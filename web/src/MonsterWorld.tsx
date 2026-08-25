@@ -8,7 +8,6 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from "react";
 import type { AgentStatus } from "./agentTerminalTypes";
-import { clientFailureMessage } from "./clientFailure";
 import {
   AgentSessionBar,
   type ModelSessionStatus,
@@ -21,14 +20,12 @@ import {
   WORLD_PROTOCOL,
   isResidentId,
   isWorldAgentMessage,
-  isWorldUsageLimitMessage,
   worldObservationCallId,
   type Direction,
   type ResidentId,
   type VoiceLevel,
   type WorldAgentCommand,
   type WorldAgentMessage,
-  type WorldFailureClass,
   type WorldUsage,
 } from "./monsterWorldProtocol";
 import {
@@ -86,7 +83,7 @@ import "./MonsterWorld.css";
 
 const WORLD_RENDER_INTERVAL_MS = 50;
 
-type RuntimeStatus = "offline" | "starting" | "ready" | "blocked" | "error";
+type RuntimeStatus = "offline" | "starting" | "ready" | "error";
 
 type UsageTotals = {
   modelTurns: number;
@@ -330,9 +327,8 @@ export function MonsterWorld() {
         if (worldRef.current) setWorldAgentsOnline(worldRef.current, true);
       } else if (message.status === "error") {
         const failureMessage = message.message ?? "The world agents could not connect.";
-        const status = isWorldUsageLimitMessage(failureMessage) ? "blocked" : "error";
-        setRuntimeStatus(status);
-        runtimeStatusRef.current = status;
+        setRuntimeStatus("error");
+        runtimeStatusRef.current = "error";
         setAgentError(failureMessage);
         if (worldRef.current) setWorldAgentsOnline(worldRef.current, false);
       } else if (message.status === "stopped") {
@@ -412,13 +408,6 @@ export function MonsterWorld() {
     }
     if (message.usage) commitModelUsage(message.usage, usageRef, setUsage);
 
-    const failureMessage = clientFailureMessage(
-      message.message,
-      failureDescription(message.failure),
-    );
-    const terminallyBlocked = message.failure === "usage_limit"
-      || message.failure === "budget"
-      || isWorldUsageLimitMessage(failureMessage);
     const activeWorld = worldRef.current;
     if (activeWorld) {
       settleWorldFormationTurn(activeWorld, request.callId, request.agentId, message.outcome);
@@ -427,32 +416,20 @@ export function MonsterWorld() {
       ? hasUnansweredPlayerOrder(activeWorld, request.agentId)
         || hasUnansweredGuildCall(activeWorld, request.agentId)
       : false;
-    const retryDelay = terminallyBlocked || runtimeStatusRef.current === "blocked"
-      ? Number.POSITIVE_INFINITY
-      : request.cancelled
-        ? 0
-        : unanswered
-          ? message.outcome === "failed" ? 6_000 : 0
-          : request.rejected
-            ? 2_000
-            : message.outcome === "completed"
-              ? 7_500
-              : message.outcome === "cancelled"
-                ? 2_500
-                : 8_000;
-    nextThinkAt.current[request.agentId] = retryDelay === Number.POSITIVE_INFINITY
-      ? retryDelay
-      : performance.now() + retryDelay + residentDelay(request.agentId);
-
-    if (terminallyBlocked) {
-      const notice = message.failure === "usage_limit"
-        ? `Luna usage limit reached; automatic retries are stopped. ${failureMessage}`
-        : `Luna resident turns are blocked; automatic retries are stopped. ${failureMessage}`;
-      setRuntimeStatus("blocked");
-      runtimeStatusRef.current = "blocked";
-      setAgentError(notice);
-      if (activeWorld) setWorldAgentsOnline(activeWorld, false);
-    }
+    const retryDelay = request.cancelled
+      ? 0
+      : unanswered
+        ? message.outcome === "failed" ? 6_000 : 0
+        : request.rejected
+          ? 2_000
+          : message.outcome === "completed"
+            ? 7_500
+            : message.outcome === "cancelled"
+              ? 2_500
+              : 8_000;
+    nextThinkAt.current[request.agentId] = performance.now()
+      + retryDelay
+      + residentDelay(request.agentId);
     invalidateWorld();
   }, [invalidateWorld]);
 
@@ -751,7 +728,7 @@ export function MonsterWorld() {
     ? "idle"
     : runtimeStatus === "ready"
       ? "ready"
-      : runtimeStatus === "error" || runtimeStatus === "blocked"
+      : runtimeStatus === "error"
         ? "error"
         : "stopped";
   const pendingByAgent = new Set([...pendingRequests.current.values()].map(({ agentId }) => agentId));
@@ -774,9 +751,7 @@ export function MonsterWorld() {
     : selectableResidents[0];
   const lunaStatus = runtimeStatus === "ready"
     ? "Luna online"
-    : runtimeStatus === "blocked"
-      ? "Luna blocked"
-      : runtimeStatus === "error"
+    : runtimeStatus === "error"
         ? "Luna error"
         : "Luna offline";
   const worldStatus = `${currentSceneLabel} · ${lunaStatus}`;
@@ -995,7 +970,7 @@ export function MonsterWorld() {
                     || onMapMindIds.length === 0
                   }
                   onClick={startAgents}
-                >{`${runtimeStatus === "blocked" || runtimeStatus === "error" ? "retry" : "wake"} ${onMapMindIds.length} minds`}</button>
+                >{`${runtimeStatus === "error" ? "retry" : "wake"} ${onMapMindIds.length} minds`}</button>
               )}
               <button type="button" aria-pressed={paused} onClick={() => setPaused((value) => !value)}>
                 {paused ? "resume town" : "pause town"}
@@ -1068,9 +1043,7 @@ export function MonsterWorld() {
                                     ? "nanocodex"
                                     : live
                                       ? "own session · live"
-                                      : runtimeStatus === "blocked"
-                                        ? "Luna blocked"
-                                        : runtimeStatus === "error"
+                                      : runtimeStatus === "error"
                                           ? "Luna error"
                                           : "Luna offline"}
                     </b>
@@ -1167,13 +1140,13 @@ export function MonsterWorld() {
             </ol>
           </section>
 
-          <footer className="monster-world-budget">
+          <footer className="monster-world-telemetry">
             <div>
               <span>resident activity</span>
               <strong>{usage.modelTurns} independent turns</strong>
             </div>
             <p>{usage.totalTokens.toLocaleString()} observed tokens · {usage.estimatedUsd > 0 ? `$${usage.estimatedUsd.toFixed(4)} estimated` : "cost appears when reported"}</p>
-            <p>GPT-5.6 Luna · thinking none · one persistent session per resident · bounded concurrent execution.</p>
+            <p>GPT-5.6 Luna · thinking none · one persistent session per resident · independent concurrent execution.</p>
             <p>Scout orders and room posts are reducer-owned. Every entry marked <b>nanocodex</b> came from that resident's live World tool loop.</p>
           </footer>
         </aside>
@@ -1230,15 +1203,6 @@ function commitModelUsage(
   usageRef.current = next;
   publish(next);
   return next;
-}
-
-function failureDescription(failure: WorldFailureClass | undefined): string {
-  if (failure === "usage_limit") return "The Luna usage limit was reached.";
-  if (failure === "budget") return "The Luna resident-turn safety budget was reached.";
-  if (failure === "transient") return "A temporary Luna connection problem interrupted this resident's turn.";
-  if (failure === "invalid") return "The resident's Luna result did not satisfy the world contract.";
-  if (failure === "cancelled") return "The resident's Luna turn was cancelled.";
-  return "Unknown Luna resident-turn failure.";
 }
 
 function orderProgressNotice(state: WorldState, orderId: number): string | undefined {

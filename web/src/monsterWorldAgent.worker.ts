@@ -10,7 +10,6 @@ import {
   coordinationBasisFor,
   decodeWorldPrimitiveAction,
   isWorldAgentCommand,
-  isWorldUsageLimitMessage,
   worldObservationCallId,
   type ResidentId,
   type WorldBoardMessage,
@@ -127,7 +126,6 @@ const roomMessages = new Map<number, WorldBoardMessage>();
 let roomShellBoot: Promise<Readonly<{ instructions: string; tool: Tool }>> | undefined;
 let boot: Promise<void> | undefined;
 let shuttingDown = false;
-let blocked = false;
 
 workerPort.addEventListener("message", ({ data }) => {
   if (!isWorldAgentCommand(data)) return;
@@ -355,7 +353,7 @@ function requestWorldAction(
 ): Promise<WorldToolResult> {
   const active = activeBySession.get(sessionId);
   if (!active) return Promise.reject(new Error("this Luna resident has no active world turn"));
-  if (active.cancelled || blocked || shuttingDown) {
+  if (active.cancelled || shuttingDown) {
     return Promise.reject(classified("cancelled", "this resident turn was cancelled"));
   }
   if ([...pendingWorldActions.values()].some((pending) => pending.active === active)) {
@@ -391,7 +389,7 @@ function requestWorldRoomSend(
 ): Promise<WorldBoardMessage> {
   const active = activeBySession.get(sessionId);
   if (!active) return Promise.reject(new Error("this Luna resident has no active world turn"));
-  if (active.cancelled || blocked || shuttingDown || signal.aborted) {
+  if (active.cancelled || shuttingDown || signal.aborted) {
     return Promise.reject(classified("cancelled", "this resident room send was cancelled"));
   }
   active.actionCount += 1;
@@ -491,12 +489,11 @@ async function runResidentTurn(
     activeTurns.set(entry.agentId, residentTurn);
     boot ??= connectWorld();
     await boot;
-    if (blocked) throw classified("usage_limit", "Luna world turns are blocked until an explicit retry");
     if (residentTurn.cancelled || shuttingDown) {
       throw classified("cancelled", `resident turn for ${entry.agentId} was cancelled before prompting`);
     }
     const agent = await residentAgentFor(entry);
-    if (residentTurn.cancelled || blocked || shuttingDown) {
+    if (residentTurn.cancelled || shuttingDown) {
       throw classified("cancelled", `resident turn for ${entry.agentId} was cancelled during boot`);
     }
     activeBySession.set(agent.sessionId, residentTurn);
@@ -504,7 +501,7 @@ async function runResidentTurn(
     residentTurn.turn = turn;
     result = await turn.result();
     usage = worldUsage(await result.usage());
-    if (residentTurn.cancelled || blocked || shuttingDown) {
+    if (residentTurn.cancelled || shuttingDown) {
       throw classified("cancelled", "resident turn completed after cancellation");
     }
     if (residentTurn.actionCount === 0) {
@@ -523,7 +520,6 @@ async function runResidentTurn(
       ? classified("cancelled", `resident turn for ${entry.agentId} was cancelled`)
       : usage === undefined ? cause : failureWithUsage(cause, usage);
     const failure = failureClass(normalized);
-    if (failure === "usage_limit") tripUsageLimit(normalized, entry.agentId);
     post({
       protocol: WORLD_PROTOCOL,
       type: "settled",
@@ -558,23 +554,6 @@ async function cancelResidentTurns(command: Extract<WorldAgentCommand, { type: "
     rejectWorldActionsFor(active, classified("cancelled", "resident turn was superseded"));
   }
   await Promise.all(selected.map(({ turn }) => turn?.cancel().catch(() => undefined)));
-}
-
-function tripUsageLimit(cause: unknown, failedResidentId: ResidentId): void {
-  if (blocked) return;
-  blocked = true;
-  post({
-    protocol: WORLD_PROTOCOL,
-    type: "status",
-    status: "error",
-    message: `Luna usage limit reached. Autonomous turns are paused until an explicit retry. ${errorMessage(cause)}`.slice(0, 240),
-  });
-  for (const [residentId, residentTurn] of activeTurns) {
-    if (residentId === failedResidentId) continue;
-    residentTurn.cancelled = true;
-    rejectWorldActionsFor(residentTurn, classified("usage_limit", "Luna usage limit reached"));
-    void residentTurn.turn?.cancel().catch(() => undefined);
-  }
 }
 
 async function shutdownResidents(): Promise<void> {
@@ -668,17 +647,12 @@ function failureClass(cause: unknown): WorldFailureClass {
   if (cause && typeof cause === "object" && "worldFailure" in cause) {
     const failure = (cause as { worldFailure?: unknown }).worldFailure;
     if (
-      failure === "usage_limit"
-      || failure === "transient"
+      failure === "transient"
       || failure === "invalid"
       || failure === "cancelled"
-      || failure === "budget"
     ) return failure;
   }
-  const message = errorMessage(cause);
-  // Shared message classification covers usage_limit_reached, rate-limit copy, and HTTP 429.
-  if (isWorldUsageLimitMessage(message)) return "usage_limit";
-  const normalized = message.toLowerCase();
+  const normalized = errorMessage(cause).toLowerCase();
   if (
     normalized.includes("request_id")
     || normalized.includes("state_version")

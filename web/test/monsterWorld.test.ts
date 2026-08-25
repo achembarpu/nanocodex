@@ -650,8 +650,7 @@ test("one map resident owns one isolated retained Luna session and turn", () => 
   assert.match(worker, /async function releaseResidentAgents[\s\S]*?agent\.session\.shutdown\(\)/);
   assert.equal(worker.match(/releaseResidentAgents\(\)/g)?.length, 2);
   assert.match(worker, /usage === undefined \? cause : failureWithUsage\(cause, usage\)/);
-  assert.match(worker, /usage_limit_reached/);
-  assert.match(worker, /blocked = true/);
+  assert.doesNotMatch(worker, /usage_limit|tripUsageLimit|blocked = true/);
 });
 
 test("the World surface stays statically available, stoppable, and semantically observable", () => {

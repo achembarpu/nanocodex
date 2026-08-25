@@ -323,11 +323,9 @@ export type WorldResidentDecision = Readonly<{
 }>;
 
 export type WorldFailureClass =
-  | "usage_limit"
   | "transient"
   | "invalid"
-  | "cancelled"
-  | "budget";
+  | "cancelled";
 
 export type WorldAgentCommand =
   | Readonly<{
@@ -695,14 +693,6 @@ export function sanitizeDialogue(value: string): string {
   return value.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim().slice(0, 140);
 }
 
-export function isWorldUsageLimitMessage(message: string): boolean {
-  const normalized = message.toLowerCase();
-  return normalized.includes("usage_limit_reached")
-    || normalized.includes("usage limit")
-    || normalized.includes("rate limit")
-    || /(^|\D)429(\D|$)/.test(normalized);
-}
-
 function isWorldUsage(value: unknown): value is WorldUsage {
   if (!value || typeof value !== "object") return false;
   const usage = value as Partial<WorldUsage>;
@@ -944,11 +934,9 @@ function isWorldSupplyState(value: unknown): value is WorldSupplyState {
 }
 
 function isWorldFailureClass(value: unknown): value is WorldFailureClass {
-  return value === "usage_limit"
-    || value === "transient"
+  return value === "transient"
     || value === "invalid"
-    || value === "cancelled"
-    || value === "budget";
+    || value === "cancelled";
 }
 
 function isWorldIdentifier(value: unknown): value is string {

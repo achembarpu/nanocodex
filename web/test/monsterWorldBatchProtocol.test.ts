@@ -7,7 +7,6 @@ import {
   coordinationBasisFor,
   isWorldAgentCommand,
   isWorldAgentMessage,
-  isWorldUsageLimitMessage,
   type WorldObservation,
 } from "../src/monsterWorldProtocol.ts";
 
@@ -61,15 +60,15 @@ test("every resident is eligible for its own persistent Luna turn", () => {
   assert.equal(isWorldAgentCommand({ ...cinder, memory: undefined }), false);
 });
 
-test("resident settlements carry a typed breaker reason", () => {
+test("resident settlements carry a typed failure reason", () => {
   assert.equal(isWorldAgentMessage({
     protocol: WORLD_PROTOCOL,
     type: "settled",
     requestId: "cinder-7",
     agentId: "cinder",
     outcome: "failed",
-    failure: "usage_limit",
-    message: "usage limit reached",
+    failure: "transient",
+    message: "temporary provider failure",
   }), true);
   assert.equal(isWorldAgentMessage({
     protocol: WORLD_PROTOCOL,
@@ -248,18 +247,6 @@ test("resident turns deeply reject malformed observations", () => {
     { ...valid, supplies: Object.assign([], valid.supplies) },
   ];
   for (const candidate of malformed) assert.equal(accepts(candidate), false);
-});
-
-test("usage-limit classification recognizes shared API error spellings", () => {
-  for (const message of [
-    "usage_limit_reached",
-    "Usage limit has been reached",
-    "RATE LIMIT exceeded",
-    "HTTP 429: too many requests",
-  ]) assert.equal(isWorldUsageLimitMessage(message), true, message);
-  for (const message of ["temporary transport error", "error 1429", "4290 requests queued"]) {
-    assert.equal(isWorldUsageLimitMessage(message), false, message);
-  }
 });
 
 function detailedObservation(): WorldObservation {
