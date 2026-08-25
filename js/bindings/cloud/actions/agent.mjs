@@ -108,10 +108,11 @@ function connectVoiceTransport({ baseUrl, grantSession }, grantId, agentId) {
   const grantPath = `/v1/grants/${grantId}/agents/${encodeURIComponent(agentId)}/realtime`;
   return Object.freeze({
     call(body, signal) {
+      const callBody = managedRealtimeCallBody(body, agentId);
       return grantSession.fetch(new Request(new URL(`${grantPath}/calls`, baseUrl), {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body,
+        body: callBody,
         signal,
       }));
     },
@@ -132,6 +133,18 @@ function connectVoiceTransport({ baseUrl, grantSession }, grantId, agentId) {
       return url;
     },
   });
+}
+
+function managedRealtimeCallBody(encoded, agentId) {
+  let envelope;
+  try { envelope = JSON.parse(encoded); }
+  catch { throw new TypeError("Connect voice call body is invalid"); }
+  if (!envelope || typeof envelope !== "object" || Array.isArray(envelope)
+    || envelope.managed_agent_id !== agentId
+    || typeof envelope.call_body !== "string") {
+    throw new TypeError("Connect voice call body is invalid");
+  }
+  return envelope.call_body;
 }
 
 function managedGrantFetch(session, baseUrl, grantId, agentId) {

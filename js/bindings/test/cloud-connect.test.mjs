@@ -233,11 +233,22 @@ test("Connect opens its grant-provisioned durable agent without a redundant stat
   assert.equal(voice.getSnapshot().status, "idle");
   await voice.destroy();
   const voiceTransport = managedBrowserVoiceTransport(agent);
-  const call = await voiceTransport.call("call-body");
+  const providerCall = JSON.stringify({
+    sdp: "v=offer",
+    session: { delegation: { type: "client" } },
+  });
+  const call = await voiceTransport.call(JSON.stringify({
+    call_body: providerCall,
+    managed_agent_id: agentId,
+    openai_alpha: "quicksilver=v2",
+    realtime_session_id: agentId,
+    session_id: agentId,
+    thread_id: agentId,
+  }));
   assert.equal(await call.text(), "v=answer");
   assert.equal(new URL(requests[0].url).pathname, `/v1/grants/${connection.grant.id}/agents/${agentId}/realtime/calls`);
   assert.equal(requests[0].headers.get("authorization"), "Bearer grant-session-test");
-  assert.equal(await requests[0].text(), "call-body");
+  assert.equal(await requests[0].text(), providerCall);
   const sideband = await voiceTransport.sidebandUrl("rtc_connect");
   assert.equal(sideband.protocol, "wss:");
   assert.equal(sideband.searchParams.get("call_id"), "rtc_connect");
