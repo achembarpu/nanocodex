@@ -295,6 +295,7 @@ export function toWasmConfig(options = {}) {
   copy(config, "resume", options.resume);
   copy(config, "durability_id", options.durabilityId);
   copy(config, "durability_host_id", options.durabilityHostId);
+  copy(config, "terminal_receipt_retention", options.terminalReceiptRetention);
   copy(config, "subagents", options.subagents);
   copy(config, "host_definition_id", options.hostDefinitionId);
   return config;

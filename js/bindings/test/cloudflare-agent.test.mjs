@@ -125,7 +125,7 @@ test("Cloudflare Agent owns credentials, transport, and durability options", asy
   await assert.rejects(create(module), /requires a Durable Object instance/);
   await assert.rejects(
     create(module, durableOwner(new MemoryStorage()), { apiKey: "managed-secret" }),
-    /does not accept apiKey; only eventPersistence, instructions, and tools are configurable/,
+    /does not accept apiKey; only eventPersistence, instructions, terminalReceiptRetention, and tools are configurable/,
   );
   await assert.rejects(
     create(module, durableOwner(new MemoryStorage()), { CODEX_OAUTH_BOOTSTRAP: "managed-secret" }),
@@ -148,6 +148,10 @@ test("Cloudflare Agent owns credentials, transport, and durability options", asy
   await assert.rejects(
     create(module, durableOwner(new MemoryStorage()), { eventPersistence: "somewhere" }),
     /eventPersistence must be durable or caller/,
+  );
+  await assert.rejects(
+    create(module, durableOwner(new MemoryStorage()), { terminalReceiptRetention: 0 }),
+    /terminalReceiptRetention must be an integer from 1 through 4096/,
   );
   await assert.rejects(
     create(module, { ctx: durableContext(new MemoryStorage()), env: {} }),
@@ -179,7 +183,7 @@ test("Cloudflare Agent isolates journals per Durable Object and can recreate aft
   const owner = (storage, id) => durableOwner(storage, binding, id);
 
   const [first, second] = await Promise.all([
-    create(module, owner(firstStorage, FIRST_OBJECT_ID)),
+    create(module, owner(firstStorage, FIRST_OBJECT_ID), { terminalReceiptRetention: 512 }),
     create(module, owner(secondStorage, SECOND_OBJECT_ID)),
   ]);
   assert.notEqual(first.sessionId, second.sessionId);

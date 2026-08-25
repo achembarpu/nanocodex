@@ -11,7 +11,12 @@ import {
 } from "./event-socket.mjs";
 
 const STARTUP_TIMEOUT_MS = 10_000;
-const APPLICATION_OPTIONS = new Set(["eventPersistence", "instructions", "tools"]);
+const APPLICATION_OPTIONS = new Set([
+  "eventPersistence",
+  "instructions",
+  "terminalReceiptRetention",
+  "tools",
+]);
 const lifecycles = new WeakMap();
 
 /** @internal Binds the package-owned module to the public Cloudflare namespace. */
@@ -239,7 +244,7 @@ function applicationOptions(options) {
   for (const name of Object.keys(options)) {
     if (!APPLICATION_OPTIONS.has(name)) {
       throw new TypeError(
-        `Cloudflare Agent.create does not accept ${name}; only eventPersistence, instructions, and tools are configurable`,
+        `Cloudflare Agent.create does not accept ${name}; only eventPersistence, instructions, terminalReceiptRetention, and tools are configurable`,
       );
     }
   }
@@ -248,6 +253,14 @@ function applicationOptions(options) {
     && options.eventPersistence !== "caller") {
     throw new TypeError(
       "Cloudflare Agent.create eventPersistence must be durable or caller",
+    );
+  }
+  if (options.terminalReceiptRetention !== undefined
+    && (!Number.isSafeInteger(options.terminalReceiptRetention)
+      || options.terminalReceiptRetention < 1
+      || options.terminalReceiptRetention > 4_096)) {
+    throw new TypeError(
+      "Cloudflare Agent.create terminalReceiptRetention must be an integer from 1 through 4096",
     );
   }
   return options;

@@ -63,6 +63,11 @@ export declare namespace create {
      */
     eventPersistence?: "durable" | "caller" | undefined;
     instructions?: string | undefined;
+    /**
+     * Bounds terminal receipts retained in the hot Rust journal checkpoint.
+     * The caller must preserve older exact-ID results before selecting this.
+     */
+    terminalReceiptRetention?: number | undefined;
     tools?: ToolConfiguration | undefined;
   }>;
   type ReturnType = Agent;

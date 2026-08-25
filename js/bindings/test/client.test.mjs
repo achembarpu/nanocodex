@@ -453,10 +453,12 @@ test("the WASM config pairs a durability route with its journal", () => {
     hostDefinitionId: 1,
     durabilityId: "journal-1",
     durabilityHostId: "durability-route-1",
+    terminalReceiptRetention: 512,
   }), {
     api_key: "test-key",
     durability_id: "journal-1",
     durability_host_id: "durability-route-1",
+    terminal_receipt_retention: 512,
     host_definition_id: 1,
   });
 });

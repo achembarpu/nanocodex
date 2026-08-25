@@ -230,6 +230,7 @@ struct Driver {
     journal_id: Arc<str>,
     state: JournalState,
     retained_batches: usize,
+    terminal_receipt_limit: Option<usize>,
     owner: OwnerToken,
     next_agent_generation: u64,
     active_agent_generation: Option<u64>,
@@ -1048,13 +1049,16 @@ impl Driver {
             return Ok(());
         }
         let revision = self.state.revision();
-        let payload = self.state.checkpoint_payload()?;
+        let payload = self.state.checkpoint_payload(self.terminal_receipt_limit)?;
         match self
             .store
             .compact(&self.journal_id, &self.owner, revision, &payload)
             .await
         {
             Ok(compacted_revision) if compacted_revision == revision => {
+                if let Some(limit) = self.terminal_receipt_limit {
+                    self.state.retain_terminal_receipts(limit);
+                }
                 self.retained_batches = 1;
                 Ok(())
             }
@@ -1151,11 +1155,43 @@ impl Drop for DurableSession {
 
 impl DurableSession {
     /// Loads and validates a durable session, then spawns its owning driver.
-    pub async fn open<S>(mut store: S, journal_id: impl Into<String>) -> Result<Self>
+    pub async fn open<S>(store: S, journal_id: impl Into<String>) -> Result<Self>
     where
         S: JournalStore + 'static,
     {
-        let journal_id = journal_id.into();
+        Self::open_inner(store, journal_id.into(), None).await
+    }
+
+    /// Loads a durable session whose compacted checkpoint retains at most the
+    /// newest `limit` terminal replay receipts.
+    ///
+    /// The embedding application must preserve older exact-ID results before
+    /// selecting this policy. Unresolved operations and the latest resumable
+    /// model checkpoint are always retained.
+    pub async fn open_with_terminal_receipt_limit<S>(
+        store: S,
+        journal_id: impl Into<String>,
+        limit: usize,
+    ) -> Result<Self>
+    where
+        S: JournalStore + 'static,
+    {
+        if limit == 0 {
+            return Err(Error::InvalidJournal(
+                "terminal receipt retention limit must be positive".to_owned(),
+            ));
+        }
+        Self::open_inner(store, journal_id.into(), Some(limit)).await
+    }
+
+    async fn open_inner<S>(
+        mut store: S,
+        journal_id: String,
+        terminal_receipt_limit: Option<usize>,
+    ) -> Result<Self>
+    where
+        S: JournalStore + 'static,
+    {
         if journal_id.trim().is_empty() {
             return Err(Error::InvalidJournal(
                 "journal identity must not be empty".to_owned(),
@@ -1172,6 +1208,7 @@ impl DurableSession {
             journal_id: Arc::clone(&journal_id),
             state,
             retained_batches,
+            terminal_receipt_limit,
             owner: acquired.owner,
             next_agent_generation: 0,
             active_agent_generation: None,
@@ -2257,6 +2294,52 @@ mod tests {
             }) if output == "output-0"
         ));
         assert_eq!(reopened.state().await.unwrap().revision(), 66);
+    }
+
+    #[tokio::test]
+    async fn bounded_terminal_receipt_policy_keeps_only_the_newest_compacted_receipts() {
+        let store = MemoryStore::new().unwrap();
+        let session = DurableSession::open_with_terminal_receipt_limit(
+            store.clone(),
+            "bounded-terminal-receipts",
+            3,
+        )
+        .await
+        .unwrap();
+        let (owner, _) = session.acquire_agent().await.unwrap();
+        for index in 0..22_u32 {
+            let operation_id = format!("turn-{index}");
+            assert!(matches!(
+                owner
+                    .admit_typed::<_, u32, String>(operation_id.clone(), &index)
+                    .await,
+                Ok(Admission::Accepted)
+            ));
+            owner.begin_attempt(operation_id.clone()).await.unwrap();
+            owner
+                .complete(operation_id, &index, &format!("output-{index}"))
+                .await
+                .unwrap();
+        }
+        let live = session.state().await.unwrap();
+        assert_eq!(live.operations().len(), 3);
+        assert!(live.operation("turn-19").is_some());
+        assert!(live.operation("turn-18").is_none());
+        owner.shutdown().await.unwrap();
+
+        let reopened = DurableSession::open(store, "bounded-terminal-receipts")
+            .await
+            .unwrap();
+        let state = reopened.state().await.unwrap();
+        assert_eq!(state.operations().len(), 3);
+        assert!(state.operation("turn-19").is_some());
+        assert!(state.operation("turn-20").is_some());
+        assert!(state.operation("turn-21").is_some());
+        assert!(state.operation("turn-18").is_none());
+        assert_eq!(
+            state.latest_checkpoint().unwrap().decode::<u32>().unwrap(),
+            21
+        );
     }
 
     #[tokio::test]

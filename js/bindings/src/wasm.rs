@@ -742,6 +742,8 @@ struct WasmConfig {
     #[serde(default)]
     durability_host_id: Option<String>,
     #[serde(default)]
+    terminal_receipt_retention: Option<usize>,
+    #[serde(default)]
     subagents: Option<WasmSubagentsConfig>,
 }
 
@@ -1005,11 +1007,20 @@ impl WasmNanocodex {
         if let (Some(route_id), Some(journal_id)) =
             (config.durability_host_id, config.durability_id)
         {
-            let journal = nanocodex::agent::durability::DurableSession::open(
-                JavaScriptDurabilityStore { route_id },
-                journal_id,
-            )
-            .await
+            let store = JavaScriptDurabilityStore { route_id };
+            let journal = if let Some(limit) = config.terminal_receipt_retention {
+                if !(1..=4_096).contains(&limit) {
+                    return Err(js_error(
+                        "terminal_receipt_retention must be from 1 through 4096",
+                    ));
+                }
+                nanocodex::agent::durability::DurableSession::open_with_terminal_receipt_limit(
+                    store, journal_id, limit,
+                )
+                .await
+            } else {
+                nanocodex::agent::durability::DurableSession::open(store, journal_id).await
+            }
             .map_err(js_error)?;
             builder = builder.durability(journal).await.map_err(js_error)?;
         }

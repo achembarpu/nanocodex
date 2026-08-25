@@ -296,15 +296,42 @@ impl JournalState {
             .map(|(_, checkpoint)| checkpoint)
     }
 
-    pub(crate) fn checkpoint_payload(&self) -> Result<String> {
+    pub(crate) fn checkpoint_payload(
+        &self,
+        terminal_receipt_limit: Option<usize>,
+    ) -> Result<String> {
+        let mut operations = self.operations.clone();
+        if let Some(limit) = terminal_receipt_limit {
+            Self::retain_terminal_operations(&mut operations, limit);
+        }
         serde_json::to_string(&RetainedCheckpoint {
             nanocodex_journal_state: JournalCheckpoint {
                 version: 1,
-                operations: self.operations.clone(),
+                operations,
                 latest_checkpoint: self.latest_checkpoint().cloned(),
             },
         })
         .map_err(Error::InvalidPayload)
+    }
+
+    pub(crate) fn retain_terminal_receipts(&mut self, limit: usize) {
+        Self::retain_terminal_operations(&mut self.operations, limit);
+    }
+
+    fn retain_terminal_operations(operations: &mut BTreeMap<String, OperationState>, limit: usize) {
+        let mut terminal_orders = operations
+            .values()
+            .filter(|operation| operation.status.is_terminal())
+            .map(|operation| operation.accepted_order)
+            .collect::<Vec<_>>();
+        terminal_orders.sort_unstable_by(|left, right| right.cmp(left));
+        terminal_orders.truncate(limit);
+        let retained = terminal_orders
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>();
+        operations.retain(|_, operation| {
+            !operation.status.is_terminal() || retained.contains(&operation.accepted_order)
+        });
     }
 
     pub(crate) fn from_checkpoint(revision: u64, checkpoint: JournalCheckpoint) -> Result<Self> {

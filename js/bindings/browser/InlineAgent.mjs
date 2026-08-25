@@ -39,6 +39,7 @@ export async function create(options = {}) {
     resume,
     durability,
     durabilityId,
+    terminalReceiptRetention,
     filesystem,
     filesystemTools,
     tools,
@@ -176,6 +177,7 @@ export async function create(options = {}) {
       executionEnvironment,
       resume,
       durabilityId,
+      terminalReceiptRetention,
     });
   } catch (error) {
     if (!creationStarted) await host.dispose();
