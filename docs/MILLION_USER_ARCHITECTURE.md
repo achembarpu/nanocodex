@@ -42,11 +42,34 @@ This branch now:
   shutdowns fenced admission before the first journal revision. The corrected
   run recovered that same accepted turn and committed its terminal after the
   browser re-authorized the reconnect.
+- seals old managed cursor events into immutable, checksum-verified R2
+  segments while retaining a bounded SQLite tail. Sixteen recent segment
+  descriptors stay hot; older descriptors move into immutable ordinal R2
+  index pages behind one SQLite root. History and SSE use one logical cursor
+  space across both tiers, binary-search old pages, and retry a read if the
+  SQLite ownership fence moves;
+- archives old terminal turn/idempotency receipts under deterministic per-agent
+  R2 keys while keeping unresolved work and 512 recent terminals in SQLite.
+  Exact old-ID replay and request-key conflict detection read those immutable
+  receipts before admitting any new model work;
+- removes the unused `completed_operations` mirror and retains lifetime
+  accepted/completed counts plus the original title prompt as bounded session
+  metadata; and
+- archives completed realtime operation receipts under one deterministic
+  compound-identity key while keeping pending operations and 512 recent exact
+  replays in SQLite; and
+- lets an embedding select a bounded Rust terminal-receipt checkpoint policy.
+  Managed selects 512 only because its outer receipt archive preserves older
+  exact results first. Successful compaction prunes both the stored checkpoint
+  and the live Rust state; all other SDK consumers keep indefinite replay by
+  default.
 
-The compaction bounds journal row count and repeated checkpoint copies, not the
-total lifetime receipt bytes inside the checkpoint. Exact completed-ID replay
-still grows linearly until the product chooses a retention contract and the R2
-archive/read path exists.
+The hot durability head is now bounded by explicit policy. Model checkpoints,
+unresolved operations, ambiguous steps, recent exact receipts, recent managed
+events, and the small manifest head remain in SQLite. Closed cursor history and
+old exact receipts are immutable R2 data. The durable workspace remains a
+separate caller-visible storage budget; it is not journal history and is never
+silently moved or expired.
 
 ## Scale target
 
@@ -89,8 +112,10 @@ The governing rule is simple:
                  +--------------------------------------------------------+
                  |                                                        |
                  |  session_state                                         |
-                 |  managed_turns              input + terminal forever   |
-                 |  managed_events             managed API projection     |
+                 |  managed_turns              unresolved + recent exact  |
+                 |  managed_events             bounded managed tail       |
+                 |  managed_realtime_operations pending + recent exact    |
+                 |  archive manifests          bounded R2 ownership heads |
                  |  nanocodex_cloudflare_events disabled for managed mode |
                  |  nanocodex_journal_owners   current fence              |
                  |  nanocodex_journals         current revision           |
@@ -146,16 +171,19 @@ journal in memory. Terminal entries carry safe resumable checkpoints and
 results, so retained bytes can grow faster than the number of turns when those
 checkpoints are large.
 
-The journal is deleted only when the agent is destroyed. Model compaction
-changes the checkpoint's conversation content; it does not currently seal and
-discard the older persistence batches.
+The managed policy now compacts a terminal prefix after 64 retained batches
+and keeps only unresolved operations plus the 512 newest exact receipts in the
+live and stored Rust state. The outer managed receipt archive preserves older
+API replay identities. The latest checkpoint itself can still grow with the
+model's retained conversation and remains an explicit hot-head budget.
 
 ### Managed turns and idempotency
 
-`managed_turns` retains the request hash, complete input, state, terminal JSON,
-cursor, diagnostics, retry state, and timestamps for every accepted turn. It
-provides exact-ID replay and idempotency conflict detection, but has no age or
-count compaction policy.
+`managed_turns` retains every unresolved turn and the newest 512 terminal
+receipts. Older terminal and idempotency receipts move to direct-lookup R2
+objects. Once an agent has archived receipts, a genuinely new ID pays an R2
+miss because indefinite exact-ID conflict detection cannot safely infer
+absence from a bounded local filter.
 
 ### Two event histories (inherited topology)
 
@@ -271,12 +299,14 @@ never replays the complete lifetime journal.
 
 ### Immutable history body in R2
 
-Possible deterministic keys:
+Implemented deterministic keys:
 
 ```text
-agents/<agent-id>/events/<first-cursor>-<last-cursor>-<sha256>.cbor.zst
-agents/<agent-id>/operations/<first-revision>-<last-revision>-<sha256>.cbor.zst
-agents/<agent-id>/checkpoints/<revision>-<sha256>.json.zst
+agents/<storage-id>/managed-events/segments/<first>-<last>-<sha256>.json
+agents/<storage-id>/managed-events/indexes/<zero-padded-ordinal>.json
+agents/<storage-id>/managed-turns/by-id/<sha256(turn-id)>.json
+agents/<storage-id>/managed-turns/by-request/<sha256(request-key)>.json
+agents/<storage-id>/managed-realtime/by-id/<sha256(voice-session + operation)>.json
 ```
 
 Objects are immutable. The AgentDO's SQLite manifest is authoritative; bucket
@@ -284,37 +314,36 @@ listing is never part of correctness or normal restoration.
 
 The manifest must also remain bounded. Recent segment descriptors can remain in
 SQLite, but older descriptors are packed into immutable R2 index nodes. SQLite
-retains the current index root, chained hash, and a small recent window rather
-than one row for every lifetime segment. History pagination walks the immutable
-per-agent index; it never lists the bucket or consults a global catalog.
+retains the newest ordinal key, page count, and a small recent window rather
+than one row for every lifetime segment. History pagination binary-searches
+immutable per-agent pages; it never lists the bucket or consults a global
+catalog.
 
 The archive body serves full transcript/history pagination, old exact-ID result
-lookup if that contract remains indefinite, audit/debug export, and recovery
-evidence. It does not sit between turn admission and provider execution.
+lookup, audit/debug export, and recovery evidence. R2 is absent from cold Agent
+construction. After the first receipt is archived, new turn admission performs
+a direct R2 absence lookup before provider execution to preserve indefinite
+exact-ID and idempotency semantics.
 
 ### Sealing protocol
 
 Only the owning AgentDO may seal one of its committed prefixes.
 
 ```text
- 1. Select a closed prefix ending at a safe checkpoint.
-    It must contain no unresolved operation or ambiguous tool step.
+ 1. Select a closed event prefix or terminal-receipt set. Unresolved turns are
+    never eligible.
 
  2. Encode the immutable segment with:
-      agent ID
-      owner epoch
       first/last revision or cursor
-      previous segment hash
-      ending checkpoint hash
       payload checksum
 
- 3. PUT an immutable content-addressed R2 object with a create-only condition.
-    Await the successful, checksum-validated write.
+ 3. PUT an immutable deterministic-key R2 object with a create-only condition.
+    Segment bodies are content-addressed; ordinal index and receipt keys bind
+    their fenced identity. Await the successful, checksum-validated write.
 
  4. In one AgentDO SQLite transaction:
       insert the recent sealed descriptor or advance the archive-index root
       advance the local base revision/cursor
-      retain the ending checkpoint locally
       delete the sealed local prefix
 
  5. Continue normal execution from the bounded local tail.
@@ -337,17 +366,19 @@ terminal boundary or from its own alarm.
 
 R2 should not preserve accidental duplication forever. The order of work is:
 
-1. **Implemented:** measure bytes and rows independently for journal batches,
-   managed events, raw AgentEvents, turn receipts, checkpoints, and workspace
-   data.
+1. **Implemented for owned tables:** measure bytes and rows independently for
+   journal batches, managed events, raw AgentEvents, turn receipts, realtime
+   receipts, and the SQLite remainder. Computer workspace bytes are still part
+   of the visible remainder and need a first-class Computer accounting API.
 2. **Implemented:** remove the second full event projection or make the managed
    stream a typed view over one canonical retained event log.
 3. **Implemented for capable stores:** teach the durability journal to
    checkpoint and discard a closed prefix while retaining the latest
-   checkpoint, unresolved work, and required replay receipts.
-4. Keep recent reconnect and idempotency data locally.
-5. Add R2 segments only for product-required long history, old replay, audit,
-   or export.
+   checkpoint, unresolved work, and a caller-selected recent replay window.
+4. **Implemented:** keep recent reconnect and idempotency data locally and move
+   older exact receipts to deterministic immutable R2 objects.
+5. **Implemented:** move closed managed-event prefixes into bounded immutable
+   R2 segments with a bounded hot manifest and binary-searchable ordinal index.
 
 Deletion is preferable to moving redundant data.
 
@@ -384,16 +415,18 @@ Decisions:
 - One canonical retained event log should replace the current duplicated logs.
 - Cold execution must not depend on reading historical R2 segments.
 
+Resolved product questions:
+
+- Exact-ID terminal replay remains indefinite for managed agents. Recent
+  receipts are local; old receipts are direct R2 lookups.
+- The complete managed cursor stream remains available through the existing
+  history and SSE APIs. R2 is an internal storage tier, not a second API.
+- Archived JSON is versioned and checksum-verified but not required to preserve
+  incidental source JSON whitespace.
+
 Open questions:
 
-- Is exact-ID terminal replay required forever, or only within a documented
-  retention window?
-- Must the complete public event stream be retained forever, or can old
-  assistant deltas be reduced to typed messages, tool records, and terminals?
-- Is R2 history part of the normal transcript API or an explicit archive API?
 - Which workspace paths are durable product state versus disposable tool
   scratch data?
-- Should archived content preserve JSON byte-for-byte or use a versioned
-  compact binary representation?
 - What checkpoint and local-tail sizes keep cold restoration within the target
   p99 latency?

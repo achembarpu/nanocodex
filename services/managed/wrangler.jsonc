@@ -25,6 +25,12 @@
       "service": "nanocodex-egress"
     }
   ],
+  "r2_buckets": [
+    {
+      "binding": "NANOCODEX_HISTORY",
+      "bucket_name": "nanocodex-managed-history"
+    }
+  ],
   "durable_objects": {
     "bindings": [
       {

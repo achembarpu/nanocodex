@@ -15,6 +15,7 @@
     "deploy:production:preflight": "node scripts/production-rollout.mjs preflight",
     "deploy:production:managed": "node scripts/production-rollout.mjs deploy-managed",
     "deploy:production:web": "node scripts/production-rollout.mjs deploy-web",
+    "load:durability": "node scripts/durability-load.mjs",
     "verify:production:boundary": "node scripts/production-rollout.mjs verify-boundary",
     "fanout": "node scripts/fanout.mjs",
     "mock:openai": "node scripts/mock-openai.mjs",

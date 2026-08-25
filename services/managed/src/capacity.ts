@@ -1,10 +1,16 @@
+import type { ManagedEventArchiveCapacity } from "./managed-event-archive";
+import type { ManagedRealtimeArchiveCapacity } from "./managed-realtime-archive";
+import type { ManagedTurnArchiveCapacity } from "./managed-turn-archive";
+
 type CountAndBytes = Readonly<{
   bytes: number;
   rows: number;
 }>;
 
 export type ManagedCapacitySnapshot = Readonly<{
-  completed_operations_rows: number;
+  archived_events: ManagedEventArchiveCapacity;
+  archived_realtime: ManagedRealtimeArchiveCapacity;
+  archived_turns: ManagedTurnArchiveCapacity;
   database_size_bytes: number;
   journal: CountAndBytes & Readonly<{
     max_batch_bytes: number;
@@ -13,6 +19,7 @@ export type ManagedCapacitySnapshot = Readonly<{
   known_payload_bytes: number;
   managed_events: CountAndBytes;
   raw_events: CountAndBytes;
+  realtime_operations: CountAndBytes;
   turns: Readonly<{
     blocked_rows: number;
     input_bytes: number;
@@ -55,6 +62,9 @@ const EMPTY_AGGREGATE: CountAndBytes = Object.freeze({ bytes: 0, rows: 0 });
 export function managedCapacitySnapshot(
   storage: DurableObjectStorage,
   sessionId: string,
+  archivedEvents: ManagedEventArchiveCapacity,
+  archivedTurns: ManagedTurnArchiveCapacity,
+  archivedRealtime: ManagedRealtimeArchiveCapacity,
 ): ManagedCapacitySnapshot {
   const journal = journalCapacity(storage, cloudflareJournalId(storage, sessionId));
   const managedEvents = eventCapacity(storage, "managed_events", "message_json");
@@ -63,26 +73,30 @@ export function managedCapacitySnapshot(
     "nanocodex_cloudflare_events",
     "event_json",
   );
+  const realtimeOperations = eventCapacity(
+    storage,
+    "managed_realtime_operations",
+    "response_json",
+  );
   const turns = turnCapacity(storage);
-  const completedOperations = tableExists(storage, "completed_operations")
-    ? storage.sql.exec<{ rows: number }>(
-      "SELECT COUNT(*) AS rows FROM completed_operations",
-    ).toArray()[0]?.rows ?? 0
-    : 0;
   const knownPayloadBytes = journal.bytes
     + managedEvents.bytes
     + rawEvents.bytes
+    + realtimeOperations.bytes
     + turns.input_bytes
     + turns.terminal_bytes;
   const databaseSizeBytes = storage.sql.databaseSize;
 
   return {
-    completed_operations_rows: completedOperations,
+    archived_events: archivedEvents,
+    archived_realtime: archivedRealtime,
+    archived_turns: archivedTurns,
     database_size_bytes: databaseSizeBytes,
     journal,
     known_payload_bytes: knownPayloadBytes,
     managed_events: managedEvents,
     raw_events: rawEvents,
+    realtime_operations: realtimeOperations,
     turns,
     unattributed_database_bytes: Math.max(0, databaseSizeBytes - knownPayloadBytes),
   };
@@ -119,8 +133,8 @@ function journalCapacity(
 
 function eventCapacity(
   storage: DurableObjectStorage,
-  table: "managed_events" | "nanocodex_cloudflare_events",
-  column: "message_json" | "event_json",
+  table: "managed_events" | "managed_realtime_operations" | "nanocodex_cloudflare_events",
+  column: "event_json" | "message_json" | "response_json",
 ): CountAndBytes {
   if (!tableExists(storage, table)) return EMPTY_AGGREGATE;
   return storage.sql.exec<AggregateRow>(

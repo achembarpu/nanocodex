@@ -33,6 +33,20 @@ import {
   parseCursor,
   type DurableEvent,
 } from "./durable-events";
+import {
+  ManagedEventArchive,
+  type ManagedEventSealResult,
+} from "./managed-event-archive";
+import {
+  ManagedTurnArchive,
+  type ManagedTurnReceipt,
+  type ManagedTurnSealResult,
+} from "./managed-turn-archive";
+import {
+  ManagedRealtimeArchive,
+  type ManagedRealtimeReceipt,
+  type ManagedRealtimeSealResult,
+} from "./managed-realtime-archive";
 import { webAsset } from "./web";
 import {
   MultiplayerRoom,
@@ -95,6 +109,7 @@ const MAX_CLIENT_CONNECTIONS = 64;
 const MAX_REQUEST_BODY_BYTES = 1024 * 1024;
 const MAX_REALTIME_REQUEST_BYTES = 64 * 1024;
 const MAX_REALTIME_CONTEXT_BYTES = 1024 * 1024;
+const MAX_PENDING_REALTIME_OPERATIONS = 32;
 const MAX_RETRY_DELAY_MS = 60_000;
 const SESSION_ID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -124,10 +139,16 @@ export interface Env extends AccountAuthEnv {
   NANOCODEX_ROOMS: DurableObjectNamespace<MultiplayerRoom>;
   NANOCODEX_MULTIPLAYER_QUOTA: DurableObjectNamespace<MultiplayerQuota>;
   NANOCODEX: Fetcher;
+  NANOCODEX_HISTORY: R2Bucket;
   NANOCODEX_ADMIN_TOKEN: string;
   AGENT_IDLE_TIMEOUT_MS?: string;
   MANAGED_MULTIPLAYER_IO_TIMEOUT_MS?: string;
   MANAGED_OWNERSHIP_IO_TIMEOUT_MS?: string;
+  MANAGED_EVENT_ARCHIVE_RECENT_EVENTS?: string;
+  MANAGED_EVENT_ARCHIVE_SEGMENT_BYTES?: string;
+  MANAGED_EVENT_ARCHIVE_THRESHOLD_BYTES?: string;
+  MANAGED_TURN_ARCHIVE_RECENT_TURNS?: string;
+  MANAGED_REALTIME_ARCHIVE_RECENT_OPERATIONS?: string;
 }
 
 type SessionRow = {
@@ -657,6 +678,12 @@ export class NanocodexSession extends DurableComputerSession {
   #agentShutdownPromise?: Promise<void>;
   #events?: EventWatcher;
   readonly #eventLog: DurableEventLog<StreamMessage>;
+  readonly #eventArchive: ManagedEventArchive<StreamMessage>;
+  #eventArchiveTask?: Promise<ManagedEventSealResult>;
+  readonly #turnArchive: ManagedTurnArchive;
+  #turnArchiveTask?: Promise<ManagedTurnSealResult>;
+  readonly #realtimeArchive: ManagedRealtimeArchive;
+  #realtimeArchiveTask?: Promise<ManagedRealtimeSealResult>;
   readonly #turns = new Map<string, Turn>();
   readonly #reopenInterruptedTurnIds = new Set<string>();
   readonly #eventTurnQueue: string[] = [];
@@ -686,13 +713,16 @@ export class NanocodexSession extends DurableComputerSession {
     super(ctx, env);
     this.ctx.storage.sql.exec(`
       DROP TABLE IF EXISTS terminal_turns;
+      DROP TABLE IF EXISTS completed_operations;
       CREATE TABLE IF NOT EXISTS session_state (
         singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
         session_id TEXT NOT NULL UNIQUE,
         owner_id TEXT NOT NULL,
         public_origin TEXT NOT NULL DEFAULT '',
         runtime_profile TEXT NOT NULL DEFAULT 'managed' CHECK (runtime_profile IN ('managed', 'multiplayer')),
+        accepted_turns INTEGER NOT NULL DEFAULT 0 CHECK (accepted_turns >= 0),
         completed_turns INTEGER NOT NULL DEFAULT 0,
+        first_prompt TEXT NOT NULL DEFAULT '',
         stream_error TEXT,
         last_active INTEGER NOT NULL
       );
@@ -702,10 +732,6 @@ export class NanocodexSession extends DurableComputerSession {
         owner_id TEXT,
         runtime_profile TEXT CHECK (runtime_profile IN ('managed', 'multiplayer')),
         state TEXT NOT NULL CHECK (state IN ('active', 'deleted'))
-      );
-      CREATE TABLE IF NOT EXISTS completed_operations (
-        id TEXT PRIMARY KEY,
-        completed_at INTEGER NOT NULL
       );
       CREATE TABLE IF NOT EXISTS managed_turns (
         id TEXT PRIMARY KEY,
@@ -746,6 +772,28 @@ export class NanocodexSession extends DurableComputerSession {
       );
     `);
     this.#eventLog = new DurableEventLog<StreamMessage>(this.ctx.storage);
+    this.#eventArchive = new ManagedEventArchive<StreamMessage>(
+      this.ctx.storage,
+      this.env.NANOCODEX_HISTORY,
+      this.ctx.id.toString(),
+      {
+        recentEventCount: optionalPositiveInteger(this.env.MANAGED_EVENT_ARCHIVE_RECENT_EVENTS),
+        sealThresholdBytes: optionalPositiveInteger(this.env.MANAGED_EVENT_ARCHIVE_THRESHOLD_BYTES),
+        segmentTargetBytes: optionalPositiveInteger(this.env.MANAGED_EVENT_ARCHIVE_SEGMENT_BYTES),
+      },
+    );
+    this.#turnArchive = new ManagedTurnArchive(
+      this.ctx.storage,
+      this.env.NANOCODEX_HISTORY,
+      this.ctx.id.toString(),
+      optionalPositiveInteger(this.env.MANAGED_TURN_ARCHIVE_RECENT_TURNS),
+    );
+    this.#realtimeArchive = new ManagedRealtimeArchive(
+      this.ctx.storage,
+      this.env.NANOCODEX_HISTORY,
+      this.ctx.id.toString(),
+      optionalPositiveInteger(this.env.MANAGED_REALTIME_ARCHIVE_RECENT_OPERATIONS),
+    );
     const sessionColumns = new Set(
       this.ctx.storage.sql
         .exec<{ name: string }>("PRAGMA table_info(session_state)")
@@ -769,6 +817,30 @@ export class NanocodexSession extends DurableComputerSession {
       this.ctx.storage.sql.exec(
         "ALTER TABLE session_state ADD COLUMN runtime_profile TEXT NOT NULL DEFAULT 'managed'",
       );
+    }
+    if (!sessionColumns.has("accepted_turns")) {
+      this.ctx.storage.sql.exec(
+        "ALTER TABLE session_state ADD COLUMN accepted_turns INTEGER NOT NULL DEFAULT 0 CHECK (accepted_turns >= 0)",
+      );
+      this.ctx.storage.sql.exec(
+        "UPDATE session_state SET accepted_turns = (SELECT COUNT(*) FROM managed_turns)",
+      );
+    }
+    if (!sessionColumns.has("first_prompt")) {
+      this.ctx.storage.sql.exec(
+        "ALTER TABLE session_state ADD COLUMN first_prompt TEXT NOT NULL DEFAULT ''",
+      );
+      const retainedFirstPrompt = this.ctx.storage.sql.exec<{ input_json: string }>(
+        "SELECT input_json FROM managed_turns ORDER BY created_at, id LIMIT 1",
+      ).toArray()[0]?.input_json;
+      if (retainedFirstPrompt !== undefined) {
+        try {
+          this.ctx.storage.sql.exec(
+            "UPDATE session_state SET first_prompt = ? WHERE singleton = 1",
+            promptInputText(JSON.parse(retainedFirstPrompt) as PromptInput),
+          );
+        } catch { /* Invalid retained input fails through its normal recovery path. */ }
+      }
     }
     const managedTurnColumns = new Set(this.ctx.storage.sql.exec<{ name: string }>(
       "PRAGMA table_info(managed_turns)",
@@ -1032,11 +1104,16 @@ export class NanocodexSession extends DurableComputerSession {
         url.searchParams.get("after");
       const cursor =
         requested === "latest"
-          ? this.#eventLog.latestCursor()
+          ? this.#eventArchive.latestCursor(this.#eventLog)
           : parseCursor(requested);
       if (cursor === undefined)
         return json({ error: "invalid_cursor" }, { status: 400 });
-      return this.#eventLog.stream(cursor, request.signal);
+      return this.#eventLog.streamWithPage(
+        cursor,
+        this.#eventArchive.latestCursor(this.#eventLog),
+        this.#eventArchive.pageReader(this.#eventLog),
+        request.signal,
+      );
     }
     if (request.method === "GET" && url.pathname === "/events/history") {
       if (this.#deleting)
@@ -1058,7 +1135,18 @@ export class NanocodexSession extends DurableComputerSession {
       if (!Number.isSafeInteger(limit) || limit > MAX_HISTORY_PAGE_SIZE) {
         return json({ error: "invalid_history_page" }, { status: 400 });
       }
-      const page = this.#eventLog.history(before, limit);
+      let page;
+      try {
+        page = await this.#eventArchive.history(this.#eventLog, before, limit);
+      } catch (error) {
+        return json({
+          error: "event_archive_unavailable",
+          message: errorMessage(error),
+        }, {
+          status: 503,
+          headers: { "cache-control": "no-store", "retry-after": "1" },
+        });
+      }
       return json({
         data: page.data.map((event) => ({
           cursor: event.cursor,
@@ -1070,26 +1158,63 @@ export class NanocodexSession extends DurableComputerSession {
         latest_cursor: page.latest_cursor,
       }, { headers: { "cache-control": "no-store" } });
     }
+    if (request.method === "POST" && url.pathname === "/events/archive") {
+      if (this.#deleting)
+        return json({ error: "agent_deleting" }, { status: 409 });
+      if (!this.#sessionId())
+        return json({ error: "not_found" }, { status: 404 });
+      return json(await this.#sealEventArchive(true), {
+        headers: { "cache-control": "no-store" },
+      });
+    }
     if (request.method === "GET" && url.pathname === "/capacity") {
       if (this.#deleting)
         return json({ error: "agent_deleting" }, { status: 409 });
       const sessionId = this.#sessionId();
       if (!sessionId)
         return json({ error: "not_found" }, { status: 404 });
-      return json(managedCapacitySnapshot(this.ctx.storage, sessionId), {
+      return json(managedCapacitySnapshot(
+        this.ctx.storage,
+        sessionId,
+        this.#eventArchive.capacity(),
+        this.#turnArchive.capacity(),
+        this.#realtimeArchive.capacity(),
+      ), {
         headers: { "cache-control": "no-store" },
       });
     }
     if (request.method === "POST" && url.pathname === "/turns") {
       return this.#submitHttpTurn(request);
     }
+    if (request.method === "POST" && url.pathname === "/turns/archive") {
+      if (this.#deleting)
+        return json({ error: "agent_deleting" }, { status: 409 });
+      if (!this.#sessionId())
+        return json({ error: "not_found" }, { status: 404 });
+      return json(await this.#sealTurnArchive(true), {
+        headers: { "cache-control": "no-store" },
+      });
+    }
+    if (request.method === "POST" && url.pathname === "/realtime/archive") {
+      if (this.#deleting)
+        return json({ error: "agent_deleting" }, { status: 409 });
+      if (!this.#sessionId())
+        return json({ error: "not_found" }, { status: 404 });
+      return json(await this.#sealRealtimeArchive(true), {
+        headers: { "cache-control": "no-store" },
+      });
+    }
     const turnRoute = url.pathname.match(/^\/turns\/([A-Za-z0-9._:-]{1,128})(?:\/(steer|cancel))?$/);
     if (turnRoute) {
       if (this.#deleting) return json({ error: "agent_deleting" }, { status: 409 });
       const turnId = turnRoute[1]!;
       if (request.method === "GET" && turnRoute[2] === undefined) {
-        const row = this.#managedTurn(turnId);
-        return row ? json(managedTurnView(row)) : json({ error: "turn_not_found" }, { status: 404 });
+        try {
+          const row = await this.#findManagedTurn(turnId);
+          return row ? json(managedTurnView(row)) : json({ error: "turn_not_found" }, { status: 404 });
+        } catch (error) {
+          return managedErrorResponse(error, "turn_archive_unavailable");
+        }
       }
       if (request.method === "POST" && turnRoute[2] === "steer") {
         return this.#steerHttpTurn(turnId, request);
@@ -1115,7 +1240,7 @@ export class NanocodexSession extends DurableComputerSession {
         agent_loaded: this.#agent !== undefined,
         connected_clients: this.ctx.getWebSockets().length,
         capabilities: this.#capabilities(),
-        latest_event_cursor: this.#eventLog.latestCursor(),
+        latest_event_cursor: this.#eventArchive.latestCursor(this.#eventLog),
         stream_error: session.stream_error,
       });
     }
@@ -1212,6 +1337,15 @@ export class NanocodexSession extends DurableComputerSession {
       return;
     }
     this.#logCapacity("idle_shutdown");
+    while (this.#eventArchive.needsSeal(this.#eventLog)) {
+      if (!(await this.#sealEventArchive(false)).sealed) break;
+    }
+    while (this.#turnArchive.needsSeal()) {
+      if (!(await this.#sealTurnArchive(false)).sealed) break;
+    }
+    while (this.#realtimeArchive.needsSeal()) {
+      if (!(await this.#sealRealtimeArchive(false)).sealed) break;
+    }
     await this.#shutdownAgent();
     this.#scheduleRecovery();
   }
@@ -1260,7 +1394,7 @@ export class NanocodexSession extends DurableComputerSession {
     }
     if (command.type === "cancel") {
       try {
-        const row = this.#managedTurn(command.id);
+        const row = await this.#findManagedTurn(command.id);
         if (!row) throw new ManagedRequestError(404, "turn_not_found", `turn ${command.id} does not exist`);
         if (isTerminalState(row.state)) {
           this.#send(socket, messageForManagedTurn(row));
@@ -1289,7 +1423,7 @@ export class NanocodexSession extends DurableComputerSession {
     }
     try {
       const requestHash = await hashManagedInput(command.input);
-      const submission = this.#submitManagedTurn(command.id, command.input, requestHash, null);
+      const submission = await this.#submitManagedTurn(command.id, command.input, requestHash, null);
       if (!submission.created) this.#send(socket, messageForManagedTurn(submission.row));
     } catch (error) {
       const failure = managedHttpError(error);
@@ -1372,7 +1506,7 @@ export class NanocodexSession extends DurableComputerSession {
       const input = body.input;
       const id = typeof body.id === "string" ? body.id : uuidV7();
       const requestHash = await hashManagedInput(input);
-      const submission = this.#submitManagedTurn(
+      const submission = await this.#submitManagedTurn(
         id,
         input,
         requestHash,
@@ -1580,10 +1714,29 @@ export class NanocodexSession extends DurableComputerSession {
     operation: () => Promise<Result>,
   ): Promise<Result> {
     const key = `${request.voiceSessionId}\n${request.operationId}`;
-    const existing = this.#managedRealtimeOperation(
-      request.voiceSessionId,
-      request.operationId,
-    );
+    let existing: ManagedRealtimeOperationRow | ManagedRealtimeReceipt | undefined =
+      this.#managedRealtimeOperation(
+        request.voiceSessionId,
+        request.operationId,
+      );
+    if (!existing) {
+      try {
+        existing = await this.#realtimeArchive.find(
+          request.voiceSessionId,
+          request.operationId,
+        );
+      } catch (error) {
+        throw new ManagedRequestError(
+          503,
+          "realtime_archive_unavailable",
+          `archived realtime lookup failed: ${errorMessage(error)}`,
+        );
+      }
+      existing = this.#managedRealtimeOperation(
+        request.voiceSessionId,
+        request.operationId,
+      ) ?? existing;
+    }
     if (
       existing &&
       (existing.kind !== kind || existing.request_hash !== requestHash)
@@ -1594,16 +1747,26 @@ export class NanocodexSession extends DurableComputerSession {
         "realtime operation identity is already bound to a different request",
       );
     }
+    const admittedInFlight = this.#realtimeOperations.get(key);
+    if (admittedInFlight) return admittedInFlight as Promise<Result>;
     if (existing?.state === "completed" && existing.response_json !== null) {
       return JSON.parse(existing.response_json) as Result;
     }
-    const inFlight = this.#realtimeOperations.get(key);
-    if (inFlight) return inFlight as Promise<Result>;
     if (existing?.state === "pending") {
       throw new ManagedRequestError(
         409,
         "operation_pending",
         "realtime operation is pending and will not be replayed",
+      );
+    }
+    const pendingOperations = this.ctx.storage.sql.exec<{ count: number }>(
+      "SELECT COUNT(*) AS count FROM managed_realtime_operations WHERE state = 'pending'",
+    ).one().count;
+    if (pendingOperations >= MAX_PENDING_REALTIME_OPERATIONS) {
+      throw new ManagedRequestError(
+        429,
+        "realtime_queue_full",
+        `at most ${MAX_PENDING_REALTIME_OPERATIONS} realtime operations may be pending`,
       );
     }
 
@@ -1645,6 +1808,10 @@ export class NanocodexSession extends DurableComputerSession {
             request.operationId,
             requestHash,
           );
+          if (this.#realtimeArchive.needsSeal()) {
+            void this.#sealRealtimeArchive(false).catch(() => {});
+            void this.#scheduleNextAlarm().catch(() => {});
+          }
           return result;
         } catch (error) {
           this.ctx.storage.sql.exec(
@@ -1724,7 +1891,7 @@ export class NanocodexSession extends DurableComputerSession {
       }
 
       try {
-        this.#acceptRoutedTurn(turnId, input, requestHash, request);
+        await this.#acceptRoutedTurn(turnId, input, requestHash, request);
         this.#turns.set(turnId, turn);
         this.#turnInputs.set(turnId, input);
         this.#eventTurnQueue.push(turnId);
@@ -1754,7 +1921,9 @@ export class NanocodexSession extends DurableComputerSession {
   }
 
   async #steerHttpTurn(id: string, request: Request): Promise<Response> {
-    const row = this.#managedTurn(id);
+    let row: ManagedTurnRow | undefined;
+    try { row = await this.#findManagedTurn(id); }
+    catch (error) { return managedErrorResponse(error, "turn_archive_unavailable"); }
     if (!row) return json({ error: "turn_not_found" }, { status: 404 });
     if (row.state !== "accepted") {
       return json(
@@ -1797,7 +1966,9 @@ export class NanocodexSession extends DurableComputerSession {
   }
 
   async #cancelHttpTurn(id: string): Promise<Response> {
-    const row = this.#managedTurn(id);
+    let row: ManagedTurnRow | undefined;
+    try { row = await this.#findManagedTurn(id); }
+    catch (error) { return managedErrorResponse(error, "turn_archive_unavailable"); }
     if (!row) return json({ error: "turn_not_found" }, { status: 404 });
     if (isTerminalState(row.state)) return json(managedTurnView(row));
     if (row.state === "blocked") {
@@ -1861,14 +2032,19 @@ export class NanocodexSession extends DurableComputerSession {
     }
   }
 
-  #acceptRoutedTurn(
+  async #acceptRoutedTurn(
     id: string,
     input: PromptInput,
     requestHash: string,
     request: ManagedRealtimeRequest,
-  ): ManagedTurnRow {
+  ): Promise<ManagedTurnRow> {
     this.#assertRealtimeRouteAvailable();
-    if (this.#managedTurn(id)) {
+    const requestKey = `realtime:${request.voiceSessionId}:${request.operationId}`;
+    const retained = await Promise.all([
+      this.#findManagedTurn(id),
+      this.#findManagedTurnByRequestKey(requestKey),
+    ]);
+    if (retained[0] || retained[1]) {
       throw new ManagedRequestError(
         409,
         "idempotency_conflict",
@@ -1882,8 +2058,16 @@ export class NanocodexSession extends DurableComputerSession {
       input,
       replayed: false,
     };
+    const firstPrompt = promptInputText(input);
     let event: DurableEvent<StreamMessage> | undefined;
     this.ctx.storage.transactionSync(() => {
+      if (this.#managedTurn(id) || this.#managedTurnByRequestKey(requestKey)) {
+        throw new ManagedRequestError(
+          409,
+          "idempotency_conflict",
+          "realtime turn identity was concurrently accepted",
+        );
+      }
       event = this.#eventLog.append(accepted, id);
       this.ctx.storage.sql.exec(
         `INSERT INTO managed_turns (
@@ -1891,13 +2075,20 @@ export class NanocodexSession extends DurableComputerSession {
            accepted_cursor, created_at, accepted_at, updated_at
          ) VALUES (?, ?, ?, ?, 'accepted', CAST(? AS INTEGER), ?, ?, ?)`,
         id,
-        `realtime:${request.voiceSessionId}:${request.operationId}`,
+        requestKey,
         requestHash,
         JSON.stringify(input),
         event.cursor,
         now,
         now,
         now,
+      );
+      this.ctx.storage.sql.exec(
+        `UPDATE session_state
+         SET accepted_turns = accepted_turns + 1,
+             first_prompt = CASE WHEN accepted_turns = 0 THEN ? ELSE first_prompt END
+         WHERE singleton = 1`,
+        firstPrompt,
       );
     });
     this.#publish(event!);
@@ -1933,21 +2124,32 @@ export class NanocodexSession extends DurableComputerSession {
     }
   }
 
-  #submitManagedTurn(
+  async #submitManagedTurn(
     id: string,
     input: PromptInput,
     requestHash: string,
     requestKey: string | null,
     explicitId = true,
-  ): ManagedTurnSubmission {
+  ): Promise<ManagedTurnSubmission> {
     if (this.#deleting || this.#deleted) {
       throw new ManagedRequestError(409, "agent_deleting", "the agent is being deleted");
     }
-    const keyed = requestKey === null ? undefined : this.#managedTurnByRequestKey(requestKey);
+    const archived = await Promise.all([
+      this.#managedTurn(id) ? Promise.resolve(undefined) : this.#archivedTurnById(id),
+      requestKey === null || this.#managedTurnByRequestKey(requestKey)
+        ? Promise.resolve(undefined)
+        : this.#archivedTurnByRequestKey(requestKey),
+    ]);
+    if (this.#deleting || this.#deleted) {
+      throw new ManagedRequestError(409, "agent_deleting", "the agent is being deleted");
+    }
+    const keyed = requestKey === null
+      ? undefined
+      : this.#managedTurnByRequestKey(requestKey) ?? archived[1];
     if (keyed && explicitId && keyed.id !== id) {
       throw new ManagedRequestError(409, "idempotency_conflict", "idempotency key is already bound to another turn");
     }
-    const identified = this.#managedTurn(id);
+    const identified = this.#managedTurn(id) ?? archived[0];
     if (keyed && identified && keyed.id !== identified.id) {
       throw new ManagedRequestError(409, "idempotency_conflict", "turn id and idempotency key identify different turns");
     }
@@ -1962,7 +2164,16 @@ export class NanocodexSession extends DurableComputerSession {
       if (existing.state === "cancelling") {
         this.#scheduleCancellation(existing.id);
       } else if (!isTerminalState(existing.state) && existing.state !== "blocked") {
-        this.#scheduleRecovery();
+        if (existing.state === "retryable"
+          && existing.retry_at !== null
+          && existing.retry_at > Date.now()) {
+          // Idempotent polling must preserve the retained retry deadline. It
+          // may race the recovery task that just wrote the row, so install the
+          // alarm directly without requesting another recovery pass.
+          await this.#scheduleNextAlarm();
+        } else {
+          this.#scheduleRecovery();
+        }
       }
       return { created: false, row: existing };
     }
@@ -1986,6 +2197,7 @@ export class NanocodexSession extends DurableComputerSession {
 
     const now = Date.now();
     const accepted: StreamMessage = { type: "turn_accepted", id, input, replayed: false };
+    const firstPrompt = promptInputText(input);
     let event: DurableEvent<StreamMessage> | undefined;
     this.ctx.storage.transactionSync(() => {
       if (this.#deleting || !this.#sessionId()) {
@@ -2005,6 +2217,13 @@ export class NanocodexSession extends DurableComputerSession {
         now,
         now,
         now,
+      );
+      this.ctx.storage.sql.exec(
+        `UPDATE session_state
+         SET accepted_turns = accepted_turns + 1,
+             first_prompt = CASE WHEN accepted_turns = 0 THEN ? ELSE first_prompt END
+         WHERE singleton = 1`,
+        firstPrompt,
       );
     });
     this.#publish(event!);
@@ -2282,11 +2501,28 @@ export class NanocodexSession extends DurableComputerSession {
     // once more before dropping the owned journal and event history.
     for (const socket of this.ctx.getWebSockets()) closeSocket(socket, 1000, "session deleted");
     this.#assertDeletionGeneration(generation);
+    while (this.#eventArchiveTask || this.#turnArchiveTask || this.#realtimeArchiveTask) {
+      const archiveTasks: Promise<unknown>[] = [];
+      if (this.#eventArchiveTask) archiveTasks.push(this.#eventArchiveTask);
+      if (this.#turnArchiveTask) archiveTasks.push(this.#turnArchiveTask);
+      if (this.#realtimeArchiveTask) archiveTasks.push(this.#realtimeArchiveTask);
+      await Promise.allSettled(archiveTasks);
+    }
+    await Promise.all([
+      this.#eventArchive.deleteAll(),
+      this.#turnArchive.deleteAll(),
+      this.#realtimeArchive.deleteAll(),
+    ]);
+    this.#assertDeletionGeneration(generation);
     CloudflareAgent.destroy(this);
     this.ctx.storage.transactionSync(() => {
       this.ctx.storage.sql.exec("DELETE FROM managed_turns");
       this.#eventLog.clear();
-      this.ctx.storage.sql.exec("DELETE FROM completed_operations");
+      this.#eventArchive.clearLocalState();
+      this.#turnArchive.clearLocalState();
+      this.#realtimeArchive.clearLocalState();
+      this.ctx.storage.sql.exec("DELETE FROM managed_realtime_operations");
+      this.ctx.storage.sql.exec("DELETE FROM managed_realtime_session");
       this.ctx.storage.sql.exec("DELETE FROM session_state");
     });
     await this.ctx.storage.transaction(async (transaction) => {
@@ -2380,7 +2616,10 @@ export class NanocodexSession extends DurableComputerSession {
       return;
     }
     this.#recoveryRequested = false;
-    const task = Promise.resolve().then(() => this.#runRecovery());
+    // Decide retry eligibility at scheduling time. Construction and other I/O
+    // must not let work scheduled just before retry_at drift across the fence.
+    const observedAt = Date.now();
+    const task = Promise.resolve().then(() => this.#runRecovery(observedAt));
     this.#recoveryTask = task;
     void task.finally(() => {
       if (this.#recoveryTask !== task) return;
@@ -2392,7 +2631,7 @@ export class NanocodexSession extends DurableComputerSession {
     }));
   }
 
-  async #runRecovery(): Promise<void> {
+  async #runRecovery(observedAt: number): Promise<void> {
     if (this.#deleting || !this.#sessionId() || this.#streamError) return;
     const rows = this.#managedTurns(
       `WHERE state IN ('accepted', 'cancelling', 'retryable', 'blocked')
@@ -2404,7 +2643,7 @@ export class NanocodexSession extends DurableComputerSession {
       if (!current || isTerminalState(current.state)) continue;
       if (current.state === "blocked") break;
       if ((current.state === "retryable" || current.state === "cancelling")
-        && current.retry_at !== null && current.retry_at > Date.now()) break;
+        && current.retry_at !== null && current.retry_at > observedAt) break;
       if (current.state === "cancelling") {
         const cancellation = this.#cancellationTasks.get(row.id);
         try {
@@ -2598,6 +2837,7 @@ export class NanocodexSession extends DurableComputerSession {
     try {
       agent = await CloudflareAgent.create(this, {
         eventPersistence: "caller",
+        terminalReceiptRetention: 512,
         instructions: multiplayer
           ? [
             "You are the shared Nanocodex participant in a short-lived Multiplayer chat room.",
@@ -2827,25 +3067,24 @@ export class NanocodexSession extends DurableComputerSession {
         now,
         id,
       );
-      if (state === "completed") {
-        this.ctx.storage.sql.exec(
-          "INSERT OR IGNORE INTO completed_operations (id, completed_at) VALUES (?, ?)",
-          id,
-          now,
-        );
-      }
       this.ctx.storage.sql.exec(
         `UPDATE session_state
-         SET completed_turns = (SELECT COUNT(*) FROM managed_turns WHERE state = 'completed'),
+         SET completed_turns = completed_turns + ?,
              last_active = ?
          WHERE singleton = 1`,
+        state === "completed" ? 1 : 0,
         now,
       );
       committed = this.#managedTurn(id) ?? row;
     });
     if (event) {
       this.#publish(event);
-      if (isTerminalState(committed.state)) this.#maybeLogTerminalCapacity();
+      if (isTerminalState(committed.state)) {
+        this.#maybeLogTerminalCapacity();
+        if (this.#turnArchive.needsSeal()) {
+          void this.#sealTurnArchive(false).catch(() => {});
+        }
+      }
     }
     return committed;
   }
@@ -2861,7 +3100,7 @@ export class NanocodexSession extends DurableComputerSession {
   }
 
   #logCapacity(
-    reason: "agent_constructed" | "idle_shutdown" | "terminal_milestone",
+    reason: "agent_constructed" | "archive_seal" | "idle_shutdown" | "terminal_milestone",
     dimensions: Record<string, number> = {},
   ): void {
     const sessionId = this.#sessionId();
@@ -2870,6 +3109,9 @@ export class NanocodexSession extends DurableComputerSession {
       const capacity: ManagedCapacitySnapshot = managedCapacitySnapshot(
         this.ctx.storage,
         sessionId,
+        this.#eventArchive.capacity(),
+        this.#turnArchive.capacity(),
+        this.#realtimeArchive.capacity(),
       );
       console.info({
         type: "managed.capacity",
@@ -2964,6 +3206,98 @@ export class NanocodexSession extends DurableComputerSession {
       cursor: event.cursor,
       ...(event.turn_id === null ? {} : { turn_id: event.turn_id }),
     });
+    if (this.#eventArchive.needsSeal(this.#eventLog)) {
+      void this.#sealEventArchive(false).catch(() => {});
+    }
+  }
+
+  #sealEventArchive(force: boolean): Promise<ManagedEventSealResult> {
+    if (this.#deleting) return Promise.reject(new Error("agent deletion fenced event archival"));
+    const active = this.#eventArchiveTask;
+    if (active) {
+      return force ? active.then(() => this.#sealEventArchive(true)) : active;
+    }
+    const started = performance.now();
+    const observed = this.#eventArchive.seal(force).then((result) => {
+      if (result.sealed) {
+        this.#logCapacity("archive_seal", {
+          archived_bytes: result.archived_bytes,
+          archived_events: result.archived_events,
+          index_node_created: result.index_node_created ? 1 : 0,
+          seal_ms: Math.round((performance.now() - started) * 100) / 100,
+        });
+      }
+      return result;
+    }).catch((error) => {
+      console.warn("managed event archive seal failed", errorMessage(error));
+      throw error;
+    });
+    this.#eventArchiveTask = observed;
+    void observed.finally(() => {
+      if (this.#eventArchiveTask === observed) this.#eventArchiveTask = undefined;
+    }).catch(() => {});
+    this.ctx.waitUntil(observed.catch(() => {}));
+    return observed;
+  }
+
+  #sealTurnArchive(force: boolean): Promise<ManagedTurnSealResult> {
+    if (this.#deleting) return Promise.reject(new Error("agent deletion fenced turn archival"));
+    const active = this.#turnArchiveTask;
+    if (active) {
+      return force ? active.then(() => this.#sealTurnArchive(true)) : active;
+    }
+    const started = performance.now();
+    const observed = this.#turnArchive.seal(force).then((result) => {
+      if (result.sealed) {
+        this.#logCapacity("archive_seal", {
+          archived_receipt_bytes: result.archived_bytes,
+          archived_receipts: result.archived_receipts,
+          archived_receipt_objects: result.objects,
+          seal_ms: Math.round((performance.now() - started) * 100) / 100,
+        });
+      }
+      return result;
+    }).catch((error) => {
+      console.warn("managed turn archive seal failed", errorMessage(error));
+      throw error;
+    });
+    this.#turnArchiveTask = observed;
+    void observed.finally(() => {
+      if (this.#turnArchiveTask === observed) this.#turnArchiveTask = undefined;
+    }).catch(() => {});
+    this.ctx.waitUntil(observed.catch(() => {}));
+    return observed;
+  }
+
+  #sealRealtimeArchive(force: boolean): Promise<ManagedRealtimeSealResult> {
+    if (this.#deleting) {
+      return Promise.reject(new Error("agent deletion fenced realtime archival"));
+    }
+    const active = this.#realtimeArchiveTask;
+    if (active) {
+      return force ? active.then(() => this.#sealRealtimeArchive(true)) : active;
+    }
+    const started = performance.now();
+    const observed = this.#realtimeArchive.seal(force).then((result) => {
+      if (result.sealed) {
+        this.#logCapacity("archive_seal", {
+          archived_realtime_bytes: result.archived_bytes,
+          archived_realtime_receipts: result.archived_receipts,
+          archived_realtime_objects: result.objects,
+          seal_ms: Math.round((performance.now() - started) * 100) / 100,
+        });
+      }
+      return result;
+    }).catch((error) => {
+      console.warn("managed realtime archive seal failed", errorMessage(error));
+      throw error;
+    });
+    this.#realtimeArchiveTask = observed;
+    void observed.finally(() => {
+      if (this.#realtimeArchiveTask === observed) this.#realtimeArchiveTask = undefined;
+    }).catch(() => {});
+    this.ctx.waitUntil(observed.catch(() => {}));
+    return observed;
   }
 
   async #stop(strictShutdown = false): Promise<void> {
@@ -3062,6 +3396,41 @@ export class NanocodexSession extends DurableComputerSession {
     return this.#managedTurns("WHERE id = ?", id)[0];
   }
 
+  async #findManagedTurn(id: string): Promise<ManagedTurnRow | undefined> {
+    return this.#managedTurn(id) ?? await this.#archivedTurnById(id);
+  }
+
+  async #findManagedTurnByRequestKey(
+    requestKey: string,
+  ): Promise<ManagedTurnRow | undefined> {
+    return this.#managedTurnByRequestKey(requestKey)
+      ?? await this.#archivedTurnByRequestKey(requestKey);
+  }
+
+  async #archivedTurnById(id: string): Promise<ManagedTurnReceipt | undefined> {
+    try { return await this.#turnArchive.findById(id); }
+    catch (error) {
+      throw new ManagedRequestError(
+        503,
+        "turn_archive_unavailable",
+        `archived turn lookup failed: ${errorMessage(error)}`,
+      );
+    }
+  }
+
+  async #archivedTurnByRequestKey(
+    requestKey: string,
+  ): Promise<ManagedTurnReceipt | undefined> {
+    try { return await this.#turnArchive.findByRequestKey(requestKey); }
+    catch (error) {
+      throw new ManagedRequestError(
+        503,
+        "turn_archive_unavailable",
+        `archived idempotency lookup failed: ${errorMessage(error)}`,
+      );
+    }
+  }
+
   #managedRealtimeOperation(
     voiceSessionId: string,
     operationId: string,
@@ -3086,17 +3455,9 @@ export class NanocodexSession extends DurableComputerSession {
   }
 
   #firstPrompt(): string {
-    const row = this.ctx.storage.sql
-      .exec<{ input_json: string }>(
-        "SELECT input_json FROM managed_turns ORDER BY created_at, id LIMIT 1",
-      )
-      .toArray()[0];
-    if (!row) return "";
-    try {
-      return promptInputText(JSON.parse(row.input_json) as PromptInput);
-    } catch {
-      return "";
-    }
+    return this.ctx.storage.sql.exec<{ first_prompt: string }>(
+      "SELECT first_prompt FROM session_state WHERE singleton = 1",
+    ).toArray()[0]?.first_prompt ?? "";
   }
 
   #managedTurnByRequestKey(requestKey: string): ManagedTurnRow | undefined {
@@ -3132,16 +3493,12 @@ export class NanocodexSession extends DurableComputerSession {
   }
 
   #conversationSummary(): { title: string; turnCount: number } {
-    const row = this.ctx.storage.sql.exec<{ input_json: string; turn_count: number }>(
-      `SELECT input_json,
-              (SELECT COUNT(*) FROM managed_turns) AS turn_count
-         FROM managed_turns
-        ORDER BY created_at, id
-        LIMIT 1`,
+    const row = this.ctx.storage.sql.exec<{ accepted_turns: number; first_prompt: string }>(
+      "SELECT accepted_turns, first_prompt FROM session_state WHERE singleton = 1",
     ).one();
     return {
-      title: conversationTitle(promptInputText(JSON.parse(row.input_json) as PromptInput)),
-      turnCount: row.turn_count,
+      title: conversationTitle(row.first_prompt),
+      turnCount: row.accepted_turns,
     };
   }
 
@@ -3149,6 +3506,11 @@ export class NanocodexSession extends DurableComputerSession {
     if (this.#deleting || !this.#sessionId()) return;
     const now = Date.now();
     const targets: number[] = [];
+    if (this.#eventArchive.needsSeal(this.#eventLog)
+      || this.#turnArchive.needsSeal()
+      || this.#realtimeArchive.needsSeal()) {
+      targets.push(now + 1);
+    }
     if (this.#agent || this.#agentPromise || this.#turns.size > 0 || this.#pendingTurnIds.size > 0) {
       targets.push(now + this.#idleTimeoutMs());
     }
@@ -3365,6 +3727,12 @@ function managedOwnershipTimeoutMs(env: Env): number {
   return Number.isFinite(configured)
     ? Math.min(CREDENTIAL_BINDING_PREPARE_TIMEOUT_MS, Math.max(1, configured))
     : DEFAULT_OWNERSHIP_IO_TIMEOUT_MS;
+}
+
+function optionalPositiveInteger(value: string | undefined): number | undefined {
+  if (value === undefined || !/^[1-9][0-9]*$/.test(value)) return undefined;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) ? parsed : undefined;
 }
 
 function managedMultiplayerTimeoutMs(env: Env): number {
