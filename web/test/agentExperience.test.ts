@@ -5,6 +5,7 @@ import test from "node:test";
 import { browserMcpConfiguration } from "../src/browserMcp.ts";
 
 const terminal = source("../src/AgentTerminal.tsx");
+const connectTerminal = source("../connect-playground/src/ConnectAgentExperience.tsx");
 const terminalView = source("../../js/terminal/src/AgentTerminalView.tsx");
 const terminalPresentation = source("../../js/terminal/src/TerminalTranscriptSurface.tsx");
 const dock = source("../src/ArtifactDock.tsx");
@@ -50,6 +51,10 @@ test("the landing welcome is replaced atomically by the first transcript entry",
   assert.match(terminalPresentation, /const visibleWelcome = entries\.length === 0 \? welcome : undefined/);
   assert.match(terminalPresentation, /\{visibleWelcome \? <article[\s\S]*?\{visibleWelcome\}/);
   assert.doesNotMatch(terminalPresentation, /welcomeDismissed|setWelcomeDismissed/);
+});
+
+test("the Connect terminal enables package-owned voice from final-output permission", () => {
+  assert.match(connectTerminal, /<AgentTerminalView[\s\S]*?voice=\{visibility\.finalMessages\}/);
 });
 
 test("the full Agent experience alone mounts a collapsed, counted artifact dock", () => {
