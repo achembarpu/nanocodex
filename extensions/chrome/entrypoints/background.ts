@@ -26,6 +26,12 @@ const REGISTRATION_ID = "nanocodex-site-recipes-v1";
 const RUNNER_FILE = "content-scripts/recipe-runner.js";
 const INSTANCE_KEY = "browser-instance-id";
 const LEASE_PREFIX = "page-lease:";
+const SELECTED_TAB_KEY = "selected-page-tab";
+
+interface SelectedTab {
+  tab_id: number;
+  window_id: number;
+}
 
 interface Lease {
   id: string;
@@ -40,13 +46,19 @@ const cancelledRequests = new Set<string>();
 const invalidatedLeases = new Set<string>();
 const leaseQueues = new Map<string, Promise<unknown>>();
 let recipeQueue: Promise<unknown> = Promise.resolve();
+let selectedTab: SelectedTab | undefined;
+let selectedTabWrite: Promise<void> = Promise.resolve();
 
 export default defineBackground(() => {
   void chrome.storage.local.setAccessLevel({ accessLevel: "TRUSTED_CONTEXTS" });
-  void chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
+  void chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: false });
   void serializeRecipes(repairRecipeRegistration);
   chrome.runtime.onStartup.addListener(() => void serializeRecipes(repairRecipeRegistration));
   chrome.runtime.onInstalled.addListener(() => void serializeRecipes(repairRecipeRegistration));
+  chrome.action.onClicked.addListener((tab) => {
+    selectTab(tab);
+    void chrome.sidePanel.open({ windowId: tab.windowId });
+  });
   chrome.runtime.onMessage.addListener((message: unknown, sender, sendResponse) => {
     void handleRuntimeMessage(message, sender).then(sendResponse, (error: unknown) => {
       sendResponse({ error: errorMessage(error) });
@@ -69,7 +81,7 @@ async function handleRuntimeMessage(value: unknown, sender: chrome.runtime.Messa
   switch (message.type) {
     case "page.claim": {
       if (typeof message.previous_lease_id === "string") await releaseLease(message.previous_lease_id);
-      const claim = await claimActiveTab();
+      const claim = await claimSelectedTab();
       const current: Lease = { id: crypto.randomUUID(), claim };
       await saveLease(current);
       return { lease_id: current.id, tab: claim } satisfies PageLease;
@@ -255,24 +267,44 @@ async function keepRecipe(current: Lease, originValue: string): Promise<{ name: 
   return { name: stored.recipe.name };
 }
 
-async function claimActiveTab(): Promise<TabClaim> {
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (tab?.id === undefined || tab.windowId === undefined || !tab.url) {
-    throw new Error("Open a normal HTTP or HTTPS tab, then invoke Nanocodex again.");
+function selectTab(tab: chrome.tabs.Tab): void {
+  if (tab.id === undefined) return;
+  selectedTab = { tab_id: tab.id, window_id: tab.windowId };
+  selectedTabWrite = chrome.storage.session.set({ [SELECTED_TAB_KEY]: selectedTab });
+}
+
+async function claimSelectedTab(): Promise<TabClaim> {
+  await selectedTabWrite;
+  if (!selectedTab) {
+    const stored = await chrome.storage.session.get(SELECTED_TAB_KEY);
+    if (isSelectedTab(stored[SELECTED_TAB_KEY])) selectedTab = stored[SELECTED_TAB_KEY];
+  }
+  if (!selectedTab) {
+    throw new Error("Click the Nanocodex toolbar icon on the HTTP or HTTPS page you want to change.");
+  }
+  const target = selectedTab;
+  const tab = await chrome.tabs.get(target.tab_id);
+  if (tab.windowId !== target.window_id || !tab.url) {
+    throw new Error("The selected tab is no longer available. Click the Nanocodex toolbar icon on the page again.");
   }
   const origin = normalizeOrigin(tab.url);
-  const [probe] = await chrome.scripting.executeScript({
-    target: { tabId: tab.id, frameIds: [0] },
-    world: "ISOLATED",
-    func: () => location.href,
-  });
+  let probe: chrome.scripting.InjectionResult<string> | undefined;
+  try {
+    [probe] = await chrome.scripting.executeScript({
+      target: { tabId: target.tab_id, frameIds: [0] },
+      world: "ISOLATED",
+      func: () => location.href,
+    });
+  } catch {
+    throw new Error("Nanocodex no longer has access to that page. Click its toolbar icon on the page again.");
+  }
   if (!probe?.documentId || normalizeOrigin(String(probe.result)) !== origin) {
     throw new Error("The selected tab changed while it was being claimed.");
   }
   return {
     browser_instance_id: await browserInstanceId(),
-    window_id: tab.windowId,
-    tab_id: tab.id,
+    window_id: target.window_id,
+    tab_id: target.tab_id,
     document_id: probe.documentId,
     origin,
     url: String(probe.result),
@@ -413,6 +445,12 @@ function leaseStorageKey(leaseId: string): string {
 function isLease(value: unknown): value is Lease {
   return Boolean(value) && typeof value === "object" && typeof (value as Lease).id === "string"
     && Boolean((value as Lease).claim) && typeof (value as Lease).claim.tab_id === "number";
+}
+
+function isSelectedTab(value: unknown): value is SelectedTab {
+  return Boolean(value) && typeof value === "object"
+    && typeof (value as SelectedTab).tab_id === "number"
+    && typeof (value as SelectedTab).window_id === "number";
 }
 
 async function recipeForDocument(urlValue: string, sender: chrome.runtime.MessageSender): Promise<{ css: string } | undefined> {
