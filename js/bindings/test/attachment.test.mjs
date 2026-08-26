@@ -100,6 +100,46 @@ test("reverse attachment uses canonical attach, lease, catalog digest, call, res
   await tools.close();
 });
 
+test("numeric schema keys use the Rust catalog digest", async () => {
+  const socket = new FakeSocket();
+  const tools = await createTools({ tools: {
+    numeric_keys: {
+      description: "numeric object keys",
+      parameters: {
+        type: "object",
+        properties: { 2: { type: "string" }, 10: { type: "string" } },
+        additionalProperties: false,
+      },
+      provider: "fixed",
+      handler: (input) => input,
+    },
+  } });
+  const connecting = tools.attach(reverseTarget(async () => socket), { reconnect: false }).connect();
+  await tick();
+  socket.receive({
+    ...base,
+    type: "lease",
+    lease_id: LEASE_ID,
+    generation: 7,
+    expires_at: Date.now() + 60_000,
+    capabilities: [{ name: "tools", version: 1 }],
+  });
+  await waitFor(() => socket.frames().some(({ type }) => type === "catalog_publish"));
+  const catalog = socket.frames().find(({ type }) => type === "catalog_publish");
+  assert.equal(catalog.catalog_digest, "a90cd50d8abe0572db8a87a359ea5b3429b14cb1f425c8d345b21c6db404146a");
+  socket.receive({
+    ...base,
+    type: "catalog_ack",
+    lease_id: LEASE_ID,
+    generation: 7,
+    catalog_revision: 1,
+    catalog_digest: catalog.catalog_digest,
+  });
+  const client = await connecting;
+  client.close();
+  await tools.close();
+});
+
 test("duplicate identity is idempotent, changed identity and unknown result ack fence", async () => {
   let finish;
   let calls = 0;
@@ -483,4 +523,3 @@ async function waitFor(predicate) {
   for (let index = 0; index < 100; index++) { if (predicate()) return; await tick(); }
   throw new Error("condition did not become true");
 }
-

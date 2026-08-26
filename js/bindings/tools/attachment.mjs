@@ -530,13 +530,17 @@ async function catalogDigest(catalog) {
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
-function canonicalJson(value) { return JSON.stringify(canonicalValue(value)); }
-function canonicalValue(value) {
-  if (Array.isArray(value)) return value.map(canonicalValue);
-  if (!value || typeof value !== "object") return value;
-  return Object.fromEntries(Object.entries(value)
-    .sort(([a], [b]) => compareUnicodeScalars(a, b))
-    .map(([key, child]) => [key, canonicalValue(child)]));
+function canonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.entries(value)
+      .sort(([a], [b]) => compareUnicodeScalars(a, b))
+      .map(([key, child]) => `${JSON.stringify(key)}:${canonicalJson(child)}`)
+      .join(",")}}`;
+  }
+  const encoded = JSON.stringify(value);
+  if (encoded === undefined) throw new TypeError("catalog contains a non-JSON value");
+  return encoded;
 }
 function compareUnicodeScalars(left, right) {
   const a = [...left]; const b = [...right];
@@ -773,4 +777,3 @@ const MANAGED_KEYS = Object.freeze({
   pong: ["protocol_version", "capability", "type", "lease_id", "generation", "expires_at", "nonce"],
   fenced: ["protocol_version", "capability", "type", "lease_id", "generation", "reason"],
 });
-

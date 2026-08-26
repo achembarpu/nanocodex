@@ -1470,17 +1470,16 @@ function toolResult(
 }
 
 function canonicalJson(value: unknown): string {
-  return JSON.stringify(canonicalValue(value));
-}
-
-function canonicalValue(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(canonicalValue);
-  if (!value || typeof value !== "object") return value;
-  return Object.fromEntries(
-    Object.entries(value as Record<string, unknown>)
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.entries(value as Record<string, unknown>)
       .sort(([left], [right]) => compareUnicodeScalars(left, right))
-      .map(([key, child]) => [key, canonicalValue(child)]),
-  );
+      .map(([key, child]) => `${JSON.stringify(key)}:${canonicalJson(child)}`)
+      .join(",")}}`;
+  }
+  const encoded = JSON.stringify(value);
+  if (encoded === undefined) throw new TypeError("catalog contains a non-JSON value");
+  return encoded;
 }
 
 function compareUnicodeScalars(left: string, right: string): number {
@@ -1566,4 +1565,3 @@ function websocketCloseReason(reason: string): string {
   }
   return bounded;
 }
-

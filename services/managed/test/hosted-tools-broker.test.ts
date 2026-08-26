@@ -32,6 +32,26 @@ type CallState = CallRow["state"];
 afterEach(() => { vi.useRealTimers(); });
 
 describe("HostedToolsBroker", () => {
+  it("accepts the shared Rust digest for numeric schema keys", async () => {
+    const fixture = createFixture();
+    const host = fixture.socket();
+    await attach(fixture.broker, host, HOST_ONE);
+    const tools = [numericKeyCatalogEntry()];
+    await fixture.broker.message(host.webSocket, encode({
+      ...base,
+      type: "catalog_publish",
+      lease_id: LEASE_ONE,
+      generation: 1,
+      catalog_revision: 1,
+      catalog_digest: "a90cd50d8abe0572db8a87a359ea5b3429b14cb1f425c8d345b21c6db404146a",
+      tools,
+    }));
+    expect(host.sent.at(-1)).toMatchObject({
+      type: "catalog_ack",
+      catalog_digest: "a90cd50d8abe0572db8a87a359ea5b3429b14cb1f425c8d345b21c6db404146a",
+    });
+  });
+
   it("leases one authenticated-route socket, publishes atomically, and persists results before ack", async () => {
     const fixture = createFixture();
     const host = fixture.socket();
@@ -866,6 +886,26 @@ function catalogEntry(name = "fixture__lookup", parallelSafe = true) {
   };
 }
 
+function numericKeyCatalogEntry() {
+  return {
+    provider: "fixed",
+    remote_name: "numeric_keys",
+    definition: {
+      type: "function" as const,
+      name: "numeric_keys",
+      description: "numeric object keys",
+      strict: false,
+      parameters: {
+        type: "object",
+        properties: { 2: { type: "string" }, 10: { type: "string" } },
+        additionalProperties: false,
+      },
+    },
+    parallel_safe: false,
+    timeout_ms: 120_000,
+  };
+}
+
 function completedOutput(output: string) {
   return {
     output,
@@ -940,4 +980,3 @@ function canonicalValue(value: unknown): unknown {
     .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
     .map(([key, child]) => [key, canonicalValue(child)]));
 }
-

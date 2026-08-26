@@ -52,6 +52,27 @@ impl Tool for EchoTool {
     }
 }
 
+struct NumericKeyTool;
+
+#[async_trait]
+impl Tool for NumericKeyTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::function(
+            "numeric_keys",
+            "numeric object keys",
+            json!({
+                "type":"object",
+                "properties":{"2":{"type":"string"},"10":{"type":"string"}},
+                "additionalProperties":false
+            }),
+        )
+    }
+
+    async fn execute(&self, input: ToolInput, _context: ToolContext<'_>) -> ToolResult {
+        Ok(ToolOutput::json(&input.decode_json::<Value>()?))
+    }
+}
+
 struct CustomTool;
 
 #[async_trait]
@@ -210,6 +231,24 @@ async fn empty_recipe_has_one_exact_empty_catalog() {
     assert_eq!(
         catalog.digest(),
         "bda87d90bae5170ebc6b8abcbe486dc8e98b74a129e14c8bb797b0684099e3f0"
+    );
+}
+
+#[tokio::test]
+async fn numeric_schema_keys_have_one_cross_language_catalog_digest() {
+    let tools = Tools::builder()
+        .without_defaults()
+        .tool(NumericKeyTool)
+        .build()
+        .unwrap();
+    let catalog = prepared_catalog(&tools).await.unwrap();
+    assert_eq!(
+        catalog.canonical_json(),
+        r#"[{"definition":{"description":"numeric object keys","name":"numeric_keys","parameters":{"additionalProperties":false,"properties":{"10":{"type":"string"},"2":{"type":"string"}},"type":"object"},"strict":false,"type":"function"},"parallel_safe":false,"provider":"fixed","remote_name":"numeric_keys","timeout_ms":120000}]"#
+    );
+    assert_eq!(
+        catalog.digest(),
+        "a90cd50d8abe0572db8a87a359ea5b3429b14cb1f425c8d345b21c6db404146a"
     );
 }
 
