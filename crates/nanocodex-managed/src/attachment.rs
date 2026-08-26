@@ -29,10 +29,14 @@ impl AttachmentSupervisor {
         tools: Tools,
         target: AttachmentTarget,
     ) -> Result<Self, AttachmentError> {
-        let (attachment, _events) = tools.clone().attach(target.clone()).connect().await?;
+        let attachment = match tools.clone().attach(target.clone()).connect().await {
+            Ok((attachment, _events)) => Some(attachment),
+            Err(error) if retryable(&error) => None,
+            Err(error) => return Err(error),
+        };
         let (stop, stop_rx) = watch::channel(false);
         let (outcome_tx, outcome) = watch::channel(None);
-        tokio::spawn(run(tools, target, Some(attachment), stop_rx, outcome_tx));
+        tokio::spawn(run(tools, target, attachment, stop_rx, outcome_tx));
         Ok(Self {
             requested: Arc::new(AtomicBool::new(false)),
             stop,
