@@ -211,9 +211,34 @@ async fn empty_recipe_has_one_exact_empty_catalog() {
 }
 
 #[tokio::test]
-async fn unbound_default_sources_do_not_block_attachment() {
-    let catalog = prepared_catalog(&Tools::default()).await.unwrap();
-    assert!(catalog.entries().is_empty());
+async fn enabled_sources_without_attached_executors_are_rejected() {
+    let unpinned_workspace = Tools::builder()
+        .without_defaults()
+        .workspace(true)
+        .build()
+        .unwrap();
+    let error = prepared_catalog(&unpinned_workspace).await.unwrap_err();
+    assert!(
+        matches!(error, AttachmentError::Catalog(message) if message.contains("pinned WorkspaceTools"))
+    );
+
+    let web_search = Tools::builder()
+        .without_defaults()
+        .web_search(true)
+        .build()
+        .unwrap();
+    let error = prepared_catalog(&web_search).await.unwrap_err();
+    assert!(matches!(error, AttachmentError::Catalog(message) if message.contains("web search")));
+
+    let image_generation = Tools::builder()
+        .without_defaults()
+        .image_generation(true)
+        .build()
+        .unwrap();
+    let error = prepared_catalog(&image_generation).await.unwrap_err();
+    assert!(
+        matches!(error, AttachmentError::Catalog(message) if message.contains("image generation"))
+    );
 }
 
 #[cfg(feature = "native")]
@@ -291,6 +316,7 @@ async fn fixed_and_custom_definitions_are_lossless_and_exposure_neutral() {
 async fn workspace_uses_canonical_contracts_but_omits_agent_state() {
     let workspace = tempfile::tempdir().unwrap();
     let tools = Tools::builder()
+        .without_defaults()
         .add(WorkspaceTools::new(workspace.path()))
         .build()
         .unwrap();
@@ -353,7 +379,11 @@ async fn mcp_is_frozen_into_the_same_catalog() {
         )
         .build()
         .unwrap();
-    let tools = Tools::builder().add(mcp).build().unwrap();
+    let tools = Tools::builder()
+        .without_defaults()
+        .add(mcp)
+        .build()
+        .unwrap();
     let catalog = prepared_catalog(&tools).await.unwrap();
     assert_eq!(catalog.entries().len(), 1);
     assert_eq!(catalog.entries()[0].provider(), "mcp__fixture__");
@@ -452,7 +482,7 @@ async fn connect_publishes_executes_replays_receipt_and_detaches() {
         .build()
         .unwrap();
     let target = AttachmentTarget::new(endpoint, "sensitive-bearer").unwrap();
-    let mut attachment = tools.attach(target).connect().await.unwrap();
+    let (attachment, mut events) = tools.attach(target).connect().await.unwrap();
     assert!(matches!(
         attachment.status(),
         AttachmentStatus::Ready { .. }
@@ -461,7 +491,7 @@ async fn connect_publishes_executes_replays_receipt_and_detaches() {
     while completed.len() != 3 {
         if let Some(AttachmentEvent::CallCompleted {
             call_id, outcome, ..
-        }) = attachment.recv().await
+        }) = events.recv().await
         {
             completed.insert(call_id, outcome);
         }
@@ -535,7 +565,7 @@ async fn scheduler_overlaps_safe_calls_and_preserves_unsafe_fifo_barriers() {
         })
         .build()
         .unwrap();
-    let attachment = tools
+    let (attachment, _events) = tools
         .attach(AttachmentTarget::new(endpoint, "bearer").unwrap())
         .connect()
         .await
@@ -606,7 +636,7 @@ async fn explicit_detach_drains_admitted_work_before_websocket_close() {
         })
         .build()
         .unwrap();
-    let attachment = tools
+    let (attachment, _events) = tools
         .attach(AttachmentTarget::new(endpoint, "bearer").unwrap())
         .connect()
         .await
@@ -748,7 +778,7 @@ async fn lease_expiry_forces_disconnect_and_reconnect() {
         let _ = disconnected_tx.send(());
     });
     let tools = Tools::builder().without_defaults().build().unwrap();
-    let attachment = tools
+    let (attachment, _events) = tools
         .attach(AttachmentTarget::new(endpoint, "bearer").unwrap())
         .connect()
         .await
@@ -771,7 +801,7 @@ async fn unanswered_ping_forces_disconnect() {
         let _ = disconnected_tx.send(());
     });
     let tools = Tools::builder().without_defaults().build().unwrap();
-    let attachment = tools
+    let (attachment, _events) = tools
         .attach(AttachmentTarget::new(endpoint, "bearer").unwrap())
         .connect()
         .await
@@ -821,7 +851,7 @@ async fn sixty_fifth_call_is_retained_unavailable_without_execution() {
         .tool(BlockingTool)
         .build()
         .unwrap();
-    let mut attachment = tools
+    let (attachment, mut events) = tools
         .attach(AttachmentTarget::new(endpoint, "bearer").unwrap())
         .connect()
         .await
@@ -834,7 +864,7 @@ async fn sixty_fifth_call_is_retained_unavailable_without_execution() {
         let mut saw_start = false;
         let mut saw_completion = false;
         while !(saw_start && saw_completion) {
-            match attachment.recv().await {
+            match events.recv().await {
                 Some(AttachmentEvent::CallStarted { call_id, .. }) if &*call_id == "call-64" => {
                     saw_start = true;
                 }
@@ -852,6 +882,55 @@ async fn sixty_fifth_call_is_retained_unavailable_without_execution() {
     .await
     .expect("capacity events timed out");
     drop(attachment);
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn ignored_event_stream_never_blocks_protocol_progress() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("ws://{}/attach", listener.local_addr().unwrap());
+    let (completed_tx, completed_rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (mut socket, host_id, lease_id) = ready_server(listener, now_ms() + 60_000).await;
+        for index in 0..600 {
+            let call_id = format!("ignored-events-{index}");
+            send_json(
+                &mut socket,
+                call_frame(&host_id, &lease_id, &call_id, "echo", now_ms() + 10_000),
+            )
+            .await;
+            let result = recv_call_result(&mut socket, &lease_id, &call_id).await;
+            assert_eq!(result["outcome"]["status"], "completed");
+            send_json(
+                &mut socket,
+                json!({
+                    "type":"result_ack","protocol_version":1,"capability":"tools",
+                    "lease_id":lease_id,"generation":1,"catalog_revision":1,
+                    "call_id":call_id
+                }),
+            )
+            .await;
+        }
+        let _ = completed_tx.send(());
+        let _ = socket.next().await;
+    });
+    let tools = Tools::builder()
+        .without_defaults()
+        .tool(EchoTool)
+        .build()
+        .unwrap();
+    let (attachment, _ignored_events) = tools
+        .attach(AttachmentTarget::new(endpoint, "bearer").unwrap())
+        .connect()
+        .await
+        .unwrap();
+    let second_handle = attachment.clone();
+    drop(attachment);
+    tokio::time::timeout(Duration::from_secs(10), completed_rx)
+        .await
+        .expect("protocol stalled behind the ignored event stream")
+        .unwrap();
+    second_handle.detach().await.unwrap();
     server.await.unwrap();
 }
 

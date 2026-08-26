@@ -19,6 +19,30 @@ pub(crate) struct PreparedTools {
 
 impl PreparedTools {
     pub(crate) fn prepare(tools: &Tools) -> Result<Self, PreparedToolError> {
+        if tools.workspace_enabled() {
+            #[cfg(feature = "workspace-runtime")]
+            if tools.workspace_tools.is_none() {
+                return Err(PreparedToolError::NonAttachable(
+                    "enabled workspace tools require a pinned WorkspaceTools source".into(),
+                ));
+            }
+            #[cfg(not(feature = "workspace-runtime"))]
+            return Err(PreparedToolError::NonAttachable(
+                "enabled workspace tools require the workspace-runtime feature and a pinned WorkspaceTools source".into(),
+            ));
+        }
+        if tools.web_search_enabled() {
+            return Err(PreparedToolError::NonAttachable(
+                "built-in web search has no attached executor; disable it for this placement"
+                    .into(),
+            ));
+        }
+        if tools.image_generation_enabled() {
+            return Err(PreparedToolError::NonAttachable(
+                "built-in image generation has no attached executor; disable it for this placement"
+                    .into(),
+            ));
+        }
         if tools.has_unattachable_provider() {
             return Err(PreparedToolError::NonAttachable(
                 "a generic dynamic provider cannot produce an immutable catalog; add MCP with ToolsBuilder::add".into(),

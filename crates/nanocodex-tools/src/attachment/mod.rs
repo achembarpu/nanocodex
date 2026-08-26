@@ -1,8 +1,8 @@
 //! Generic WebSocket attachment for one immutable [`Tools`] recipe.
 //!
 //! This boundary knows only a final WebSocket URL, a bearer credential, and a
-//! private connection identity. Agent, account, and managed-service discovery
-//! remain the caller's responsibility.
+//! private connection identity. Agent, account, and endpoint discovery remain
+//! the caller's responsibility.
 
 mod driver;
 mod protocol;
@@ -104,7 +104,7 @@ impl AttachmentConnector {
     ///
     /// Fails for non-attachable selections, discovery failures, transport
     /// failures, invalid protocol frames, or fencing before readiness.
-    pub async fn connect(self) -> Result<Attachment, AttachmentError> {
+    pub async fn connect(self) -> Result<(Attachment, AttachmentEvents), AttachmentError> {
         install_default_rustls_crypto_provider();
         let identity = uuid::Uuid::now_v7();
         let prepared = PreparedTools::prepare(&self.tools)?;
@@ -146,10 +146,9 @@ impl AttachmentConnector {
             refs,
             status: status_rx,
             closed: closed_rx,
-            events: event_rx,
         };
         attachment.wait_until_ready().await?;
-        Ok(attachment)
+        Ok((attachment, AttachmentEvents { events: event_rx }))
     }
 }
 
@@ -178,12 +177,15 @@ impl Drop for HandleRefs {
     }
 }
 
-/// Live attachment. Dropping it detaches the executor.
+/// Cheap live attachment handle.
+///
+/// Clones share one attachment. Dropping the last handle detaches the executor;
+/// dropping its independent [`AttachmentEvents`] observer does not.
+#[derive(Clone)]
 pub struct Attachment {
     refs: Arc<HandleRefs>,
     status: watch::Receiver<AttachmentStatus>,
     closed: watch::Receiver<Option<Result<(), AttachmentError>>>,
-    events: mpsc::Receiver<AttachmentEvent>,
 }
 
 impl fmt::Debug for Attachment {
@@ -200,11 +202,6 @@ impl Attachment {
     #[must_use]
     pub fn status(&self) -> AttachmentStatus {
         self.status.borrow().clone()
-    }
-
-    /// Receives the next ordered lifecycle event.
-    pub async fn recv(&mut self) -> Option<AttachmentEvent> {
-        self.events.recv().await
     }
 
     /// Explicitly detaches and waits for terminal cleanup.
@@ -246,9 +243,41 @@ impl Attachment {
     }
 }
 
+/// Best-effort ordered observations from one attachment.
+///
+/// Observation never applies backpressure to execution or protocol progress.
+/// When this bounded stream lags, events may be dropped. Use [`Attachment::status`]
+/// and [`Attachment::closed`] for authoritative lifecycle state.
+pub struct AttachmentEvents {
+    events: mpsc::Receiver<AttachmentEvent>,
+}
+
+impl fmt::Debug for AttachmentEvents {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AttachmentEvents")
+            .finish_non_exhaustive()
+    }
+}
+
+impl AttachmentEvents {
+    /// Receives the next available observation.
+    pub async fn recv(&mut self) -> Option<AttachmentEvent> {
+        self.events.recv().await
+    }
+}
+
 /// Monotonic catalog revision scoped to one lease generation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct CatalogRevision(pub(crate) u64);
+
+impl CatalogRevision {
+    /// Returns the endpoint-assigned revision number.
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
 
 /// Latest attachment connection state.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -267,7 +296,7 @@ pub enum AttachmentStatus {
     Fenced,
 }
 
-/// Ordered lifecycle and call observation.
+/// Best-effort ordered lifecycle and call observation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum AttachmentEvent {

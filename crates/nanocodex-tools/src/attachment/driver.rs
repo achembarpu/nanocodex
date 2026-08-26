@@ -6,7 +6,7 @@ use std::{
 
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
-use tokio::sync::{Semaphore, mpsc, oneshot, watch};
+use tokio::sync::{mpsc, watch};
 use tokio_tungstenite::{
     connect_async,
     tungstenite::{
@@ -55,7 +55,6 @@ pub(crate) async fn run(
     let mut revision = 1_u64;
     let mut first = true;
     let mut backoff = Duration::from_millis(100);
-    let call_event_slots = Arc::new(Semaphore::new(protocol::MAX_RECEIPTS));
     let terminal = loop {
         let _ = status.send(AttachmentStatus::Connecting);
         emit(&events, AttachmentEvent::Connecting);
@@ -93,7 +92,6 @@ pub(crate) async fn run(
                 runtime: &runtime,
                 events: &events,
                 status: &status,
-                event_slots: &call_event_slots,
             },
             &mut commands,
             &mut revision,
@@ -214,53 +212,38 @@ struct PendingCall {
 }
 
 struct CallEvents {
-    completed: oneshot::Sender<AttachmentCallOutcome>,
+    call_id: Box<str>,
+    revision: CatalogRevision,
 }
 
 impl CallEvents {
-    fn complete(self, outcome: AttachmentCallOutcome) {
-        let _ = self.completed.send(outcome);
+    fn complete(self, events: &mpsc::Sender<AttachmentEvent>, outcome: AttachmentCallOutcome) {
+        emit(
+            events,
+            AttachmentEvent::CallCompleted {
+                call_id: self.call_id,
+                outcome,
+                revision: self.revision,
+            },
+        );
     }
 }
 
-async fn begin_call_events(
+fn begin_call_events(
     events: &mpsc::Sender<AttachmentEvent>,
-    slots: &Arc<Semaphore>,
-    commands: &mut mpsc::Receiver<Command>,
     call_id: Box<str>,
     name: Box<str>,
     revision: CatalogRevision,
-) -> Option<CallEvents> {
-    let permit = tokio::select! {
-        permit = Arc::clone(slots).acquire_owned() => permit.ok()?,
-        command = commands.recv() => match command {
-            Some(Command::Detach) | None => return None,
+) -> CallEvents {
+    emit(
+        events,
+        AttachmentEvent::CallStarted {
+            call_id: call_id.clone(),
+            name,
+            revision,
         },
-    };
-    let (completed, completion) = oneshot::channel();
-    let events = events.clone();
-    tokio::spawn(async move {
-        if events
-            .send(AttachmentEvent::CallStarted {
-                call_id: call_id.clone(),
-                name,
-                revision,
-            })
-            .await
-            .is_ok()
-            && let Ok(outcome) = completion.await
-        {
-            let _ = events
-                .send(AttachmentEvent::CallCompleted {
-                    call_id,
-                    outcome,
-                    revision,
-                })
-                .await;
-        }
-        drop(permit);
-    });
-    Some(CallEvents { completed })
+    );
+    CallEvents { call_id, revision }
 }
 
 #[derive(Clone, PartialEq)]
@@ -422,7 +405,6 @@ struct ConnectionContext<'a> {
     runtime: &'a Arc<PreparedToolRuntime>,
     events: &'a mpsc::Sender<AttachmentEvent>,
     status: &'a watch::Sender<AttachmentStatus>,
-    event_slots: &'a Arc<Semaphore>,
 }
 
 async fn connection<S>(
@@ -439,7 +421,6 @@ where
         runtime,
         events,
         status,
-        event_slots,
     } = context;
     if let Err(error) = send(
         &mut socket,
@@ -547,7 +528,7 @@ where
             completion = completed_rx.recv() => if let Some(Completion::Result { call_id, outcome, observed }) = completion {
                 let Some(call) = in_flight.remove(&call_id) else { continue; };
                 let _ = call.task.await;
-                call.events.complete(observed);
+                call.events.complete(events, observed);
                 if receipts.len() >= protocol::MAX_RECEIPTS { break ConnectionEnd::Fenced("result receipt capacity exceeded".into()); }
                 receipts.insert(call_id.clone(), Receipt { identity: call.identity, outcome: outcome.clone() });
                 if let Err(error) = send_result(&mut socket, &lease_id, generation, *revision, &call_id, &outcome).await {
@@ -580,17 +561,14 @@ where
                             if admitted != &identity { break ConnectionEnd::Fenced("duplicate in-flight call changed immutable fields".into()); }
                             continue;
                         }
-                        let Some(call_events) = begin_call_events(events, event_slots, commands, call_id.clone().into(), name.clone().into(), CatalogRevision(*revision)).await else {
-                            detaching = true;
-                            continue;
-                        };
+                        let call_events = begin_call_events(events, call_id.clone().into(), name.clone().into(), CatalogRevision(*revision));
                         if receipts.len().saturating_add(in_flight.len()).saturating_add(pending.len()) >= protocol::MAX_RECEIPTS {
-                            call_events.complete(AttachmentCallOutcome::Unavailable);
+                            call_events.complete(events, AttachmentCallOutcome::Unavailable);
                             break ConnectionEnd::Fenced("result receipt capacity exhausted".into());
                         }
                         if in_flight.len().saturating_add(pending.len()) >= protocol::MAX_IN_FLIGHT {
                             let outcome = unavailable("attachment execution capacity is exhausted");
-                            call_events.complete(AttachmentCallOutcome::Unavailable);
+                            call_events.complete(events, AttachmentCallOutcome::Unavailable);
                             if let Err(error) = send_result(&mut socket, &lease_id, generation, *revision, &call_id, &outcome).await { break ConnectionEnd::Failed(error); }
                             receipts.insert(call_id.into(), Receipt { identity, outcome });
                             continue;
@@ -599,7 +577,7 @@ where
                         let tool_timeout = runtime.timeout_ms(&name).unwrap_or(0);
                         if deadline_at <= now || tool_timeout == 0 {
                             let outcome = unavailable(if tool_timeout == 0 { "tool is not in the pinned catalog" } else { "tool deadline elapsed before execution" });
-                            call_events.complete(AttachmentCallOutcome::Unavailable);
+                            call_events.complete(events, AttachmentCallOutcome::Unavailable);
                             if let Err(error) = send_result(&mut socket, &lease_id, generation, *revision, &call_id, &outcome).await { break ConnectionEnd::Failed(error); }
                             receipts.insert(call_id.into(), Receipt { identity, outcome });
                             continue;
@@ -647,12 +625,14 @@ where
         }
     }
     for call in pending {
-        call.events.complete(AttachmentCallOutcome::Ambiguous);
+        call.events
+            .complete(events, AttachmentCallOutcome::Ambiguous);
     }
     for (_, call) in in_flight {
         call.task.abort();
         let _ = call.task.await;
-        call.events.complete(AttachmentCallOutcome::Ambiguous);
+        call.events
+            .complete(events, AttachmentCallOutcome::Ambiguous);
     }
     end
 }

@@ -60,9 +60,10 @@ default for the rest. Host-owned `exec`, `wait`, and `tool_search` names cannot
 be replaced, and colliding normalized JavaScript names are rejected when the
 recipe is built.
 
-`ToolsBuilder::add` composes the same recipe from either a fixed [`Tool`] or a
-[`WorkspaceTools`] value. A workspace source selects canonical local workspace
-tools rooted at its directory; adding a second workspace source is rejected.
+`ToolsBuilder::add` composes the same recipe from a fixed [`Tool`], a
+[`WorkspaceTools`] value, or [`Mcp`]. A workspace source selects canonical
+local workspace tools rooted at its directory; adding a second workspace source
+is rejected.
 Namespaced Code Mode names such as `image_gen__imagegen` remain available to
 `exec`; normal Code Mode exposes the Codex-compatible `image_gen.imagegen`
 Responses namespace and routes its namespaced call to the same handler.
@@ -143,7 +144,7 @@ let mcp = Mcp::builder()
     )
     .build()?;
 
-let tools = Tools::builder().provider(mcp).build()?;
+let tools = Tools::builder().add(mcp).build()?;
 # Ok(())
 # }
 ```
@@ -158,6 +159,43 @@ definitions, keeping large catalogs out of the initial tool list.
 `CodeModeOnly`, `DeferredAndCodeMode`, or `Hidden` for each server. Automatic
 catalog and aggregate resource pagination is bounded by page, item, cursor,
 and wall-clock limits.
+
+## Attach one immutable recipe
+
+With the `attachment` feature, the same `Tools` value can execute behind a
+reverse WebSocket. Attachment consumes the complete recipe, finishes MCP
+discovery, validates the immutable catalog, connects, and waits for the remote
+catalog acknowledgement:
+
+```rust,no_run
+use nanocodex_tools::{Tools, attachment::AttachmentTarget};
+
+# async fn run() -> Result<(), Box<dyn std::error::Error>> {
+let tools = Tools::builder().without_defaults().build()?;
+let target = AttachmentTarget::new("wss://tools.example.test/v1/attach", "bearer")?;
+let (attachment, mut events) = tools.attach(target).connect().await?;
+
+let observer = tokio::spawn(async move {
+    while let Some(event) = events.recv().await {
+        println!("{event:?}");
+    }
+});
+attachment.detach().await?;
+observer.await?;
+# Ok(())
+# }
+```
+
+Only sources with a concrete attached executor are accepted: fixed tools,
+MCP added with `add`, and pinned `WorkspaceTools`. Generic dynamic providers
+remain local-only. Built-in web search and image generation also remain at the
+model backend, so attached recipes disable defaults and opt into concrete
+sources. Preparation and discovery errors happen before a socket is opened;
+`connect` returns only after readiness. The cheap `Attachment` control handle
+is cloneable and its last drop detaches. `AttachmentEvents` is an independent,
+bounded, best-effort observer: lag may drop events but can never delay tool
+execution or protocol progress. `Attachment::status` and `closed` are the
+authoritative lifecycle APIs.
 
 ## Companion workspace runtimes
 
