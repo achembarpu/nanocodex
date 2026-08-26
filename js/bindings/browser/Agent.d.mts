@@ -1,9 +1,11 @@
 import type {
+  AgentLifecycle,
   AgentOptions,
   DefaultAgent,
   ExecutionEnvironment,
 } from "../types.mjs";
-import type { WorkerTransport } from "./Transport.mjs";
+import type { ManagedTransport, WorkerTransport } from "./Transport.mjs";
+import type { Tools } from "../tools/Tools.mjs";
 
 export type Agent = DefaultAgent;
 
@@ -24,8 +26,13 @@ type WorkerToolExposureOptions =
   | { mcp: WorkerMcpServers; toolMode?: "code" | undefined };
 
 /** Creates a Rust/WASM Agent in a package-owned browser module Worker. */
+export function create(options: create.ManagedOptions): Promise<AgentLifecycle>;
 export function create(options?: create.Options): Promise<create.ReturnType>;
 export declare namespace create {
+  type ManagedOptions = Readonly<{
+    transport: ManagedTransport;
+    tools?: Tools | undefined;
+  }>;
   type Options = AgentOptions & WorkerToolExposureOptions & {
     /** Precompiled browser module; WebAssembly modules are structured-clone-safe. */
     module?: WebAssembly.Module | undefined;

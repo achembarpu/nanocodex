@@ -19,6 +19,10 @@ import {
 import { createBrowserHost } from "./host.mjs";
 import { initializeBrowserEngine } from "./engine.mjs";
 import { resolveResponsesTransport } from "../runtime/responses-transport.mjs";
+import {
+  createManagedAgent,
+  managedTransportOptions,
+} from "../runtime/managed-transport.mjs";
 import { resolveTools } from "../runtime/tool-configuration.mjs";
 import {
   hostManaged as defaultHostManagedTransport,
@@ -26,6 +30,12 @@ import {
 
 /** Creates the Rust/WASM Agent in the current Web API host isolate. */
 export async function create(options = {}) {
+  if (managedTransportOptions(options?.transport)) return createManagedAgent(options);
+  const internalRuntime = options[Symbol.for("nanocodex.browser.internalRuntime")];
+  if (internalRuntime !== undefined
+    && (!internalRuntime || typeof internalRuntime !== "object" || Array.isArray(internalRuntime))) {
+    throw new TypeError("browser Agent internal runtime options must be an object");
+  }
   const {
     transport,
     module,
@@ -48,6 +58,7 @@ export async function create(options = {}) {
     executionEnvironment,
     codeEvaluator,
   } = options;
+  const toolProviders = internalRuntime?.toolProviders;
   const stableSessionId = sessionId ?? createSessionId();
   const {
     apiKey,
@@ -80,6 +91,7 @@ export async function create(options = {}) {
     filesystem,
     filesystemTools,
     tools: hostTools,
+    toolProviders,
     toolMode,
     mcp: mcp === false
       ? undefined

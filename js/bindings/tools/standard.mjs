@@ -91,12 +91,12 @@ export function imageGeneration(options = {}) {
 export function viewImage(options) {
   return namedTool("view_image", {
     supportsParallelToolCalls: true,
-    description: "View an image file from the browser workspace.",
+    description: "View a local image file from the filesystem when visual inspection is needed. Use this for images already available on disk.",
     parameters: {
       type: "object",
       properties: {
-        path: { type: "string" },
-        detail: { type: "string", enum: ["high", "original"] },
+        path: { type: "string", description: "Local filesystem path to an image file." },
+        detail: { type: "string", enum: ["high", "original"], description: "Image detail level. Defaults to `high`; use `original` to preserve exact resolution." },
       },
       required: ["path"],
       additionalProperties: false,
@@ -104,10 +104,10 @@ export function viewImage(options) {
     outputSchema: {
       type: "object",
       properties: {
-        detail: { type: "string", enum: ["high", "original"] },
-        image_url: { type: "string" },
+        image_url: { type: "string", description: "Data URL for the loaded image." },
+        detail: { type: "string", enum: ["high", "original"], description: "Image detail hint returned by view_image. Returns `high` for default resized behavior or `original` when original resolution is preserved." },
       },
-      required: ["detail", "image_url"],
+      required: ["image_url", "detail"],
       additionalProperties: false,
     },
     async handler(input) {

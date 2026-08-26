@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { createBrowserHost as createProductionBrowserHost } from "../browser/host.mjs";
+import { createTools } from "../tools/Tools.mjs";
 
 const createBrowserHost = (options = {}) => createProductionBrowserHost({
   codeEvaluator: evaluateInTestRealm,
@@ -80,6 +81,68 @@ test("browser host carries ordered frames and application tools", async () => {
   assert.deepEqual(events, ["event"]);
 });
 
+test("browser host composes an isolate-owned dynamic tool provider", async () => {
+  let ready = false;
+  let attached = true;
+  const provider = {
+    definitions: () => attached ? [{
+      type: "function",
+      name: "hosted_echo",
+      description: "Echo through the reverse host.",
+      strict: false,
+      defer_loading: true,
+      parameters: { type: "object", additionalProperties: true },
+    }] : [],
+    resolve: (name) => attached && name === "hosted_echo" ? {
+      name,
+      parallelSafe: true,
+      handler: (input) => ({ source: "private-host", echoed: input }),
+    } : undefined,
+    async settled() { ready = true; },
+  };
+  const host = createBrowserHost({
+    toolProviders: [provider],
+    tools: {
+      hosted_echo: {
+        description: "Echo through the reverse host.",
+        strict: false,
+        parameters: { type: "object", additionalProperties: true },
+        parallelSafe: true,
+        handler: (input) => ({ source: "cloud", echoed: input }),
+      },
+    },
+  });
+
+  await host.ready();
+  assert.equal(ready, true);
+  assert.deepEqual(
+    JSON.parse(host.toolDefinitions()).map((definition) =>
+      definition.type === "tool_search" ? "tool_search" : definition.name),
+    ["tool_search", "hosted_echo"],
+  );
+  const result = JSON.parse(await host.executeCode(
+    "text(await tools.hosted_echo({ value: 42 }));",
+    "session",
+    "call-exec",
+  ));
+  assert.equal(result.success, true);
+  assert.deepEqual(result.nested_calls[0].structured_result, {
+    source: "private-host",
+    echoed: { value: 42 },
+  });
+
+  attached = false;
+  const fallback = JSON.parse(await host.executeCode(
+    "text(await tools.hosted_echo({ value: 43 }));",
+    "session",
+    "call-fallback",
+  ));
+  assert.deepEqual(fallback.nested_calls[0].structured_result, {
+    source: "cloud",
+    echoed: { value: 43 },
+  });
+});
+
 test("browser host directly dispatches tools without dynamic code evaluation", async () => {
   const host = createBrowserHost({
     toolMode: "direct",
@@ -106,6 +169,20 @@ test("browser host never flattens remote MCP tools into direct mode", () => {
   assert.throws(
     () => createBrowserHost({ mcp: { fixture: { client: {} } }, toolMode: "direct" }),
     /remote MCP requires Code Mode/,
+  );
+});
+
+test("browser host owns and closes a supplied Tools runtime", async () => {
+  const tools = await createTools();
+  const host = createBrowserHost({ tools, createWebSocket() {} });
+  assert.throws(
+    () => createBrowserHost({ tools, createWebSocket() {} }),
+    /already belongs to an Agent host/,
+  );
+  await host.dispose();
+  assert.throws(
+    () => tools.attach("wss://managed.test/tools"),
+    /Tools runtime is closed/,
   );
 });
 
@@ -139,7 +216,16 @@ test("browser host readiness installs deferred MCP without waiting for discovery
 
     releaseDiscovery(tools);
     await new Promise((resolve) => setImmediate(resolve));
-    assert.match(host.toolDefinitions(), /mcp__fixture__lookup/);
+    const deferred = JSON.parse(host.toolDefinitions())
+      .find(({ name }) => name === "mcp__fixture__lookup");
+    assert.equal(deferred.defer_loading, true);
+    const execution = JSON.parse(await host.executeCode(
+      "text(typeof tools.mcp__fixture__lookup);",
+      "session",
+      "call-mcp-runtime",
+    ));
+    assert.equal(execution.success, true);
+    assert.match(JSON.stringify(execution.output), /function/);
   } finally {
     releaseDiscovery(tools);
     await readiness.catch(() => {});
@@ -176,6 +262,7 @@ test("browser host cancellation is scoped to one session", async () => {
   const host = createBrowserHost({
     tools: {
       blocked: {
+        supportsParallelToolCalls: true,
         parameters: { type: "object" },
         handler(_input, context) {
           started.get(context.sessionId)?.();

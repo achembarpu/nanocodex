@@ -9,7 +9,7 @@ import {
   rm,
   unlink,
 } from "node:fs/promises";
-import { isAbsolute, join, resolve } from "node:path";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import { createWorkspace, normalizeRelativePath, tools } from "../runtime/workspace.mjs";
 
@@ -20,19 +20,29 @@ export async function open(options = {}) {
     throw new TypeError("Node workspace path must be a non-empty string");
   }
   const directory = resolve(options.path);
-  await mkdir(directory, { recursive: true });
-  const metadata = await lstat(directory);
+  const logicalRoot = options.root ?? "/workspace";
+  try {
+    await mkdir(directory, { recursive: true });
+  } catch (error) {
+    throw privatePathError(error, directory, logicalRoot);
+  }
+  let metadata;
+  try {
+    metadata = await lstat(directory);
+  } catch (error) {
+    throw privatePathError(error, directory, logicalRoot);
+  }
   if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
-    throw new Error(`Node workspace path must be a real directory: ${directory}`);
+    throw new Error("Node workspace path must be a real directory");
   }
   return createWorkspace({
-    root: directory,
-    backend: nodeBackend(directory),
+    root: logicalRoot,
+    backend: nodeBackend(directory, logicalRoot),
   });
 }
 
-function nodeBackend(root) {
-  return {
+function nodeBackend(root, logicalRoot) {
+  const backend = {
     async list(path, { recursive, maxEntries }) {
       const directory = await resolveDirectory(root, path, false);
       const output = [];
@@ -45,7 +55,7 @@ function nodeBackend(root) {
     async writeFile(path, contents) {
       const { directory, name } = await resolveParent(root, path, true);
       const target = join(directory, name);
-      await rejectSymlink(target, { optional: true });
+      await rejectSymlink(target, { displayPath: path, optional: true });
       const temporary = join(directory, `.nanocodex-${randomUUID()}.tmp`);
       const handle = await openFile(temporary, "wx", 0o600);
       try {
@@ -61,13 +71,23 @@ function nodeBackend(root) {
     async remove(path, { recursive }) {
       const { directory, name } = await resolveParent(root, path, false);
       const target = join(directory, name);
-      await rejectSymlink(target);
+      await rejectSymlink(target, { displayPath: path });
       await rm(target, { recursive, force: false });
     },
     async mkdir(path) {
       await resolveDirectory(root, path, true);
     },
   };
+  return Object.fromEntries(Object.entries(backend).map(([name, operation]) => [
+    name,
+    async (...args) => {
+      try {
+        return await operation(...args);
+      } catch (error) {
+        throw privatePathError(error, root, logicalRoot);
+      }
+    },
+  ]));
 }
 
 async function listDirectory(root, directory, prefix, recursive, maxEntries, output) {
@@ -100,7 +120,7 @@ async function listDirectory(root, directory, prefix, recursive, maxEntries, out
 async function resolveFile(root, path) {
   const { directory, name } = await resolveParent(root, path, false);
   const target = join(directory, name);
-  const metadata = await rejectSymlink(target);
+  const metadata = await rejectSymlink(target, { displayPath: path });
   if (!metadata.isFile()) throw new Error(`workspace path is not a file: ${path}`);
   return target;
 }
@@ -138,10 +158,12 @@ async function resolveDirectory(root, path, create) {
   return directory;
 }
 
-async function rejectSymlink(path, { optional = false } = {}) {
+async function rejectSymlink(path, { displayPath = path, optional = false } = {}) {
   try {
     const metadata = await lstat(path);
-    if (metadata.isSymbolicLink()) throw new Error(`workspace refuses symbolic link: ${path}`);
+    if (metadata.isSymbolicLink()) {
+      throw new Error(`workspace refuses symbolic link: ${displayPath}`);
+    }
     return metadata;
   } catch (error) {
     if (optional && error?.code === "ENOENT") return undefined;
@@ -150,10 +172,25 @@ async function rejectSymlink(path, { optional = false } = {}) {
 }
 
 function assertInside(root, path) {
-  const relative = path.slice(root.length);
-  if (!isAbsolute(root) || (relative && !relative.startsWith("/"))) {
-    throw new Error(`workspace path escaped its root: ${path}`);
+  const descendant = relative(root, path);
+  if (
+    !isAbsolute(root)
+    || descendant === ".."
+    || descendant.startsWith(`..${sep}`)
+    || isAbsolute(descendant)
+  ) {
+    throw new Error("workspace path escaped its root");
   }
+}
+
+function privatePathError(error, nativeRoot, logicalRoot) {
+  if (!(error instanceof Error) || !error.message.includes(nativeRoot)) return error;
+  const sanitized = new Error(error.message.split(nativeRoot).join(logicalRoot));
+  sanitized.name = error.name;
+  for (const property of ["code", "errno", "syscall"]) {
+    if (property in error) sanitized[property] = error[property];
+  }
+  return sanitized;
 }
 
 function displayRelative(prefix, name) {

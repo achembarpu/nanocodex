@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, symlink } from "node:fs/promises";
+import { lstat, mkdtemp, readFile, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -112,6 +112,7 @@ test("Node workspaces reuse real files and reject symlink escapes", async () => 
   const outside = await mkdtemp(join(tmpdir(), "nanocodex-outside-"));
   try {
     const first = await NodeWorkspace.open({ path: directory });
+    assert.equal(first.root, "/workspace");
     await first.writeFile("src/main.rs", "fn main() {}\n");
     assert.equal(await readFile(join(directory, "src/main.rs"), "utf8"), "fn main() {}\n");
 
@@ -121,11 +122,37 @@ test("Node workspaces reuse real files and reject symlink escapes", async () => 
     await symlink(outside, join(directory, "escape"));
     await assert.rejects(second.writeFile("escape/stolen.txt", "no"), /unsafe/);
     await assert.rejects(second.list(".", { recursive: true }), /refuses symbolic link/);
+
+    const logical = await NodeWorkspace.open({ path: directory, root: "/project" });
+    assert.equal(logical.root, "/project");
+    assert.deepEqual(await logical.list("src"), [
+      {
+        kind: "file",
+        modifiedAt: (await lstat(join(directory, "src/main.rs"))).mtimeMs,
+        path: "/project/src/main.rs",
+        size: 13,
+      },
+    ]);
+    await assert.rejects(logical.readFile("escape"), (error) => {
+      assert.doesNotMatch(error.message, new RegExp(escapeRegExp(directory)));
+      assert.match(error.message, /symbolic link: escape/);
+      return true;
+    });
+    await assert.rejects(logical.readFile("missing.txt"), (error) => {
+      assert.equal(error.code, "ENOENT");
+      assert.doesNotMatch(error.message, new RegExp(escapeRegExp(directory)));
+      assert.match(error.message, /\/project\/missing\.txt/);
+      return true;
+    });
   } finally {
     await rm(directory, { recursive: true, force: true });
     await rm(outside, { recursive: true, force: true });
   }
 });
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
 
 function memoryOpfs() {
   const root = new MemoryDirectory();

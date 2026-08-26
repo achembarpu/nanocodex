@@ -1,7 +1,9 @@
 import type {
   Agent as BaseAgent,
   AgentActions,
+  AgentOptions,
   AgentEvent,
+  DefaultAgent,
   ToolConfiguration,
 } from "../types.mjs";
 import type { CloudflareDurableObjectStorage } from "../runtime/cloudflare-durability-store.mjs";
@@ -73,4 +75,18 @@ export declare namespace create {
     tools?: ToolConfiguration<SubagentTool> | undefined;
   }>;
   type ReturnType = Agent;
+}
+
+/** Creates one non-durable Rust/WASM Agent in the current Cloudflare isolate. */
+export function createEphemeral(
+  owner: createEphemeral.Owner,
+  options?: createEphemeral.Options,
+): Promise<createEphemeral.ReturnType>;
+export declare namespace createEphemeral {
+  type Owner = DurableObjectOwner;
+  type Options = Readonly<AgentOptions & {
+    /** Caller-owned tools exposed directly to the model. */
+    tools?: ToolConfiguration<SubagentTool> | undefined;
+  }>;
+  type ReturnType = DefaultAgent;
 }

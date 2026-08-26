@@ -4,6 +4,8 @@ export {
   subscriptionRevision,
 } from "./runtime/subscription-store.mjs";
 export { createQuickJsEvaluator } from "./runtime/quickjs-evaluator.mjs";
+export { createTools } from "./tools/Tools.mjs";
+export type { Tools, AttachmentClient, AttachmentTarget, AttachmentTransport } from "./tools/Tools.mjs";
 export type { AsyncQuickJsModule, QuickJsEvaluatorOptions } from "./runtime/quickjs-evaluator.mjs";
 export {
   createTempoProvider,
@@ -19,6 +21,7 @@ export type {
   Agent,
   AgentActions,
   AgentEvent,
+  AgentLifecycle,
   AgentOptions,
   AgentSessionContext,
   ChatGptCredential,
@@ -44,6 +47,8 @@ export type {
   MppSession,
   PromptInput,
   PromptItem,
+  LifecycleTurn,
+  LifecycleTurnResult,
   ReasoningMode,
   SessionSnapshot,
   SubscriptionCommitRequest,

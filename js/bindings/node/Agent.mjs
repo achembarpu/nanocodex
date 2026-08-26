@@ -19,12 +19,17 @@ import {
 } from "../internal.mjs";
 import { createNodeHost } from "./host.mjs";
 import { resolveResponsesTransport } from "../runtime/responses-transport.mjs";
+import {
+  createManagedAgent,
+  managedTransportOptions,
+} from "../runtime/managed-transport.mjs";
 import { resolveTools } from "../runtime/tool-configuration.mjs";
 
 let initializedWeb;
 let NodeNanocodex;
 
 export function create(options = {}) {
+  if (managedTransportOptions(options?.transport)) return createManagedAgent(options);
   const {
     model,
     thinking,

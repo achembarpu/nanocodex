@@ -24,6 +24,8 @@ test("Worker Agent preserves synchronous prompt handles, independent results, an
     harness: false,
     transport: Transport.openAi({ apiKey: "test-key" }),
   }, { worker });
+  assert.equal(agent.agentId, "root");
+  assert.equal(agent.sessionId, "root");
   const events = [];
   const watch = agent.events.watch();
   watch.onEvent((event) => events.push(event.seq));

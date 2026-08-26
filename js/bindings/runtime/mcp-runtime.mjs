@@ -101,6 +101,7 @@ export async function createMcpRuntime(configuration, options = {}) {
   }
 
   return Object.freeze({
+    search: ({ query, limit }) => searchTools(query, limit),
     definitions() {
       return [
         toolSearchDefinition(servers),
@@ -542,17 +543,30 @@ async function callRemoteTool(entry, input, context) {
 
 async function withMcpRequest(server, outerSignal, operation) {
   const controller = new AbortController();
-  const abort = () => controller.abort();
+  let rejectInterruption;
+  const interruption = new Promise((_, reject) => { rejectInterruption = reject; });
+  const abort = () => {
+    controller.abort(outerSignal?.reason);
+    rejectInterruption(new Error(`MCP request to ${server.name} was cancelled`));
+  };
   if (outerSignal?.aborted) abort();
   else outerSignal?.addEventListener("abort", abort, { once: true });
-  const timeout = setTimeout(abort, server.timeoutMs);
+  const timeout = setTimeout(() => {
+    controller.abort(new Error(`MCP request exceeded ${server.timeoutMs} milliseconds`));
+    rejectInterruption(new Error(
+      `MCP request to ${server.name} exceeded ${server.timeoutMs} milliseconds`,
+    ));
+  }, server.timeoutMs);
+  // An injected client is not required to honor AbortSignal. The SDK owns the
+  // deadline and observes any eventual rejection after the race is settled.
+  const execution = Promise.resolve().then(() => operation({
+    signal: controller.signal,
+    timeout: server.timeoutMs,
+  }));
+  void execution.catch(() => {});
   try {
-    return await operation({ signal: controller.signal, timeout: server.timeoutMs });
+    return await Promise.race([execution, interruption]);
   } catch (error) {
-    if (controller.signal.aborted) {
-      const reason = outerSignal?.aborted ? "was cancelled" : `exceeded ${server.timeoutMs} milliseconds`;
-      throw new Error(`MCP request to ${server.name} ${reason}`, { cause: error });
-    }
     throw error;
   } finally {
     clearTimeout(timeout);

@@ -1,5 +1,60 @@
 import type { PromptInput, TurnUsage } from "../types.mjs";
 
+export type HistorySource = Readonly<{ turn_id: string; cursor: string }>;
+export type HistoryCitation = Readonly<{
+  thread_id: string;
+  title: string;
+  sources: readonly HistorySource[];
+}>;
+export type SessionSearchHit = Readonly<{
+  session_id: string;
+  title: string;
+  turn_id: string;
+  cursor: string;
+  score: number;
+  snippet: string;
+}>;
+export type FindSessionsRequest = Readonly<{
+  query: string;
+  limit?: number | undefined;
+}>;
+export type FindSessionsResponse = Readonly<{
+  query: string;
+  results: readonly SessionSearchHit[];
+  citations: readonly HistoryCitation[];
+}>;
+export type ReadSessionRequest = Readonly<{
+  session_id: string;
+  turn_ids?: readonly string[] | undefined;
+}>;
+export type SessionTurn = Readonly<{
+  session_id: string;
+  title: string;
+  turn_id: string;
+  cursor: string;
+  user: string;
+  assistant: string;
+}>;
+export type ReadSessionResponse = Readonly<{
+  turns: readonly SessionTurn[];
+  citations: readonly HistoryCitation[];
+}>;
+export type MemoryKey = Readonly<{
+  id: number;
+  version: number;
+}>;
+export type MemoryRecord = Readonly<{
+  key: MemoryKey;
+  content: string;
+  created_at_ms: number;
+  updated_at_ms: number;
+  last_scanned_at_ms: number | null;
+  scan_count: number;
+  last_used_at_ms: number | null;
+  use_count: number;
+  probation_until_ms: number | null;
+}>;
+
 export type Options = Readonly<{
   /** Managed service origin. Defaults to the current browser origin. */
   baseUrl?: string | URL | undefined;
@@ -7,6 +62,16 @@ export type Options = Readonly<{
   apiKey?: string | undefined;
   /** Platform-compatible fetch implementation, primarily for non-browser hosts and tests. */
   fetch?: typeof globalThis.fetch | undefined;
+  /** WebSocket factory for Node/RN. Authorization is supplied only to this private handshake callback. */
+  toolsTransport?: ((target: URL, options: Readonly<{
+    headers?: Readonly<Record<string, string>>;
+    credentials?: "include";
+  }>) => import("../tools/Tools.mjs").AttachmentSocket | Promise<import("../tools/Tools.mjs").AttachmentSocket>) | Readonly<{
+    connect(target: URL, options: Readonly<{
+      headers?: Readonly<Record<string, string>>;
+      credentials?: "include";
+    }>): import("../tools/Tools.mjs").AttachmentSocket | Promise<import("../tools/Tools.mjs").AttachmentSocket>;
+  }> | undefined;
 }>;
 
 export type Capabilities = Readonly<{
@@ -86,6 +151,7 @@ export type CompletedEventData = Readonly<{
   id: string;
   final_message: string;
   usage: TurnUsage | null;
+  citations: readonly HistoryCitation[];
   usage_error?: string | undefined;
 }>;
 
@@ -137,6 +203,7 @@ export type TurnResult = Readonly<{
   turnId: string;
   finalMessage: string;
   usage: TurnUsage | null;
+  citations: readonly HistoryCitation[];
   usageError?: string | undefined;
   cursor?: string | undefined;
 }>;
@@ -162,6 +229,8 @@ export type Agent = Readonly<{
   /** Account-owned list metadata, present on handles returned by `list()`. */
   summary?: Summary | undefined;
   turn: Readonly<{ prompt(options: PromptOptions): Turn }>;
+  /** Reverse-tool endpoint with cookie/bearer transport retained in a private closure. */
+  toolsTarget(): import("../tools/Tools.mjs").AttachmentTarget;
   events: Readonly<{
     page(options?: EventHistoryOptions): Promise<EventHistoryPage>;
     /**
@@ -181,3 +250,9 @@ export function get(id: string, options?: Options): Promise<Agent>;
 export function open(id: string, options?: Options): Agent;
 export function remove(id: string, options?: Options): Promise<void>;
 export { remove as delete };
+export function findSessions(request: FindSessionsRequest, options?: Options): Promise<FindSessionsResponse>;
+export function readSession(request: ReadSessionRequest, options?: Options): Promise<ReadSessionResponse>;
+/** List the authenticated account's hosted durable memory. */
+export function listMemories(options?: Options): Promise<readonly MemoryRecord[]>;
+/** Compare-and-swap delete one hosted durable memory; deleting an absent id is idempotent. */
+export function deleteMemory(key: MemoryKey, options?: Options): Promise<void>;

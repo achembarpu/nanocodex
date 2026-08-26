@@ -16,6 +16,7 @@ export type {
 } from "../runtime/tempo-provider.mjs";
 export type {
   AgentEvent,
+  AgentLifecycle,
   AgentSessionContext,
   ChatGptCredential,
   ChatGptCredentialSeed,
@@ -30,6 +31,8 @@ export type {
   ExecutionEnvironment,
   PromptInput,
   PromptItem,
+  LifecycleTurn,
+  LifecycleTurnResult,
   ReasoningMode,
   SessionSnapshot,
   Thinking,
@@ -57,6 +60,7 @@ export * as Subagents from "../runtime/subagents.mjs";
 export * as Transport from "./Transport.mjs";
 export * as Voice from "./Voice.mjs";
 export * as Workspace from "./workspace.mjs";
+export * as Tools from "../tools/index.mjs";
 export {
   createConfig,
   type AgentParameters,

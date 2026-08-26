@@ -24,10 +24,10 @@ test("Responses transports own authentication and connection setup", () => {
   assert.throws(() => NodeTransport.openAi({ apiKey: " " }), /non-empty/);
 });
 
-test("subagents are installed by default and accept a branded concurrency override", () => {
-  assert.deepEqual(Object.keys(Subagents), ["create"]);
+test("subagents are installed by default and expose branded lifecycle helpers", () => {
+  assert.deepEqual(Object.keys(Subagents), ["close", "create", "interrupt", "spawn", "wait"]);
   assert.deepEqual(resolveTools(undefined), {
-    tools: undefined,
+    tools: {},
     subagents: { max_concurrency: 32 },
   });
   const ping = {

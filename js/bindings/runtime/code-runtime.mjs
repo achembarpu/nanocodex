@@ -1,69 +1,48 @@
-const MAX_CONCURRENT_NESTED_CALLS = 128;
+import {
+  providerSource,
+  ToolRouter,
+  toolMapSource,
+  toolRouterBrand,
+  toolRouterRuntime,
+} from "./tool-router.mjs";
+
 const CANCELLATION_MESSAGE = "Code Mode execution was cancelled";
 
 export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
   const activeExecutions = new Set();
   const codeObservations = new Map();
   const stores = new Map();
-  const providers = [];
+  const router = toolConfiguration?.[toolRouterBrand]
+    ? (toolConfiguration[toolRouterRuntime] ?? toolConfiguration)
+    : new ToolRouter();
+  let nextSourceId = 1;
   let nextCallId = 1;
-  const definitions = [];
-  const configuredTools = [];
   const toolByName = new Map();
 
   function addTools(configuration = {}) {
+    const added = {};
     for (const [name, tool] of Object.entries(configuration)) {
       if (toolByName.has(name)) {
         throw new Error(`tool is already configured: ${name}`);
       }
-      addTool(name, tool, { configuredTools, definitions, toolByName });
+      added[name] = tool;
+    }
+    if (Object.keys(added).length) {
+      router.addSource(toolMapSource(`cloud:${String(nextSourceId++).padStart(8, "0")}`, added));
+      for (const [name, tool] of Object.entries(added)) toolByName.set(name, tool);
     }
   }
-  addTools(toolConfiguration);
+  if (!toolConfiguration?.[toolRouterBrand]) addTools(toolConfiguration);
 
-  function currentDefinitions() {
-    return [
-      ...definitions,
-      ...providers.flatMap((provider) => provider.definitions()),
-    ];
-  }
-
-  function currentCodeDefinitions() {
-    return currentDefinitions().map((definition) => definition.type === "tool_search"
-      ? deepFreeze({
-          type: "function",
-          name: "tool_search",
-          description: definition.description,
-          strict: false,
-          parameters: jsonSnapshot(definition.parameters, "tool_search parameters"),
-        })
-      : definition);
-  }
-
-  function currentTools() {
-    const tools = [...configuredTools];
-    for (const provider of providers) {
-      for (const definition of provider.definitions()) {
-        const name = definition.type === "tool_search" ? "tool_search" : definition.name;
-        const tool = provider.resolve(name);
-        if (tool) tools.push(tool);
-      }
-    }
-    return tools;
+  function stableDefinitions() {
+    return router.modelDefinitions();
   }
 
   function resolveTool(name) {
-    const configured = toolByName.get(name);
-    if (configured) return configured;
-    for (const provider of providers) {
-      const tool = provider.resolve(name);
-      if (tool) return tool;
-    }
+    return router.resolve(name);
   }
 
-  async function executeTool(name, encodedInput, sessionId = "default", callId = "tool") {
-    const tool = resolveTool(name);
-    if (!tool) return encodeToolOutput(`unknown application tool: ${name}`, false, null);
+  async function executeTool(name, encodedInput, sessionId = "default", callId = "tool", model = "unknown") {
     let input;
     try {
       input = JSON.parse(encodedInput);
@@ -74,10 +53,13 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
     const execution = { callId, controller, sessionId };
     activeExecutions.add(execution);
     try {
-      const result = await tool.handler(input, {
+      const tool = resolveTool(name);
+      if (!tool) return encodeToolOutput(`unknown application tool: ${name}`, false, null);
+      const result = await router.execute(name, input, {
         sessionId,
         parentCallId: "",
         callId,
+        model,
         signal: controller.signal,
       });
       return encodeToolOutput(
@@ -93,7 +75,11 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
     }
   }
 
-  async function executeCode(source, sessionId = "default", parentCallId = "exec", observer) {
+  async function executeCode(source, sessionId = "default", parentCallId = "exec", model = "unknown", observer) {
+    if (typeof model === "function" && observer === undefined) {
+      observer = model;
+      model = "unknown";
+    }
     const startedAt = performance.now();
     const content = [];
     const stored = stores.get(sessionId) || new Map();
@@ -102,12 +88,29 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
     const controller = new AbortController();
     const execution = { callId: parentCallId, controller, sessionId };
     activeExecutions.add(execution);
+    let admission;
+    try {
+      admission = await router.admit(controller.signal);
+    } catch (error) {
+      activeExecutions.delete(execution);
+      return JSON.stringify({
+        output: `Script failed\nWall time ${wallTime(startedAt)} seconds\nOutput:\n${errorMessage(error)}`,
+        success: false,
+        nested_calls: nestedCalls,
+      });
+    }
     const tools = Object.create(null);
-    const availableTools = currentTools();
-    const availableDefinitions = currentCodeDefinitions();
+    const availableTools = [...admission.tools.values()];
+    const availableDefinitions = admission.definitions.map((definition) => definition.type === "tool_search"
+      ? deepFreeze({
+          type: "function",
+          name: "tool_search",
+          description: definition.description,
+          strict: false,
+          parameters: jsonSnapshot(definition.parameters, "tool_search parameters"),
+        })
+      : definition);
     const nestedInvocations = [];
-    const nestedCallPermits = new AsyncSemaphore(MAX_CONCURRENT_NESTED_CALLS);
-    const parallelExecution = new AsyncReadWriteGate();
     for (const { handler, name, parallelSafe } of availableTools) {
       tools[name] = (input) => {
         const invocation = executeNestedTool(input);
@@ -149,20 +152,13 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
         let result;
         try {
           controller.signal.throwIfAborted();
-          const releasePermit = await nestedCallPermits.acquire(controller.signal);
-          let releaseExecution;
-          try {
-            releaseExecution = await parallelExecution.acquire(parallelSafe, controller.signal);
-            result = await handler(input, {
+          result = await admission.invoke(name, input, {
               sessionId,
               parentCallId,
               callId,
+              model,
               signal: controller.signal,
-            });
-          } finally {
-            releaseExecution?.();
-            releasePermit();
-          }
+          });
         } catch (error) {
           const message = errorMessage(error);
           Object.assign(recordedCall, {
@@ -284,11 +280,12 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
         nested_calls: nestedCalls,
       });
     } finally {
+      admission.release();
       activeExecutions.delete(execution);
     }
   }
 
-  function executeCodeObserved(source, sessionId = "default", parentCallId = "exec") {
+  function executeCodeObserved(source, sessionId = "default", parentCallId = "exec", model = "unknown") {
     const key = codeObservationKey(sessionId, parentCallId);
     codeObservations.get(key)?.close();
     const observation = createCodeObservation(sessionId);
@@ -299,6 +296,7 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
         source,
         sessionId,
         parentCallId,
+        model,
         (update) => observation.push(JSON.stringify(update)),
       );
     } catch (error) {
@@ -342,7 +340,7 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
 
   function releaseSession(sessionId) {
     stores.delete(sessionId);
-    for (const tool of configuredTools) tool.releaseSession?.(sessionId);
+    router.releaseSession(sessionId);
     closeCodeObservations(sessionId);
   }
 
@@ -351,56 +349,45 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
       execution.controller.abort(new Error(CANCELLATION_MESSAGE));
     }
     stores.clear();
-    for (const tool of configuredTools) tool.dispose?.();
+    router.reset();
     closeCodeObservations();
   }
 
   return Object.freeze({
     addTools,
-    addProvider(provider) {
+    addProvider(provider, options = {}) {
       if (!provider || typeof provider.definitions !== "function" || typeof provider.resolve !== "function") {
         throw new TypeError("a Code Mode tool provider requires definitions() and resolve(name)");
       }
-      providers.push(provider);
+      const sourceId = options.id ?? provider.sourceId ?? `provider:${String(nextSourceId++).padStart(8, "0")}`;
+      router.addSource(providerSource(
+        sourceId,
+        provider,
+        options,
+      ));
+      return sourceId;
     },
+    validateProviderDefinitions(sourceId, candidateDefinitions, options = {}) {
+      const definitions = jsonSnapshot(candidateDefinitions, `tool source ${sourceId} candidate definitions`);
+      return router.validateSource({
+        id: sourceId,
+        kind: options.kind ?? "attached",
+        mode: options.mode ?? "attached-over-cloud",
+        deferred: options.deferred ?? true,
+        definitions: () => definitions,
+        resolve: (name) => ({ name, parallelSafe: false, handler() {} }),
+      });
+    },
+    router,
     executeCode,
     executeCodeObserved,
     executeTool,
     nextCodeUpdate,
     cancel,
-    toolDefinitions: () => JSON.stringify(currentDefinitions()),
+    toolDefinitions: () => JSON.stringify(stableDefinitions()),
     releaseSession,
     reset,
   });
-}
-
-function addTool(name, tool, collection) {
-  if (!tool || typeof tool.handler !== "function") {
-    throw new TypeError(`tool ${name} requires a handler function`);
-  }
-  const configured = Object.freeze({
-    dispose: typeof tool.dispose === "function" ? tool.dispose : undefined,
-    handler: tool.handler,
-    name,
-    parallelSafe: tool.supportsParallelToolCalls === true,
-    releaseSession: typeof tool.releaseSession === "function" ? tool.releaseSession : undefined,
-  });
-  collection.configuredTools.push(configured);
-  collection.toolByName.set(name, configured);
-  const definition = {
-    type: "function",
-    name,
-    description: tool.description || "Application-defined tool.",
-    strict: false,
-    parameters: jsonSnapshot(tool.parameters || {
-      type: "object",
-      additionalProperties: true,
-    }, `tool ${name} parameters`),
-  };
-  if (tool.outputSchema !== undefined) {
-    definition.output_schema = jsonSnapshot(tool.outputSchema, "tool output schema");
-  }
-  collection.definitions.push(deepFreeze(definition));
 }
 
 async function evaluateNative(source, environment) {
@@ -491,7 +478,7 @@ function toolValue(value) {
   return isToolResult(value) ? value.value : value;
 }
 
-const TOOL_RESULT = Symbol("nanocodex.toolResult");
+const TOOL_RESULT = Symbol.for("nanocodex.toolResult");
 
 export function toolResult(output, structuredResult = output, options = {}) {
   const success = options.success ?? true;
@@ -552,119 +539,6 @@ function abortableEvaluation(evaluation, signal) {
       (error) => settle(reject, error),
     );
   });
-}
-
-class AsyncSemaphore {
-  constructor(permits) {
-    this.permits = permits;
-    this.waiters = [];
-  }
-
-  acquire(signal) {
-    if (signal.aborted) return Promise.reject(signal.reason);
-    if (this.permits > 0 && this.waiters.length === 0) {
-      this.permits -= 1;
-      return Promise.resolve(once(() => this.release()));
-    }
-    return new Promise((resolve, reject) => {
-      const waiter = { resolve, reject, signal };
-      waiter.abort = () => {
-        const index = this.waiters.indexOf(waiter);
-        if (index >= 0) this.waiters.splice(index, 1);
-        reject(signal.reason ?? new Error(CANCELLATION_MESSAGE));
-      };
-      signal.addEventListener("abort", waiter.abort, { once: true });
-      this.waiters.push(waiter);
-    });
-  }
-
-  release() {
-    while (this.waiters.length) {
-      const waiter = this.waiters.shift();
-      waiter.signal.removeEventListener("abort", waiter.abort);
-      if (waiter.signal.aborted) continue;
-      waiter.resolve(once(() => this.release()));
-      return;
-    }
-    this.permits += 1;
-  }
-}
-
-class AsyncReadWriteGate {
-  constructor() {
-    this.readers = 0;
-    this.writer = false;
-    this.waiters = [];
-  }
-
-  acquire(parallelSafe, signal) {
-    if (signal.aborted) return Promise.reject(signal.reason);
-    if (this.canAcquireImmediately(parallelSafe)) {
-      return Promise.resolve(this.grant(parallelSafe));
-    }
-    return new Promise((resolve, reject) => {
-      const waiter = { parallelSafe, resolve, reject, signal };
-      waiter.abort = () => {
-        const index = this.waiters.indexOf(waiter);
-        if (index >= 0) this.waiters.splice(index, 1);
-        reject(signal.reason ?? new Error(CANCELLATION_MESSAGE));
-        this.drain();
-      };
-      signal.addEventListener("abort", waiter.abort, { once: true });
-      this.waiters.push(waiter);
-    });
-  }
-
-  canAcquireImmediately(parallelSafe) {
-    return this.waiters.length === 0
-      && !this.writer
-      && (parallelSafe || this.readers === 0);
-  }
-
-  grant(parallelSafe) {
-    if (parallelSafe) this.readers += 1;
-    else this.writer = true;
-    return once(() => {
-      if (parallelSafe) this.readers -= 1;
-      else this.writer = false;
-      this.drain();
-    });
-  }
-
-  drain() {
-    if (this.writer || this.waiters.length === 0) return;
-    const first = this.waiters[0];
-    if (!first.parallelSafe) {
-      if (this.readers !== 0) return;
-      this.waiters.shift();
-      first.signal.removeEventListener("abort", first.abort);
-      if (first.signal.aborted) {
-        first.reject(first.signal.reason ?? new Error(CANCELLATION_MESSAGE));
-        this.drain();
-      } else {
-        first.resolve(this.grant(false));
-      }
-      return;
-    }
-    while (!this.writer && this.waiters[0]?.parallelSafe) {
-      const waiter = this.waiters.shift();
-      waiter.signal.removeEventListener("abort", waiter.abort);
-      if (waiter.signal.aborted) {
-        waiter.reject(waiter.signal.reason ?? new Error(CANCELLATION_MESSAGE));
-      } else {
-        waiter.resolve(this.grant(true));
-      }
-    }
-  }
-}
-
-function once(callback) {
-  let active = true;
-  return () => {
-    if (!active) return;
-    active = false;
-    callback();
-  };
 }
 
 function codeObservationKey(sessionId, callId) {

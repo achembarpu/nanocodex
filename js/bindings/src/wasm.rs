@@ -62,8 +62,12 @@ extern "C" {
     fn host_emit_event(session_id: &str, event: &str, encoded_bytes: u32);
 
     #[wasm_bindgen(catch, js_namespace = ["globalThis", "nanocodexHost"], js_name = executeCode)]
-    fn host_execute_code(source: &str, session_id: &str, call_id: &str)
-    -> Result<Promise, JsValue>;
+    fn host_execute_code(
+        source: &str,
+        session_id: &str,
+        call_id: &str,
+        model: &str,
+    ) -> Result<Promise, JsValue>;
 
     #[wasm_bindgen(catch, js_namespace = ["globalThis", "nanocodexHost"], js_name = nextCodeUpdate)]
     fn host_next_code_update(session_id: &str, call_id: &str) -> Result<Promise, JsValue>;
@@ -74,6 +78,7 @@ extern "C" {
         input: &str,
         session_id: &str,
         call_id: &str,
+        model: &str,
     ) -> Result<Promise, JsValue>;
 
     #[wasm_bindgen(js_namespace = ["globalThis", "nanocodexHost"], js_name = cancelCode)]
@@ -538,8 +543,14 @@ impl CodeModeHost for JavaScriptCodeModeHost {
                     CodeModeHostError::new(format!("failed to encode hosted tool input: {error}"))
                 })?,
             };
-            let promise = host_execute_tool(name, &input, context.session_id(), context.call_id())
-                .map_err(|error| CodeModeHostError::new(host_error_message(&error)))?;
+            let promise = host_execute_tool(
+                name,
+                &input,
+                context.session_id(),
+                context.call_id(),
+                context.model(),
+            )
+            .map_err(|error| CodeModeHostError::new(host_error_message(&error)))?;
             let value = JsFuture::from(promise)
                 .await
                 .map_err(|error| CodeModeHostError::new(host_error_message(&error)))?;
@@ -570,8 +581,13 @@ async fn execute_javascript_code(
     context: ToolContext<'_>,
     mut observer: Option<&mut dyn CodeModeObserver>,
 ) -> Result<CodeModeExecution, CodeModeHostError> {
-    let execution = host_execute_code(source, context.session_id(), context.call_id())
-        .map_err(|error| CodeModeHostError::new(host_error_message(&error)))?;
+    let execution = host_execute_code(
+        source,
+        context.session_id(),
+        context.call_id(),
+        context.model(),
+    )
+    .map_err(|error| CodeModeHostError::new(host_error_message(&error)))?;
     loop {
         let update = host_next_code_update(context.session_id(), context.call_id())
             .map_err(|error| CodeModeHostError::new(host_error_message(&error)))?;

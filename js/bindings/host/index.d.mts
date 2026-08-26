@@ -13,6 +13,7 @@ export type {
 export type {
   AgentActions,
   AgentEvent,
+  AgentLifecycle,
   AgentOptions,
   AgentSessionContext,
   ChatGptCredential,
@@ -41,6 +42,8 @@ export type {
   NamedTool,
   PromptInput,
   PromptItem,
+  LifecycleTurn,
+  LifecycleTurnResult,
   RealtimeTranscriptEntry,
   ReasoningMode,
   SessionSnapshot,

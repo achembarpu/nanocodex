@@ -7,6 +7,110 @@ const origin = "https://managed.example";
 const agentId = "0198d3f0-8844-7000-8000-000000000001";
 const apiKey = `ncx_live_${"a".repeat(12)}_${"b".repeat(43)}`;
 
+test("managed account clients expose findSessions and readSession over the same bearer", async () => {
+  assert.equal("searchHistory" in Agent, false);
+  assert.equal("findThreads" in Agent, false);
+  assert.equal("readThread" in Agent, false);
+  const requests = [];
+  const fetch = async (input, init) => {
+    const request = new Request(input, init);
+    requests.push(request);
+    const path = new URL(request.url).pathname;
+    if (path === "/v1/history/sessions/search") {
+      assert.deepEqual(await request.json(), { query: "copper", limit: 4 });
+      return Response.json({
+        query: "copper",
+        results: [{
+          session_id: agentId,
+          title: "Copper notes",
+          turn_id: "turn-1",
+          cursor: "7",
+          score: 0.9,
+          snippet: "remember copper",
+        }],
+        citations: [{
+          thread_id: agentId,
+          title: "Copper notes",
+          sources: [{ turn_id: "turn-1", cursor: "7" }],
+        }],
+      });
+    }
+    if (path === `/v1/history/sessions/${agentId}/read`) {
+      assert.deepEqual(await request.json(), { turn_ids: ["turn-1"] });
+      return Response.json({
+        turns: [{
+          session_id: agentId,
+          title: "Copper notes",
+          turn_id: "turn-1",
+          cursor: "7",
+          user: "remember copper",
+          assistant: "remembered",
+        }],
+        citations: [{
+          thread_id: agentId,
+          title: "Copper notes",
+          sources: [{ turn_id: "turn-1", cursor: "7" }],
+        }],
+      });
+    }
+    return Response.json({ error: "not_found" }, { status: 404 });
+  };
+  const options = { baseUrl: origin, apiKey, fetch };
+  const found = await Agent.findSessions({ query: "copper", limit: 4 }, options);
+  const read = await Agent.readSession({ session_id: agentId, turn_ids: ["turn-1"] }, options);
+
+  assert.equal(found.results[0].session_id, agentId);
+  assert.equal(read.turns[0].assistant, "remembered");
+  assert.deepEqual(read.citations[0].sources, [{ turn_id: "turn-1", cursor: "7" }]);
+  for (const request of requests) {
+    assert.equal(request.method, "POST");
+    assert.equal(request.credentials, "omit");
+    assert.equal(request.headers.get("authorization"), `Bearer ${apiKey}`);
+  }
+});
+
+test("managed account clients list and optimistic-delete hosted memory without provider credentials", async () => {
+  const requests = [];
+  const fetch = async (input, init) => {
+    const request = new Request(input, init);
+    requests.push(request);
+    const url = new URL(request.url);
+    if (request.method === "GET" && url.pathname === "/v1/memory") {
+      return Response.json({
+        memories: [{
+          key: { id: 7, version: 2 },
+          content: "Prefer invariant-first reviews.",
+          created_at_ms: 1,
+          updated_at_ms: 2,
+          last_scanned_at_ms: null,
+          scan_count: 0,
+          last_used_at_ms: 3,
+          use_count: 1,
+          probation_until_ms: null,
+        }],
+      });
+    }
+    if (request.method === "DELETE" && url.pathname === "/v1/memory/7") {
+      assert.equal(url.searchParams.get("version"), "2");
+      return new Response(null, { status: 204 });
+    }
+    return Response.json({ error: "not_found" }, { status: 404 });
+  };
+  const options = { baseUrl: origin, apiKey, fetch };
+  const memories = await Agent.listMemories(options);
+  assert.equal(memories[0].key.id, 7);
+  assert.equal(memories[0].content, "Prefer invariant-first reviews.");
+  await Agent.deleteMemory(memories[0].key, options);
+  for (const request of requests) {
+    assert.equal(request.headers.get("authorization"), `Bearer ${apiKey}`);
+    assert.equal(request.headers.has("openai-api-key"), false);
+  }
+  await assert.rejects(
+    () => Agent.deleteMemory({ id: 7, version: 0 }, options),
+    /positive safe integer/,
+  );
+});
+
 test("managed Agent covers account-scoped create, list, get, and delete", async () => {
   const calls = [];
   const fetch = async (input, init) => {
@@ -38,6 +142,7 @@ test("managed Agent covers account-scoped create, list, get, and delete", async 
   assert.equal(created.type, "managed");
   assert.equal(created.id, agentId);
   assert.equal(Object.hasOwn(created, "websocket_url"), false);
+  assert.equal(created.toolsTarget().endpoint.href, `wss://managed.example/v1/agents/${agentId}/tool-host`);
   assert.equal(Object.isFrozen(created), true);
   assert.match(calls[0].headers.get("idempotency-key"), /^managed-create:[0-9a-f-]{36}$/);
 
@@ -59,6 +164,25 @@ test("managed Agent covers account-scoped create, list, get, and delete", async 
   assert.equal(calls.filter((request) =>
     request.method === "GET" && new URL(request.url).pathname === `/v1/agents/${agentId}`
   ).length, 2, "open constructs a handle without adding a state probe");
+});
+
+test("managed tools target retains bearer only in the injected handshake", async () => {
+  let handshake;
+  const socket = { readyState: 0, send() {}, close() {}, addEventListener() {} };
+  const agent = Agent.open(agentId, {
+    baseUrl: origin,
+    apiKey,
+    fetch: async () => Response.json({}),
+    toolsTransport: async (target, options) => {
+      handshake = { target, options };
+      return socket;
+    },
+  });
+  const target = agent.toolsTarget();
+  assert.equal(JSON.stringify(target).includes(apiKey), false);
+  assert.equal(await target.transport.connect(target.endpoint), socket);
+  assert.equal(handshake.target.href, `wss://managed.example/v1/agents/${agentId}/tool-host`);
+  assert.equal(handshake.options.headers.authorization, `Bearer ${apiKey}`);
 });
 
 test("managed Agent retries creation with one stable identity", async () => {
@@ -514,13 +638,16 @@ test("prompts and a watcher multiplex one active managed event request without s
     id: `turn-${number}`,
     final_message: `done ${number}`,
     usage: null,
+    ...(number === 1 ? {} : { citations: [] }),
   })).join(""));
 
-  assert.deepEqual((await Promise.all(results)).map((result) => result.finalMessage), [
+  const completed = await Promise.all(results);
+  assert.deepEqual(completed.map((result) => result.finalMessage), [
     "done 1",
     "done 2",
     "done 3",
   ]);
+  assert.deepEqual(completed[0].citations, []);
   await watching;
   assert.deepEqual(watched.map((event) => event.data.id), ["turn-1", "turn-2", "turn-3"]);
   assert.equal(eventRequests, 1);
@@ -590,12 +717,14 @@ test("a result joining a latest tail replays durably from its accepted cursor", 
     id: "turn-latest-result",
     final_message: "replayed",
     usage: null,
+    citations: [],
   }));
 
   assert.deepEqual(await within(result, "latest-tail result replay"), {
     turnId: "turn-latest-result",
     finalMessage: "replayed",
     usage: null,
+    citations: [],
     cursor: "211",
   });
   assert.equal((await within(watchedTerminal, "latest watcher terminal")).value.cursor, "211");
@@ -674,12 +803,14 @@ test("shared event replay reconnect resolves one turn and delivers each cursor e
     id: "turn-1",
     final_message: "done",
     usage: null,
+    citations: [],
   })}`);
 
   assert.deepEqual(await firstResult, {
     turnId: "turn-1",
     finalMessage: "done",
     usage: null,
+    citations: [],
     cursor: "7",
   });
   assert.strictEqual(await turn.result(), await turn.result());
@@ -733,6 +864,7 @@ test("turn result without an event watcher opens one shared stream and preserves
         id: "turn-1",
         final_message: "done",
         usage: null,
+        citations: [],
       })]);
     }
     return Response.json({ error: "not_found" }, { status: 404 });
@@ -750,6 +882,7 @@ test("turn result without an event watcher opens one shared stream and preserves
     turnId: "turn-1",
     finalMessage: "done",
     usage: null,
+    citations: [],
     cursor: "7",
   });
   assert.strictEqual(await turn.result(), await turn.result());

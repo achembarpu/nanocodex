@@ -309,6 +309,7 @@ export type AgentActions = {
 };
 
 export type Agent<extended extends object = {}> = {
+  readonly agentId: string;
   readonly key: string;
   readonly name: string;
   readonly sessionId: string;
@@ -322,6 +323,51 @@ export type Agent<extended extends object = {}> = {
 } & extended;
 
 export type DefaultAgent = Agent<AgentActions>;
+
+/** Transport-independent Agent lifecycle shared by local and managed durable Agents. */
+export type AgentLifecycle = {
+  readonly agentId: string;
+  readonly key: string;
+  readonly name: string;
+  readonly sessionId: string;
+  readonly type: string;
+  readonly uid: string;
+  dispose(): void;
+  events: {
+    watch(options?: WatchEventsOptions): EventWatcher;
+  };
+  session: {
+    /** Stops this client lifecycle. A managed shutdown never deletes the durable Agent. */
+    shutdown(): Promise<void>;
+  };
+  turn: {
+    prompt(options: { input: PromptInput; id?: string | undefined }): LifecycleTurn;
+  };
+};
+
+export type LifecycleTurn = Readonly<{
+  readonly agent: Readonly<{
+    agentId: string;
+    key: string;
+    name: string;
+    sessionId: string;
+    type: string;
+    uid: string;
+    dispose(): void;
+  }>;
+  accepted(): Promise<string | undefined>;
+  result(): Promise<LifecycleTurnResult>;
+  steer(options: { input: PromptInput }): Promise<void>;
+  cancel(): Promise<void>;
+  dispose(): void;
+}>;
+
+export type LifecycleTurnResult = Readonly<{
+  finalMessage: string;
+  /** Managed Agents may return null when the service did not report usage. */
+  usage(): Promise<TurnUsage | null>;
+  dispose(): void;
+}>;
 
 export type Turn<agent extends Agent<object> = Agent<object>> = Readonly<{
   readonly agent: agent;
@@ -381,7 +427,8 @@ export type NamedTool = Tool & Readonly<{ name: string }>;
 /** Static JavaScript tools, optionally composed with Rust-backed extensions. */
 export type ToolConfiguration<Extension = never> =
   | ToolMap
-  | readonly (NamedTool | Extension)[];
+  | readonly (NamedTool | Extension)[]
+  | import("./tools/Tools.mjs").Tools;
 
 export type CodeEvaluatorEnvironment = {
   tools: Readonly<Record<string, (input: unknown) => Promise<unknown>>>;

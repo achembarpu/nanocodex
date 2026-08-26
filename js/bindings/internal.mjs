@@ -441,14 +441,14 @@ const hostBridge = Object.freeze({
     host.releaseSession(sessionId);
     hostSessions.delete(sessionId);
   },
-  executeCode(source, sessionId, callId) {
-    return requiredSessionHost(sessionId).executeCode(source, sessionId, callId);
+  executeCode(source, sessionId, callId, model) {
+    return requiredSessionHost(sessionId).executeCode(source, sessionId, callId, model);
   },
   nextCodeUpdate(sessionId, callId) {
     return requiredSessionHost(sessionId).nextCodeUpdate(sessionId, callId);
   },
-  executeTool(name, input, sessionId, callId) {
-    return requiredSessionHost(sessionId).executeTool(name, input, sessionId, callId);
+  executeTool(name, input, sessionId, callId, model) {
+    return requiredSessionHost(sessionId).executeTool(name, input, sessionId, callId, model);
   },
   cancelCode(sessionId) {
     hostSessions.get(sessionId)?.cancelCode?.(sessionId);
@@ -564,6 +564,7 @@ function createAgent(
     released: false,
     shutdownPromise: undefined,
     subscriptions: new Set(),
+    agentId: typeof raw.agentId === "string" ? raw.agentId : raw.sessionId,
     sessionId: raw.sessionId,
     uid: `agent-${nextAgentUid++}`,
   };
@@ -593,6 +594,7 @@ function agentView(state, extensions) {
     key: state.runtime.key,
     name: state.runtime.name,
     type: state.runtime.type,
+    get agentId() { return state.agentId; },
     get sessionId() { return state.sessionId; },
     extend(fn) {
       if (typeof fn !== "function") throw new TypeError("agent.extend requires a decorator function");

@@ -1,4 +1,5 @@
 import type {
+  AgentLifecycle,
   AgentOptions,
   CodeEvaluator,
   DefaultAgent,
@@ -7,9 +8,10 @@ import type {
   McpServers,
   ToolConfiguration,
 } from "../types.mjs";
-import type { Transport } from "../browser/Transport.mjs";
+import type { ManagedTransport, ResponsesTransport } from "../browser/Transport.mjs";
 import type { Tool as SubagentTool } from "../runtime/subagents.mjs";
 import type { Workspace } from "../runtime/workspace.mjs";
+import type { Tools } from "../tools/Tools.mjs";
 
 export type Agent = DefaultAgent;
 type ToolExposureOptions =
@@ -17,8 +19,13 @@ type ToolExposureOptions =
   | { mcp: McpServers; toolMode?: "code" | undefined };
 
 /** Creates Rust/WASM in the current Web API host isolate. */
+export function create(options: create.ManagedOptions): Promise<AgentLifecycle>;
 export function create(options?: create.Options): Promise<create.ReturnType>;
 export declare namespace create {
+  type ManagedOptions = Readonly<{
+    transport: ManagedTransport;
+    tools?: Tools | undefined;
+  }>;
   type Options = AgentOptions & ToolExposureOptions & {
     /** Caller-owned persistent filesystem mounted through standard workspace tools. */
     filesystem?: Workspace | undefined;
@@ -30,7 +37,7 @@ export declare namespace create {
     /** Optional CSP-compatible Code Mode evaluator, such as createQuickJsEvaluator(). */
     codeEvaluator?: CodeEvaluator | undefined;
     /** Defaults to the same-origin Nanocodex `/api/responses` proxy. */
-    transport?: Transport | undefined;
+    transport?: ResponsesTransport | undefined;
   } & (
     | {
       durability?: undefined;

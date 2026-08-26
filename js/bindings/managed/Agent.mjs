@@ -5,6 +5,7 @@ const API_KEY = /^ncx_live_[A-Za-z0-9_-]{12}_[A-Za-z0-9_-]{43}$/;
 const CURSOR = /^(?:0|[1-9][0-9]*)$/;
 const LATEST_CURSOR = "latest";
 const IDEMPOTENCY_KEY = /^[\x21-\x7e]{1,256}$/;
+const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const TURN_ID = /^[A-Za-z0-9._:-]{1,128}$/;
 const TERMINAL_TYPES = new Set([
   "turn_completed",
@@ -22,7 +23,7 @@ const TURN_SUBMISSION_TIMEOUT_MS = 10_000;
 const TURN_STATE_POLL_INITIAL_MS = 1_000;
 const TURN_STATE_POLL_MAX_MS = 5_000;
 const TURN_STATE_READ_TIMEOUT_MS = 2_000;
-const ALLOWED_OPTIONS = new Set(["apiKey", "baseUrl", "fetch"]);
+const ALLOWED_OPTIONS = new Set(["apiKey", "baseUrl", "fetch", "toolsTransport"]);
 const eventEncoder = new TextEncoder();
 
 /** Create a new managed agent owned by the authenticated account. */
@@ -104,6 +105,47 @@ export async function remove(id, options = {}) {
 
 export { remove as delete };
 
+/** Find candidate completed sessions owned by the authenticated account. */
+export async function findSessions(request, options = {}) {
+  validateFindSessionsRequest(request);
+  const body = await managedClient(options).json("/v1/history/sessions/search", {
+    method: "POST",
+    body: JSON.stringify(request),
+  });
+  return managedFindSessionsResponse(body);
+}
+
+/** Read exact projected turns from one completed account session. */
+export async function readSession(request, options = {}) {
+  validateReadSessionRequest(request);
+  const body = await managedClient(options).json(
+    `/v1/history/sessions/${encodeURIComponent(request.session_id)}/read`,
+    {
+      method: "POST",
+      body: JSON.stringify(request.turn_ids === undefined ? {} : { turn_ids: request.turn_ids }),
+    },
+  );
+  return managedReadSessionResponse(body);
+}
+
+/** List the authenticated account's hosted durable memory. */
+export async function listMemories(options = {}) {
+  const body = await managedClient(options).json("/v1/memory");
+  if (!body || typeof body !== "object" || Array.isArray(body) || !Array.isArray(body.memories)) {
+    throw new ManagedError("invalid_response", "managed memory list is malformed");
+  }
+  return Object.freeze(body.memories.map(managedMemoryRecord));
+}
+
+/** Compare-and-swap delete one account-owned hosted memory. */
+export async function deleteMemory(key, options = {}) {
+  validateMemoryKey(key);
+  await managedClient(options).empty(
+    `/v1/memory/${key.id}?version=${key.version}`,
+    { method: "DELETE" },
+  );
+}
+
 function agentHandle(client, id, summary) {
   validateAgentId(id);
   const eventStream = replayableEventStream(client, id);
@@ -119,6 +161,7 @@ function agentHandle(client, id, summary) {
     turn: Object.freeze({
       prompt: (options) => managedTurn(client, id, eventStream, options),
     }),
+    toolsTarget: () => client.toolsTarget(id),
     state: () => client.json(agentPath(id)),
     delete: async () => {
       await client.empty(agentPath(id), { method: "DELETE" });
@@ -429,6 +472,7 @@ function terminalResult(turnId, terminal, cursor) {
       turnId,
       finalMessage: terminal.final_message,
       usage: terminal.usage ?? null,
+      citations: managedCitations(terminal.citations ?? []),
       ...(typeof terminal.usage_error === "string" ? { usageError: terminal.usage_error } : {}),
       ...(typeof cursor === "string" ? { cursor } : {}),
     });
@@ -436,6 +480,130 @@ function terminalResult(turnId, terminal, cursor) {
   const code = typeof terminal.type === "string" ? terminal.type : "turn_failed";
   const message = stringOr(terminal.error, `managed ${code.replaceAll("_", " ")}`);
   throw new ManagedError(code, message);
+}
+
+function managedFindSessionsResponse(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)
+    || typeof value.query !== "string") {
+    throw new ManagedError("invalid_response", "managed find sessions response is malformed");
+  }
+  return Object.freeze({
+    query: value.query,
+    results: managedSessionSearchHits(value.results),
+    citations: managedCitations(value.citations),
+  });
+}
+
+function managedSessionSearchHits(value) {
+  if (!Array.isArray(value)) {
+    throw new ManagedError("invalid_response", "managed history results are malformed");
+  }
+  return Object.freeze(value.map((result) => {
+    if (!result || typeof result !== "object" || Array.isArray(result)
+      || typeof result.session_id !== "string"
+      || typeof result.title !== "string"
+      || typeof result.turn_id !== "string"
+      || typeof result.cursor !== "string" || !CURSOR.test(result.cursor)
+      || typeof result.score !== "number" || !Number.isFinite(result.score)
+      || typeof result.snippet !== "string") {
+      throw new ManagedError("invalid_response", "managed history search result is malformed");
+    }
+    return Object.freeze({
+      session_id: result.session_id,
+      title: result.title,
+      turn_id: result.turn_id,
+      cursor: result.cursor,
+      score: result.score,
+      snippet: result.snippet,
+    });
+  }));
+}
+
+function managedReadSessionResponse(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value) || !Array.isArray(value.turns)) {
+    throw new ManagedError("invalid_response", "managed read session response is malformed");
+  }
+  const turns = value.turns.map((turn) => {
+    if (!turn || typeof turn !== "object" || Array.isArray(turn)
+      || typeof turn.session_id !== "string"
+      || typeof turn.title !== "string"
+      || typeof turn.turn_id !== "string"
+      || typeof turn.cursor !== "string" || !CURSOR.test(turn.cursor)
+      || typeof turn.user !== "string"
+      || typeof turn.assistant !== "string") {
+      throw new ManagedError("invalid_response", "managed session turn is malformed");
+    }
+    return Object.freeze({
+      session_id: turn.session_id,
+      title: turn.title,
+      turn_id: turn.turn_id,
+      cursor: turn.cursor,
+      user: turn.user,
+      assistant: turn.assistant,
+    });
+  });
+  return Object.freeze({
+    turns: Object.freeze(turns),
+    citations: managedCitations(value.citations),
+  });
+}
+
+function managedMemoryRecord(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new ManagedError("invalid_response", "managed memory record is malformed");
+  }
+  validateMemoryKeyResponse(value.key);
+  for (const field of ["created_at_ms", "updated_at_ms", "scan_count", "use_count"]) {
+    if (!Number.isSafeInteger(value[field]) || value[field] < 0) {
+      throw new ManagedError("invalid_response", "managed memory record is malformed");
+    }
+  }
+  for (const field of ["last_scanned_at_ms", "last_used_at_ms", "probation_until_ms"]) {
+    if (value[field] !== null && (!Number.isSafeInteger(value[field]) || value[field] < 0)) {
+      throw new ManagedError("invalid_response", "managed memory record is malformed");
+    }
+  }
+  if (typeof value.content !== "string") {
+    throw new ManagedError("invalid_response", "managed memory record is malformed");
+  }
+  return Object.freeze({
+    key: Object.freeze({ id: value.key.id, version: value.key.version }),
+    content: value.content,
+    created_at_ms: value.created_at_ms,
+    updated_at_ms: value.updated_at_ms,
+    last_scanned_at_ms: value.last_scanned_at_ms,
+    scan_count: value.scan_count,
+    last_used_at_ms: value.last_used_at_ms,
+    use_count: value.use_count,
+    probation_until_ms: value.probation_until_ms,
+  });
+}
+
+function managedCitations(value) {
+  if (!Array.isArray(value)) {
+    throw new ManagedError("invalid_response", "managed citations are malformed");
+  }
+  return Object.freeze(value.map((citation) => {
+    if (!citation || typeof citation !== "object" || Array.isArray(citation)
+      || typeof citation.thread_id !== "string"
+      || typeof citation.title !== "string"
+      || !Array.isArray(citation.sources)) {
+      throw new ManagedError("invalid_response", "managed citation is malformed");
+    }
+    const sources = citation.sources.map((source) => {
+      if (!source || typeof source !== "object" || Array.isArray(source)
+        || typeof source.turn_id !== "string"
+        || typeof source.cursor !== "string" || !CURSOR.test(source.cursor)) {
+        throw new ManagedError("invalid_response", "managed citation source is malformed");
+      }
+      return Object.freeze({ turn_id: source.turn_id, cursor: source.cursor });
+    });
+    return Object.freeze({
+      thread_id: citation.thread_id,
+      title: citation.title,
+      sources: Object.freeze(sources),
+    });
+  }));
 }
 
 function replayableEventStream(client, agentId) {
@@ -930,6 +1098,12 @@ function managedClient(options) {
   }
   const fetchImpl = options.fetch ?? globalThis.fetch;
   if (typeof fetchImpl !== "function") throw new Error("fetch is unavailable in this runtime");
+  const toolsTransport = options.toolsTransport;
+  if (toolsTransport !== undefined
+      && typeof toolsTransport !== "function"
+      && typeof toolsTransport?.connect !== "function") {
+    throw new TypeError("managed toolsTransport must be a function or provide connect(target, options)");
+  }
 
   const response = async (path, init = {}) => {
     const headers = new Headers();
@@ -956,6 +1130,33 @@ function managedClient(options) {
   };
   return Object.freeze({
     response,
+    toolsTarget(agentId) {
+      const url = new URL(`${agentPath(agentId)}/tool-host`, baseUrl);
+      url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+      return Object.freeze({
+        endpoint: url,
+        transport: Object.freeze({
+          async connect() {
+            if (toolsTransport !== undefined) {
+              const connect = typeof toolsTransport === "function"
+                ? toolsTransport
+                : toolsTransport.connect.bind(toolsTransport);
+              return connect(url, Object.freeze(apiKey
+                ? { headers: Object.freeze({ authorization: `Bearer ${apiKey}` }) }
+                : { credentials: "include" }));
+            }
+            if (apiKey) {
+              throw new Error("managed tools attachment with an API key requires toolsTransport so Authorization remains in the WebSocket handshake");
+            }
+            const WebSocketImpl = globalThis.WebSocket;
+            if (typeof WebSocketImpl !== "function") {
+              throw new Error("WebSocket is unavailable; configure managed Agent toolsTransport");
+            }
+            return new WebSocketImpl(url);
+          },
+        }),
+      });
+    },
     async json(path, init) {
       const result = await response(path, init);
       if (!result.ok) throw await responseError(result);
@@ -1017,6 +1218,56 @@ function turnPath(agentId, turnId) {
 function validateAgentId(id) {
   if (typeof id !== "string" || !TURN_ID.test(id)) {
     throw new TypeError("managed agent id is invalid");
+  }
+}
+
+function validateFindSessionsRequest(request) {
+  if (!request || typeof request !== "object" || Array.isArray(request)) {
+    throw new TypeError("managed find sessions request must be an object");
+  }
+  const unsupported = Object.keys(request).find((key) => !["query", "limit"].includes(key));
+  if (unsupported) throw new TypeError(`managed find sessions does not accept ${unsupported}`);
+  if (typeof request.query !== "string" || !request.query.trim()) {
+    throw new TypeError("managed find sessions query must be a non-empty string");
+  }
+  if (request.limit !== undefined
+    && (!Number.isSafeInteger(request.limit) || request.limit < 1 || request.limit > 20)) {
+    throw new TypeError("managed find sessions limit must be an integer from 1 through 20");
+  }
+}
+
+function validateReadSessionRequest(request) {
+  if (!request || typeof request !== "object" || Array.isArray(request)) {
+    throw new TypeError("managed read session request must be an object");
+  }
+  const unsupported = Object.keys(request).find((key) => !["session_id", "turn_ids"].includes(key));
+  if (unsupported) throw new TypeError(`managed read session does not accept ${unsupported}`);
+  if (typeof request.session_id !== "string" || !SESSION_ID.test(request.session_id)) {
+    throw new TypeError("managed session id is invalid");
+  }
+  if (request.turn_ids !== undefined && (!Array.isArray(request.turn_ids)
+    || request.turn_ids.length > 20
+    || request.turn_ids.some((id) => typeof id !== "string" || !TURN_ID.test(id)))) {
+    throw new TypeError("managed read session turn_ids must contain at most 20 valid turn ids");
+  }
+}
+
+function validateMemoryKey(key) {
+  if (!key || typeof key !== "object" || Array.isArray(key)
+    || Object.keys(key).some((field) => field !== "id" && field !== "version")
+    || !Number.isSafeInteger(key.id) || key.id < 1
+    || !Number.isSafeInteger(key.version) || key.version < 1) {
+    throw new TypeError("managed memory key must contain positive safe integer id and version");
+  }
+}
+
+function validateMemoryKeyResponse(key) {
+  try {
+    validateMemoryKey(key);
+  } catch (error) {
+    throw new ManagedError("invalid_response", "managed memory record has an invalid key", {
+      cause: error,
+    });
   }
 }
 

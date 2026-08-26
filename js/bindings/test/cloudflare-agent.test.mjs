@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { test } from "node:test";
 
+import { bindAgent, create, createEphemeral, destroy } from "../cloudflare/Agent.mjs";
 import * as HostAgent from "../host/Agent.mjs";
-import { bindAgent, create, destroy } from "../cloudflare/Agent.mjs";
 import { createCloudflareDurabilityStore } from "../runtime/cloudflare-durability-store.mjs";
 import * as Subagents from "../runtime/subagents.mjs";
 
@@ -159,6 +159,12 @@ test("Cloudflare Agent owns credentials, transport, and durability options", asy
     /owner\.env\.NANOCODEX Service Binding/,
   );
   await assert.rejects(
+    create(module, durableOwner(new MemoryStorage()), {
+      [Symbol.for("nanocodex.cloudflare.internalRuntime")]: [],
+    }),
+    /internal runtime options must be an object/,
+  );
+  await assert.rejects(
     create(module, { env: { NANOCODEX: egressBinding() } }),
     /requires owner\.ctx/,
   );
@@ -172,6 +178,46 @@ test("Cloudflare Agent owns credentials, transport, and durability options", asy
       env: { NANOCODEX: egressBinding() },
     }),
     /requires Durable Object SQLite storage/,
+  );
+});
+
+test("Cloudflare ephemeral Agent owns transport without durable state", async () => {
+  const module = await readFile(new URL("../pkg-web/nanocodex_bg.wasm", import.meta.url));
+  const storage = new MemoryStorage();
+  const subjects = [];
+  const owner = durableOwner(storage, egressBinding(subjects));
+  const agent = await createEphemeral(module, owner, {
+    instructions: "Use the caller's search tool.",
+    model: "gpt-5.6-sol",
+    tools: [{
+      name: "search",
+      description: "Search account history",
+      handler: () => [],
+    }],
+  });
+
+  assert.deepEqual(subjects, [FIRST_OBJECT_ID]);
+  assert.equal(storage.sessionId, undefined);
+  assert.equal(storage.journals.size, 0);
+  assert.equal(storage.events.length, 0);
+  await agent.session.shutdown();
+});
+
+test("Cloudflare ephemeral Agent validates adapter-owned startup", async () => {
+  const module = await readFile(new URL("../pkg-web/nanocodex_bg.wasm", import.meta.url));
+  const owner = durableOwner(new MemoryStorage(), {
+    async fetch() {
+      return { status: 403, headers: new Headers() };
+    },
+  });
+
+  await assert.rejects(
+    createEphemeral(module, owner),
+    /EGRESS broker rejected.*HTTP 403/,
+  );
+  await assert.rejects(
+    createEphemeral(module, owner, { transport: {} }),
+    /createEphemeral does not accept transport/,
   );
 });
 

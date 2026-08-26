@@ -32,3 +32,11 @@ export { dataset } from "./dataset.mjs";
 export type { DatasetOptions } from "./dataset.mjs";
 export { justBash } from "./bash.mjs";
 export type { JustBashNetworkOptions, JustBashRuntime } from "./bash.mjs";
+export { createTools } from "./Tools.mjs";
+export type {
+  AttachmentClient,
+  AttachmentSocket,
+  AttachmentTarget,
+  AttachmentTransport,
+  Tools,
+} from "./Tools.mjs";

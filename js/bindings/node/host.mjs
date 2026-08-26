@@ -6,6 +6,11 @@ import packageMetadata from "../package.json" with { type: "json" };
 
 import { createCodeRuntime } from "../runtime/code-runtime.mjs";
 import { createMcpRuntime } from "../runtime/mcp-runtime.mjs";
+import {
+  toolRouterBrand,
+  toolRouterRuntime,
+  toolRuntimeLifecycle,
+} from "../runtime/tool-router.mjs";
 import { utf8ByteLength } from "../runtime/utf8.mjs";
 
 const RESPONSES_WEBSOCKETS_BETA = "responses_websockets=2026-02-06";
@@ -16,6 +21,25 @@ const DEFAULT_MAX_FRAME_BYTES = 16 * 1024 * 1024;
 const MPP_CLIENT_PROTOCOL_ERROR_CLOSE_CODE = 3008;
 
 export function createNodeHost(options = {}) {
+  const toolMode = options.toolMode ?? "code";
+  if (toolMode !== "code" && toolMode !== "direct") {
+    throw new TypeError("toolMode must be code or direct");
+  }
+  const toolsRouter = options.tools?.[toolRouterBrand]
+    ? options.tools[toolRouterRuntime]
+    : undefined;
+  const toolsMcp = toolsRouter?.hasSourceKind("mcp") === true;
+  if (toolsRouter?.hasSource("workspace") && options.filesystem) {
+    throw new TypeError("workspace is already configured in Tools");
+  }
+  if (toolsMcp && options.mcpServers) {
+    throw new TypeError("MCP is already configured in Tools");
+  }
+  if ((toolsMcp || options.mcpServers) && toolMode !== "code") {
+    throw new TypeError("remote MCP requires Code Mode");
+  }
+  const toolsLifecycle = options.tools?.[toolRuntimeLifecycle];
+  toolsLifecycle?.available();
   const connections = new Map();
   const code = createCodeRuntime(options.tools, {
     require: createRequire(resolve(options.workspace ?? process.cwd(), ".nanocodex-code-mode.cjs")),
@@ -26,17 +50,10 @@ export function createNodeHost(options = {}) {
     ? import("../runtime/workspace.mjs")
         .then(({ tools }) => code.addTools(tools(options.filesystem)))
     : undefined;
-  const toolMode = options.toolMode ?? "code";
-  if (toolMode !== "code" && toolMode !== "direct") {
-    throw new TypeError("toolMode must be code or direct");
-  }
-  if (options.mcpServers && toolMode !== "code") {
-    throw new TypeError("remote MCP requires Code Mode");
-  }
   const mcp = options.mcpServers
     ? createMcpRuntime(options.mcpServers, { clientName: "nanocodex-node" })
     : undefined;
-  if (mcp) mcp.then((provider) => code.addProvider(provider), () => {});
+  if (mcp) mcp.then((provider) => code.addProvider(provider, { id: "mcp", kind: "mcp" }), () => {});
   const onEvent = options.onEvent || (() => {});
   const connectTimeoutMs = options.connectTimeoutMs ?? 30_000;
   const sendTimeoutMs = options.sendTimeoutMs ?? 30_000;
@@ -265,11 +282,13 @@ export function createNodeHost(options = {}) {
       for (const handle of [...connections.keys()]) close(handle);
       code.reset();
       await mcp?.then((provider) => provider.close(), () => {});
+      await toolsLifecycle?.close();
       options.onDispose?.();
     })();
     return disposal;
   }
 
+  toolsLifecycle?.claim();
   return Object.freeze({
     ready: async () => { await Promise.all([filesystem, mcp]); },
     retain() {

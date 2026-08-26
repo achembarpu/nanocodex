@@ -1,9 +1,9 @@
 # Nanocodex for JavaScript
 
 The Node, browser, and Web API host entrypoints expose the same viem-v3-style
-API over the same Rust/WASM agent. A required Responses `Transport` owns
-authentication and socket setup; `Agent.create(...)` owns agent policy, tools,
-and lifecycle. Generated WASM handles and host routing remain private.
+API. A `Transport` owns authentication, placement, and socket setup;
+`Agent.create(...)` owns tools and the common Agent/Turn lifecycle. Generated
+WASM handles, managed control-plane handles, and host routing remain private.
 
 ```js
 import { Actions, Agent, Transport } from "nanocodex/node";
@@ -54,7 +54,17 @@ Transports are explicit, immutable configurations, like viem v3 transports:
 Transport.openAi({ apiKey, websocketUrl });
 Transport.chatGpt({ subscription });
 Transport.mpp({ session: paymentSession });
+Transport.managed({ agent: { create: true } });
+Transport.managed({ agent: { id: retainedAgentId } });
 ```
+
+Managed identity is always explicit. `{ create: true }` provisions one new
+account-owned durable Agent; `{ id }` eagerly verifies and opens that existing
+Agent. Omitting `agent` never creates a durable resource. Both return the same
+`sessionId`, `events.watch()`, `turn.prompt()` / Turn, `dispose()`, and
+`session.shutdown()` lifecycle used by local transports. Managed shutdown
+closes this client and any reverse tool attachment; it does not delete the
+durable Agent.
 
 Choose the entrypoint by execution owner:
 
@@ -69,6 +79,70 @@ The browser transports additionally expose `Transport.hostManaged(...)` for a
 Worker, Durable Object, or application proxy that owns rotating credentials.
 Authentication modes are constructors rather than a union of mutually
 exclusive fields on `Agent.create`.
+
+### Compose and place tools
+
+`createTools` owns one deterministic tool recipe. Custom functions, a portable
+workspace, and MCP are composed once; placement is selected afterward. Pass the
+recipe to an in-process Node or Web API host, or reverse-attach it to a managed
+agent target:
+
+```js
+import { createTools } from "nanocodex";
+import { Agent, Transport, Workspace } from "nanocodex/node";
+import WebSocket from "ws";
+
+const workspace = await Workspace.open({ path: process.cwd() });
+const tools = await createTools({
+  workspace,
+  tools: {
+    lookup_issue: {
+      description: "Read one issue from the application database.",
+      parameters: {
+        type: "object",
+        properties: { id: { type: "string" } },
+        required: ["id"],
+        additionalProperties: false,
+      },
+      handler: ({ id }) => issues.get(id),
+    },
+  },
+  mcp: {
+    docs: { url: "https://mcp.example.test" },
+  },
+});
+
+const agent = await Agent.create({
+  transport: Transport.managed({
+    agent: { id: agentId },
+    baseUrl: managedOrigin,
+    apiKey,
+    toolsTransport: (target, options) => new WebSocket(target, {
+      headers: options.headers,
+    }),
+  }),
+  tools,
+});
+
+// On shutdown:
+await agent.session.shutdown();
+```
+
+The managed target retains credentials in a private transport closure; the API
+key is not embedded in the endpoint or serializable target data. While the
+attachment is live, an exact same-name attached tool wins over the cloud tool.
+After detach, the cloud definition is immediately eligible again. Definition
+parity is validated before the attached catalog becomes active, and calls
+already admitted retain their pinned placement.
+
+`Tools` has one Agent owner and owns the lifecycle of its MCP runtime and
+reverse attachments. Local transports host the recipe in process; a managed
+transport starts a bounded reverse-attachment supervisor while the durable
+Agent remains available through its cloud tools. A successful catalog
+acknowledgement upgrades later admissions to the attached placement. A second
+Agent host rejects the same value. Do not also supply legacy top-level
+workspace or MCP configuration to an Agent that already receives them through
+`Tools`.
 
 Browser consumers can attach Codex's ChatGPT Realtime voice lifecycle to the
 same retained Agent. The resource owns microphone, speaker, WebRTC, sideband,

@@ -1,10 +1,13 @@
 import {
   Actions,
   Agent,
+  type AgentLifecycle,
   type AgentSessionContext,
   ChatGptSubscription,
   type AccountsWallet,
   type CostStatus,
+  type LifecycleTurn,
+  type LifecycleTurnResult,
   type McpServer,
   createTempoProviderFromAccounts,
   createMemoryChatGptSubscriptionStore,
@@ -25,14 +28,22 @@ import {
 import {
   Agent as HostAgent,
   type BrowserWebSocketRequest,
+  type DefaultAgent,
   Transport as HostTransport,
 } from "../host/index.mjs";
 import type * as RootPublicTypes from "../index.mjs";
 import type * as BrowserPublicTypes from "../browser/index.mjs";
 import type * as HostPublicTypes from "../host/index.mjs";
 import type * as NodePublicTypes from "../node/index.mjs";
+import { createTools, type Tools as ToolsCapability } from "../index.mjs";
 import type { WorkspaceEntry as BrowserWorkspaceEntry } from "../browser/workspace.mjs";
 import type { WorkspaceEntry as NodeWorkspaceEntry } from "../node/workspace.mjs";
+
+const toolsCapability: ToolsCapability = await createTools();
+void toolsCapability;
+// @ts-expect-error Tools is nominal and cannot be forged from lifecycle-shaped methods.
+const forgedToolsCapability: ToolsCapability = { attach() {}, async close() {} };
+void forgedToolsCapability;
 import {
   createWorkerAgent,
   prepareWorkerAgent,
@@ -189,6 +200,23 @@ async function check() {
   const cloudflareApplication: true = extendedCloudflareAgent.application;
   void cloudflareApplication;
   CloudflareAgent.destroy(cloudflareOwner);
+  const ephemeralCloudflareAgent: DefaultAgent = await CloudflareAgent.createEphemeral(
+    cloudflareOwner,
+    {
+      instructions: "Search the caller's account history.",
+      model: "gpt-5.6-sol",
+      tools: [{
+        name: "search",
+        description: "Search account history",
+        handler: async () => [],
+      }],
+    },
+  );
+  ephemeralCloudflareAgent.turn.prompt({ input: "find a prior answer" });
+  await CloudflareAgent.createEphemeral(cloudflareOwner, {
+    // @ts-expect-error transport remains owned by the Cloudflare adapter.
+    transport: HostTransport.hostManaged(),
+  });
   await CloudflareAgent.create(cloudflareOwner, {
     // @ts-expect-error broker subjects are not caller-selected.
     subject: "caller-selected",
@@ -243,6 +271,27 @@ async function check() {
     workspace: nodeWorkspace.root,
     tools: [...Subagents.create({ maxConcurrency: 8 })],
   });
+  const child = await Subagents.spawn(agent, {
+    role: "memory-search",
+    task: "Search the available history tools.",
+    model: "luna",
+    thinking: "low",
+    outputSchema: {
+      type: "object",
+      properties: { answer: { type: "string" } },
+      required: ["answer"],
+      additionalProperties: false,
+    },
+  });
+  const localLifecycle: AgentLifecycle = agent;
+  void localLifecycle;
+  const childWait = await Subagents.wait(agent, {
+    agentIds: [child.agent_id],
+    timeoutMs: 30_000,
+  });
+  childWait.agents[0]?.status.state;
+  await Subagents.interrupt(agent, child.agent_id);
+  await Subagents.close(agent, child.agent_id);
   await agent.session.compact();
   const sessionContext: AgentSessionContext = await agent.session.appendDeveloperMessage(
     "voice started",
@@ -299,6 +348,40 @@ async function check() {
   });
   await subscription.status();
   await Agent.create({ transport: Transport.chatGpt({ subscription }) });
+  const managedTransport = Transport.managed({
+    agent: { id: "0198d3f0-8844-7000-8000-000000000001" },
+    baseUrl: "https://managed.example",
+    apiKey,
+    toolsTransport: (_target, _options) => ({
+      readyState: 1,
+      send() {},
+      close() {},
+      addEventListener() {},
+    }),
+  });
+  const managedAgent = await Agent.create({
+    transport: managedTransport,
+    tools: toolsCapability,
+  });
+  const commonManagedLifecycle: AgentLifecycle = managedAgent;
+  void commonManagedLifecycle;
+  const managedTurn: LifecycleTurn = managedAgent.turn.prompt({ input: "hello" });
+  const managedResult: LifecycleTurnResult = await managedTurn.result();
+  await managedResult.usage();
+  await managedAgent.session.shutdown();
+  const browserManaged = await BrowserAgent.create({
+    transport: BrowserTransport.managed({ agent: { create: true } }),
+    tools: toolsCapability,
+  });
+  await browserManaged.session.shutdown();
+  // @ts-expect-error managed identity is always explicit.
+  Transport.managed({ baseUrl: "https://managed.example" });
+  // @ts-expect-error create and open-existing identities are mutually exclusive.
+  Transport.managed({ agent: { create: true, id: "0198d3f0-8844-7000-8000-000000000001" } });
+  // @ts-expect-error managed service owns model policy.
+  await Agent.create({ transport: managedTransport, model: "gpt-5.6-sol" });
+  // @ts-expect-error managed transport accepts only the unified Tools recipe.
+  await Agent.create({ transport: managedTransport, tools: { echo: { handler() {} } } });
   // @ts-expect-error authentication belongs to the selected transport.
   await Agent.create({ transport: Transport.openAi({ apiKey }), subscription });
 
@@ -426,9 +509,9 @@ async function check() {
   });
   // @ts-expect-error transport queue policy is private to the adapter.
   await Agent.create({ transport: Transport.openAi({ apiKey }), maxQueuedMessages: 1 });
+  // @ts-expect-error browser send-buffer policy is private to the adapter.
   await BrowserAgent.create({
     transport: BrowserTransport.openAi({ apiKey }),
-    // @ts-expect-error browser send-buffer policy is private to the adapter.
     maxBufferedSendBytes: 1,
   });
 

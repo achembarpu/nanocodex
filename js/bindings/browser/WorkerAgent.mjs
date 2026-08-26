@@ -641,7 +641,7 @@ function releaseWorkerResult(results, resultId) {
 }
 
 function describeAgent(agentId, agent) {
-  return { agentId, sessionId: agent.sessionId };
+  return { handleId: agentId, agentId: agent.agentId, sessionId: agent.sessionId };
 }
 
 class WorkerConnection {
@@ -705,8 +705,8 @@ class WorkerConnection {
         if (!raw.released) {
           raw.released = true;
           this.rawAgents.delete(raw);
-          if (!this.constructingAgents.has(raw.agentId)) {
-            this.sendBestEffort("agent.dispose", [raw.agentId]);
+          if (!this.constructingAgents.has(raw.handleId)) {
+            this.sendBestEffort("agent.dispose", [raw.handleId]);
           }
           this.agents -= 1;
         }
@@ -722,14 +722,14 @@ class WorkerConnection {
   }
 
   async createClient(root, reservation) {
-    const agentId = root?.agentId;
-    this.constructingAgents.add(agentId);
+    const handleId = root?.handleId ?? root?.agentId;
+    this.constructingAgents.add(handleId);
     try {
       return await createAgentClient(this.runtime(), root, reservation);
     } catch (error) {
       if (this.closed) throw error;
       try {
-        await this.rpc("agent.dispose", [agentId]);
+        await this.rpc("agent.dispose", [handleId]);
       } catch (rollbackError) {
         throw new AggregateError(
           [error, rollbackError],
@@ -738,7 +738,7 @@ class WorkerConnection {
       }
       throw error;
     } finally {
-      this.constructingAgents.delete(agentId);
+      this.constructingAgents.delete(handleId);
       this.closeIfIdle();
     }
   }
@@ -747,34 +747,38 @@ class WorkerConnection {
     this.assertOpen();
     this.agents += 1;
     const connection = this;
-    const { agentId } = descriptor;
+    const handleId = descriptor.handleId ?? descriptor.agentId;
+    const agentId = descriptor.handleId === undefined
+      ? descriptor.sessionId
+      : descriptor.agentId;
     const raw = {
+      handleId,
       agentId,
       sessionId: descriptor.sessionId,
       released: false,
-      prompt(input, id) { return connection.prompt(agentId, { input, ...(id === undefined ? {} : { id }) }); },
-      promptContent(input, id) { return connection.prompt(agentId, { input: JSON.parse(input), ...(id === undefined ? {} : { id }) }); },
-      fork: async () => connection.rawAgent(await connection.rpc("agent.fork", [agentId])),
+      prompt(input, id) { return connection.prompt(handleId, { input, ...(id === undefined ? {} : { id }) }); },
+      promptContent(input, id) { return connection.prompt(handleId, { input: JSON.parse(input), ...(id === undefined ? {} : { id }) }); },
+      fork: async () => connection.rawAgent(await connection.rpc("agent.fork", [handleId])),
       forkFrom: async (result) => {
         if (result?.connection !== connection) {
           throw new TypeError("historical forks require a result from the same Worker Agent");
         }
-        return connection.rawAgent(await connection.rpc("agent.fork", [agentId, result.resultId]));
+        return connection.rawAgent(await connection.rpc("agent.fork", [handleId, result.resultId]));
       },
-      spawn: async () => connection.rawAgent(await connection.rpc("agent.spawn", [agentId])),
-      compact: () => connection.rpc("agent.compact", [agentId]),
-      context: async () => JSON.stringify(await connection.rpc("agent.context", [agentId])),
-      setThinking: (value) => connection.rpc("agent.setThinking", [agentId, value]),
-      setFastMode: (value) => connection.rpc("agent.setFastMode", [agentId, value]),
-      appendDeveloperMessage: async (text) => JSON.stringify(await connection.rpc("agent.appendDeveloperMessage", [agentId, text])),
-      startRealtimeConversation: async () => JSON.stringify(await connection.rpc("agent.realtime.start", [agentId])),
-      endRealtimeConversation: async () => JSON.stringify(await connection.rpc("agent.realtime.end", [agentId])),
-      realtimeDelegation: (input, transcript) => connection.rpc("agent.realtime.delegation", [agentId, input, transcript]),
-      realtimeTailDelegation: (transcript) => connection.rpc("agent.realtime.tailDelegation", [agentId, transcript]),
+      spawn: async () => connection.rawAgent(await connection.rpc("agent.spawn", [handleId])),
+      compact: () => connection.rpc("agent.compact", [handleId]),
+      context: async () => JSON.stringify(await connection.rpc("agent.context", [handleId])),
+      setThinking: (value) => connection.rpc("agent.setThinking", [handleId, value]),
+      setFastMode: (value) => connection.rpc("agent.setFastMode", [handleId, value]),
+      appendDeveloperMessage: async (text) => JSON.stringify(await connection.rpc("agent.appendDeveloperMessage", [handleId, text])),
+      startRealtimeConversation: async () => JSON.stringify(await connection.rpc("agent.realtime.start", [handleId])),
+      endRealtimeConversation: async () => JSON.stringify(await connection.rpc("agent.realtime.end", [handleId])),
+      realtimeDelegation: (input, transcript) => connection.rpc("agent.realtime.delegation", [handleId, input, transcript]),
+      realtimeTailDelegation: (transcript) => connection.rpc("agent.realtime.tailDelegation", [handleId, transcript]),
       browserVoice: async (voice) => connection.rawVoice(
-        await connection.rpc("agent.voice.create", [agentId, voice]),
+        await connection.rpc("agent.voice.create", [handleId, voice]),
       ),
-      shutdown: () => connection.rpc("agent.shutdown", [agentId]),
+      shutdown: () => connection.rpc("agent.shutdown", [handleId]),
       free() {},
     };
     this.rawAgents.add(raw);

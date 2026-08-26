@@ -4,9 +4,11 @@ import { createServer } from "node:http";
 import { test } from "node:test";
 import { WebSocketServer } from "ws";
 
-import { Actions, Agent, Transport } from "../node/index.mjs";
+import { Actions, Agent, Subagents, Transport } from "../node/index.mjs";
 import { createNodeHost } from "../node/host.mjs";
 import { createMemoryDurabilityStore } from "../runtime/durability-store.mjs";
+import { createWorkspace } from "../runtime/workspace.mjs";
+import { createTools } from "../tools/Tools.mjs";
 
 const SESSION_IDS = Object.freeze({
   primary: "018f1f9a-7b3c-7a01-8000-000000000001",
@@ -60,6 +62,50 @@ test("Node host opens application sockets through MPP", async () => {
     reconnectable: false,
   });
   host.close(1);
+});
+
+test("Node host owns one Tools lifecycle and validates Tools-owned MCP policy", async () => {
+  const mcp = {
+    fixture: {
+      client: {
+        async listTools() { return { tools: [] }; },
+        async close() {},
+      },
+    },
+  };
+  const tools = await createTools({ mcp });
+  assert.throws(
+    () => createNodeHost({ tools, toolMode: "direct" }),
+    /remote MCP requires Code Mode/,
+  );
+  assert.throws(
+    () => createNodeHost({ tools, mcpServers: mcp }),
+    /MCP is already configured in Tools/,
+  );
+  const host = createNodeHost({ tools });
+  assert.throws(
+    () => createNodeHost({ tools }),
+    /already belongs to an Agent host/,
+  );
+  await host.dispose();
+  assert.throws(
+    () => tools.attach("wss://managed.test/tools"),
+    /Tools runtime is closed/,
+  );
+
+  const workspace = createWorkspace({ backend: {
+    async list() { return []; },
+    async readFile() { return new Uint8Array(); },
+    async writeFile() {},
+    async remove() {},
+    async mkdir() {},
+  } });
+  const workspaceTools = await createTools({ workspace });
+  assert.throws(
+    () => createNodeHost({ tools: workspaceTools, filesystem: {} }),
+    /workspace is already configured in Tools/,
+  );
+  await workspaceTools.close();
 });
 
 test("Node host loads and calls deferred Mercator MCP tools", async () => {
@@ -177,6 +223,8 @@ test("Node-hosted WASM preserves follow-ons, cache identity, events, and custom 
       },
     },
   });
+  assert.equal(agent.agentId, SESSION_IDS.primary);
+  assert.equal(agent.sessionId, SESSION_IDS.primary);
   const watch = agent.events.watch();
   watch.onEvent((event) => events.push(event));
 
@@ -410,6 +458,93 @@ test("a durable Node-hosted root runs the canonical in-memory Rust subagent task
     await decoy.session.shutdown();
     await server.close();
     await decoyServer.close();
+  }
+});
+
+test("Node host invokes canonical subagent handlers without a root model turn", async () => {
+  const server = await startServer();
+  const agent = await createWarmAgent({
+    apiKey: "test-key",
+    websocketUrl: server.url,
+    thinking: "none",
+    sessionId: "018f1f9a-7b3c-7a09-8000-000000000009",
+    tools: [{
+      name: "find_threads",
+      description: "Find one memory thread.",
+      parameters: { type: "object" },
+      handler: () => ({ thread_id: "thread-memory" }),
+    }, ...Subagents.create({ maxConcurrency: 1 })],
+  });
+
+  try {
+    const startedPromise = Subagents.spawn(agent, {
+      role: "memory-search",
+      task: "Use find_threads and return its thread ID.",
+      model: "luna",
+      thinking: "low",
+      outputSchema: {
+        type: "object",
+        properties: { answer: { type: "string" } },
+        required: ["answer"],
+        additionalProperties: false,
+      },
+    });
+    const childSocket = await bounded(server.connection, "child connection");
+    const childReader = messageReader(childSocket);
+    await bounded(childReader.next(), "child warmup");
+    sendWarmup(childSocket, "direct-child-warmup");
+    const started = await bounded(startedPromise, "direct spawn");
+    assert.deepEqual(started, {
+      agent_id: 1,
+      role: "memory-search",
+      status: { state: "running" },
+    });
+    await bounded(childReader.next(), "child task");
+    sendCompleted(childSocket, "direct-find", [{
+      type: "function_call",
+      call_id: "direct-find-call",
+      name: "find_threads",
+      arguments: "{}",
+    }]);
+    const found = await bounded(childReader.next(), "find_threads output");
+    assert.deepEqual(JSON.parse(found.input[0].output), { thread_id: "thread-memory" });
+    sendCompleted(childSocket, "direct-submit", [{
+      type: "function_call",
+      call_id: "direct-submit-call",
+      name: "submit_result",
+      arguments: JSON.stringify({
+        turn_token: 1,
+        output: { answer: "thread-memory" },
+      }),
+    }]);
+    const submitted = await bounded(childReader.next(), "submit_result output");
+    assert.deepEqual(JSON.parse(submitted.input[0].output), { accepted: true });
+    sendFinal(childSocket, "direct-final", "submitted");
+
+    const waited = await bounded(Subagents.wait(agent, {
+      agentIds: [started.agent_id],
+      timeoutMs: 5_000,
+    }), "direct wait");
+    assert.equal(waited.timed_out, false);
+    assert.deepEqual(waited.agents[0].status, {
+      state: "completed",
+      output: { answer: "thread-memory" },
+    });
+    await Subagents.close(agent, started.agent_id);
+    await assert.rejects(
+      Subagents.wait(agent, { agentIds: [started.agent_id], timeoutMs: 0 }),
+      /timeoutMs must be greater than zero/,
+    );
+    const nonRoot = await agent.session.spawn();
+    await assert.rejects(
+      Subagents.wait(nonRoot, { agentIds: [started.agent_id], timeoutMs: 1 }),
+      /require the owning root agent/,
+    );
+    nonRoot.dispose();
+    assert.equal(server.connections, 1);
+  } finally {
+    await agent.session.shutdown();
+    await server.close();
   }
 });
 
@@ -672,6 +807,20 @@ function messageReader(socket) {
       return new Promise((resolve) => { waiter = resolve; });
     },
   };
+}
+
+async function bounded(promise, stage) {
+  let timer;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(`timed out waiting for ${stage}`)), 5_000);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 class ManagedSocket extends EventTarget {

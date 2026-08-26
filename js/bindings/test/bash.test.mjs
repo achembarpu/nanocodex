@@ -8,6 +8,10 @@ test("Just Bash mounts one persistent workspace without a process sandbox", asyn
   const first = await justBash({ filesystem: workspace });
   const written = await first.tool.handler({
     cmd: "mkdir -p notes && printf 'forty two\\n' > notes/answer.txt && cat notes/answer.txt",
+    justification: "advisory for a host that supports approvals",
+    login: true,
+    yield_time_ms: 10_000,
+    prefix_rule: ["mkdir"],
   }, context());
 
   assert.equal(written.exit_code, 0);

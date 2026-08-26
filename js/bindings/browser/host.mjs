@@ -1,4 +1,9 @@
 import { createCodeRuntime, toolResult } from "../runtime/code-runtime.mjs";
+import {
+  toolRouterBrand,
+  toolRouterRuntime,
+  toolRuntimeLifecycle,
+} from "../runtime/tool-router.mjs";
 import { utf8ByteLength } from "../runtime/utf8.mjs";
 import { createWorkerEvaluator } from "../runtime/worker-evaluator.mjs";
 import { openHostManagedWebSocket } from "./hostManagedWebSocket.mjs";
@@ -10,6 +15,25 @@ const MPP_CLIENT_PROTOCOL_ERROR_CLOSE_CODE = 3008;
 const WEBSOCKET_OPEN = 1;
 
 export function createBrowserHost(options = {}) {
+  const toolMode = options.toolMode ?? "code";
+  if (toolMode !== "code" && toolMode !== "direct") {
+    throw new TypeError("toolMode must be code or direct");
+  }
+  const toolsRouter = options.tools?.[toolRouterBrand]
+    ? options.tools[toolRouterRuntime]
+    : undefined;
+  const toolsMcp = toolsRouter?.hasSourceKind("mcp") === true;
+  if (toolsRouter?.hasSource("workspace") && options.filesystem) {
+    throw new TypeError("workspace is already configured in Tools");
+  }
+  if (toolsMcp && options.mcp) {
+    throw new TypeError("MCP is already configured in Tools");
+  }
+  if ((toolsMcp || options.mcp) && toolMode !== "code") {
+    throw new TypeError("remote MCP requires Code Mode");
+  }
+  const toolsLifecycle = options.tools?.[toolRuntimeLifecycle];
+  toolsLifecycle?.available();
   const WebSocketImpl = options.WebSocketImpl ?? globalThis.WebSocket;
   const createWebSocket = options.createWebSocket
     ?? (options.hostManagedProtocol && ((endpoint, sessionId) =>
@@ -28,6 +52,24 @@ export function createBrowserHost(options = {}) {
           "browser Code Mode requires a child Worker or an explicit codeEvaluator",
         )));
   const code = createCodeRuntime(options.tools, { evaluate: codeEvaluator });
+  const toolProviders = options.toolProviders ?? [];
+  if (!Array.isArray(toolProviders)) {
+    throw new TypeError("toolProviders must be an array");
+  }
+  for (const [index, provider] of toolProviders.entries()) {
+    const sourceOptions = {
+      id: provider.sourceId ?? `attached:${String(index).padStart(8, "0")}`,
+      kind: "attached",
+      mode: "attached-over-cloud",
+      deferred: true,
+    };
+    const sourceId = code.addProvider(provider, sourceOptions);
+    provider.setCatalogValidator?.((definitions) =>
+      code.validateProviderDefinitions(sourceId, definitions, sourceOptions));
+  }
+  const toolProvidersReady = Promise.all(
+    toolProviders.map((provider) => provider.settled?.()),
+  );
   if (options.filesystem && options.filesystemTools === false) {
     code.addTools({
       apply_patch: {
@@ -47,19 +89,12 @@ export function createBrowserHost(options = {}) {
     ? import("../runtime/workspace.mjs")
         .then(({ tools }) => code.addTools(tools(options.filesystem)))
     : undefined;
-  const toolMode = options.toolMode ?? "code";
-  if (toolMode !== "code" && toolMode !== "direct") {
-    throw new TypeError("toolMode must be code or direct");
-  }
-  if (options.mcp && toolMode !== "code") {
-    throw new TypeError("remote MCP requires Code Mode");
-  }
   const mcp = options.mcp
     ? import("../runtime/mcp-runtime.mjs").then(({ createMcpRuntime }) =>
         createMcpRuntime(options.mcp, { clientName: "nanocodex-browser" }))
     : undefined;
   const mcpInstalled = mcp?.then((provider) => {
-    code.addProvider(provider);
+    code.addProvider(provider, { id: "mcp", kind: "mcp" });
     return provider;
   });
   const onEvent = options.onEvent || (() => {});
@@ -347,6 +382,7 @@ export function createBrowserHost(options = {}) {
       cleanup(() => closePreconnected(disposalError));
       cleanup(() => code.reset());
       cleanup(() => mcpInstalled?.then((provider) => provider.close(), () => {}));
+      cleanup(() => toolsLifecycle?.close());
       cleanup(() => options.onDispose?.());
       const settled = await Promise.allSettled(cleanups);
       const errors = settled
@@ -418,8 +454,11 @@ export function createBrowserHost(options = {}) {
     }
   }
 
+  toolsLifecycle?.claim();
   return Object.freeze({
-    ready: async () => { await Promise.all([filesystemReady, mcpInstalled]); },
+    ready: async () => {
+      await Promise.all([filesystemReady, mcpInstalled, toolProvidersReady]);
+    },
     retain() {
       if (disposal) throw new Error("Nanocodex host is already disposed");
       references += 1;

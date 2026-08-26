@@ -398,6 +398,40 @@ test("MCP startup timeout bounds complete paginated discovery", async () => {
   assert.equal(pages, 2);
 });
 
+test("MCP tool deadlines settle even when an injected client ignores AbortSignal", async () => {
+  const mcp = await createMcpRuntime({
+    stubborn: {
+      timeoutMs: 10,
+      client: {
+        async listTools() {
+          return {
+            tools: [{
+              name: "hang",
+              description: "Never settles.",
+              inputSchema: { type: "object", additionalProperties: false },
+            }],
+          };
+        },
+        callTool() {
+          return new Promise(() => {});
+        },
+      },
+    },
+  });
+  await mcp.settled();
+  const runtime = createCodeRuntime();
+  runtime.addProvider(mcp);
+  const started = Date.now();
+  const result = JSON.parse(await runtime.executeTool(
+    "mcp__stubborn__hang",
+    "{}",
+  ));
+  assert.equal(result.success, false);
+  assert.match(result.output, /exceeded 10 milliseconds/);
+  assert.ok(Date.now() - started < 1_000);
+  await mcp.close();
+});
+
 test("remote MCP tools retry payment challenges through McpClient.wrap", async () => {
   const challenge = Challenge.from({
     id: "nanocodex-paid-mcp",

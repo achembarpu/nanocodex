@@ -2,6 +2,7 @@ import {
   createResponsesTransport,
   nonEmpty,
 } from "../runtime/responses-transport.mjs";
+import { createManagedTransport } from "../runtime/managed-transport.mjs";
 import { defaultHostManagedWebSocketUrl } from "./hostManagedWebSocket.mjs";
 
 export function openAi(options) {
@@ -41,6 +42,11 @@ export function mpp(options) {
     mpp: options.session,
     ...connection(options),
   });
+}
+
+/** Account-authenticated durable Agent transport with explicit create/open identity. */
+export function managed(options) {
+  return createManagedTransport(options);
 }
 
 function connection(options = {}) {

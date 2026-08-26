@@ -1,3 +1,5 @@
+import { toolRouterBrand, toolRouterRuntime } from "./tool-router.mjs";
+
 export const subagentsBrand = Symbol("nanocodex.subagents");
 export const defaultSubagentMaxConcurrency = 32;
 
@@ -5,12 +7,27 @@ const DEFAULT_SUBAGENTS = Object.freeze({
   max_concurrency: defaultSubagentMaxConcurrency,
 });
 
-export function resolveTools(configuration) {
+export function resolveTools(configuration, { defaultSubagents = true } = {}) {
+  const subagentsByDefault = defaultSubagents ? DEFAULT_SUBAGENTS : undefined;
+  if (configuration === undefined) {
+    return { tools: {}, subagents: subagentsByDefault };
+  }
   if (!Array.isArray(configuration)) {
-    return { tools: configuration, subagents: DEFAULT_SUBAGENTS };
+    if (!configuration || typeof configuration !== "object") {
+      throw new TypeError("tools must be a tool map or an array of named tools");
+    }
+    const capabilityLike = typeof configuration.attach === "function"
+      || typeof configuration.close === "function";
+    if (capabilityLike
+      && (!configuration[toolRouterBrand]
+        || !configuration[toolRouterRuntime]
+        || typeof configuration[toolRouterRuntime].execute !== "function")) {
+      throw new TypeError("tools capability was not created by createTools()");
+    }
+    return { tools: configuration, subagents: subagentsByDefault };
   }
   const tools = {};
-  let subagents = DEFAULT_SUBAGENTS;
+  let subagents = subagentsByDefault;
   let configuredSubagents = false;
   for (const entry of configuration) {
     const extension = entry?.[subagentsBrand];

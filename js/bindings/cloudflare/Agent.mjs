@@ -11,6 +11,18 @@ import {
 } from "./event-socket.mjs";
 
 const STARTUP_TIMEOUT_MS = 10_000;
+const INTERNAL_RUNTIME = Symbol.for("nanocodex.cloudflare.internalRuntime");
+const EPHEMERAL_APPLICATION_OPTIONS = new Set([
+  "fastMode",
+  "instructions",
+  "model",
+  "reasoningMode",
+  "resume",
+  "sessionId",
+  "thinking",
+  "tools",
+  "workspace",
+]);
 const APPLICATION_OPTIONS = new Set([
   "eventPersistence",
   "instructions",
@@ -23,6 +35,7 @@ const lifecycles = new WeakMap();
 export function bindAgent(module, hostAgent = HostAgent) {
   return Object.freeze({
     create: (owner, options) => create(module, owner, options, hostAgent),
+    createEphemeral: (owner, options) => createEphemeral(module, owner, options),
     destroy,
     route,
   });
@@ -98,8 +111,15 @@ export async function create(module, owner, options = {}, hostAgent = HostAgent)
 async function createOwned(module, resolved, options, hostAgent, lifecycle) {
   const { context, egress, subject } = resolved;
   const configured = applicationOptions(options);
-  const eventPersistence = configured.eventPersistence ?? "durable";
-  const { eventPersistence: _eventPersistence, ...agentOptions } = configured;
+  const {
+    eventPersistence = "durable",
+    [INTERNAL_RUNTIME]: internalRuntime,
+    ...agentOptions
+  } = configured;
+  if (internalRuntime !== undefined
+    && (!internalRuntime || typeof internalRuntime !== "object" || Array.isArray(internalRuntime))) {
+    throw new TypeError("Cloudflare Agent internal runtime options must be an object");
+  }
   const eventSocket = eventPersistence === "durable"
     ? createCloudflareEventSocket(context)
     : undefined;
@@ -132,7 +152,11 @@ async function createOwned(module, resolved, options, hostAgent, lifecycle) {
     agent = await hostAgent.create({
       ...agentOptions,
       module,
-      toolMode: agentOptions.toolMode ?? "direct",
+      toolMode: internalRuntime?.toolMode ?? "direct",
+      codeEvaluator: internalRuntime?.codeEvaluator,
+      [Symbol.for("nanocodex.browser.internalRuntime")]: {
+        toolProviders: internalRuntime?.toolProviders,
+      },
       transport,
       sessionId,
       durability,
@@ -211,6 +235,49 @@ function errorMessage(error) {
   return error instanceof Error ? error.message : String(error);
 }
 
+/** @internal Creates one non-durable Agent in the current Cloudflare isolate. */
+export async function createEphemeral(module, owner, options = {}) {
+  const { egress, subject } = resolveOwner(owner);
+  const agentOptions = ephemeralApplicationOptions(options);
+  const endpoint = cloudflareEgress({
+    binding: scopeCloudflareEgress(egress, subject),
+  });
+  const startup = deferred();
+  const transport = Transport.hostManaged({
+    ...endpoint,
+    websocketPreconnect: true,
+    async createWebSocket(url, id, request) {
+      try {
+        const opened = await endpoint.createWebSocket(url, id, request);
+        if (request.authorization === "preconnect") startup.resolve();
+        return opened;
+      } catch (error) {
+        if (request.authorization === "preconnect") startup.reject(error);
+        throw error;
+      }
+    },
+  });
+
+  let agent;
+  try {
+    agent = await HostAgent.create({
+      ...agentOptions,
+      module,
+      toolMode: "direct",
+      transport,
+    });
+    await withTimeout(
+      startup.promise,
+      STARTUP_TIMEOUT_MS,
+      "Cloudflare ephemeral Agent EGRESS startup validation timed out",
+    );
+    return agent;
+  } catch (error) {
+    if (agent) await agent.session.shutdown().catch(() => {});
+    throw error;
+  }
+}
+
 function resolveOwner(owner) {
   const context = resolveContext(owner);
   const egress = owner.env?.NANOCODEX;
@@ -262,6 +329,20 @@ function applicationOptions(options) {
     throw new TypeError(
       "Cloudflare Agent.create terminalReceiptRetention must be an integer from 1 through 4096",
     );
+  }
+  return options;
+}
+
+function ephemeralApplicationOptions(options) {
+  if (!options || typeof options !== "object" || Array.isArray(options)) {
+    throw new TypeError("Cloudflare Agent.createEphemeral options must be an object");
+  }
+  for (const name of Object.keys(options)) {
+    if (!EPHEMERAL_APPLICATION_OPTIONS.has(name)) {
+      throw new TypeError(
+        `Cloudflare Agent.createEphemeral does not accept ${name}; transport and runtime policy are owned by the adapter`,
+      );
+    }
   }
   return options;
 }

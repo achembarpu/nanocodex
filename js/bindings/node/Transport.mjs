@@ -2,6 +2,7 @@ import {
   createResponsesTransport,
   nonEmpty,
 } from "../runtime/responses-transport.mjs";
+import { createManagedTransport } from "../runtime/managed-transport.mjs";
 
 export function openAi(options) {
   const apiKey = nonEmpty(options?.apiKey, "OpenAI API key");
@@ -29,6 +30,11 @@ export function mpp(options) {
     mpp: options.session,
     ...endpoints(options),
   });
+}
+
+/** Account-authenticated durable Agent transport with explicit create/open identity. */
+export function managed(options) {
+  return createManagedTransport(options);
 }
 
 function endpoints(options = {}) {
