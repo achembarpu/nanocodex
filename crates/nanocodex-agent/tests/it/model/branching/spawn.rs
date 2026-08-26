@@ -277,7 +277,7 @@ async fn cloned_builders_singleflight_one_shared_prefix_warmup() -> Result<()> {
         .shared_prompt_cache();
 
     let (first, mut first_events) = builder.clone().build()?;
-    let first_session = first.session_id();
+    let first_session = first.session_id().to_owned();
     first.prompt("first turn").await?.result().await?;
     drop(first);
     let mut first_warmup_source = None;

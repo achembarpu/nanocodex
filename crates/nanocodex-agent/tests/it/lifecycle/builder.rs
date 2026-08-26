@@ -147,7 +147,7 @@ async fn rollout_uses_an_explicit_typed_session_id() {
         .build()
         .unwrap();
 
-    assert_eq!(agent.session_id(), session_id);
+    assert_eq!(agent.local_session_id(), Some(session_id));
     assert_eq!(
         agent.rollout().expect("rollout enabled").thread_id(),
         session_id.to_string()
