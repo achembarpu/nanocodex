@@ -168,7 +168,7 @@
     {
       "binding": "EVALS_DB",
       "database_name": "nanocodex-evals",
-      "database_id": "0e02b65e-9d95-447f-bbf3-e0ae39b54e44",
+      "database_id": "d49546ff-8e8f-4e26-962a-c2cfbaa946f8",
       "migrations_dir": "migrations"
     }
   ],
@@ -235,7 +235,7 @@
         {
           "binding": "EVALS_DB",
           "database_name": "nanocodex-evals",
-          "database_id": "0e02b65e-9d95-447f-bbf3-e0ae39b54e44",
+          "database_id": "d49546ff-8e8f-4e26-962a-c2cfbaa946f8",
           "migrations_dir": "migrations"
         }
       ],
