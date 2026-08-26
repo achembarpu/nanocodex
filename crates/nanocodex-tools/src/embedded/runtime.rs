@@ -262,12 +262,28 @@ impl EmbeddedToolRuntime {
     /// request.
     #[must_use]
     pub fn contains(&self, name: &str) -> bool {
-        self.local.iter().any(|tool| tool.name.as_ref() == name)
-            || self.host.as_ref().is_some_and(|_| {
-                self.callable_tool_names
-                    .read()
-                    .is_ok_and(|names| names.contains(name))
-            })
+        if self.local.iter().any(|tool| tool.name.as_ref() == name) {
+            return true;
+        }
+        if let (Some(host), Some(session_id)) = (&self.host, &self.session_id)
+            && let Ok(definitions) = host.tool_definitions(session_id)
+        {
+            let found = definitions
+                .iter()
+                .any(|definition| definition.name() == name);
+            if let Ok(mut names) = self.callable_tool_names.write() {
+                names.clear();
+                names.extend(
+                    definitions
+                        .into_iter()
+                        .map(|definition| definition.name().to_owned()),
+                );
+            }
+            return found;
+        }
+        self.callable_tool_names
+            .read()
+            .is_ok_and(|names| names.contains(name))
     }
 
     /// Dispatches a direct embedded definition or returns a model-visible failure.
@@ -427,7 +443,10 @@ fn failed(message: &str) -> CodeModeExecution {
 
 #[cfg(all(test, not(target_family = "wasm")))]
 mod tests {
-    use std::sync::{Arc, Mutex};
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    };
 
     use async_trait::async_trait;
     use nanocodex_oai_api::tools::ToolOutputBody;
@@ -451,6 +470,11 @@ mod tests {
     struct DeferredHost;
 
     struct PendingDeferredHost;
+
+    #[derive(Clone)]
+    struct LateDeferredHost {
+        ready: Arc<AtomicBool>,
+    }
 
     struct ExecHost;
 
@@ -605,6 +629,47 @@ mod tests {
             _context: ToolContext<'a>,
         ) -> HostFuture<'a, Result<CodeModeExecution, CodeModeHostError>> {
             Box::pin(async { unreachable!("pending discovery does not execute code") })
+        }
+    }
+
+    impl CodeModeHost for LateDeferredHost {
+        fn tool_definitions(
+            &self,
+            _session_id: &str,
+        ) -> Result<Vec<ToolDefinition>, CodeModeHostError> {
+            let mut definitions = vec![ToolDefinition::tool_search(
+                "client",
+                "Search deferred MCP tools.",
+                json!({"type": "object"}),
+            )];
+            if self.ready.load(Ordering::Acquire) {
+                definitions.push(
+                    ToolDefinition::function(
+                        "mcp__viem__search_docs",
+                        "Search Viem documentation.",
+                        json!({"type": "object"}),
+                    )
+                    .with_deferred_loading(),
+                );
+            }
+            Ok(definitions)
+        }
+
+        fn execute<'a>(
+            &'a self,
+            _source: &'a str,
+            _context: ToolContext<'a>,
+        ) -> HostFuture<'a, Result<CodeModeExecution, CodeModeHostError>> {
+            Box::pin(async { unreachable!("this test dispatches the late tool directly") })
+        }
+
+        fn execute_tool<'a>(
+            &'a self,
+            name: &'a str,
+            _input: ToolInput,
+            _context: ToolContext<'a>,
+        ) -> HostFuture<'a, Result<crate::ToolOutput, CodeModeHostError>> {
+            Box::pin(async move { Ok(crate::ToolOutput::from_json(json!({"name": name}), true)) })
         }
     }
 
@@ -848,6 +913,34 @@ mod tests {
             .await;
         assert!(output.success);
         assert_eq!(output.structured_result()["name"], "mcp__mercator__search");
+    }
+
+    #[tokio::test]
+    async fn direct_dispatch_refreshes_tools_discovered_after_the_model_prefix() {
+        let ready = Arc::new(AtomicBool::new(false));
+        let tools = bound_tools(LateDeferredHost {
+            ready: Arc::clone(&ready),
+        })
+        .for_session("session-1");
+        let runtime = EmbeddedToolRuntime::new_with_tools(".", None, None, &tools);
+        let specs = runtime.model_specs("session-1");
+        assert_eq!(
+            specs.iter().map(ToolDefinition::name).collect::<Vec<_>>(),
+            ["exec", "tool_search"]
+        );
+        assert!(!runtime.contains("mcp__viem__search_docs"));
+
+        ready.store(true, Ordering::Release);
+        assert!(runtime.contains("mcp__viem__search_docs"));
+        let output = runtime
+            .execute_tool(
+                "mcp__viem__search_docs",
+                ToolInput::Function(serde_json::value::to_raw_value(&json!({})).unwrap()),
+                ToolContext::new("gpt-5", "session-1", "call-1", &[], 1_000),
+            )
+            .await;
+        assert!(output.success);
+        assert_eq!(output.structured_result()["name"], "mcp__viem__search_docs");
     }
 
     #[tokio::test]
