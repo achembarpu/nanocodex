@@ -392,8 +392,8 @@ pub enum ToolsBuildError {
     #[error("tool name `{0}` is registered more than once")]
     DuplicateName(Box<str>),
 
-    /// A singleton capability source was added more than once.
-    #[error("tool capability source `{0}` is configured more than once")]
+    /// A singleton tool source was added more than once.
+    #[error("tool source `{0}` is configured more than once")]
     DuplicateSource(&'static str),
 
     /// A custom tool collides with an enabled built-in tool.

@@ -448,7 +448,8 @@ shared registry and installs fresh tools for every root, spawn, and fork:
 
 ```rust,ignore
 let (registry, control, updates) = nanocodex_subagents::channel(max_concurrency);
-let tools = HostedTools::new(javascript_host);
+let tools = Tools::builder().without_defaults().build()?;
+let tools = nanocodex_tools::embedded::bind_host(tools, javascript_host);
 let (agent, events) = Nanocodex::builder(openai)
     .tools_factory(move |handle| {
         nanocodex_subagents::install_tools(tools.clone(), handle, registry.clone())
