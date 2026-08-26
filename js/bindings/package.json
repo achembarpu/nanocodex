@@ -158,6 +158,7 @@
     "test:typecheck": "tsc -p test/tsconfig.json"
   },
   "dependencies": {
+    "@cfworker/json-schema": "4.1.1",
     "@eduoj/wasm-clang": "1.0.0",
     "@microsoft/dev-tunnels-ssh": "3.12.40",
     "@microsoft/dev-tunnels-ssh-keys": "3.12.40",
