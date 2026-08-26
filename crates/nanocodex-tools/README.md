@@ -61,7 +61,7 @@ be replaced, and colliding normalized JavaScript names are rejected when the
 recipe is built.
 
 `ToolsBuilder::add` composes the same recipe from a fixed [`Tool`], a
-[`WorkspaceTools`] value, or [`Mcp`]. A workspace source selects canonical
+[`WorkspaceTools`] value, or [`Mcp`](mcp::Mcp). A workspace source selects canonical
 local workspace tools rooted at its directory; adding a second workspace source
 is rejected.
 Namespaced Code Mode names such as `image_gen__imagegen` remain available to
