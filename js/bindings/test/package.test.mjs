@@ -75,7 +75,11 @@ test("the packed package ships and resolves every public entry point", async () 
       import { fileURLToPath } from "node:url";
       import { Actions } from "nanocodex";
       import * as rootExports from "nanocodex";
-      import { createMemoryDurabilityStore, durabilityRevision } from "nanocodex/durability";
+      import {
+        createMemoryDurabilityStore,
+        durabilityRevision,
+        sqliteDurabilitySchema,
+      } from "nanocodex/durability";
       import * as durabilityExports from "nanocodex/durability";
       import { createCloudflareDurabilityStore } from "nanocodex/durability/cloudflare";
       import {
@@ -132,7 +136,7 @@ test("the packed package ships and resolves every public entry point", async () 
         transactionSync(callback) { return callback(); },
       });
       assert.equal(Object.isFrozen(cloudflareStore), true);
-      assert.equal(cloudflareSchemaStatements, 3);
+      assert.equal(cloudflareSchemaStatements, sqliteDurabilitySchema.length + 1);
       let postgresCalls = 0;
       const postgresStore = createPostgresDurabilityStore({
         connect() {
