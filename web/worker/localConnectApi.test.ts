@@ -4,6 +4,10 @@ import test from "node:test";
 import worker from "./index.ts";
 import { routeLocalConnectApi } from "./localConnectApi.ts";
 
+function fetcher(fetch: (request: Request) => Promise<Response>): Fetcher {
+  return { fetch } as Fetcher;
+}
+
 test("local Connect API routes retain the exact browser request", async () => {
   const requests: Request[] = [];
   const binding = fetcher((request) => {
