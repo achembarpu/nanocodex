@@ -432,7 +432,7 @@ async fn run_reopens_one_durable_agent_and_falls_back_when_local_tools_are_absen
     );
     assert_process_events(
         &second.stdout,
-        &[("assistant.message", 4), ("run.completed", 5)],
+        &[("assistant.message", 1), ("run.completed", 2)],
     );
     assert_eq!(
         String::from_utf8(second.stderr.clone()).unwrap(),
