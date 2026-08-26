@@ -266,6 +266,7 @@ pub(crate) struct ManagedDriver<S> {
     shutdown: Shutdown,
     pending: HashMap<String, PendingTurn>,
     turns_by_key: HashMap<BackendTurnKey, String>,
+    next_event_seq: u64,
     #[cfg(feature = "tools")]
     attachment: Option<AttachmentSupervisor>,
 }
@@ -300,6 +301,7 @@ where
             shutdown,
             pending: HashMap::new(),
             turns_by_key: HashMap::new(),
+            next_event_seq: 1,
             #[cfg(feature = "tools")]
             attachment,
         }
@@ -513,9 +515,10 @@ where
             });
         }
         if let Some(mut nested) = event.data.agent_event().map_err(backend_error)? {
-            nested.seq = event.cursor.parse::<u64>().map_err(|_| {
+            nested.seq = self.next_event_seq;
+            self.next_event_seq = self.next_event_seq.checked_add(1).ok_or_else(|| {
                 backend_error(ManagedError::InvalidEvent(
-                    "durable cursor does not fit the agent event sequence".to_owned(),
+                    "managed agent event sequence exhausted".to_owned(),
                 ))
             })?;
             nested.request_id = Arc::from(self.events.request_id());

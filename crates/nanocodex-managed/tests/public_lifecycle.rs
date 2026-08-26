@@ -194,14 +194,14 @@ async fn public_managed_lifecycle_preserves_durable_identity_control_and_replay(
             .await
             .expect("rewritten assistant event should be public");
         assert_eq!(assistant.kind, AgentEventKind::AssistantMessage);
-        assert_eq!(assistant.seq, 41);
+        assert_eq!(assistant.seq, 1);
         assert_eq!(assistant.request_id.as_ref(), SESSION_ID);
         let terminal = events
             .recv()
             .await
             .expect("rewritten run terminal should be public");
         assert_eq!(terminal.kind, AgentEventKind::RunCompleted);
-        assert_eq!(terminal.seq, 42);
+        assert_eq!(terminal.seq, 2);
         assert_eq!(terminal.request_id.as_ref(), SESSION_ID);
         assert!(
             (&mut turn).now_or_never().is_none(),
