@@ -1,23 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import {
-  providerSource,
-  ToolRouter,
-  toolRouterBrand,
-  toolRouterRuntime,
-} from "../runtime/tool-router.mjs";
+import { providerSource, ToolRouter, toolRouterBrand, toolRouterRuntime } from "../runtime/tool-router.mjs";
 import { createTools } from "../tools/Tools.mjs";
 import { createAttachment } from "../tools/attachment.mjs";
 
-const LEASE_ID = "22222222-2222-4222-8222-222222222222";
-const base = { protocol_version: 1, capability: "tools" };
-
-function reverseTarget(connect, endpoint = "wss://managed.test/") {
+function reverseTarget(connect, endpoint = "wss://managed.test/tools") {
   return { endpoint, transport: { connect } };
 }
 
-test("reverse attachment uses canonical attach, lease, catalog digest, call, result, and ack frames", async () => {
+test("attachment publishes one exact catalog and exchanges ready, call, result, and ack", async () => {
   const socket = new FakeSocket();
   let context;
   const tools = await createTools({ tools: {
@@ -30,372 +22,213 @@ test("reverse attachment uses canonical attach, lease, catalog digest, call, res
       handler: ({ value }, received) => { context = received; return { value }; },
     },
   } });
-  const connecting = tools.attach(reverseTarget(async (target) => {
+  const connector = createAttachment(tools, reverseTarget(async (target) => {
     assert.equal(target, "wss://managed.test/tools");
     return socket;
-  }, "wss://managed.test/tools"), {
-    reconnect: false,
-  }).connect();
-  await tick();
-  const hostId = socket.frames()[0].host_id;
-  assert.match(hostId, /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  }), { reconnect: false });
+  const connecting = connector.connect();
+  await waitFor(() => socket.frames().length === 1);
   assert.deepEqual(socket.frames()[0], {
-    ...base,
-    type: "attach",
-    host_id: hostId,
-    capabilities: [{ name: "tools", version: 1 }],
+    type: "catalog",
+    tools: [{
+      provider: "javascript",
+      remote_name: "echo",
+      definition: {
+        type: "function",
+        name: "echo",
+        description: "Echo one value.",
+        strict: true,
+        parameters: { type: "object", properties: { value: { type: "string" } }, required: ["value"], additionalProperties: false },
+        output_schema: { type: "object", properties: { value: { type: "string" } }, required: ["value"], additionalProperties: false },
+      },
+      parallel_safe: true,
+      timeout_ms: 120_000,
+    }],
   });
-  socket.receive({
-    ...base,
-    type: "lease",
-    lease_id: LEASE_ID,
-    generation: 7,
-    expires_at: Date.now() + 60_000,
-    capabilities: [{ name: "tools", version: 1 }],
-  });
-  await waitFor(() => socket.frames().some(({ type }) => type === "catalog_publish"));
-  const catalog = socket.frames().find(({ type }) => type === "catalog_publish");
-  assert.match(catalog.catalog_digest, /^[0-9a-f]{64}$/);
-  assert.deepEqual(catalog.tools[0], {
-    provider: "javascript",
-    remote_name: "echo",
-    definition: {
-      type: "function",
-      name: "echo",
-      description: "Echo one value.",
-      strict: true,
-      parameters: { type: "object", properties: { value: { type: "string" } }, required: ["value"], additionalProperties: false },
-      output_schema: { type: "object", properties: { value: { type: "string" } }, required: ["value"], additionalProperties: false },
-    },
-    parallel_safe: true,
-    timeout_ms: 120_000,
-  });
-  socket.receive({
-    ...base,
-    type: "catalog_ack",
-    lease_id: LEASE_ID,
-    generation: 7,
-    catalog_revision: 1,
-    catalog_digest: catalog.catalog_digest,
-  });
+  socket.receive({ type: "ready" });
   const client = await connecting;
-  assert.equal(client.connected, true);
-  assert.deepEqual(Object.keys(client), ["connected", "closed", "close"]);
-  socket.receive(callFrame({ value: "hello" }, socket));
+  socket.receive(callFrame({ value: "hello" }));
   await waitFor(() => socket.frames().some(({ type }) => type === "result"));
-  const result = socket.frames().find(({ type }) => type === "result");
   assert.equal(context.model, "gpt-5.6-sol");
-  assert.deepEqual(result.outcome, {
-    status: "completed",
-    output: {
-      output: '{"value":"hello"}',
-      success: true,
-      structured_result: { value: "hello" },
-      metadata: null,
-      process_trace: null,
+  assert.deepEqual(lastFrame(socket, "result"), {
+    type: "result",
+    call_id: "call:1",
+    outcome: {
+      status: "completed",
+      output: {
+        output: '{"value":"hello"}', success: true,
+        structured_result: { value: "hello" }, metadata: null, process_trace: null,
+      },
     },
   });
-  socket.receive({ ...base, type: "result_ack", lease_id: LEASE_ID, generation: 7, catalog_revision: 1, call_id: "call:1" });
-  client.close();
+  socket.receive({ type: "ack", call_id: "call:1" });
+  await drain(client, socket);
   await tools.close();
 });
 
-test("numeric schema keys use the Rust catalog digest", async () => {
-  const socket = new FakeSocket();
+test("catalog preserves provider, remote name, summary, and timeout metadata", async () => {
   const tools = await createTools({ tools: {
-    numeric_keys: {
-      description: "numeric object keys",
-      parameters: {
-        type: "object",
-        properties: { 2: { type: "string" }, 10: { type: "string" } },
-        additionalProperties: false,
-      },
-      provider: "fixed",
-      handler: (input) => input,
+    local: {
+      description: "Local.", provider: "local-provider", remoteName: "remote-local",
+      summary: "search metadata", timeoutMs: 9_000, handler: () => "ok",
     },
   } });
-  const connecting = tools.attach(reverseTarget(async () => socket), { reconnect: false }).connect();
-  await tick();
-  socket.receive({
-    ...base,
-    type: "lease",
-    lease_id: LEASE_ID,
-    generation: 7,
-    expires_at: Date.now() + 60_000,
-    capabilities: [{ name: "tools", version: 1 }],
+  const socket = new FakeSocket();
+  const connector = createAttachment(tools, reverseTarget(async () => socket), { reconnect: false, provider: "fallback-provider" });
+  const connecting = connector.connect();
+  await waitFor(() => socket.frames().length === 1);
+  assert.deepEqual(socket.frames()[0].tools[0], {
+    provider: "local-provider", remote_name: "remote-local",
+    definition: {
+      type: "function", name: "local", description: "Local.", strict: false,
+      parameters: { type: "object", additionalProperties: true },
+    },
+    parallel_safe: false, summary: "search metadata", timeout_ms: 9_000,
   });
-  await waitFor(() => socket.frames().some(({ type }) => type === "catalog_publish"));
-  const catalog = socket.frames().find(({ type }) => type === "catalog_publish");
-  assert.equal(catalog.catalog_digest, "a90cd50d8abe0572db8a87a359ea5b3429b14cb1f425c8d345b21c6db404146a");
-  socket.receive({
-    ...base,
-    type: "catalog_ack",
-    lease_id: LEASE_ID,
-    generation: 7,
-    catalog_revision: 1,
-    catalog_digest: catalog.catalog_digest,
-  });
-  const client = await connecting;
-  client.close();
+  socket.receive({ type: "ready" });
+  await drain(await connecting, socket);
   await tools.close();
 });
 
-test("duplicate identity is idempotent, changed identity and unknown result ack fence", async () => {
-  let finish;
-  let calls = 0;
+test("in-flight cancellation uses an ordinary ambiguous result and receipt ack path", async () => {
+  let admitted;
   const fixture = await readyAttachment({
-    async handler() { calls++; return new Promise((resolve) => { finish = resolve; }); },
+    handler: (_input, { signal }) => new Promise((_resolve, reject) => {
+      admitted = true;
+      signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+    }),
   });
-  const first = callFrame({ id: 1 }, fixture.socket);
-  fixture.socket.receive(first);
-  fixture.socket.receive(first);
-  await tick();
-  assert.equal(calls, 1);
-  fixture.socket.receive({ ...first, input: { id: 2 } });
-  await waitFor(() => fixture.socket.closed?.code === 1008);
-  finish?.("late");
-  fixture.client.close();
-  await fixture.tools.close();
-
-  const unknown = await readyAttachment({ handler: () => "ok" });
-  unknown.socket.receive({ ...base, type: "result_ack", lease_id: LEASE_ID, generation: 7, catalog_revision: 1, call_id: "unknown" });
-  await waitFor(() => unknown.socket.closed?.code === 1008);
-  await unknown.tools.close();
-});
-
-test("post-dispatch cancellation is too_late and does not suppress the result", async () => {
-  let finish;
-  const fixture = await readyAttachment({ handler: () => new Promise((resolve) => { finish = resolve; }) });
-  fixture.socket.receive(callFrame({ value: 1 }, fixture.socket));
-  await tick();
-  fixture.socket.receive({ ...base, type: "cancel", lease_id: LEASE_ID, generation: 7, catalog_revision: 1, call_id: "call:1" });
-  await waitFor(() => fixture.socket.frames().some(({ type }) => type === "cancel_ack"));
-  assert.equal(fixture.socket.frames().find(({ type }) => type === "cancel_ack").outcome, "too_late");
-  finish("done");
+  fixture.socket.receive(callFrame({ value: 1 }));
+  await waitFor(() => admitted);
+  fixture.socket.receive({ type: "cancel", call_id: "call:1" });
   await waitFor(() => fixture.socket.frames().some(({ type }) => type === "result"));
-  assert.equal(fixture.socket.frames().find(({ type }) => type === "result").outcome.status, "completed");
-  fixture.client.close();
+  assert.deepEqual(lastFrame(fixture.socket, "result"), {
+    type: "result", call_id: "call:1",
+    outcome: { status: "ambiguous", message: "tool execution was cancelled after dispatch" },
+  });
+  assert.equal(fixture.socket.frames().some(({ type }) => type === "cancel_ack"), false);
+  fixture.socket.receive({ type: "ack", call_id: "call:1" });
+  await drain(fixture.client, fixture.socket);
   await fixture.tools.close();
 });
 
-test("invalid post-dispatch output is ambiguous, not an ordinary tool failure", async () => {
-  const fixture = await readyAttachment({ handler: () => 1n });
-  fixture.socket.receive(callFrame({ value: 1 }, fixture.socket));
-  await waitFor(() => fixture.socket.frames().some(({ type }) => type === "result"));
-  const outcome = fixture.socket.frames().find(({ type }) => type === "result").outcome;
-  assert.equal(outcome.status, "ambiguous");
-  assert.match(outcome.message, /not valid bounded wire output/);
-  fixture.client.close();
-  await fixture.tools.close();
-});
-
-test("expired calls are rejected before handler admission and model is immutable identity", async () => {
+test("pre-dispatch cancellation is idempotent and remains authoritative", async () => {
   let calls = 0;
   const fixture = await readyAttachment({ handler: () => { calls++; return "unexpected"; } });
-  fixture.socket.receive({ ...callFrame({}, fixture.socket), deadline_at: Date.now() - 1 });
+  fixture.socket.receive({ type: "cancel", call_id: "call:1" });
   await waitFor(() => fixture.socket.frames().some(({ type }) => type === "result"));
+  fixture.socket.receive(callFrame({}));
+  await waitFor(() => fixture.socket.frames().filter(({ type }) => type === "result").length === 2);
   assert.equal(calls, 0);
-  assert.equal(fixture.socket.frames().find(({ type }) => type === "result").outcome.status, "unavailable");
-  fixture.client.close();
+  assert.equal(lastFrame(fixture.socket, "result").outcome.status, "cancelled");
+  fixture.socket.receive({ type: "ack", call_id: "call:1" });
+  await drain(fixture.client, fixture.socket);
   await fixture.tools.close();
-
-  const changed = await readyAttachment({ handler: () => "ok" });
-  const first = callFrame({}, changed.socket);
-  changed.socket.receive(first);
-  await waitFor(() => changed.socket.frames().some(({ type }) => type === "result"));
-  changed.socket.receive({ ...first, model: "gpt-5.6-terra" });
-  await waitFor(() => changed.socket.closed?.code === 1008);
-  await changed.tools.close();
 });
 
-test("attachment targets are validated before transport and plaintext is loopback-only", async () => {
-  const tools = await createTools();
-  for (const target of [
-    "https://managed.test/tools",
-    "wss://user:secret@managed.test/tools",
-    "wss://managed.test/tools#secret",
-    "ws://managed.test/tools",
-  ]) assert.throws(() => tools.attach(target), /tool attachment target|plaintext ws/);
-  assert.throws(
-    () => tools.attach("wss://managed.test", { transport: { connect() {} } }),
-    /unsupported tool attachment option/,
-  );
-  assert.throws(
-    () => tools.attach({ url: "wss://managed.test" }),
-    /unsupported tool attachment target field/,
-  );
-  assert.throws(
-    () => tools.attach("wss://managed.test", { reconnectDelayMs: 0 }),
-    /positive safe integer/,
-  );
-  const connector = tools.attach(reverseTarget(async (target) => {
-    assert.equal(target, "ws://127.0.0.1:8787/tools");
-    throw new Error("expected stop");
-  }, "ws://127.0.0.1:8787/tools"));
-  await assert.rejects(connector.connect(), /expected stop/);
-  await tools.close();
+test("graceful drain waits for dispatched calls and their acknowledgements", async () => {
+  let finish;
+  const fixture = await readyAttachment({ handler: () => new Promise((resolve) => { finish = resolve; }) });
+  fixture.socket.receive(callFrame({}));
+  await tick();
+  const closing = fixture.client.close();
+  assert.deepEqual(lastFrame(fixture.socket, "drain"), { type: "drain" });
+  fixture.socket.receive({ type: "draining" });
+  await tick();
+  assert.equal(fixture.socket.closed, undefined);
+  finish("done");
+  await waitFor(() => fixture.socket.frames().some(({ type }) => type === "result"));
+  assert.equal(fixture.socket.closed, undefined);
+  fixture.socket.receive({ type: "ack", call_id: "call:1" });
+  await closing;
+  assert.deepEqual(fixture.socket.closed, { code: 1000, reason: "tool attachment drained" });
+  await fixture.tools.close();
 });
 
-test("attachment waits for settled providers and dispatches through its published snapshot", async () => {
-  let settle;
-  let entries = [];
-  const settled = new Promise((resolve) => { settle = resolve; });
-  const router = new ToolRouter();
-  router.addSource(providerSource("late", {
-    id: "late",
-    kind: "cloud",
-    definitions: () => entries.map(({ definition }) => definition),
-    resolve: (name) => entries.find(({ definition }) => definition.name === name)?.tool,
-    settled: () => settled,
-  }));
-  const owner = { [toolRouterBrand]: true, [toolRouterRuntime]: router };
+test("a call already crossing the socket is accepted until the draining barrier", async () => {
+  const fixture = await readyAttachment({ handler: () => "crossed" });
+  const closing = fixture.client.close();
+  await waitFor(() => fixture.socket.frames().some(({ type }) => type === "drain"));
+  fixture.socket.receive(callFrame({}));
+  fixture.socket.receive({ type: "draining" });
+  await waitFor(() => fixture.socket.frames().some(({ type }) => type === "result"));
+  assert.equal(lastFrame(fixture.socket, "result").outcome.status, "completed");
+  fixture.socket.receive({ type: "ack", call_id: "call:1" });
+  await closing;
+  await fixture.tools.close();
+});
+
+test("a call already racing the drain handshake completes without fencing", async () => {
+  let calls = 0;
+  const fixture = await readyAttachment({ handler: () => { calls++; return "done"; } });
+  const closing = fixture.client.close();
+  fixture.socket.receive(callFrame({}));
+  await waitFor(() => fixture.socket.frames().some(({ type }) => type === "result"));
+  assert.equal(calls, 1);
+  assert.equal(fixture.socket.closed, undefined);
+  fixture.socket.receive({ type: "draining" });
+  fixture.socket.receive({ type: "ack", call_id: "call:1" });
+  await closing;
+  assert.equal(fixture.socket.closed.code, 1000);
+  await fixture.tools.close();
+});
+
+test("Tools close drains owned attachments before disposing their admitted tools", async () => {
+  let finish;
+  let admitted = false;
+  let disposed = false;
   const socket = new FakeSocket();
-  const connector = createAttachment(owner, reverseTarget(async () => socket), {
-    reconnect: false,
-  });
+  const tools = await createTools({ tools: { echo: {
+    description: "Echo.",
+    parameters: { type: "object", additionalProperties: true },
+    handler: () => {
+      admitted = true;
+      return new Promise((resolve) => { finish = resolve; });
+    },
+    dispose: () => { disposed = true; },
+  } } });
+  const connector = tools.attach(reverseTarget(async () => socket));
   const connecting = connector.connect();
-  await tick();
-  assert.deepEqual(socket.frames(), []);
-  entries = [{
-    definition: { type: "function", name: "late", description: "Late.", strict: false, parameters: { type: "object" } },
-    tool: { name: "late", parallelSafe: false, handler: () => "published" },
-  }];
-  settle();
-  await waitFor(() => socket.frames().some(({ type }) => type === "attach"));
-  socket.receive({ ...base, type: "lease", lease_id: LEASE_ID, generation: 7, expires_at: Date.now() + 60_000, capabilities: [{ name: "tools", version: 1 }] });
-  await waitFor(() => socket.frames().some(({ type }) => type === "catalog_publish"));
-  const catalog = socket.frames().find(({ type }) => type === "catalog_publish");
-  assert.equal(catalog.tools[0].definition.name, "late");
-  socket.receive({ ...base, type: "catalog_ack", lease_id: LEASE_ID, generation: 7, catalog_revision: 1, catalog_digest: catalog.catalog_digest });
-  const client = await connecting;
-  await router.detachSource("late");
-  socket.receive({ ...callFrame({}, socket), name: "late" });
-  await waitFor(() => socket.frames().some(({ type }) => type === "result"));
-  assert.equal(socket.frames().find(({ type }) => type === "result").outcome.output.output, "published");
-  client.close();
-  connector.close();
-});
-
-test("callbacks from a replaced socket cannot fence the reconnected generation", async () => {
-  const first = new FakeSocket();
-  const second = new FakeSocket();
-  const sockets = [first, second];
-  const tools = await createTools({ tools: { echo: { handler: () => "ok" } } });
-  const connecting = tools.attach(reverseTarget(async () => sockets.shift()), {
-    reconnectDelayMs: 1,
-  }).connect();
-  await acknowledge(first, LEASE_ID, 7);
-  const client = await connecting;
-  first.close(1012, "reconnect");
-  await waitFor(() => second.frames().some(({ type }) => type === "attach"));
-  await acknowledge(second, "33333333-3333-4333-8333-333333333333", 8);
-  await waitFor(() => client.connected);
-
-  first.emit("open", {});
-  first.receive({ unexpected: true });
-  first.emit("error", { error: new Error("stale") });
-  await tick();
-  assert.equal(second.closed, undefined);
-  assert.equal(client.connected, true);
-  client.close();
-  await tools.close();
-});
-
-test("initial transport failure rejects without reconnecting", async () => {
-  const tools = await createTools();
-  let attempts = 0;
-  await assert.rejects(
-    tools.attach(reverseTarget(async () => { attempts++; throw new Error("offline"); })).connect(),
-    /offline/,
-  );
-  await new Promise((resolve) => setTimeout(resolve, 300));
-  assert.equal(attempts, 1);
-  await tools.close();
-});
-
-test("an opened socket that never leases or acknowledges the catalog times out", async () => {
-  const socket = new FakeSocket();
-  const tools = await createTools();
-  await assert.rejects(
-    tools.attach(reverseTarget(async () => socket), {
-      handshakeTimeoutMs: 5,
-      reconnect: false,
-    }).connect(),
-    /handshake timed out/,
-  );
-  assert.equal(socket.closed.code, 1012);
-  await tools.close();
-});
-
-test("Node-style ws text buffers remain text while binary messages are rejected", async () => {
-  const socket = new NodeStyleSocket();
-  const tools = await createTools();
-  const connecting = tools.attach(reverseTarget(async () => socket), {
-    reconnect: false,
-  }).connect();
-  await tick();
-  socket.receive({
-    ...base,
-    type: "lease",
-    lease_id: LEASE_ID,
-    generation: 7,
-    expires_at: Date.now() + 60_000,
-    capabilities: [{ name: "tools", version: 1 }],
-  });
-  await waitFor(() => socket.frames().some(({ type }) => type === "catalog_publish"));
-  const catalog = socket.frames().find(({ type }) => type === "catalog_publish");
-  socket.receive({
-    ...base,
-    type: "catalog_ack",
-    lease_id: LEASE_ID,
-    generation: 7,
-    catalog_revision: 1,
-    catalog_digest: catalog.catalog_digest,
-  });
-  const client = await connecting;
-  assert.equal(client.connected, true);
-  socket.receive({ ...base, type: "pong" }, true);
-  await waitFor(() => socket.closed?.code === 1008);
-  await tools.close();
-});
-
-test("lease expiry watchdog closes a ready generation", async () => {
-  const socket = new FakeSocket();
-  const tools = await createTools({ tools: { echo: { description: "Echo.", handler: () => "ok" } } });
-  const connecting = tools.attach(reverseTarget(async () => socket), {
-    reconnect: false,
-    heartbeatMs: 5,
-  }).connect();
-  await tick();
-  socket.receive({ ...base, type: "lease", lease_id: LEASE_ID, generation: 7, expires_at: Date.now() + 20, capabilities: [{ name: "tools", version: 1 }] });
-  await waitFor(() => socket.frames().some(({ type }) => type === "catalog_publish"));
-  const catalog = socket.frames().find(({ type }) => type === "catalog_publish");
-  socket.receive({ ...base, type: "catalog_ack", lease_id: LEASE_ID, generation: 7, catalog_revision: 1, catalog_digest: catalog.catalog_digest });
+  await waitFor(() => socket.frames().some(({ type }) => type === "catalog"));
+  socket.receive({ type: "ready" });
   await connecting;
-  await new Promise((resolve) => setTimeout(resolve, 40));
-  assert.equal(socket.closed.code, 1012);
-  await tools.close();
+  socket.receive(callFrame({}));
+  await waitFor(() => admitted);
+
+  const closing = tools.close();
+  await waitFor(() => socket.frames().some(({ type }) => type === "drain"));
+  socket.receive({ type: "draining" });
+  await tick();
+  assert.equal(disposed, false);
+  finish("done");
+  await waitFor(() => socket.frames().some(({ type }) => type === "result"));
+  assert.equal(disposed, false);
+  socket.receive({ type: "ack", call_id: "call:1" });
+  await closing;
+  assert.equal(disposed, true);
 });
 
-test("Tools.close owns live and not-yet-connected attachment connectors", async () => {
-  const tools = await createTools();
-  const socket = new FakeSocket();
-  const connector = tools.attach(reverseTarget(async () => socket), { reconnect: false });
-  await tools.close();
-  await assert.rejects(connector.connect(), /connector is closed/);
+test("a throwing drain send still closes once and settles every waiter", async () => {
+  const socket = new ThrowingDrainSocket();
+  const fixture = await readyAttachment({ handler: () => "ok" }, socket);
+  const first = fixture.client.close();
+  const second = fixture.client.close();
+  assert.equal(first, second);
+  await first;
+  assert.deepEqual(socket.frames().map(({ type }) => type), ["catalog", "drain"]);
+  assert.equal(socket.closed.code, 1011);
+  assert.match(socket.closed.reason, /drain failed/);
+  await fixture.tools.close();
+});
 
-  let openSocket;
-  const opening = new Promise((resolve) => { openSocket = resolve; });
-  const racingTools = await createTools();
-  const racingConnect = racingTools.attach(reverseTarget(() => opening), {
-  }).connect();
-  await racingTools.close();
-  await assert.rejects(racingConnect, /connector is closed/);
-  openSocket(new FakeSocket());
-
-  const live = await readyAttachment({ handler: () => "ok" });
-  await live.tools.close();
-  assert.equal(live.socket.closed.code, 1000);
+test("logical close settles when an injected socket emits no close event", async () => {
+  const socket = new SilentCloseSocket();
+  const fixture = await readyAttachment({ handler: () => "ok" }, socket);
+  const closing = fixture.client.close();
+  fixture.socket.receive({ type: "draining" });
+  await closing;
+  assert.deepEqual(socket.closed, { code: 1000, reason: "tool attachment drained" });
+  await fixture.tools.close();
 });
 
 test("connector close does not wait for provider settlement", async () => {
@@ -415,97 +248,269 @@ test("connector close does not wait for provider settlement", async () => {
   await router.reset();
 });
 
-test("detach exposes one repeatable boundary that waits for WebSocket retirement", async () => {
-  const socket = new DelayedCloseSocket();
-  const fixture = await readyAttachment({ handler: () => "ok" }, socket);
-  const closing = fixture.connector.close();
-  let settled = false;
-  void closing.then(() => { settled = true; });
+test("duplicate calls are idempotent and changed immutable identity rejects the socket", async () => {
+  let finish;
+  let calls = 0;
+  const fixture = await readyAttachment({ handler: () => { calls++; return new Promise((resolve) => { finish = resolve; }); } });
+  const first = callFrame({ id: 1 });
+  fixture.socket.receive(first);
+  fixture.socket.receive(first);
   await tick();
-  assert.equal(settled, false);
-  assert.equal(fixture.client.connected, false);
-  socket.finishClose();
-  await closing;
-  await fixture.connector.closed();
-  await fixture.client.closed();
-  assert.equal(await fixture.connector.close(), undefined);
+  assert.equal(calls, 1);
+  fixture.socket.receive({ ...first, input: { id: 2 } });
+  await waitFor(() => fixture.socket.closed?.code === 1008);
+  assert.match(fixture.socket.closed.reason, /different immutable fields/);
+  finish?.("late");
   await fixture.tools.close();
 });
 
-test("Tools.close joins delayed WebSocket retirement", async () => {
-  const socket = new DelayedCloseSocket();
-  const fixture = await readyAttachment({ handler: () => "ok" }, socket);
-  const closing = fixture.tools.close();
-  let settled = false;
-  void closing.then(() => { settled = true; });
-  await tick();
-  assert.equal(settled, false);
-  assert.equal(fixture.client.connected, false);
-  socket.finishClose();
-  await closing;
-  assert.equal(settled, true);
-  await fixture.connector.closed();
-  await fixture.client.closed();
+test("expired, invalid, and oversized post-dispatch outcomes preserve semantics", async () => {
+  let calls = 0;
+  const expired = await readyAttachment({ handler: () => { calls++; return "unexpected"; } });
+  expired.socket.receive({ ...callFrame({}), deadline_at: Date.now() - 1 });
+  await waitFor(() => expired.socket.frames().some(({ type }) => type === "result"));
+  assert.equal(calls, 0);
+  assert.equal(lastFrame(expired.socket, "result").outcome.status, "unavailable");
+  expired.socket.receive({ type: "ack", call_id: "call:1" });
+  await drain(expired.client, expired.socket);
+  await expired.tools.close();
+
+  const invalid = await readyAttachment({ handler: () => 1n });
+  invalid.socket.receive(callFrame({}));
+  await waitFor(() => invalid.socket.frames().some(({ type }) => type === "result"));
+  assert.equal(lastFrame(invalid.socket, "result").outcome.status, "ambiguous");
+  invalid.socket.receive({ type: "ack", call_id: "call:1" });
+  await drain(invalid.client, invalid.socket);
+  await invalid.tools.close();
+
+  const oversized = await readyAttachment({ handler: () => "too large" });
+  oversized.socket.receive({ ...callFrame({}), output_byte_budget: 1 });
+  await waitFor(() => oversized.socket.frames().some(({ type }) => type === "result"));
+  assert.equal(lastFrame(oversized.socket, "result").outcome.status, "ambiguous");
+  oversized.socket.receive({ type: "ack", call_id: "call:1" });
+  await drain(oversized.client, oversized.socket);
+  await oversized.tools.close();
 });
 
-test("Cloudflare self-fencing settles terminal attachment truth", async () => {
-  const socket = new CloudflareSocket();
-  const fixture = await readyAttachment({ handler: () => "ok" }, socket);
-  socket.receive({ ...base, type: "unknown" });
-  await fixture.client.closed();
-  await fixture.connector.closed();
-  assert.equal(fixture.client.connected, false);
+test("heartbeat uses exact ping and pong nonce frames", async () => {
+  const socket = new FakeSocket();
+  const tools = await createTools();
+  const connector = createAttachment(tools, reverseTarget(async () => socket), { reconnect: false, heartbeatMs: 5 });
+  const connecting = connector.connect();
+  await waitFor(() => socket.frames().some(({ type }) => type === "catalog"));
+  socket.receive({ type: "ready" });
+  const client = await connecting;
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  await waitFor(() => socket.frames().some(({ type }) => type === "ping"));
+  const ping = lastFrame(socket, "ping");
+  assert.deepEqual(Object.keys(ping), ["type", "nonce"]);
+  socket.receive({ type: "pong", nonce: ping.nonce });
+  await tick();
+  await drain(client, socket);
+  await tools.close();
+});
+
+test("graceful drain keeps the attachment lease alive until calls are acknowledged", async () => {
+  let finish;
+  const socket = new FakeSocket();
+  const tools = await createTools({ tools: {
+    echo: { handler: () => new Promise((resolve) => { finish = resolve; }) },
+  } });
+  const connector = createAttachment(tools, reverseTarget(async () => socket), {
+    reconnect: false,
+    heartbeatMs: 5,
+  });
+  const connecting = connector.connect();
+  await waitFor(() => socket.frames().some(({ type }) => type === "catalog"));
+  socket.receive({ type: "ready" });
+  const client = await connecting;
+  socket.receive(callFrame({}));
+  await waitFor(() => finish !== undefined);
+  const closing = client.close();
+  socket.receive({ type: "draining" });
+  await waitForTimer(() => socket.frames().some(({ type }) => type === "ping"));
+  const ping = lastFrame(socket, "ping");
+  socket.receive({ type: "pong", nonce: ping.nonce });
+  finish("done");
+  await waitFor(() => socket.frames().some(({ type }) => type === "result"));
+  socket.receive({ type: "ack", call_id: "call:1" });
+  await closing;
+  await tools.close();
+});
+
+test("old protocol fields and unknown acknowledgements reject via close code and reason", async () => {
+  const old = await readyAttachment({ handler: () => "ok" });
+  old.socket.receive({ type: "ready", protocol_version: 1 });
+  await waitFor(() => old.socket.closed?.code === 1008);
+  assert.match(old.socket.closed.reason, /unsupported field protocol_version/);
+  await old.tools.close();
+
+  const unknown = await readyAttachment({ handler: () => "ok" });
+  unknown.socket.receive({ type: "ack", call_id: "unknown" });
+  await waitFor(() => unknown.socket.closed?.code === 1008);
+  assert.match(unknown.socket.closed.reason, /retained terminal result/);
+  await unknown.tools.close();
+});
+
+test("ready before catalog publication is rejected", async () => {
+  const socket = new FakeSocket();
+  socket.readyState = 0;
+  const tools = await createTools();
+  const connector = createAttachment(tools, reverseTarget(async () => socket), { reconnect: false });
+  const connecting = connector.connect();
+  await waitFor(() => socket.listeners.has("message"));
+  socket.receive({ type: "ready" });
+  await assert.rejects(connecting, /rejected.*catalog handshake/);
   assert.equal(socket.closed.code, 1008);
-  assert(Buffer.byteLength(socket.closed.reason) <= 123);
+  await tools.close();
+});
+
+test("result send failure is a reconnectable transport close, not a policy rejection", async () => {
+  const socket = new FakeSocket();
+  const fixture = await readyAttachment({ handler: () => "done" }, socket);
+  socket.throwOnType = "result";
+  socket.receive(callFrame({}));
+  await fixture.client.closed();
+  assert.equal(socket.closed.code, 1011);
   await fixture.tools.close();
+});
+
+test("a replaced socket owns a fresh immutable catalog and ignores stale callbacks", async () => {
+  const first = new FakeSocket();
+  const second = new FakeSocket();
+  const sockets = [first, second];
+  const tools = await createTools({ tools: { echo: { handler: () => "ok" } } });
+  const connector = createAttachment(tools, reverseTarget(async () => sockets.shift()), { reconnectDelayMs: 1 });
+  const connecting = connector.connect();
+  await waitFor(() => first.frames().some(({ type }) => type === "catalog"));
+  first.receive({ type: "ready" });
+  const client = await connecting;
+  first.close(1012, "replace");
+  await waitFor(() => second.frames().some(({ type }) => type === "catalog"));
+  assert.deepEqual(second.frames()[0], first.frames()[0]);
+  second.receive({ type: "ready" });
+  await waitFor(() => client.connected);
+  first.receive({ type: "ready", protocol_version: 1 });
+  first.emit("error", { error: new Error("stale") });
+  await tick();
+  assert.equal(second.closed, undefined);
+  await drain(client, second);
+  await tools.close();
+});
+
+test("a policy-close is terminal and never reconnects to replace its successor", async () => {
+  const first = new FakeSocket();
+  const second = new FakeSocket();
+  let connections = 0;
+  const tools = await createTools();
+  const connector = createAttachment(tools, reverseTarget(async () => {
+    connections++;
+    return connections === 1 ? first : second;
+  }), { reconnectDelayMs: 1 });
+  const connecting = connector.connect();
+  await waitFor(() => first.frames().some(({ type }) => type === "catalog"));
+  first.receive({ type: "ready" });
+  const client = await connecting;
+  first.close(1008, "Hosted Tools attachment replaced");
+  await client.closed();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(connections, 1);
+  assert.deepEqual(second.frames(), []);
+  await tools.close();
+});
+
+test("attachment target and public one-argument API are enforced", async () => {
+  const tools = await createTools();
+  for (const target of ["https://managed.test/tools", "wss://user:secret@managed.test/tools", "wss://managed.test/tools#secret", "ws://managed.test/tools"]) {
+    assert.throws(() => tools.attach(target), /tool attachment target|plaintext ws/);
+  }
+  assert.throws(() => tools.attach("wss://managed.test", { reconnect: false }), /only a target/);
+  assert.throws(() => tools.attach({ url: "wss://managed.test" }), /unsupported tool attachment target field/);
+  await tools.close();
+});
+
+test("attachment waits for providers and dispatches through the socket catalog snapshot", async () => {
+  let settle;
+  let entries = [];
+  const settled = new Promise((resolve) => { settle = resolve; });
+  const router = new ToolRouter();
+  router.addSource(providerSource("late", {
+    id: "late", kind: "cloud",
+    definitions: () => entries.map(({ definition }) => definition),
+    resolve: (name) => entries.find(({ definition }) => definition.name === name)?.tool,
+    settled: () => settled,
+  }));
+  const owner = { [toolRouterBrand]: true, [toolRouterRuntime]: router };
+  const socket = new FakeSocket();
+  const connector = createAttachment(owner, reverseTarget(async () => socket), { reconnect: false });
+  const connecting = connector.connect();
+  await tick();
+  assert.deepEqual(socket.frames(), []);
+  entries = [{
+    definition: { type: "function", name: "late", description: "Late.", strict: false, parameters: { type: "object" } },
+    tool: { name: "late", parallelSafe: false, handler: () => "published" },
+  }];
+  settle();
+  await waitFor(() => socket.frames().some(({ type }) => type === "catalog"));
+  socket.receive({ type: "ready" });
+  const client = await connecting;
+  await router.detachSource("late");
+  socket.receive({ ...callFrame({}), name: "late" });
+  await waitFor(() => socket.frames().some(({ type }) => type === "result"));
+  assert.equal(lastFrame(socket, "result").outcome.output.output, "published");
+  socket.receive({ type: "ack", call_id: "call:1" });
+  await drain(client, socket);
+});
+
+test("Node-style text buffers work and binary messages are protocol rejection", async () => {
+  const socket = new NodeStyleSocket();
+  const tools = await createTools();
+  const connector = createAttachment(tools, reverseTarget(async () => socket), { reconnect: false });
+  const connecting = connector.connect();
+  await waitFor(() => socket.frames().some(({ type }) => type === "catalog"));
+  socket.receive({ type: "ready" });
+  await connecting;
+  socket.receive({ type: "pong", nonce: "binary" }, true);
+  await waitFor(() => socket.closed?.code === 1008);
+  await tools.close();
 });
 
 async function readyAttachment(tool, socket = new FakeSocket()) {
   const tools = await createTools({ tools: { echo: {
     description: "Echo.", parameters: { type: "object", additionalProperties: true }, ...tool,
   } } });
-  const connector = tools.attach(reverseTarget(async () => socket), { reconnect: false });
+  const connector = createAttachment(tools, reverseTarget(async () => socket), { reconnect: false });
   const connecting = connector.connect();
-  await tick();
-  socket.receive({ ...base, type: "lease", lease_id: LEASE_ID, generation: 7, expires_at: Date.now() + 60_000, capabilities: [{ name: "tools", version: 1 }] });
-  await waitFor(() => socket.frames().some(({ type }) => type === "catalog_publish"));
-  const catalog = socket.frames().find(({ type }) => type === "catalog_publish");
-  socket.receive({ ...base, type: "catalog_ack", lease_id: LEASE_ID, generation: 7, catalog_revision: 1, catalog_digest: catalog.catalog_digest });
+  await waitFor(() => socket.frames().some(({ type }) => type === "catalog"));
+  socket.receive({ type: "ready" });
   return { socket, tools, connector, client: await connecting };
 }
 
-async function acknowledge(socket, leaseId, generation) {
-  await waitFor(() => socket.frames().some(({ type }) => type === "attach"));
-  socket.receive({ ...base, type: "lease", lease_id: leaseId, generation, expires_at: Date.now() + 60_000, capabilities: [{ name: "tools", version: 1 }] });
-  await waitFor(() => socket.frames().some(({ type }) => type === "catalog_publish"));
-  const catalog = socket.frames().find(({ type }) => type === "catalog_publish");
-  socket.receive({ ...base, type: "catalog_ack", lease_id: leaseId, generation, catalog_revision: 1, catalog_digest: catalog.catalog_digest });
-}
-
-function callFrame(input, socket) {
+function callFrame(input) {
   return {
-    ...base,
-    type: "call",
-    host_id: socket.frames().find(({ type }) => type === "attach").host_id,
-    lease_id: LEASE_ID,
-    generation: 7,
-    catalog_revision: 1,
-    session_id: "session:1",
-    call_id: "call:1",
-    model: "gpt-5.6-sol",
-    name: "echo",
-    input,
-    output_token_budget: 10_000,
-    output_byte_budget: 128 * 1024,
+    type: "call", session_id: "session:1", call_id: "call:1", model: "gpt-5.6-sol",
+    name: "echo", input, output_token_budget: 10_000, output_byte_budget: 128 * 1024,
     deadline_at: Date.now() + 30_000,
   };
 }
+
+async function drain(client, socket) {
+  const closing = client.close();
+  await waitFor(() => socket.frames().some(({ type }) => type === "drain"));
+  socket.receive({ type: "draining" });
+  await closing;
+}
+function lastFrame(socket, type) { return socket.frames().filter((frame) => frame.type === type).at(-1); }
 
 class FakeSocket {
   readyState = 1;
   sent = [];
   listeners = new Map();
-  send(value) { this.sent.push(value); }
+  send(value) {
+    const frame = JSON.parse(value);
+    if (frame.type === this.throwOnType) throw new Error(`send ${frame.type} failed`);
+    this.sent.push(value);
+  }
   close(code, reason) { this.closed = { code, reason }; this.readyState = 3; this.emit("close", { code, reason }); }
   addEventListener(type, listener) { const list = this.listeners.get(type) ?? []; list.push(listener); this.listeners.set(type, list); }
   receive(frame) { this.emit("message", { data: JSON.stringify(frame) }); }
@@ -513,14 +518,15 @@ class FakeSocket {
   frames() { return this.sent.map((value) => JSON.parse(value)); }
 }
 
-class DelayedCloseSocket extends FakeSocket {
-  close(code, reason) { this.closed = { code, reason }; this.readyState = 2; }
-  finishClose() { this.readyState = 3; this.emit("close", this.closed); }
+class ThrowingDrainSocket extends FakeSocket {
+  send(value) {
+    super.send(value);
+    if (JSON.parse(value).type === "drain") throw new Error("send drain failed");
+  }
 }
 
-class CloudflareSocket extends FakeSocket {
-  accept() {}
-  close(code, reason) { this.closed = { code, reason }; this.readyState = 2; }
+class SilentCloseSocket extends FakeSocket {
+  close(code, reason) { this.closed = { code, reason }; this.readyState = 3; }
 }
 
 class NodeStyleSocket {
@@ -537,6 +543,13 @@ class NodeStyleSocket {
 
 const tick = () => new Promise((resolve) => setImmediate(resolve));
 async function waitFor(predicate) {
-  for (let index = 0; index < 100; index++) { if (predicate()) return; await tick(); }
+  for (let index = 0; index < 200; index++) { if (predicate()) return; await tick(); }
   throw new Error("condition did not become true");
+}
+async function waitForTimer(predicate) {
+  for (let index = 0; index < 100; index++) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  }
+  throw new Error("timer condition did not become true");
 }

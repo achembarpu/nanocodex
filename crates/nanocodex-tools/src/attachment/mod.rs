@@ -1,8 +1,7 @@
 //! Generic WebSocket attachment for one immutable [`Tools`] recipe.
 //!
-//! This boundary knows only a final WebSocket URL, a bearer credential, and a
-//! private connection identity. Agent, account, and endpoint discovery remain
-//! the caller's responsibility.
+//! This boundary knows only a final WebSocket URL and bearer credential. Agent,
+//! account, placement, and endpoint discovery remain the caller's responsibility.
 
 mod driver;
 mod protocol;
@@ -103,14 +102,13 @@ impl AttachmentConnector {
     /// # Errors
     ///
     /// Fails for non-attachable selections, discovery failures, transport
-    /// failures, invalid protocol frames, or fencing before readiness.
+    /// failures, invalid protocol frames, or endpoint rejection before readiness.
     pub async fn connect(self) -> Result<(Attachment, AttachmentEvents), AttachmentError> {
         install_default_rustls_crypto_provider();
-        let identity = uuid::Uuid::now_v7();
         let prepared = PreparedTools::prepare(&self.tools)?;
         let runtime = Arc::new(PreparedToolRuntime::initialize(prepared).await?);
         let catalog = runtime.catalog()?;
-        let tools = serde_json::to_value(catalog.entries())
+        let tools = serde_json::to_value(catalog)
             .map_err(|error| AttachmentError::Catalog(error.to_string().into()))?;
         let names = tools
             .as_array()
@@ -130,9 +128,7 @@ impl AttachmentConnector {
         let config = driver::Config {
             endpoint: self.target.endpoint,
             authorization: format!("Bearer {}", self.target.bearer).into(),
-            identity: identity.to_string().into(),
             tools,
-            catalog_digest: catalog.digest().into(),
         };
         let (command_tx, command_rx) = mpsc::channel(8);
         let (event_tx, event_rx) = mpsc::channel(128);
@@ -231,7 +227,7 @@ impl Attachment {
         loop {
             let current = status.borrow().clone();
             match current {
-                AttachmentStatus::Ready { .. } => return Ok(()),
+                AttachmentStatus::Ready => return Ok(()),
                 AttachmentStatus::Fenced => return self.closed().await,
                 _ => {}
             }
@@ -267,18 +263,6 @@ impl AttachmentEvents {
     }
 }
 
-/// Monotonic catalog revision scoped to one lease generation.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub struct CatalogRevision(pub(crate) u64);
-
-impl CatalogRevision {
-    /// Returns the endpoint-assigned revision number.
-    #[must_use]
-    pub const fn get(self) -> u64 {
-        self.0
-    }
-}
-
 /// Latest attachment connection state.
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[non_exhaustive]
@@ -286,13 +270,10 @@ pub enum AttachmentStatus {
     /// A connection or reconnect is in progress.
     Connecting,
     /// The exact catalog was acknowledged.
-    Ready {
-        /// Acknowledged catalog revision.
-        revision: CatalogRevision,
-    },
+    Ready,
     /// The transport is temporarily disconnected.
     Disconnected,
-    /// The remote endpoint authoritatively rejected this lease.
+    /// The remote endpoint authoritatively rejected this socket.
     Fenced,
 }
 
@@ -302,12 +283,10 @@ pub enum AttachmentStatus {
 pub enum AttachmentEvent {
     /// A connection or reconnect attempt started.
     Connecting,
-    /// The endpoint granted a pinned lease.
+    /// The endpoint accepted the socket and immutable catalog.
     Attached,
     /// The immutable catalog was acknowledged.
     CatalogPublished {
-        /// Acknowledged catalog revision.
-        revision: CatalogRevision,
         /// Number of entries in the exact catalog.
         tool_count: usize,
     },
@@ -317,8 +296,6 @@ pub enum AttachmentEvent {
         call_id: Box<str>,
         /// Exact catalog name.
         name: Box<str>,
-        /// Pinned catalog revision.
-        revision: CatalogRevision,
     },
     /// One admitted invocation reached a transport outcome.
     CallCompleted {
@@ -326,15 +303,13 @@ pub enum AttachmentEvent {
         call_id: Box<str>,
         /// Conservative transport classification.
         outcome: AttachmentCallOutcome,
-        /// Pinned catalog revision.
-        revision: CatalogRevision,
     },
     /// The executor detached normally.
     Detached {
         /// Human-readable terminal reason.
         reason: Box<str>,
     },
-    /// The endpoint authoritatively fenced this executor.
+    /// The endpoint authoritatively rejected this executor.
     Fenced {
         /// Human-readable protocol or lease violation.
         reason: Box<str>,
@@ -365,7 +340,7 @@ pub enum AttachmentError {
     /// The recipe could not produce an exact immutable catalog.
     #[error("attached catalog failed: {0}")]
     Catalog(Box<str>),
-    /// The remote endpoint rejected this lease or a protocol pin.
+    /// The remote endpoint rejected this socket or its protocol frames.
     #[error("attachment was fenced: {0}")]
     Fenced(Box<str>),
     /// The WebSocket connection or frame exchange failed.

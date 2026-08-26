@@ -4,13 +4,11 @@ use futures_util::FutureExt;
 use nanocodex_oai_api::tools::ToolOutputWire;
 use serde::Serialize;
 use serde_json::{Value, value::to_raw_value};
-use sha2::{Digest, Sha256};
 use tracing::Instrument;
 
 use super::PreparedTools;
 use crate::{Tool, ToolContext, ToolDefinition, ToolInput, ToolOutput};
 
-const CATALOG_DIGEST_DOMAIN: &[u8] = b"nanocodex-hosted-tools-catalog-v1\0";
 const HOSTED_TOOL_CALL_TIMEOUT_MS: u64 = 120_000;
 
 enum PreparedToolHandler {
@@ -114,43 +112,6 @@ pub(crate) enum PreparedToolDefinition {
     },
 }
 
-#[cfg(test)]
-impl PreparedToolDefinition {
-    /// Returns the model-visible tool name.
-    #[must_use]
-    pub fn name(&self) -> &str {
-        match self {
-            Self::Function { name, .. } | Self::Custom { name, .. } => name,
-        }
-    }
-
-    /// Returns the model-visible tool description.
-    #[must_use]
-    pub fn description(&self) -> &str {
-        match self {
-            Self::Function { description, .. } | Self::Custom { description, .. } => description,
-        }
-    }
-
-    /// Returns the exact client-owned function output schema.
-    #[must_use]
-    pub const fn output_schema(&self) -> Option<&Value> {
-        match self {
-            Self::Function { output_schema, .. } => output_schema.as_ref(),
-            Self::Custom { .. } => None,
-        }
-    }
-
-    /// Returns the exact custom-tool grammar format.
-    #[must_use]
-    pub const fn format(&self) -> Option<&PreparedCustomToolFormat> {
-        match self {
-            Self::Function { .. } => None,
-            Self::Custom { format, .. } => Some(format),
-        }
-    }
-}
-
 /// Exact language-neutral custom-tool grammar format.
 #[doc(hidden)]
 #[derive(Clone, Debug, Serialize)]
@@ -159,21 +120,6 @@ pub(crate) struct PreparedCustomToolFormat {
     kind: &'static str,
     syntax: Box<str>,
     definition: Box<str>,
-}
-
-#[cfg(test)]
-impl PreparedCustomToolFormat {
-    /// Returns the grammar syntax, such as `lark`.
-    #[must_use]
-    pub fn syntax(&self) -> &str {
-        &self.syntax
-    }
-
-    /// Returns the complete grammar definition.
-    #[must_use]
-    pub fn definition(&self) -> &str {
-        &self.definition
-    }
 }
 
 /// Immutable language-neutral attachment catalog entry.
@@ -187,76 +133,6 @@ pub(crate) struct PreparedToolCatalogEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     summary: Option<Box<str>>,
     timeout_ms: u64,
-}
-
-#[cfg(test)]
-impl PreparedToolCatalogEntry {
-    /// Returns the canonical provider identity.
-    #[must_use]
-    pub fn provider(&self) -> &str {
-        &self.provider
-    }
-
-    /// Returns the provider-owned tool identity.
-    #[must_use]
-    pub fn remote_name(&self) -> &str {
-        &self.remote_name
-    }
-
-    /// Returns the exact exported language-neutral definition.
-    #[must_use]
-    pub const fn definition(&self) -> &PreparedToolDefinition {
-        &self.definition
-    }
-
-    /// Returns whether this exact handler explicitly permits parallel calls.
-    #[must_use]
-    pub const fn parallel_safe(&self) -> bool {
-        self.parallel_safe
-    }
-
-    /// Returns the stable deferred-discovery summary, when present.
-    #[must_use]
-    pub fn summary(&self) -> Option<&str> {
-        self.summary.as_deref()
-    }
-
-    /// Returns the bounded call timeout in milliseconds.
-    #[must_use]
-    pub const fn timeout_ms(&self) -> u64 {
-        self.timeout_ms
-    }
-}
-
-/// Complete immutable catalog snapshot and its canonical identity.
-#[doc(hidden)]
-#[derive(Debug)]
-pub(crate) struct PreparedToolCatalog {
-    entries: Vec<PreparedToolCatalogEntry>,
-    #[cfg(test)]
-    canonical_json: String,
-    digest: String,
-}
-
-impl PreparedToolCatalog {
-    /// Returns the catalog entries in stable name order.
-    #[must_use]
-    pub(crate) fn entries(&self) -> &[PreparedToolCatalogEntry] {
-        &self.entries
-    }
-
-    #[cfg(test)]
-    /// Returns canonical compact JSON with recursively Unicode-scalar-sorted keys.
-    #[must_use]
-    pub(crate) fn canonical_json(&self) -> &str {
-        &self.canonical_json
-    }
-
-    /// Returns the lowercase domain-separated SHA-256 catalog digest.
-    #[must_use]
-    pub(crate) fn digest(&self) -> &str {
-        &self.digest
-    }
 }
 
 /// Owned invocation accepted by the private prepared runtime.
@@ -346,25 +222,20 @@ impl PreparedToolRuntime {
             .map(|entry| entry.timeout_ms)
     }
 
+    pub(crate) fn parallel_safe(&self, name: &str) -> bool {
+        self.entries
+            .iter()
+            .find(|entry| entry.definition.name() == name)
+            .is_some_and(|entry| entry.supports_parallel_tool_calls)
+    }
+
     /// Returns one complete immutable language-neutral catalog snapshot.
     ///
     /// # Errors
     ///
-    /// Returns an error when the catalog cannot be encoded as canonical JSON.
-    pub fn catalog(&self) -> Result<PreparedToolCatalog, PreparedToolError> {
-        let entries = self
-            .entries
-            .iter()
-            .map(catalog_entry)
-            .collect::<Result<Vec<_>, _>>()?;
-        let canonical_json = canonical_json(&entries)?;
-        let digest = catalog_digest(&canonical_json);
-        Ok(PreparedToolCatalog {
-            entries,
-            #[cfg(test)]
-            canonical_json,
-            digest,
-        })
+    /// Returns an error when a catalog entry cannot be encoded.
+    pub fn catalog(&self) -> Result<Vec<PreparedToolCatalogEntry>, PreparedToolError> {
+        self.entries.iter().map(catalog_entry).collect()
     }
 
     /// Executes one invocation against the exact immutable catalog entry.
@@ -543,68 +414,6 @@ fn catalog_entry(entry: &PreparedToolEntry) -> Result<PreparedToolCatalogEntry, 
     })
 }
 
-pub(super) fn canonical_json<T: Serialize>(value: &T) -> Result<String, PreparedToolError> {
-    let value = serde_json::to_value(value).map_err(PreparedToolError::CatalogEncoding)?;
-    let mut encoded = String::new();
-    write_canonical_value(&value, &mut encoded)?;
-    Ok(encoded)
-}
-
-fn write_canonical_value(value: &Value, encoded: &mut String) -> Result<(), PreparedToolError> {
-    match value {
-        Value::Null => encoded.push_str("null"),
-        Value::Bool(value) => encoded.push_str(if *value { "true" } else { "false" }),
-        Value::Number(value) => {
-            let value = value.as_f64().ok_or_else(|| {
-                PreparedToolError::UnsupportedCatalogNumber(value.to_string().into())
-            })?;
-            encoded.push_str(ryu_js::Buffer::new().format_finite(value));
-        }
-        Value::String(value) => encoded
-            .push_str(&serde_json::to_string(value).map_err(PreparedToolError::CatalogEncoding)?),
-        Value::Array(values) => {
-            encoded.push('[');
-            for (index, value) in values.iter().enumerate() {
-                if index != 0 {
-                    encoded.push(',');
-                }
-                write_canonical_value(value, encoded)?;
-            }
-            encoded.push(']');
-        }
-        Value::Object(values) => {
-            let mut values = values.iter().collect::<Vec<_>>();
-            values.sort_by(|(left, _), (right, _)| left.chars().cmp(right.chars()));
-            encoded.push('{');
-            for (index, (key, value)) in values.into_iter().enumerate() {
-                if index != 0 {
-                    encoded.push(',');
-                }
-                encoded.push_str(
-                    &serde_json::to_string(key).map_err(PreparedToolError::CatalogEncoding)?,
-                );
-                encoded.push(':');
-                write_canonical_value(value, encoded)?;
-            }
-            encoded.push('}');
-        }
-    }
-    Ok(())
-}
-
-fn catalog_digest(canonical_json: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(CATALOG_DIGEST_DOMAIN);
-    hasher.update(canonical_json.as_bytes());
-    let mut encoded = String::with_capacity(64);
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    for byte in hasher.finalize() {
-        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
-        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
-    }
-    encoded
-}
-
 fn panic_message(payload: Box<dyn Any + Send>) -> String {
     match payload.downcast::<String>() {
         Ok(message) => *message,
@@ -673,12 +482,6 @@ pub(crate) enum PreparedToolError {
     /// The selected catalog entry is not executable.
     #[error("attached tool `{0}` has a non-executable definition")]
     UnsupportedDefinition(Box<str>),
-    /// The immutable catalog could not enter its canonical JSON wire form.
-    #[error("failed to encode attached tool catalog: {0}")]
-    CatalogEncoding(#[source] serde_json::Error),
-    /// A catalog number could not be represented as an ECMAScript number.
-    #[error("attached tool catalog contains an unsupported number: {0}")]
-    UnsupportedCatalogNumber(Box<str>),
     /// The completed output could not enter the lossless wire form.
     #[error("failed to encode attached tool output: {0}")]
     InvalidOutput(#[source] serde_json::Error),

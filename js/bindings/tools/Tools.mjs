@@ -72,9 +72,10 @@ export async function createTools(options = {}) {
     [toolRouterBrand]: true,
     [toolRouterRuntime]: router,
     [toolRuntimeLifecycle]: lifecycle,
-    attach(target, attachmentOptions = {}) {
+    attach(target) {
       if (closed) throw new Error("Tools runtime is closed");
-      const attachment = createAttachment(owner, target, attachmentOptions);
+      if (arguments.length !== 1) throw new TypeError("Tools.attach accepts only a target");
+      const attachment = createAttachment(owner, target);
       attachments.add(attachment);
       void attachment.closed().then(() => attachments.delete(attachment));
       return attachment;

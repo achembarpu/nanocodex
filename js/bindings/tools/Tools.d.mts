@@ -23,18 +23,12 @@ export type AttachmentTarget = string | URL | Readonly<{
 export type AttachmentClient = Readonly<{
   readonly connected: boolean;
   closed(): Promise<void>;
-  close(code?: number, reason?: string): Promise<void>;
+  close(): Promise<void>;
 }>;
 
 export type Tools = Readonly<{
   readonly [toolsBrand]: true;
-  attach(target: AttachmentTarget, options?: {
-    provider?: string;
-    reconnect?: boolean;
-    reconnectDelayMs?: number;
-    heartbeatMs?: number;
-    handshakeTimeoutMs?: number;
-  }): Readonly<{
+  attach(target: AttachmentTarget): Readonly<{
     connect(): Promise<AttachmentClient>;
     closed(): Promise<void>;
     close(): Promise<void>;
@@ -42,6 +36,11 @@ export type Tools = Readonly<{
   close(): Promise<void>;
 }>;
 
+/**
+ * Creates one owned tool runtime. Caller-supplied tool ownership transfers only
+ * after this promise resolves; a rejected construction leaves those tools with
+ * the caller. The returned runtime joins all owned cleanup through close().
+ */
 export function createTools(options?: {
   tools?: ToolMap | readonly NamedTool[];
   /** Portable workspace handle; React Native supplies one via createWorkspace({ backend }). */
@@ -50,4 +49,3 @@ export function createTools(options?: {
   mcp?: McpServers | false;
   mcpOptions?: Readonly<Record<string, unknown>>;
 }): Promise<Tools>;
-

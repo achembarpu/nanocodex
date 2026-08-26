@@ -1,9 +1,6 @@
 import {
   HOSTED_TOOL_CALL_TIMEOUT_MS,
-  HOSTED_TOOLS_CAPABILITY,
-  HOSTED_TOOLS_CAPABILITY_VERSION,
   HOSTED_TOOLS_LEASE_MS,
-  HOSTED_TOOLS_PROTOCOL_VERSION,
   MAX_HOSTED_TOOL_OUTPUT_BYTES,
   HostedToolsProtocolError,
   parseHostedToolsHostFrame,
@@ -19,7 +16,6 @@ const DEFAULT_MAX_IN_FLIGHT = 64;
 const MAX_RETAINED_RECEIPTS = 512;
 const MAX_CALLS_PER_GENERATION = 512;
 const TOOL_RESULT = Symbol.for("nanocodex.toolResult");
-const CATALOG_DIGEST_DOMAIN = "nanocodex-hosted-tools-catalog-v1\0";
 const encoder = new TextEncoder();
 
 /**
@@ -46,8 +42,6 @@ type HostedToolsStateRow = {
   host_id: string | null;
   lease_id: string | null;
   lease_expires_at: number;
-  catalog_revision: number | null;
-  catalog_digest: string | null;
   catalog_json: string | null;
 };
 
@@ -58,7 +52,6 @@ type HostedToolsCallRow = {
   host_id: string;
   lease_id: string;
   generation: number;
-  catalog_revision: number;
   model: string;
   name: string;
   input_json: string;
@@ -74,17 +67,15 @@ type HostedToolsCallRow = {
 type HostedToolsSocketAttachment = {
   kind: typeof SOCKET_TAG;
   sessionId: string;
-  hostId?: string;
   leaseId?: string;
   generation?: number;
-  leaseExpiresAt?: number;
   active?: true;
+  draining?: true;
 };
 
 type PendingCall = {
   leaseId: string;
   generation: number;
-  catalogRevision: number;
   deadlineAt: number;
   promise: Promise<HostedToolCallOutcome>;
   resolve(outcome: HostedToolCallOutcome): void;
@@ -97,14 +88,7 @@ export type HostedToolsBrokerContext = Pick<
   "acceptWebSocket" | "getWebSockets" | "storage"
 >;
 
-export type HostedToolsCatalogIdentity = Readonly<{
-  hostId: string;
-  leaseId: string;
-  generation: number;
-  catalogRevision: number;
-}>;
-
-export type HostedToolsProviderDefinition = Readonly<HostedToolCatalogEntry & HostedToolsCatalogIdentity>;
+export type HostedToolsProviderDefinition = Readonly<HostedToolCatalogEntry>;
 
 export type HostedToolsInvokeRequest = Readonly<{
   sessionId: string;
@@ -118,12 +102,15 @@ export type HostedToolsInvokeRequest = Readonly<{
 }>;
 
 export type HostedToolsPreparedTool = Readonly<{
+  entry: HostedToolCatalogEntry;
+  invoke(request: HostedToolsInvokeRequest): Promise<HostedToolsInvocationOutcome>;
+}>;
+
+type HostedToolsCatalogBinding = Readonly<{
   hostId: string;
   leaseId: string;
   generation: number;
-  catalogRevision: number;
   entry: HostedToolCatalogEntry;
-  invoke(request: HostedToolsInvokeRequest): Promise<HostedToolsInvocationOutcome>;
 }>;
 
 export type HostedToolsCodeDefinition = HostedToolCatalogEntry["definition"] & {
@@ -161,13 +148,7 @@ export interface HostedToolsBrokerPersistence {
   state(): HostedToolsStateRow;
   replaceHost(row: HostedToolsStateRow): void;
   clearHost(leaseId: string, generation: number): void;
-  publishCatalog(
-    leaseId: string,
-    generation: number,
-    revision: number,
-    digest: string,
-    catalogJson: string,
-  ): void;
+  clearCatalog(leaseId: string, generation: number): void;
   call(callId: string): HostedToolsCallRow | undefined;
   callBySource(sessionId: string, sourceCallId: string): HostedToolsCallRow | undefined;
   insertCall(row: HostedToolsCallRow, now: number): void;
@@ -195,10 +176,7 @@ export type HostedToolsBrokerOptions = Readonly<{
   onCatalogChanged?: (definitions: readonly HostedToolsProviderDefinition[]) => void;
 }>;
 
-/**
- * Owns the v1 reverse attachment for one agent Durable Object.
- * `upgrade` intentionally performs no authentication; its route must authenticate first.
- */
+/** Owns the reverse tool attachment for one agent Durable Object. */
 export class HostedToolsBroker {
   readonly #provider: HostedToolsDynamicProvider;
   readonly #pending = new Map<string, PendingCall>();
@@ -274,16 +252,7 @@ export class HostedToolsBroker {
               signal: context.signal,
             });
             if (outcome.status === "completed") return wireToolResult(outcome.output);
-            const result = toolResult(
-              outcome.message,
-              outcome,
-              false,
-              {
-                host_id: prepared.hostId,
-                generation: prepared.generation,
-                catalog_revision: prepared.catalogRevision,
-              },
-            );
+            const result = toolResult(outcome.message, outcome, false, null);
             return outcome[HOSTED_TOOLS_PRE_ADMISSION_UNAVAILABLE] === true
               ? Object.freeze({
                   ...(result as Record<PropertyKey, unknown>),
@@ -389,11 +358,7 @@ export class HostedToolsBroker {
       || cancelRequested.cancel_requested !== 1) return false;
     try {
       this.#send(socket, {
-        ...managedBase(),
         type: "cancel",
-        lease_id: row.lease_id,
-        generation: row.generation,
-        catalog_revision: row.catalog_revision,
         call_id: row.call_id,
       });
       return true;
@@ -405,99 +370,20 @@ export class HostedToolsBroker {
   }
 
   async #dispatchHostFrame(socket: WebSocket, frame: HostedToolsHostFrame): Promise<void> {
-    if (frame.type === "attach") {
-      this.#attach(socket, frame);
-      return;
-    }
-    const attachment = this.#requireLease(
-      socket,
-      frame.lease_id,
-      frame.generation,
-      frame.type === "catalog_publish" || frame.type === "ping",
-    );
-    if (frame.type === "ping") {
-      this.#heartbeat(socket, frame);
-    } else if (frame.type === "catalog_publish") {
-      await this.#publishCatalog(socket, frame);
-    } else if (frame.type === "result") {
-      this.#completeResult(socket, attachment, frame);
-    } else {
-      this.#completeCancellation(socket, attachment, frame);
-    }
+    if (frame.type === "catalog") await this.#publishCatalog(socket, frame);
+    else if (frame.type === "ping") this.#heartbeat(socket, frame);
+    else if (frame.type === "drain") this.#drain(socket);
+    else this.#completeResult(socket, frame);
   }
 
-  #attach(
-    socket: WebSocket,
-    frame: Extract<HostedToolsHostFrame, { type: "attach" }>,
-  ): void {
-    const attachment = this.#attachment(socket);
-    if (!attachment || attachment.hostId || attachment.leaseId || attachment.generation) {
-      throw new HostedToolsProtocolError("already_attached", "this socket already holds a Hosted Tools lease");
-    }
-    const current = this.#persistence.state();
-    if (this.#nextCandidateGeneration >= Number.MAX_SAFE_INTEGER) {
-      throw new HostedToolsProtocolError("generation_exhausted", "Hosted Tools generation is exhausted");
-    }
-    const generation = ++this.#nextCandidateGeneration;
-    const leaseId = this.#randomUUID();
-    const expiresAt = this.#now() + HOSTED_TOOLS_LEASE_MS;
-    // A replacement is a candidate until its catalog has passed the complete
-    // digest/protocol validation below. Keep the active source routable while
-    // that happens; a malformed candidate must never create a cloud gap.
-    for (const candidate of this.context.getWebSockets(SOCKET_TAG)) {
-      if (candidate === socket) continue;
-      const pending = this.#attachment(candidate);
-      if (!pending?.leaseId || pending.generation === undefined || pending.active) continue;
-      this.#sendFence(candidate, pending.leaseId, pending.generation, "a newer Hosted Tools candidate acquired the lease");
-      closeSocket(candidate, 1008, "Hosted Tools candidate replaced");
-    }
-
-    socket.serializeAttachment({
-      ...attachment,
-      hostId: frame.host_id,
-      leaseId,
-      generation,
-      leaseExpiresAt: expiresAt,
-    } satisfies HostedToolsSocketAttachment);
-    try {
-      this.#send(socket, {
-        ...managedBase(),
-        type: "lease",
-        lease_id: leaseId,
-        generation,
-        expires_at: expiresAt,
-        capabilities: [{ name: HOSTED_TOOLS_CAPABILITY, version: HOSTED_TOOLS_CAPABILITY_VERSION }],
-      });
-    } catch {
-      this.#retire(socket, "lease delivery failed");
-      closeSocket(socket, 1011, "Hosted Tools lease delivery failed");
-      return;
-    }
-  }
-
-  #requireLease(
-    socket: WebSocket,
-    leaseId: string,
-    generation: number,
-    allowCandidate = false,
-  ): HostedToolsSocketAttachment {
+  #activeAttachment(socket: WebSocket): HostedToolsSocketAttachment {
     const attachment = this.#attachment(socket);
     const state = this.#persistence.state();
-    const active = attachment?.active === true
-      && state.host_id === attachment.hostId
-      && state.lease_id === leaseId
-      && state.generation === generation
-      && state.lease_expires_at > this.#now();
-    const candidate = allowCandidate
-      && attachment?.active !== true
-      && attachment?.leaseExpiresAt !== undefined
-      && attachment.leaseExpiresAt > this.#now();
-    if (!attachment?.hostId
-      || attachment.leaseId !== leaseId
-      || attachment.generation !== generation
-      || (!active && !candidate)) {
-      this.#fence(socket, "stale or expired Hosted Tools lease");
-      throw new HostedToolsProtocolError("stale_lease", "Hosted Tools lease is stale or expired");
+    if (!attachment?.active || !attachment.leaseId || attachment.generation === undefined
+      || state.lease_id !== attachment.leaseId
+      || state.generation !== attachment.generation
+      || state.lease_expires_at <= this.#now()) {
+      throw new HostedToolsProtocolError("stale_socket", "socket no longer owns the tool attachment");
     }
     return attachment;
   }
@@ -506,36 +392,37 @@ export class HostedToolsBroker {
     socket: WebSocket,
     frame: Extract<HostedToolsHostFrame, { type: "ping" }>,
   ): void {
-    const attachment = this.#attachment(socket);
+    const attachment = this.#activeAttachment(socket);
     const expiresAt = this.#now() + HOSTED_TOOLS_LEASE_MS;
-    if (attachment?.active) {
-      const state = this.#persistence.state();
-      this.#persistence.replaceHost({ ...state, lease_expires_at: expiresAt });
-    } else if (attachment) {
-      socket.serializeAttachment({ ...attachment, leaseExpiresAt: expiresAt } satisfies HostedToolsSocketAttachment);
-    }
+    const state = this.#persistence.state();
+    this.#persistence.replaceHost({ ...state, lease_expires_at: expiresAt });
     this.#send(socket, {
-      ...managedBase(),
       type: "pong",
-      lease_id: frame.lease_id,
-      generation: frame.generation,
-      expires_at: expiresAt,
-      ...(frame.nonce === undefined ? {} : { nonce: frame.nonce }),
+      nonce: frame.nonce,
     });
   }
 
   async #publishCatalog(
     socket: WebSocket,
-    frame: Extract<HostedToolsHostFrame, { type: "catalog_publish" }>,
+    frame: Extract<HostedToolsHostFrame, { type: "catalog" }>,
   ): Promise<void> {
-    const catalogJson = canonicalJson(frame.tools);
-    const digest = await sha256(`${CATALOG_DIGEST_DOMAIN}${catalogJson}`);
-    if (digest !== frame.catalog_digest) {
-      throw new HostedToolsProtocolError(
-        "catalog_digest_mismatch",
-        "catalog digest does not match its canonical snapshot",
-      );
+    const initial = this.#attachment(socket);
+    if (!initial || initial.leaseId || initial.generation !== undefined || initial.active) {
+      throw new HostedToolsProtocolError("catalog_immutable", "one immutable catalog is allowed per socket");
     }
+    if (this.#nextCandidateGeneration >= Number.MAX_SAFE_INTEGER) {
+      throw new HostedToolsProtocolError("generation_exhausted", "Hosted Tools generation is exhausted");
+    }
+    const generation = ++this.#nextCandidateGeneration;
+    const leaseId = this.#randomUUID();
+    const expiresAt = this.#now() + HOSTED_TOOLS_LEASE_MS;
+    const candidate = {
+      ...initial,
+      leaseId,
+      generation,
+    } satisfies HostedToolsSocketAttachment;
+    socket.serializeAttachment(candidate);
+    const catalogJson = JSON.stringify(frame.tools);
     const candidateDefinitions = frame.tools.map((entry) => Object.freeze({
       ...entry,
       definition: Object.freeze({
@@ -554,71 +441,12 @@ export class HostedToolsBroker {
         `candidate catalog is incompatible with the managed tool route: ${errorMessage(error)}`,
       );
     }
-    const candidate = this.#attachment(socket);
-    if (!candidate?.hostId || !candidate.leaseId || candidate.generation === undefined
-      || candidate.leaseId !== frame.lease_id || candidate.generation !== frame.generation) {
-      throw new HostedToolsProtocolError("stale_lease", "catalog publication lost its socket candidate");
-    }
     const now = this.#now();
     const state = this.#persistence.state();
-    let changed = false;
-    let replaced: HostedToolsStateRow | undefined;
-    if (candidate.active) {
-      if (state.lease_id !== frame.lease_id || state.generation !== frame.generation) {
-        throw new HostedToolsProtocolError("stale_lease", "catalog publication lost its attachment");
-      }
-      if (state.lease_expires_at <= now) {
-        throw new HostedToolsProtocolError("stale_lease", "catalog publication crossed lease expiry");
-      }
-      if (state.catalog_revision === frame.catalog_revision) {
-        if (state.catalog_digest !== frame.catalog_digest || state.catalog_json !== catalogJson) {
-          throw new HostedToolsProtocolError(
-            "catalog_conflict",
-            "a catalog revision cannot be republished with different contents",
-          );
-        }
-      } else {
-        if (state.catalog_revision !== null && frame.catalog_revision < state.catalog_revision) {
-          throw new HostedToolsProtocolError("stale_catalog", "catalog revisions must increase monotonically");
-        }
-        changed = true;
-      }
-    } else {
-      if (candidate.generation !== this.#nextCandidateGeneration) {
-        throw new HostedToolsProtocolError("stale_lease", "a newer catalog candidate owns publication");
-      }
-      if (frame.catalog_revision !== 1) {
-        throw new HostedToolsProtocolError("stale_catalog", "a candidate must publish catalog revision 1");
-      }
-      if (candidate.leaseExpiresAt === undefined || candidate.leaseExpiresAt <= now) {
-        throw new HostedToolsProtocolError("stale_lease", "candidate catalog publication crossed lease expiry");
-      }
-      replaced = state.lease_id ? state : undefined;
-      changed = true;
-    }
-
-    // Queue the acknowledgement before mutating visibility. A failed send must
-    // leave the previously active catalog and its admitted calls untouched.
-    this.#send(socket, {
-      ...managedBase(),
-      type: "catalog_ack",
-      lease_id: frame.lease_id,
-      generation: frame.generation,
-      catalog_revision: frame.catalog_revision,
-      catalog_digest: frame.catalog_digest,
-    });
-
-    if (changed) this.#persistence.transaction(() => {
-      if (candidate.active) {
-        this.#persistence.publishCatalog(
-          frame.lease_id,
-          frame.generation,
-          frame.catalog_revision,
-          frame.catalog_digest,
-          catalogJson,
-        );
-        return;
-      }
+    const replaced = state.lease_id ? state : undefined;
+    // A failed ready send must leave the previous attachment routable.
+    this.#send(socket, { type: "ready" });
+    this.#persistence.transaction(() => {
       if (state.lease_id) {
         this.#persistence.markGenerationAmbiguous(
           state.lease_id,
@@ -628,12 +456,10 @@ export class HostedToolsBroker {
         );
       }
       this.#persistence.replaceHost({
-        generation: candidate.generation!,
-        host_id: candidate.hostId!,
-        lease_id: candidate.leaseId!,
-        lease_expires_at: candidate.leaseExpiresAt!,
-        catalog_revision: frame.catalog_revision,
-        catalog_digest: frame.catalog_digest,
+        generation,
+        host_id: candidate.sessionId,
+        lease_id: leaseId,
+        lease_expires_at: expiresAt,
         catalog_json: catalogJson,
       });
     });
@@ -644,27 +470,36 @@ export class HostedToolsBroker {
         if (existing === socket) continue;
         const old = this.#attachment(existing);
         if (!old?.active || old.leaseId !== replaced.lease_id || old.generation !== replaced.generation) continue;
-        this.#sendFence(existing, old.leaseId, old.generation, "a newer Hosted Tools host published its catalog");
-        closeSocket(existing, 1008, "Hosted Tools lease replaced");
+        closeSocket(existing, 1008, "Hosted Tools attachment replaced");
       }
     }
-    if (!candidate.active) {
-      socket.serializeAttachment({ ...candidate, active: true } satisfies HostedToolsSocketAttachment);
+    socket.serializeAttachment({ ...candidate, active: true } satisfies HostedToolsSocketAttachment);
+    this.#notifyCatalogChanged();
+  }
+
+  #drain(socket: WebSocket): void {
+    const attachment = this.#activeAttachment(socket);
+    if (attachment.draining) {
+      throw new HostedToolsProtocolError("already_draining", "socket is already draining");
     }
-    if (changed) this.#notifyCatalogChanged();
+    const state = this.#persistence.state();
+    // Visibility is removed before the peer is told that draining began.
+    this.#persistence.clearCatalog(state.lease_id!, state.generation);
+    socket.serializeAttachment({ ...attachment, draining: true } satisfies HostedToolsSocketAttachment);
+    this.#notifyCatalogChanged();
+    this.#send(socket, { type: "draining" });
   }
 
   #completeResult(
     socket: WebSocket,
-    _attachment: HostedToolsSocketAttachment,
     frame: Extract<HostedToolsHostFrame, { type: "result" }>,
   ): void {
+    const attachment = this.#activeAttachment(socket);
     const row = this.#persistence.call(frame.call_id);
     const stored = JSON.stringify(frame.outcome);
     if (!row
-      || row.lease_id !== frame.lease_id
-      || row.generation !== frame.generation
-      || row.catalog_revision !== frame.catalog_revision) {
+      || row.lease_id !== attachment.leaseId
+      || row.generation !== attachment.generation) {
       throw new HostedToolsProtocolError("unknown_call", "result does not match an admitted pinned call");
     }
     if (row.state === "ambiguous") {
@@ -719,11 +554,7 @@ export class HostedToolsBroker {
   #ackResult(socket: WebSocket, frame: Extract<HostedToolsHostFrame, { type: "result" }>): void {
     try {
       this.#send(socket, {
-        ...managedBase(),
-        type: "result_ack",
-        lease_id: frame.lease_id,
-        generation: frame.generation,
-        catalog_revision: frame.catalog_revision,
+        type: "ack",
         call_id: frame.call_id,
       });
     } catch {
@@ -732,64 +563,9 @@ export class HostedToolsBroker {
     }
   }
 
-  #completeCancellation(
-    _socket: WebSocket,
-    _attachment: HostedToolsSocketAttachment,
-    frame: Extract<HostedToolsHostFrame, { type: "cancel_ack" }>,
-  ): void {
-    const row = this.#persistence.call(frame.call_id);
-    if (!row
-      || row.lease_id !== frame.lease_id
-      || row.generation !== frame.generation
-      || row.catalog_revision !== frame.catalog_revision) {
-      throw new HostedToolsProtocolError("unknown_call", "cancellation does not match an admitted pinned call");
-    }
-    if (row.state === "ambiguous") {
-      if (row.cancel_requested !== 1) {
-        throw new HostedToolsProtocolError("cancel_conflict", "cancellation was never requested for this call");
-      }
-      if (frame.outcome === "too_late") return;
-      const receiptJson = JSON.stringify({ type: "cancel_ack", outcome: frame.outcome });
-      const recorded = this.#persistence.recordLateReceipt(row.call_id, receiptJson, this.#now());
-      if (!recorded || recorded.receipt_json !== receiptJson) {
-        throw new HostedToolsProtocolError("cancel_conflict", "late cancellation proof conflicts with retained proof");
-      }
-      return;
-    }
-    if (row.cancel_requested !== 1) {
-      throw new HostedToolsProtocolError("cancel_conflict", "cancellation was never requested for this call");
-    }
-    if (frame.outcome === "too_late"
-      && (row.state === "dispatched" || row.state === "completed" || row.state === "unavailable")) {
-      // The ordinary result and cancellation acknowledgement travel as
-      // independent frames. A valid result may durably win immediately before
-      // the host observes the racing cancel, so `too_late` remains a truthful
-      // idempotent acknowledgement after that terminal result.
-      return;
-    }
-    if (row.state === "cancelled" && frame.outcome === "cancelled") return;
-    if (row.state !== "dispatched") {
-      throw new HostedToolsProtocolError("cancel_conflict", "terminal cancellation acknowledgement conflicts");
-    }
-    const outcome: HostedToolCallOutcome = {
-      status: "cancelled",
-      message: "Hosted Tools host acknowledged cancellation before completion",
-    };
-    const completed = this.#persistence.transitionCall(
-      row.call_id,
-      ["dispatched"],
-      "cancelled",
-      JSON.stringify(outcome),
-      this.#now(),
-    );
-    if (!completed) throw new HostedToolsProtocolError("cancel_conflict", "call cancellation lost ownership");
-    this.#pruneReceipts();
-    this.#takePending(row.call_id)?.resolve(outcome);
-  }
-
   #definitions(): readonly HostedToolsProviderDefinition[] {
     const state = this.#persistence.state();
-    if (!state.host_id || !state.lease_id || state.catalog_revision === null || !state.catalog_json) return [];
+    if (!state.host_id || !state.lease_id || !state.catalog_json) return [];
     if (state.lease_expires_at <= this.#now()) {
       const socket = this.#socketForState(state);
       if (socket) this.#fence(socket, "Hosted Tools lease expired");
@@ -797,52 +573,24 @@ export class HostedToolsBroker {
       return [];
     }
     if (!this.#socketForState(state)) return [];
-    const entries = JSON.parse(state.catalog_json) as HostedToolCatalogEntry[];
-    return entries.map((entry) => Object.freeze({
-      ...entry,
+    return JSON.parse(state.catalog_json) as HostedToolCatalogEntry[];
+  }
+
+  #resolve(name: string): HostedToolsPreparedTool | undefined {
+    const state = this.#persistence.state();
+    const definition = this.#definitions().find((candidate) => candidate.definition.name === name);
+    if (!definition) return undefined;
+    const binding: HostedToolsCatalogBinding = Object.freeze({
       hostId: state.host_id!,
       leaseId: state.lease_id!,
       generation: state.generation,
-      catalogRevision: state.catalog_revision!,
-    }));
-  }
-
-  #resolve(name: string, selected?: HostedToolsCatalogIdentity): HostedToolsPreparedTool | undefined {
-    const definitions = this.#definitions();
-    const definition = definitions.find((candidate) => candidate.definition.name === name
-      && (!selected
-        || (candidate.hostId === selected.hostId
-          && candidate.leaseId === selected.leaseId
-          && candidate.generation === selected.generation
-          && candidate.catalogRevision === selected.catalogRevision)));
-    if (!definition) return undefined;
-    const entry: HostedToolCatalogEntry = {
-      provider: definition.provider,
-      remote_name: definition.remote_name,
-      definition: definition.definition,
-      parallel_safe: definition.parallel_safe,
-      ...(definition.summary === undefined ? {} : { summary: definition.summary }),
-      timeout_ms: definition.timeout_ms,
-    };
-    const binding = Object.freeze({
-      hostId: definition.hostId,
-      leaseId: definition.leaseId,
-      generation: definition.generation,
-      catalogRevision: definition.catalogRevision,
-      entry,
-      invoke: (request: HostedToolsInvokeRequest) => this.#invoke({
-        hostId: definition.hostId,
-        leaseId: definition.leaseId,
-        generation: definition.generation,
-        catalogRevision: definition.catalogRevision,
-        entry,
-      }, request),
+      entry: definition,
     });
-    return binding;
+    return Object.freeze({ entry: definition, invoke: (request: HostedToolsInvokeRequest) => this.#invoke(binding, request) });
   }
 
   #invoke(
-    binding: Omit<HostedToolsPreparedTool, "invoke">,
+    binding: HostedToolsCatalogBinding,
     request: HostedToolsInvokeRequest,
   ): Promise<HostedToolsInvocationOutcome> {
     const retained = this.#persistence.callBySource(request.sessionId, request.callId);
@@ -859,16 +607,10 @@ export class HostedToolsBroker {
     const hostId = retained?.host_id ?? binding.hostId;
     const pinnedLeaseId = retained?.lease_id ?? binding.leaseId;
     const generation = retained?.generation ?? binding.generation;
-    const catalogRevision = retained?.catalog_revision ?? binding.catalogRevision;
     let call: Extract<HostedToolsManagedFrame, { type: "call" }>;
     try {
       call = parseHostedToolsManagedFrame(JSON.stringify({
-        ...managedBase(),
         type: "call",
-        host_id: hostId,
-        lease_id: pinnedLeaseId,
-        generation,
-        catalog_revision: catalogRevision,
         session_id: request.sessionId,
         call_id: transportCallId,
         model: request.model,
@@ -886,10 +628,9 @@ export class HostedToolsBroker {
       call_id: call.call_id,
       session_id: call.session_id,
       source_call_id: request.callId,
-      host_id: call.host_id,
-      lease_id: call.lease_id,
-      generation: call.generation,
-      catalog_revision: call.catalog_revision,
+      host_id: hostId,
+      lease_id: pinnedLeaseId,
+      generation,
       model: call.model,
       name: call.name,
       input_json: inputJson,
@@ -937,12 +678,11 @@ export class HostedToolsBroker {
     }
     const current = this.#persistence.state();
     const dispatchNow = this.#now();
-    const socket = this.#socketForState(current);
+    const socket = this.#routingSocketForState(current);
     if (!socket
       || current.host_id !== binding.hostId
       || current.lease_id !== leaseId
       || current.generation !== binding.generation
-      || current.catalog_revision !== binding.catalogRevision
       || current.lease_expires_at <= dispatchNow
       || deadlineAt <= dispatchNow) {
       return Promise.resolve(this.#finishBeforeDispatch(
@@ -973,7 +713,6 @@ export class HostedToolsBroker {
     const pending: PendingCall = {
       leaseId,
       generation: binding.generation,
-      catalogRevision: binding.catalogRevision,
       deadlineAt,
       promise,
       resolve,
@@ -995,7 +734,7 @@ export class HostedToolsBroker {
   }
 
   #attachmentIsPresent(
-    binding: Omit<HostedToolsPreparedTool, "invoke">,
+    binding: HostedToolsCatalogBinding,
     now: number,
   ): boolean {
     const current = this.#persistence.state();
@@ -1003,7 +742,7 @@ export class HostedToolsBroker {
       && current.lease_id === binding.leaseId
       && current.generation === binding.generation
       && current.lease_expires_at > now
-      && this.#socketForState(current) !== undefined;
+      && this.#routingSocketForState(current) !== undefined;
   }
 
   #repeatedCall(existing: HostedToolsCallRow, proposed: HostedToolsCallRow): Promise<HostedToolsInvocationOutcome> {
@@ -1121,22 +860,9 @@ export class HostedToolsBroker {
   #fence(socket: WebSocket, reason: string, code = 1008): void {
     const attachment = this.#attachment(socket);
     if (attachment?.leaseId && attachment.generation !== undefined) {
-      this.#sendFence(socket, attachment.leaseId, attachment.generation, boundedReason(reason));
       this.#retire(socket, reason);
     }
     closeSocket(socket, code, boundedReason(reason));
-  }
-
-  #sendFence(socket: WebSocket, leaseId: string, generation: number, reason: string): void {
-    try {
-      this.#send(socket, {
-        ...managedBase(),
-        type: "fenced",
-        lease_id: leaseId,
-        generation,
-        reason: boundedReason(reason),
-      });
-    } catch { /* Closing the socket is the authoritative fence. */ }
   }
 
   #socketForState(state: HostedToolsStateRow): WebSocket | undefined {
@@ -1144,11 +870,16 @@ export class HostedToolsBroker {
     return this.context.getWebSockets(SOCKET_TAG).find((socket) => {
       const attachment = this.#attachment(socket);
       return socket.readyState === WebSocket.OPEN
-        && attachment?.hostId === state.host_id
-        && attachment.leaseId === state.lease_id
+        && attachment?.leaseId === state.lease_id
         && attachment.generation === state.generation
         && attachment.active === true;
     });
+  }
+
+  #routingSocketForState(state: HostedToolsStateRow): WebSocket | undefined {
+    if (!state.catalog_json) return undefined;
+    const socket = this.#socketForState(state);
+    return socket && this.#attachment(socket)?.draining !== true ? socket : undefined;
   }
 
   #attachment(socket: WebSocket): HostedToolsSocketAttachment | undefined {
@@ -1157,9 +888,7 @@ export class HostedToolsBroker {
   }
 
   #send(socket: WebSocket, frame: HostedToolsManagedFrame): void {
-    const encoded = JSON.stringify(frame);
-    parseHostedToolsManagedFrame(encoded);
-    socket.send(encoded);
+    socket.send(JSON.stringify(frame));
   }
 
   #notifyCatalogChanged(): void {
@@ -1178,8 +907,6 @@ class SqlHostedToolsPersistence implements HostedToolsBrokerPersistence {
         host_id TEXT,
         lease_id TEXT,
         lease_expires_at INTEGER NOT NULL DEFAULT 0,
-        catalog_revision INTEGER,
-        catalog_digest TEXT,
         catalog_json TEXT
       );
       INSERT OR IGNORE INTO hosted_tools_state (singleton) VALUES (1);
@@ -1190,7 +917,6 @@ class SqlHostedToolsPersistence implements HostedToolsBrokerPersistence {
         host_id TEXT NOT NULL,
         lease_id TEXT NOT NULL,
         generation INTEGER NOT NULL,
-        catalog_revision INTEGER NOT NULL,
         model TEXT NOT NULL,
         name TEXT NOT NULL,
         input_json TEXT NOT NULL,
@@ -1234,8 +960,7 @@ class SqlHostedToolsPersistence implements HostedToolsBrokerPersistence {
 
   state(): HostedToolsStateRow {
     const row = this.storage.sql.exec<HostedToolsStateRow>(
-      `SELECT generation, host_id, lease_id, lease_expires_at,
-              catalog_revision, catalog_digest, catalog_json
+      `SELECT generation, host_id, lease_id, lease_expires_at, catalog_json
        FROM hosted_tools_state WHERE singleton = 1`,
     ).toArray()[0];
     if (!row) throw new Error("Hosted Tools state is missing");
@@ -1246,14 +971,12 @@ class SqlHostedToolsPersistence implements HostedToolsBrokerPersistence {
     this.storage.sql.exec(
       `UPDATE hosted_tools_state
        SET generation = ?, host_id = ?, lease_id = ?, lease_expires_at = ?,
-           catalog_revision = ?, catalog_digest = ?, catalog_json = ?
+           catalog_json = ?
        WHERE singleton = 1`,
       row.generation,
       row.host_id,
       row.lease_id,
       row.lease_expires_at,
-      row.catalog_revision,
-      row.catalog_digest,
       row.catalog_json,
     );
   }
@@ -1262,27 +985,18 @@ class SqlHostedToolsPersistence implements HostedToolsBrokerPersistence {
     this.storage.sql.exec(
       `UPDATE hosted_tools_state
        SET host_id = NULL, lease_id = NULL, lease_expires_at = 0,
-           catalog_revision = NULL, catalog_digest = NULL, catalog_json = NULL
+           catalog_json = NULL
        WHERE singleton = 1 AND lease_id = ? AND generation = ?`,
       leaseId,
       generation,
     );
   }
 
-  publishCatalog(
-    leaseId: string,
-    generation: number,
-    revision: number,
-    digest: string,
-    catalogJson: string,
-  ): void {
+  clearCatalog(leaseId: string, generation: number): void {
     this.storage.sql.exec(
       `UPDATE hosted_tools_state
-       SET catalog_revision = ?, catalog_digest = ?, catalog_json = ?
+       SET catalog_json = NULL
        WHERE singleton = 1 AND lease_id = ? AND generation = ?`,
-      revision,
-      digest,
-      catalogJson,
       leaseId,
       generation,
     );
@@ -1290,7 +1004,7 @@ class SqlHostedToolsPersistence implements HostedToolsBrokerPersistence {
 
   call(callId: string): HostedToolsCallRow | undefined {
     return this.storage.sql.exec<HostedToolsCallRow>(
-      `SELECT call_id, session_id, source_call_id, host_id, lease_id, generation, catalog_revision,
+      `SELECT call_id, session_id, source_call_id, host_id, lease_id, generation,
               model, name, input_json, output_token_budget, output_byte_budget,
               deadline_at, cancel_requested, state, result_json, receipt_json
        FROM hosted_tool_calls WHERE call_id = ?`,
@@ -1300,7 +1014,7 @@ class SqlHostedToolsPersistence implements HostedToolsBrokerPersistence {
 
   callBySource(sessionId: string, sourceCallId: string): HostedToolsCallRow | undefined {
     return this.storage.sql.exec<HostedToolsCallRow>(
-      `SELECT call_id, session_id, source_call_id, host_id, lease_id, generation, catalog_revision,
+      `SELECT call_id, session_id, source_call_id, host_id, lease_id, generation,
               model, name, input_json, output_token_budget, output_byte_budget,
               deadline_at, cancel_requested, state, result_json, receipt_json
        FROM hosted_tool_calls WHERE session_id = ? AND source_call_id = ?`,
@@ -1312,17 +1026,16 @@ class SqlHostedToolsPersistence implements HostedToolsBrokerPersistence {
   insertCall(row: HostedToolsCallRow, now: number): void {
     this.storage.sql.exec(
       `INSERT INTO hosted_tool_calls
-         (call_id, session_id, source_call_id, host_id, lease_id, generation, catalog_revision,
+         (call_id, session_id, source_call_id, host_id, lease_id, generation,
           model, name, input_json, output_token_budget, output_byte_budget, deadline_at,
           cancel_requested, state, result_json, receipt_json, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       row.call_id,
       row.session_id,
       row.source_call_id,
       row.host_id,
       row.lease_id,
       row.generation,
-      row.catalog_revision,
       row.model,
       row.name,
       row.input_json,
@@ -1435,13 +1148,6 @@ class SqlHostedToolsPersistence implements HostedToolsBrokerPersistence {
   }
 }
 
-function managedBase() {
-  return {
-    protocol_version: HOSTED_TOOLS_PROTOCOL_VERSION,
-    capability: HOSTED_TOOLS_CAPABILITY,
-  } as const;
-}
-
 function wireToolResult(output: Extract<HostedToolCallOutcome, { status: "completed" }>["output"]): unknown {
   return Object.freeze({
     [TOOL_RESULT]: true,
@@ -1469,40 +1175,6 @@ function toolResult(
   });
 }
 
-function canonicalJson(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
-  if (value && typeof value === "object") {
-    return `{${Object.entries(value as Record<string, unknown>)
-      .sort(([left], [right]) => compareUnicodeScalars(left, right))
-      .map(([key, child]) => `${JSON.stringify(key)}:${canonicalJson(child)}`)
-      .join(",")}}`;
-  }
-  const encoded = JSON.stringify(value);
-  if (encoded === undefined) throw new TypeError("catalog contains a non-JSON value");
-  return encoded;
-}
-
-function compareUnicodeScalars(left: string, right: string): number {
-  const leftCodePoints = left[Symbol.iterator]();
-  const rightCodePoints = right[Symbol.iterator]();
-  while (true) {
-    const leftNext = leftCodePoints.next();
-    const rightNext = rightCodePoints.next();
-    if (leftNext.done || rightNext.done) {
-      return leftNext.done === rightNext.done ? 0 : leftNext.done ? -1 : 1;
-    }
-    const difference = leftNext.value.codePointAt(0)! - rightNext.value.codePointAt(0)!;
-    if (difference !== 0) return difference;
-  }
-}
-
-async function sha256(value: string): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
-  return [...new Uint8Array(digest)]
-    .map((byte) => byte.toString(16).padStart(2, "0"))
-    .join("");
-}
-
 function sameImmutableCall(left: HostedToolsCallRow, right: HostedToolsCallRow): boolean {
   return left.call_id === right.call_id
     && left.session_id === right.session_id
@@ -1510,7 +1182,6 @@ function sameImmutableCall(left: HostedToolsCallRow, right: HostedToolsCallRow):
     && left.host_id === right.host_id
     && left.lease_id === right.lease_id
     && left.generation === right.generation
-    && left.catalog_revision === right.catalog_revision
     && left.model === right.model
     && left.name === right.name
     && left.input_json === right.input_json

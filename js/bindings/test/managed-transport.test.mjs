@@ -9,7 +9,6 @@ const origin = "https://managed.example";
 const agentId = "0198d3f0-8844-7000-8000-000000000001";
 const sessionId = "0198d3f0-8844-7000-8000-000000000002";
 const apiKey = `ncx_live_${"a".repeat(12)}_${"b".repeat(43)}`;
-const leaseId = "22222222-2222-4222-8222-222222222222";
 const requestId = "request-1";
 const serverTurnId = "server-turn-1";
 
@@ -143,14 +142,14 @@ test("managed create reverse-attaches one Tools recipe and shutdown closes it wi
   try {
     assert.equal(agent.agentId, agentId);
     assert.equal(agent.sessionId, sessionId);
-    await waitFor(() => socket.frames.some(({ type }) => type === "catalog_publish"));
+    await waitFor(() => socket.frames.some(({ type }) => type === "catalog"));
     assert.equal(handshake.target.href, `wss://managed.example/v1/agents/${agentId}/tool-host`);
     assert.equal(handshake.options.headers.authorization, `Bearer ${apiKey}`);
     assert.equal(JSON.stringify(BrowserTransport.managed({
       agent: { id: agentId }, baseUrl: origin, apiKey,
     })).includes(apiKey), false);
-    assert.deepEqual(socket.frames.slice(0, 2).map(({ type }) => type), ["attach", "catalog_publish"]);
-    assert.equal(socket.frames[1].tools[0].definition.name, "echo");
+    assert.deepEqual(socket.frames.slice(0, 1).map(({ type }) => type), ["catalog"]);
+    assert.equal(socket.frames[0].tools[0].definition.name, "echo");
   } finally {
     await agent.session.shutdown();
   }
@@ -183,8 +182,31 @@ test("cold reverse attachment failure does not block the durable Agent and retri
     assert(Date.now() - startedAt < 200, "durable readiness does not wait for attachment backoff");
     await waitFor(() => attempts >= 1);
     assert.equal(attempts, 1);
-    await waitFor(() => socket.frames.some(({ type }) => type === "catalog_publish"), 1_000);
+    await waitFor(() => socket.frames.some(({ type }) => type === "catalog"), 1_000);
     assert.equal(attempts, 2);
+  } finally {
+    await agent.session.shutdown();
+  }
+});
+
+test("managed reverse attachment does not retry a terminal policy rejection", async () => {
+  const socket = new ManagedToolSocket();
+  socket.rejectCatalog = true;
+  let attempts = 0;
+  const tools = await createTools();
+  const agent = await NodeAgent.create({
+    transport: NodeTransport.managed({
+      agent: { id: agentId },
+      baseUrl: origin,
+      fetch: async () => Response.json({ agent_id: agentId, session_id: sessionId }),
+      toolsTransport: () => { attempts += 1; return socket; },
+    }),
+    tools,
+  });
+  try {
+    await waitFor(() => socket.closed?.code === 1008);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(attempts, 1);
   } finally {
     await agent.session.shutdown();
   }
@@ -209,7 +231,7 @@ test("managed reverse attachment keeps retrying after the capped backoff is reac
   });
 
   try {
-    await waitFor(() => socket.frames.some(({ type }) => type === "catalog_publish"), 10_000);
+    await waitFor(() => socket.frames.some(({ type }) => type === "catalog"), 10_000);
     assert.equal(attempts, 6, "attachment recovery is not capped at five attempts");
   } finally {
     await agent.session.shutdown();
@@ -371,6 +393,7 @@ class ManagedToolSocket {
   readyState = 1;
   frames = [];
   listeners = new Map();
+  rejectCatalog = false;
 
   addEventListener(type, listener) {
     const listeners = this.listeners.get(type) ?? [];
@@ -381,27 +404,11 @@ class ManagedToolSocket {
   send(encoded) {
     const frame = JSON.parse(encoded);
     this.frames.push(frame);
-    if (frame.type === "attach") {
-      queueMicrotask(() => this.receive({
-        protocol_version: 1,
-        capability: "tools",
-        type: "lease",
-        lease_id: leaseId,
-        generation: 1,
-        expires_at: Date.now() + 60_000,
-        capabilities: [{ name: "tools", version: 1 }],
-      }));
-    } else if (frame.type === "catalog_publish") {
-      queueMicrotask(() => this.receive({
-        protocol_version: 1,
-        capability: "tools",
-        type: "catalog_ack",
-        lease_id: leaseId,
-        generation: 1,
-        catalog_revision: frame.catalog_revision,
-        catalog_digest: frame.catalog_digest,
-      }));
-    }
+    if (frame.type === "catalog") queueMicrotask(() => {
+      if (this.rejectCatalog) this.close(1008, "catalog rejected");
+      else this.receive({ type: "ready" });
+    });
+    else if (frame.type === "drain") queueMicrotask(() => this.receive({ type: "draining" }));
   }
 
   receive(frame) {
@@ -428,4 +435,3 @@ async function waitFor(predicate, timeoutMs = 500) {
     await tick();
   }
 }
-

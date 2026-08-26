@@ -17,10 +17,8 @@ use tokio_tungstenite::{
 };
 use url::Url;
 
-use super::protocol::{self, HostFrame, RemoteFrame};
-use super::{
-    AttachmentCallOutcome, AttachmentError, AttachmentEvent, AttachmentStatus, CatalogRevision,
-};
+use super::protocol::{self, ExecutorFrame, RemoteFrame};
+use super::{AttachmentCallOutcome, AttachmentError, AttachmentEvent, AttachmentStatus};
 use crate::prepared::{PreparedToolCall, PreparedToolError, PreparedToolRuntime};
 
 #[cfg(not(test))]
@@ -35,9 +33,7 @@ const PONG_TIMEOUT: Duration = Duration::from_millis(50);
 pub(crate) struct Config {
     pub(crate) endpoint: Url,
     pub(crate) authorization: Box<str>,
-    pub(crate) identity: Box<str>,
     pub(crate) tools: Value,
-    pub(crate) catalog_digest: Box<str>,
 }
 
 pub(crate) enum Command {
@@ -52,7 +48,6 @@ pub(crate) async fn run(
     status: watch::Sender<AttachmentStatus>,
     closed: watch::Sender<Option<Result<(), AttachmentError>>>,
 ) {
-    let mut revision = 1_u64;
     let mut first = true;
     let mut backoff = Duration::from_millis(100);
     let terminal = loop {
@@ -94,17 +89,16 @@ pub(crate) async fn run(
                 status: &status,
             },
             &mut commands,
-            &mut revision,
         )
         .await;
-        if matches!(*status.borrow(), AttachmentStatus::Ready { .. }) {
+        if matches!(*status.borrow(), AttachmentStatus::Ready) {
             first = false;
             backoff = Duration::from_millis(100);
         }
         match end {
             ConnectionEnd::Detached => break Ok(()),
             ConnectionEnd::DetachFailed(error) => break Err(error),
-            ConnectionEnd::Fenced(reason) => {
+            ConnectionEnd::Rejected(reason) => {
                 let _ = status.send(AttachmentStatus::Fenced);
                 emit(
                     &events,
@@ -164,29 +158,7 @@ enum ConnectionEnd {
     DetachFailed(AttachmentError),
     Disconnected,
     Failed(AttachmentError),
-    Fenced(Box<str>),
-}
-
-async fn next_handshake_frame<S>(
-    socket: &mut tokio_tungstenite::WebSocketStream<S>,
-    commands: &mut mpsc::Receiver<Command>,
-    phase: &'static str,
-) -> Result<RemoteFrame, ConnectionEnd>
-where
-    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
-{
-    tokio::select! {
-        command = commands.recv() => match command {
-            Some(Command::Detach) | None => Err(ConnectionEnd::Detached),
-        },
-        frame = tokio::time::timeout(HANDSHAKE_TIMEOUT, next_frame(socket)) => match frame {
-            Ok(Ok(frame)) => Ok(frame),
-            Ok(Err(end)) => Err(end),
-            Err(_) => Err(ConnectionEnd::Failed(AttachmentError::Transport(
-                format!("timed out waiting for attachment {phase}").into(),
-            ))),
-        },
-    }
+    Rejected(Box<str>),
 }
 
 enum Completion {
@@ -213,7 +185,6 @@ struct PendingCall {
 
 struct CallEvents {
     call_id: Box<str>,
-    revision: CatalogRevision,
 }
 
 impl CallEvents {
@@ -223,7 +194,6 @@ impl CallEvents {
             AttachmentEvent::CallCompleted {
                 call_id: self.call_id,
                 outcome,
-                revision: self.revision,
             },
         );
     }
@@ -233,25 +203,19 @@ fn begin_call_events(
     events: &mpsc::Sender<AttachmentEvent>,
     call_id: Box<str>,
     name: Box<str>,
-    revision: CatalogRevision,
 ) -> CallEvents {
     emit(
         events,
         AttachmentEvent::CallStarted {
             call_id: call_id.clone(),
             name,
-            revision,
         },
     );
-    CallEvents { call_id, revision }
+    CallEvents { call_id }
 }
 
 #[derive(Clone, PartialEq)]
 struct CallIdentity {
-    host_id: Box<str>,
-    lease_id: Box<str>,
-    generation: u64,
-    catalog_revision: u64,
     session_id: Box<str>,
     call_id: Box<str>,
     model: Box<str>,
@@ -283,18 +247,6 @@ fn admitted_identity<'a>(
         })
 }
 
-fn catalog_parallel_safe(tools: &Value, name: &str) -> bool {
-    tools.as_array().is_some_and(|tools| {
-        tools.iter().any(|tool| {
-            tool.get("definition")
-                .and_then(|definition| definition.get("name"))
-                .and_then(Value::as_str)
-                == Some(name)
-                && tool.get("parallel_safe").and_then(Value::as_bool) == Some(true)
-        })
-    })
-}
-
 fn start_ready_calls(
     runtime: &Arc<PreparedToolRuntime>,
     pending: &mut VecDeque<PendingCall>,
@@ -305,9 +257,7 @@ fn start_ready_calls(
         if in_flight.values().any(|call| !call.parallel_safe) {
             break;
         }
-        let Some(next) = pending.front() else {
-            break;
-        };
+        let Some(next) = pending.front() else { break };
         if !next.parallel_safe && !in_flight.is_empty() {
             break;
         }
@@ -411,7 +361,6 @@ async fn connection<S>(
     mut socket: tokio_tungstenite::WebSocketStream<S>,
     context: ConnectionContext<'_>,
     commands: &mut mpsc::Receiver<Command>,
-    revision: &mut u64,
 ) -> ConnectionEnd
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
@@ -424,304 +373,316 @@ where
     } = context;
     if let Err(error) = send(
         &mut socket,
-        &HostFrame::Attach {
-            protocol_version: 1,
-            capability: "tools",
-            host_id: &config.identity,
-            capabilities: protocol::capabilities(),
+        &ExecutorFrame::Catalog {
+            tools: &config.tools,
         },
     )
     .await
     {
         return ConnectionEnd::Failed(error);
     }
-
-    let (lease_id, generation, expires_at) =
-        match next_handshake_frame(&mut socket, commands, "lease").await {
-            Ok(RemoteFrame::Lease {
-                lease_id,
-                generation,
-                expires_at,
-                ..
-            }) => (lease_id, generation, expires_at),
-            Ok(_) => {
-                policy_close(&mut socket).await;
-                return ConnectionEnd::Fenced("expected lease after attach".into());
-            }
-            Err(ConnectionEnd::Fenced(reason)) => {
-                policy_close(&mut socket).await;
-                return ConnectionEnd::Fenced(reason);
-            }
-            Err(end) => return end,
-        };
-    if expires_at <= now_ms() {
-        policy_close(&mut socket).await;
-        return ConnectionEnd::Fenced("endpoint granted an expired lease".into());
-    }
-    emit(events, AttachmentEvent::Attached);
-    if let Err(error) = publish(&mut socket, config, &lease_id, generation, *revision).await {
-        return ConnectionEnd::Failed(error);
-    }
-    match next_handshake_frame(&mut socket, commands, "catalog acknowledgement").await {
-        Ok(RemoteFrame::CatalogAck {
-            lease_id: ack_lease,
-            generation: ack_generation,
-            catalog_revision,
-            catalog_digest,
-            ..
-        }) if ack_lease == lease_id
-            && ack_generation == generation
-            && catalog_revision == *revision
-            && catalog_digest == config.catalog_digest.as_ref() => {}
-        Ok(RemoteFrame::CatalogAck {
-            lease_id: ack_lease,
-            generation: ack_generation,
-            catalog_revision,
-            catalog_digest,
-            ..
-        }) => {
-            policy_close(&mut socket).await;
-            return ConnectionEnd::Fenced(format!(
-                "catalog acknowledgement did not match publication (lease={}, generation={}, revision={}, digest={})",
-                ack_lease == lease_id,
-                ack_generation == generation,
-                catalog_revision == *revision,
-                catalog_digest == config.catalog_digest.as_ref(),
-            ).into());
-        }
-        Ok(RemoteFrame::Fenced {
-            lease_id: fence_lease,
-            generation: fence_generation,
-            reason,
-            ..
-        }) => {
-            policy_close(&mut socket).await;
-            return ConnectionEnd::Fenced(
-                if fence_lease == lease_id && fence_generation == generation {
-                    reason
-                } else {
-                    "fence pin did not match active lease".to_owned()
-                }
-                .into(),
-            );
-        }
+    match next_handshake_frame(&mut socket, commands).await {
+        Ok(RemoteFrame::Ready {}) => {}
         Ok(frame) => {
-            policy_close(&mut socket).await;
-            return ConnectionEnd::Fenced(
-                format!(
-                    "expected catalog acknowledgement after publication, received {}",
-                    frame.kind()
-                )
-                .into(),
-            );
+            return reject(
+                &mut socket,
+                format!("expected ready after catalog, received {}", frame.kind()),
+            )
+            .await;
         }
-        Err(ConnectionEnd::Fenced(reason)) => {
-            policy_close(&mut socket).await;
-            return ConnectionEnd::Fenced(reason);
-        }
+        Err(ConnectionEnd::Rejected(reason)) => return reject(&mut socket, reason).await,
         Err(end) => return end,
     }
-    let current = CatalogRevision(*revision);
-    let _ = status.send(AttachmentStatus::Ready { revision: current });
+    emit(events, AttachmentEvent::Attached);
+    let _ = status.send(AttachmentStatus::Ready);
     emit(
         events,
         AttachmentEvent::CatalogPublished {
-            revision: current,
             tool_count: config.tools.as_array().map_or(0, Vec::len),
         },
     );
 
     let (completed_tx, mut completed_rx) = mpsc::channel::<Completion>(protocol::MAX_IN_FLIGHT);
-    let mut in_flight: HashMap<Box<str>, InFlight> = HashMap::new();
+    let mut in_flight = HashMap::<Box<str>, InFlight>::new();
     let mut pending = VecDeque::<PendingCall>::new();
-    let mut receipts: HashMap<Box<str>, Receipt> = HashMap::new();
+    let mut receipts = HashMap::<Box<str>, Receipt>::new();
     let mut heartbeat = tokio::time::interval_at(
         tokio::time::Instant::now() + protocol::HEARTBEAT_INTERVAL,
         protocol::HEARTBEAT_INTERVAL,
     );
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    let mut lease_expiry = Box::pin(tokio::time::sleep_until(lease_deadline(expires_at)));
     let mut pong_timeout = Box::pin(tokio::time::sleep(PONG_TIMEOUT));
     let mut awaiting_pong: Option<String> = None;
     let mut detaching = false;
+    let mut draining = false;
 
     let end = loop {
         start_ready_calls(runtime, &mut pending, &mut in_flight, &completed_tx);
-        if detaching && pending.is_empty() && in_flight.is_empty() {
+        if detaching
+            && draining
+            && pending.is_empty()
+            && in_flight.is_empty()
+            && receipts.is_empty()
+        {
             break ConnectionEnd::Detached;
         }
         tokio::select! {
-            command = commands.recv(), if !detaching => match command { Some(Command::Detach) | None => detaching = true },
-            _ = &mut lease_expiry, if !detaching => break ConnectionEnd::Disconnected,
-            _ = &mut pong_timeout, if !detaching && awaiting_pong.is_some() => break ConnectionEnd::Disconnected,
-            _ = heartbeat.tick(), if !detaching => {
+            command = commands.recv(), if !detaching => {
+                match command { Some(Command::Detach) | None => {} }
+                if let Err(error) = send(&mut socket, &ExecutorFrame::Drain {}).await {
+                    break ConnectionEnd::DetachFailed(error);
+                }
+                detaching = true;
+            }
+            _ = &mut pong_timeout, if awaiting_pong.is_some() => {
+                break if detaching {
+                    ConnectionEnd::DetachFailed(AttachmentError::Transport("heartbeat timed out while draining".into()))
+                } else {
+                    ConnectionEnd::Disconnected
+                };
+            },
+            _ = heartbeat.tick() => {
                 if awaiting_pong.is_some() { break ConnectionEnd::Disconnected; }
                 let nonce = uuid::Uuid::new_v4().to_string();
-                if let Err(error) = send(&mut socket, &HostFrame::Ping { protocol_version:1, capability:"tools", lease_id:&lease_id, generation, nonce:&nonce }).await { break ConnectionEnd::Failed(error); }
+                if let Err(error) = send(&mut socket, &ExecutorFrame::Ping { nonce: &nonce }).await {
+                    break if detaching { ConnectionEnd::DetachFailed(error) } else { ConnectionEnd::Failed(error) };
+                }
                 awaiting_pong = Some(nonce);
                 pong_timeout.as_mut().reset(tokio::time::Instant::now() + PONG_TIMEOUT);
             }
             completion = completed_rx.recv() => if let Some(Completion::Result { call_id, outcome, observed }) = completion {
-                let Some(call) = in_flight.remove(&call_id) else { continue; };
+                let Some(call) = in_flight.remove(&call_id) else { continue };
                 let _ = call.task.await;
                 call.events.complete(events, observed);
-                if receipts.len() >= protocol::MAX_RECEIPTS { break ConnectionEnd::Fenced("result receipt capacity exceeded".into()); }
+                if receipts.len() >= protocol::MAX_RECEIPTS { break ConnectionEnd::Rejected("result receipt capacity exceeded".into()); }
                 receipts.insert(call_id.clone(), Receipt { identity: call.identity, outcome: outcome.clone() });
-                if let Err(error) = send_result(&mut socket, &lease_id, generation, *revision, &call_id, &outcome).await {
+                if let Err(error) = send_result(&mut socket, &call_id, &outcome).await {
                     break if detaching { ConnectionEnd::DetachFailed(error) } else { ConnectionEnd::Failed(error) };
                 }
             },
-            incoming = socket.next(), if !detaching => {
-                let frame = match incoming {
-                    Some(Ok(Message::Text(text))) => match RemoteFrame::parse(&text) { Ok(frame) => frame, Err(reason) => break ConnectionEnd::Fenced(reason.into()) },
-                    Some(Ok(Message::Ping(payload))) => { if socket.send(Message::Pong(payload)).await.is_err() { break ConnectionEnd::Disconnected; } continue; }
-                    Some(Ok(Message::Close(frame))) => {
-                        if frame.as_ref().is_some_and(|frame| frame.code == CloseCode::Policy) { break ConnectionEnd::Fenced("endpoint closed the lease".into()); }
-                        break ConnectionEnd::Disconnected;
-                    }
-                    Some(Ok(_)) => break ConnectionEnd::Fenced("endpoint sent a non-text frame".into()),
-                    Some(Err(_)) | None => break ConnectionEnd::Disconnected,
+            incoming = socket.next() => {
+                let frame = match incoming_frame(&mut socket, incoming).await {
+                    Ok(Some(frame)) => frame,
+                    Ok(None) => continue,
+                    Err(ConnectionEnd::Disconnected) if detaching => break ConnectionEnd::DetachFailed(AttachmentError::Transport("websocket closed while draining".into())),
+                    Err(end) => break end,
                 };
                 match frame {
-                    RemoteFrame::Call { host_id, lease_id: pin_lease, generation: pin_generation, catalog_revision, session_id, call_id, model, name, input, output_token_budget, output_byte_budget, deadline_at, .. } => {
-                        if host_id != config.identity.as_ref() || pin_lease != lease_id || pin_generation != generation || catalog_revision != *revision {
-                            break ConnectionEnd::Fenced("call pin did not match active catalog".into());
-                        }
-                        let identity = CallIdentity { host_id:host_id.clone().into(), lease_id:pin_lease.clone().into(), generation:pin_generation, catalog_revision, session_id:session_id.clone().into(), call_id:call_id.clone().into(), model:model.into(), name:name.clone().into(), input:input.clone(), output_token_budget, output_byte_budget, deadline_at };
+                    RemoteFrame::Call { session_id, call_id, model, name, input, output_token_budget, output_byte_budget, deadline_at } => {
+                        if draining { break ConnectionEnd::Rejected("call received after drain barrier".into()); }
+                        let identity = CallIdentity { session_id:session_id.into(), call_id:call_id.clone().into(), model:model.into(), name:name.clone().into(), input:input.clone(), output_token_budget, output_byte_budget, deadline_at };
                         if let Some(receipt) = receipts.get(call_id.as_str()) {
-                            if receipt.identity != identity { break ConnectionEnd::Fenced("duplicate call changed immutable fields".into()); }
-                            if let Err(error) = send_result(&mut socket, &lease_id, generation, *revision, &call_id, &receipt.outcome).await { break ConnectionEnd::Failed(error); }
+                            if receipt.identity != identity { break ConnectionEnd::Rejected("duplicate call changed immutable fields".into()); }
+                            if let Err(error) = send_result(&mut socket, &call_id, &receipt.outcome).await { break ConnectionEnd::Failed(error); }
                             continue;
                         }
-                        if let Some(admitted) = admitted_identity(&in_flight, &pending, call_id.as_str()) {
-                            if admitted != &identity { break ConnectionEnd::Fenced("duplicate in-flight call changed immutable fields".into()); }
+                        if let Some(admitted) = admitted_identity(&in_flight, &pending, &call_id) {
+                            if admitted != &identity { break ConnectionEnd::Rejected("duplicate in-flight call changed immutable fields".into()); }
                             continue;
                         }
-                        let call_events = begin_call_events(events, call_id.clone().into(), name.clone().into(), CatalogRevision(*revision));
+                        let call_events = begin_call_events(events, call_id.clone().into(), name.clone().into());
                         if receipts.len().saturating_add(in_flight.len()).saturating_add(pending.len()) >= protocol::MAX_RECEIPTS {
                             call_events.complete(events, AttachmentCallOutcome::Unavailable);
-                            break ConnectionEnd::Fenced("result receipt capacity exhausted".into());
+                            break ConnectionEnd::Rejected("result receipt capacity exhausted".into());
                         }
                         if in_flight.len().saturating_add(pending.len()) >= protocol::MAX_IN_FLIGHT {
                             let outcome = unavailable("attachment execution capacity is exhausted");
                             call_events.complete(events, AttachmentCallOutcome::Unavailable);
-                            if let Err(error) = send_result(&mut socket, &lease_id, generation, *revision, &call_id, &outcome).await { break ConnectionEnd::Failed(error); }
+                            if let Err(error) = send_result(&mut socket, &call_id, &outcome).await { break ConnectionEnd::Failed(error); }
                             receipts.insert(call_id.into(), Receipt { identity, outcome });
                             continue;
                         }
-                        let now = now_ms();
                         let tool_timeout = runtime.timeout_ms(&name).unwrap_or(0);
-                        if deadline_at <= now || tool_timeout == 0 {
+                        if deadline_at <= now_ms() || tool_timeout == 0 {
                             let outcome = unavailable(if tool_timeout == 0 { "tool is not in the pinned catalog" } else { "tool deadline elapsed before execution" });
                             call_events.complete(events, AttachmentCallOutcome::Unavailable);
-                            if let Err(error) = send_result(&mut socket, &lease_id, generation, *revision, &call_id, &outcome).await { break ConnectionEnd::Failed(error); }
+                            if let Err(error) = send_result(&mut socket, &call_id, &outcome).await { break ConnectionEnd::Failed(error); }
                             receipts.insert(call_id.into(), Receipt { identity, outcome });
                             continue;
                         }
-                        let parallel_safe = catalog_parallel_safe(&config.tools, &name);
+                        let parallel_safe = runtime.parallel_safe(&name);
                         pending.push_back(PendingCall { identity, tool_timeout, parallel_safe, events:call_events });
                     }
-                    RemoteFrame::Cancel { lease_id:pin_lease, generation:pin_generation, catalog_revision, call_id, .. } => {
-                        if pin_lease != lease_id || pin_generation != generation || catalog_revision != *revision { break ConnectionEnd::Fenced("cancel pin did not match active catalog".into()); }
-                        if let Err(error) = send(&mut socket, &HostFrame::CancelAck { protocol_version:1, capability:"tools", lease_id:&lease_id, generation, catalog_revision:*revision, call_id:&call_id, outcome:"too_late" }).await { break ConnectionEnd::Failed(error); }
+                    RemoteFrame::Cancel { call_id } => {
+                        let outcome = cancelled();
+                        if let Some(index) = pending.iter().position(|call| call.identity.call_id.as_ref() == call_id) {
+                            let call = pending.remove(index).expect("position came from the same queue");
+                            call.events.complete(events, AttachmentCallOutcome::Cancelled);
+                            receipts.insert(call_id.clone().into(), Receipt { identity: call.identity, outcome: outcome.clone() });
+                            if let Err(error) = send_result(&mut socket, &call_id, &outcome).await { break ConnectionEnd::Failed(error); }
+                        } else if let Some(call) = in_flight.remove(call_id.as_str()) {
+                            call.task.abort();
+                            let _ = call.task.await;
+                            let outcome = ambiguous("tool execution was cancelled after dispatch");
+                            call.events.complete(events, AttachmentCallOutcome::Ambiguous);
+                            receipts.insert(call_id.clone().into(), Receipt { identity: call.identity, outcome: outcome.clone() });
+                            if let Err(error) = send_result(&mut socket, &call_id, &outcome).await { break ConnectionEnd::Failed(error); }
+                        }
                     }
-                    RemoteFrame::ResultAck { lease_id:pin_lease, generation:pin_generation, catalog_revision, call_id, .. } => {
-                        if pin_lease != lease_id || pin_generation != generation || catalog_revision != *revision || receipts.remove(call_id.as_str()).is_none() { break ConnectionEnd::Fenced("result acknowledgement did not match a retained result".into()); }
+                    RemoteFrame::Ack { call_id } => {
+                        if receipts.remove(call_id.as_str()).is_none() {
+                            break ConnectionEnd::Rejected("acknowledgement did not match a retained result".into());
+                        }
                     }
-                    RemoteFrame::CatalogAck { .. } => break ConnectionEnd::Fenced("unexpected catalog acknowledgement".into()),
-                    RemoteFrame::Pong { lease_id:pin_lease, generation:pin_generation, expires_at, nonce, .. } => {
-                        if pin_lease != lease_id || pin_generation != generation { break ConnectionEnd::Fenced("pong pin did not match active lease".into()); }
-                        let Some(expected_nonce) = awaiting_pong.take() else { break ConnectionEnd::Fenced("unexpected pong without an outstanding ping".into()); };
-                        if nonce.as_deref() != Some(expected_nonce.as_str()) { break ConnectionEnd::Fenced("pong nonce did not match the outstanding ping".into()); }
-                        if expires_at <= now_ms() { break ConnectionEnd::Disconnected; }
-                        lease_expiry.as_mut().reset(lease_deadline(expires_at));
-                    },
-                    RemoteFrame::Fenced { lease_id:pin_lease, generation:pin_generation, reason, .. } => {
-                        if pin_lease != lease_id || pin_generation != generation { break ConnectionEnd::Fenced("fence pin did not match active lease".into()); }
-                        break ConnectionEnd::Fenced(reason.into());
+                    RemoteFrame::Pong { nonce } => {
+                        let Some(expected) = awaiting_pong.take() else { break ConnectionEnd::Rejected("unexpected pong without an outstanding ping".into()) };
+                        if nonce != expected { break ConnectionEnd::Rejected("pong nonce did not match the outstanding ping".into()); }
                     }
-                    RemoteFrame::Lease { .. } => break ConnectionEnd::Fenced("unexpected lease".into()),
+                    RemoteFrame::Draining {} => {
+                        if !detaching || draining { break ConnectionEnd::Rejected("unexpected draining acknowledgement".into()); }
+                        draining = true;
+                    }
+                    RemoteFrame::Ready {} => break ConnectionEnd::Rejected("unexpected ready".into()),
                 }
             }
         }
     };
+
+    let end = if detaching {
+        match end {
+            ConnectionEnd::Disconnected => ConnectionEnd::DetachFailed(AttachmentError::Transport(
+                "websocket disconnected while draining".into(),
+            )),
+            ConnectionEnd::Failed(error) => ConnectionEnd::DetachFailed(error),
+            end => end,
+        }
+    } else {
+        end
+    };
+
+    if !matches!(end, ConnectionEnd::Detached) {
+        for call in pending {
+            call.events
+                .complete(events, AttachmentCallOutcome::Ambiguous);
+        }
+        for (call_id, call) in in_flight {
+            call.task.abort();
+            let _ = call.task.await;
+            call.events
+                .complete(events, AttachmentCallOutcome::Ambiguous);
+            receipts.entry(call_id).or_insert(Receipt {
+                identity: call.identity,
+                outcome: ambiguous(
+                    "tool execution was interrupted before its result was acknowledged",
+                ),
+            });
+        }
+    }
     match &end {
         ConnectionEnd::Detached => {
             let _ = socket.close(None).await;
         }
-        ConnectionEnd::Fenced(_) => {
-            let _ = socket
-                .close(Some(CloseFrame {
-                    code: CloseCode::Policy,
-                    reason: "attachment protocol violation".into(),
-                }))
-                .await;
+        ConnectionEnd::Rejected(reason) => {
+            policy_close(&mut socket, reason).await;
         }
         ConnectionEnd::Disconnected | ConnectionEnd::Failed(_) | ConnectionEnd::DetachFailed(_) => {
         }
     }
-    for call in pending {
-        call.events
-            .complete(events, AttachmentCallOutcome::Ambiguous);
-    }
-    for (_, call) in in_flight {
-        call.task.abort();
-        let _ = call.task.await;
-        call.events
-            .complete(events, AttachmentCallOutcome::Ambiguous);
-    }
     end
 }
 
-async fn publish<S>(
+async fn next_handshake_frame<S>(
     socket: &mut tokio_tungstenite::WebSocketStream<S>,
-    config: &Config,
-    lease_id: &str,
-    generation: u64,
-    revision: u64,
-) -> Result<(), AttachmentError>
+    commands: &mut mpsc::Receiver<Command>,
+) -> Result<RemoteFrame, ConnectionEnd>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
-    send(
-        socket,
-        &HostFrame::CatalogPublish {
-            protocol_version: 1,
-            capability: "tools",
-            lease_id,
-            generation,
-            catalog_revision: revision,
-            catalog_digest: &config.catalog_digest,
-            tools: &config.tools,
+    tokio::select! {
+        command = commands.recv() => match command { Some(Command::Detach) | None => Err(ConnectionEnd::Detached) },
+        frame = tokio::time::timeout(HANDSHAKE_TIMEOUT, next_frame(socket)) => match frame {
+            Ok(frame) => frame,
+            Err(_) => Err(ConnectionEnd::Failed(AttachmentError::Transport("timed out waiting for attachment readiness".into()))),
         },
-    )
-    .await
+    }
+}
+
+async fn incoming_frame<S>(
+    socket: &mut tokio_tungstenite::WebSocketStream<S>,
+    incoming: Option<Result<Message, tokio_tungstenite::tungstenite::Error>>,
+) -> Result<Option<RemoteFrame>, ConnectionEnd>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    match incoming {
+        Some(Ok(Message::Text(text))) => RemoteFrame::parse(&text)
+            .map(Some)
+            .map_err(|reason| ConnectionEnd::Rejected(reason.into())),
+        Some(Ok(Message::Ping(payload))) => {
+            socket.send(Message::Pong(payload)).await.map_err(|error| {
+                ConnectionEnd::Failed(AttachmentError::Transport(error.to_string().into()))
+            })?;
+            Ok(None)
+        }
+        Some(Ok(Message::Close(Some(frame)))) if frame.code == CloseCode::Policy => {
+            Err(ConnectionEnd::Rejected(if frame.reason.is_empty() {
+                "endpoint rejected the attachment".into()
+            } else {
+                frame.reason.to_string().into()
+            }))
+        }
+        Some(Ok(Message::Close(_))) | None => Err(ConnectionEnd::Disconnected),
+        Some(Ok(_)) => Err(ConnectionEnd::Rejected(
+            "endpoint sent a non-text frame".into(),
+        )),
+        Some(Err(error)) => Err(ConnectionEnd::Failed(AttachmentError::Transport(
+            error.to_string().into(),
+        ))),
+    }
+}
+
+async fn next_frame<S>(
+    socket: &mut tokio_tungstenite::WebSocketStream<S>,
+) -> Result<RemoteFrame, ConnectionEnd>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    loop {
+        let incoming = socket.next().await;
+        match incoming_frame(socket, incoming).await? {
+            Some(frame) => return Ok(frame),
+            None => continue,
+        }
+    }
+}
+
+async fn reject<S>(
+    socket: &mut tokio_tungstenite::WebSocketStream<S>,
+    reason: impl Into<Box<str>>,
+) -> ConnectionEnd
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let reason = reason.into();
+    policy_close(socket, &reason).await;
+    ConnectionEnd::Rejected(reason)
+}
+
+async fn policy_close<S>(socket: &mut tokio_tungstenite::WebSocketStream<S>, reason: &str)
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let reason = bounded(reason);
+    let reason = reason
+        .get(..reason.len().min(123))
+        .unwrap_or("attachment protocol violation");
+    let _ = socket
+        .close(Some(CloseFrame {
+            code: CloseCode::Policy,
+            reason: reason.into(),
+        }))
+        .await;
 }
 
 async fn send_result<S>(
     socket: &mut tokio_tungstenite::WebSocketStream<S>,
-    lease_id: &str,
-    generation: u64,
-    revision: u64,
     call_id: &str,
     outcome: &Value,
 ) -> Result<(), AttachmentError>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
-    send(
-        socket,
-        &HostFrame::Result {
-            protocol_version: 1,
-            capability: "tools",
-            lease_id,
-            generation,
-            catalog_revision: revision,
-            call_id,
-            outcome,
-        },
-    )
-    .await
+    send(socket, &ExecutorFrame::Result { call_id, outcome }).await
 }
 
 async fn send<S, T: serde::Serialize>(
@@ -744,59 +705,14 @@ where
         .map_err(|error| AttachmentError::Transport(error.to_string().into()))
 }
 
-async fn next_frame<S>(
-    socket: &mut tokio_tungstenite::WebSocketStream<S>,
-) -> Result<RemoteFrame, ConnectionEnd>
-where
-    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
-{
-    loop {
-        match socket.next().await {
-            Some(Ok(Message::Text(text))) => {
-                return RemoteFrame::parse(&text)
-                    .map_err(|error| ConnectionEnd::Fenced(error.into()));
-            }
-            Some(Ok(Message::Ping(payload))) => {
-                socket.send(Message::Pong(payload)).await.map_err(|error| {
-                    ConnectionEnd::Failed(AttachmentError::Transport(error.to_string().into()))
-                })?
-            }
-            Some(Ok(_)) => {
-                return Err(ConnectionEnd::Fenced(
-                    "unexpected websocket frame during handshake".into(),
-                ));
-            }
-            Some(Err(error)) => {
-                return Err(ConnectionEnd::Failed(AttachmentError::Transport(
-                    error.to_string().into(),
-                )));
-            }
-            None => {
-                return Err(ConnectionEnd::Failed(AttachmentError::Transport(
-                    "websocket closed".into(),
-                )));
-            }
-        }
-    }
-}
-
-async fn policy_close<S>(socket: &mut tokio_tungstenite::WebSocketStream<S>)
-where
-    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
-{
-    let _ = socket
-        .close(Some(CloseFrame {
-            code: CloseCode::Policy,
-            reason: "attachment protocol violation".into(),
-        }))
-        .await;
-}
-
 fn unavailable(message: &str) -> Value {
     json!({"status":"unavailable", "message":bounded(message)})
 }
 fn ambiguous(message: &str) -> Value {
     json!({"status":"ambiguous", "message":bounded(message)})
+}
+fn cancelled() -> Value {
+    json!({"status":"cancelled", "message":"tool attachment call was cancelled"})
 }
 fn bounded_completed_failure(
     message: &str,
@@ -826,9 +742,6 @@ fn now_ms() -> u64 {
         .map_or(0, |duration| {
             duration.as_millis().try_into().unwrap_or(u64::MAX)
         })
-}
-fn lease_deadline(expires_at: u64) -> tokio::time::Instant {
-    tokio::time::Instant::now() + Duration::from_millis(expires_at.saturating_sub(now_ms()))
 }
 fn emit(events: &mpsc::Sender<AttachmentEvent>, event: AttachmentEvent) {
     let _ = events.try_send(event);

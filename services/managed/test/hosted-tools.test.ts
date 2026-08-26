@@ -10,7 +10,6 @@ const USER_ID = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
 const API_KEY = `ncx_live_${"d".repeat(12)}_${"h".repeat(43)}`;
 const MESSAGE_TIMEOUT_MS = 20_000;
 const createdAgents = new Set<string>();
-const base = { protocol_version: 1, capability: "tools" } as const;
 
 beforeAll(async () => seedApiKey());
 
@@ -21,82 +20,51 @@ afterAll(async () => {
 });
 
 describe("managed Hosted Tools", () => {
-  it("authenticates the reverse endpoint and monotonically fences replacement", async () => {
+  it("authenticates the reverse endpoint and rejects the replaced socket", async () => {
     const agentId = await createAgent();
     const endpoint = `https://example.test/v1/agents/${agentId}/tool-host`;
     const unauthenticated = await SELF.fetch(endpoint, { headers: { upgrade: "websocket" } });
     expect(unauthenticated.status).toBe(401);
 
     const first = await upgrade(endpoint);
-    const firstLeaseMessage = nextMessage(first);
-    first.send(JSON.stringify({
-      ...base,
-      type: "attach",
-      host_id: "01890f3e-65b2-7cc0-98c4-7f93b54e0a1d",
-      capabilities: [{ name: "tools", version: 1 }],
-    }));
-    const firstLease = await firstLeaseMessage;
-    expect(firstLease).toMatchObject({ type: "lease", generation: 1 });
+    const firstReady = nextMessage(first);
+    first.send(JSON.stringify({ type: "catalog", tools: [] }));
+    expect(await firstReady).toEqual({ type: "ready" });
 
     const pongMessage = nextMessage(first);
     first.send(JSON.stringify({
-      ...base,
       type: "ping",
-      lease_id: firstLease.lease_id,
-      generation: firstLease.generation,
       nonce: "host-heartbeat",
     }));
-    expect(await pongMessage).toMatchObject({
+    expect(await pongMessage).toEqual({
       type: "pong",
-      lease_id: firstLease.lease_id,
-      generation: 1,
       nonce: "host-heartbeat",
     });
 
-    const fencedMessage = nextMessage(first);
+    const replaced = nextClose(first);
     const second = await upgrade(endpoint);
-    const secondLeaseMessage = nextMessage(second);
-    second.send(JSON.stringify({
-      ...base,
-      type: "attach",
-      host_id: "01890f3e-65b3-7cc0-98c4-7f93b54e0a1d",
-      capabilities: [{ name: "tools", version: 1 }],
-    }));
-    expect(await fencedMessage).toMatchObject({
-      type: "fenced",
-      lease_id: firstLease.lease_id,
-      generation: firstLease.generation,
+    const secondReady = nextMessage(second);
+    second.send(JSON.stringify({ type: "catalog", tools: [] }));
+    expect(await secondReady).toEqual({ type: "ready" });
+    expect(await replaced).toMatchObject({
+      code: 1008,
+      reason: "Hosted Tools attachment replaced",
     });
-    expect(await secondLeaseMessage).toMatchObject({ type: "lease", generation: 2 });
     second.close(1000, "test complete");
   });
 
   it("installs attached/cloud parity validation before the first managed turn", async () => {
     const agentId = await createAgent();
     const host = await upgrade(`https://example.test/v1/agents/${agentId}/tool-host`);
-    const leaseMessage = nextMessage(host);
-    host.send(JSON.stringify({
-      ...base,
-      type: "attach",
-      host_id: "01890f3e-65b6-7cc0-98c4-7f93b54e0a1d",
-      capabilities: [{ name: "tools", version: 1 }],
-    }));
-    const lease = await leaseMessage;
     const tools = [mismatchedPriorityCatalogEntry()];
-    const fenced = nextMessage(host);
+    const rejected = nextClose(host);
     host.send(JSON.stringify({
-      ...base,
-      type: "catalog_publish",
-      lease_id: lease.lease_id,
-      generation: lease.generation,
-      catalog_revision: 1,
-      catalog_digest: await catalogDigest(tools),
+      type: "catalog",
       tools,
     }));
-    expect(await fenced).toMatchObject({
-      type: "fenced",
-      lease_id: lease.lease_id,
-      generation: lease.generation,
+    expect(await rejected).toMatchObject({
+      code: 1008,
+      reason: expect.stringContaining("catalog_contract_mismatch"),
     });
   });
 
@@ -142,7 +110,7 @@ describe("managed Hosted Tools", () => {
         },
       },
     });
-    const connector = tools.attach(agent.toolsTarget(), { reconnect: false });
+    const connector = tools.attach(agent.toolsTarget());
     try {
       const attachment = await connector.connect();
       expect(attachment.connected).toBe(true);
@@ -191,7 +159,7 @@ describe("managed Hosted Tools", () => {
         },
       },
     });
-    const connector = tools.attach(agent.toolsTarget(), { reconnect: false });
+    const connector = tools.attach(agent.toolsTarget());
     try {
       expect((await connector.connect()).connected).toBe(true);
       const localStarted = await startTurn(
@@ -282,39 +250,6 @@ function mismatchedPriorityCatalogEntry() {
   };
 }
 
-async function catalogDigest(tools: unknown): Promise<string> {
-  const canonical = JSON.stringify(canonicalValue(tools));
-  const bytes = await crypto.subtle.digest(
-    "SHA-256",
-    new TextEncoder().encode(`nanocodex-hosted-tools-catalog-v1\0${canonical}`),
-  );
-  return [...new Uint8Array(bytes)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
-}
-
-function canonicalValue(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(canonicalValue);
-  if (!value || typeof value !== "object") return value;
-  return Object.fromEntries(
-    Object.entries(value as Record<string, unknown>)
-      .sort(([left], [right]) => compareUnicodeScalars(left, right))
-      .map(([key, child]) => [key, canonicalValue(child)]),
-  );
-}
-
-function compareUnicodeScalars(left: string, right: string): number {
-  const leftCodePoints = left[Symbol.iterator]();
-  const rightCodePoints = right[Symbol.iterator]();
-  while (true) {
-    const leftNext = leftCodePoints.next();
-    const rightNext = rightCodePoints.next();
-    if (leftNext.done || rightNext.done) {
-      return leftNext.done === rightNext.done ? 0 : leftNext.done ? -1 : 1;
-    }
-    const difference = leftNext.value.codePointAt(0)! - rightNext.value.codePointAt(0)!;
-    if (difference !== 0) return difference;
-  }
-}
-
 async function createAgent(): Promise<string> {
   const created = await authenticatedFetch("https://example.test/v1/agents", { method: "POST" });
   expect(created.status).toBe(201);
@@ -373,6 +308,19 @@ function nextMessage(socket: WebSocket): Promise<Record<string, any>> {
       clearTimeout(timeout);
       try { resolve(JSON.parse(String(event.data)) as Record<string, any>); }
       catch (error) { reject(error); }
+    }, { once: true });
+  });
+}
+
+function nextClose(socket: WebSocket): Promise<{ code: number; reason: string }> {
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(
+      () => reject(new Error("timed out waiting for Hosted Tools close")),
+      MESSAGE_TIMEOUT_MS,
+    );
+    socket.addEventListener("close", (event) => {
+      clearTimeout(timeout);
+      resolve({ code: event.code, reason: event.reason });
     }, { once: true });
   });
 }

@@ -29,7 +29,6 @@ axum = { workspace = true, features = ["ws"] }
 futures-util.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["fs", "io-std", "io-util", "net", "process"] }
-uuid.workspace = true
 
 [[bin]]
 name = "nanocodex2"

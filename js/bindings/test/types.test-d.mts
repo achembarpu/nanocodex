@@ -41,6 +41,12 @@ import type { WorkspaceEntry as NodeWorkspaceEntry } from "../node/workspace.mjs
 
 const toolsCapability: ToolsCapability = await createTools();
 void toolsCapability;
+toolsCapability.attach("wss://managed.example/tools");
+const attachmentClient = await toolsCapability.attach("wss://managed.example/tools").connect();
+// @ts-expect-error Graceful drain owns the close code and reason.
+attachmentClient.close(1000);
+// @ts-expect-error Attachment policy is private; the public API accepts only a target.
+toolsCapability.attach("wss://managed.example/tools", { reconnect: false });
 // @ts-expect-error Tools is nominal and cannot be forged from lifecycle-shaped methods.
 const forgedToolsCapability: ToolsCapability = { attach() {}, async close() {} };
 void forgedToolsCapability;

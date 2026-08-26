@@ -1,5 +1,6 @@
 import * as ManagedAgent from "../managed/Agent.mjs";
 import { reportError } from "../internal.mjs";
+import { AttachmentRejectedError } from "../tools/attachment.mjs";
 import {
   toolRouterBrand,
   toolRuntimeLifecycle,
@@ -91,9 +92,10 @@ async function superviseAttachment(state) {
     try {
       await connector.connect();
       return;
-    } catch {
+    } catch (error) {
       connector.close();
       if (state.connector === connector) state.connector = undefined;
+      if (error instanceof AttachmentRejectedError) throw error;
       if (state.attachmentAbort.signal.aborted) return;
       if (attempt === ATTACHMENT_BACKOFF_MS.length - 1) {
         reportError(new Error(
@@ -454,4 +456,3 @@ function mergeExtensions(left, right) {
   }
   return merged;
 }
-

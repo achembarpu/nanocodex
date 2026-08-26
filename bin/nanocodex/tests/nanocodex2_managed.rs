@@ -38,7 +38,7 @@ struct TestState {
     failed_tool_host_attempts: usize,
     expect_local_tool: bool,
     disconnect_after_ready: bool,
-    host_ids: Arc<Mutex<Vec<String>>>,
+    catalogs: Arc<Mutex<Vec<serde_json::Value>>>,
 }
 
 #[tokio::test]
@@ -57,7 +57,7 @@ async fn run_uses_managed_lifecycle_with_the_configured_local_workspace() {
         failed_tool_host_attempts: 0,
         expect_local_tool: true,
         disconnect_after_ready: false,
-        host_ids: Arc::new(Mutex::new(Vec::new())),
+        catalogs: Arc::new(Mutex::new(Vec::new())),
     };
     let app = Router::new()
         .route("/v1/agents", post(create_agent))
@@ -150,7 +150,7 @@ async fn run_reports_a_created_agent_before_lifecycle_open_failure() {
         failed_tool_host_attempts: 0,
         expect_local_tool: false,
         disconnect_after_ready: false,
-        host_ids: Arc::new(Mutex::new(Vec::new())),
+        catalogs: Arc::new(Mutex::new(Vec::new())),
     };
     let app = Router::new()
         .route("/v1/agents", post(create_agent))
@@ -201,7 +201,7 @@ async fn run_keeps_the_durable_agent_when_local_tools_are_initially_unavailable(
         failed_tool_host_attempts: usize::MAX,
         expect_local_tool: false,
         disconnect_after_ready: false,
-        host_ids: Arc::new(Mutex::new(Vec::new())),
+        catalogs: Arc::new(Mutex::new(Vec::new())),
     };
     let app = Router::new()
         .route("/v1/agents", post(create_agent))
@@ -269,7 +269,7 @@ async fn run_reconnects_the_same_local_host_after_a_ready_socket_disconnect() {
         failed_tool_host_attempts: 0,
         expect_local_tool: false,
         disconnect_after_ready: true,
-        host_ids: Arc::new(Mutex::new(Vec::new())),
+        catalogs: Arc::new(Mutex::new(Vec::new())),
     };
     let app = Router::new()
         .route("/v1/agents", post(create_agent))
@@ -310,9 +310,9 @@ async fn run_reconnects_the_same_local_host_after_a_ready_socket_disconnect() {
     );
     assert!(String::from_utf8_lossy(&output.stdout).contains("run.completed"));
     assert_eq!(state.tool_host_attempts.load(Ordering::SeqCst), 2);
-    let host_ids = state.host_ids.lock().unwrap();
-    assert_eq!(host_ids.len(), 2);
-    assert_eq!(host_ids[0], host_ids[1]);
+    let catalogs = state.catalogs.lock().unwrap();
+    assert_eq!(catalogs.len(), 2);
+    assert_eq!(catalogs[0], catalogs[1]);
     assert!(!workspace.path().join("hosted-proof.txt").exists());
     assert!(!String::from_utf8_lossy(&output.stderr).contains(&api_key));
     server.abort();
@@ -604,9 +604,9 @@ async fn serve_durable_tool_host(socket: WebSocket, state: DurableState) {
         failed_tool_host_attempts: 0,
         expect_local_tool: true,
         disconnect_after_ready: false,
-        host_ids: Arc::new(Mutex::new(Vec::new())),
+        catalogs: Arc::new(Mutex::new(Vec::new())),
     };
-    serve_tool_host(socket, compatible_state, 1).await;
+    serve_tool_host(socket, compatible_state, false).await;
     observer.await.unwrap();
     state.detaches.fetch_add(1, Ordering::SeqCst);
     state.changed.notify_waiters();
@@ -834,56 +834,21 @@ async fn tool_host(
             .unwrap();
     }
     upgrade
-        .on_upgrade(move |socket| serve_tool_host(socket, state, attempt as u64))
+        .on_upgrade(move |socket| {
+            let disconnect = state.disconnect_after_ready && attempt == 1;
+            serve_tool_host(socket, state, disconnect)
+        })
         .into_response()
 }
 
-async fn serve_tool_host(mut socket: WebSocket, state: TestState, generation: u64) {
-    let Some(Ok(Message::Text(attach))) = socket.recv().await else {
+async fn serve_tool_host(mut socket: WebSocket, state: TestState, disconnect_after_ready: bool) {
+    let Some(Ok(Message::Text(catalog))) = socket.recv().await else {
         return;
     };
-    let attach: serde_json::Value = serde_json::from_str(&attach).unwrap();
-    assert_eq!(attach["type"], "attach");
-    assert_eq!(attach["protocol_version"], 1);
-    assert_eq!(
-        attach["capabilities"],
-        serde_json::json!([{"name":"tools","version":1}])
-    );
-    let attachment_identity = attach["host_id"].as_str().unwrap().to_owned();
-    state
-        .host_ids
-        .lock()
-        .unwrap()
-        .push(attachment_identity.clone());
-    assert_eq!(
-        uuid::Uuid::parse_str(&attachment_identity)
-            .unwrap()
-            .get_version_num(),
-        7
-    );
-    let lease_id = "93568332-3c78-4cf7-85dc-8f24313e5202";
-    socket
-        .send(Message::Text(
-            serde_json::json!({
-                "protocol_version": 1,
-                "capability": "tools",
-                "type": "lease",
-                "lease_id": lease_id,
-                "generation": generation,
-                "expires_at": 9_000_000_000_000_u64,
-                "capabilities": [{"name":"tools","version":1}]
-            })
-            .to_string()
-            .into(),
-        ))
-        .await
-        .unwrap();
-    let Some(Ok(Message::Text(publication))) = socket.recv().await else {
-        return;
-    };
-    let publication: serde_json::Value = serde_json::from_str(&publication).unwrap();
-    assert_eq!(publication["type"], "catalog_publish");
-    let names = publication["tools"]
+    let catalog: serde_json::Value = serde_json::from_str(&catalog).unwrap();
+    assert_eq!(catalog["type"], "catalog");
+    assert_eq!(catalog.as_object().unwrap().len(), 2);
+    let names = catalog["tools"]
         .as_array()
         .unwrap()
         .iter()
@@ -895,27 +860,22 @@ async fn serve_tool_host(mut socket: WebSocket, state: TestState, generation: u6
             .into_iter()
             .collect(),
     );
-    let digest = publication["catalog_digest"].as_str().unwrap().to_owned();
+    state.catalogs.lock().unwrap().push(catalog);
     socket
         .send(Message::Text(
-            serde_json::json!({
-                "protocol_version": 1,
-                "capability": "tools",
-                "type": "catalog_ack",
-                "lease_id": lease_id,
-                "generation": generation,
-                "catalog_revision": 1,
-                "catalog_digest": digest
-            })
-            .to_string()
-            .into(),
+            serde_json::json!({"type":"ready"}).to_string().into(),
         ))
         .await
         .unwrap();
 
-    if state.disconnect_after_ready {
+    if disconnect_after_ready {
         state.tool_completed.notify_one();
         drop(socket.send(Message::Close(None)).await);
+        return;
+    }
+
+    if !state.expect_local_tool {
+        serve_until_drain(&mut socket).await;
         return;
     }
 
@@ -923,13 +883,7 @@ async fn serve_tool_host(mut socket: WebSocket, state: TestState, generation: u6
     socket
         .send(Message::Text(
             serde_json::json!({
-                "protocol_version": 1,
-                "capability": "tools",
                 "type": "call",
-                "host_id": attachment_identity,
-                "lease_id": lease_id,
-                "generation": generation,
-                "catalog_revision": 1,
                 "session_id": AGENT_ID,
                 "call_id": "call-managed",
                 "model": "gpt-5.6-sol",
@@ -965,12 +919,7 @@ async fn serve_tool_host(mut socket: WebSocket, state: TestState, generation: u6
     socket
         .send(Message::Text(
             serde_json::json!({
-                "protocol_version": 1,
-                "capability": "tools",
-                "type": "result_ack",
-                "lease_id": lease_id,
-                "generation": generation,
-                "catalog_revision": 1,
+                "type": "ack",
                 "call_id": "call-managed"
             })
             .to_string()
@@ -979,7 +928,33 @@ async fn serve_tool_host(mut socket: WebSocket, state: TestState, generation: u6
         .await
         .unwrap();
     state.tool_completed.notify_one();
-    while socket.recv().await.is_some() {}
+    serve_until_drain(&mut socket).await;
+}
+
+async fn serve_until_drain(socket: &mut WebSocket) {
+    while let Some(Ok(Message::Text(frame))) = socket.recv().await {
+        let frame: serde_json::Value = serde_json::from_str(&frame).unwrap();
+        match frame["type"].as_str() {
+            Some("ping") => socket
+                .send(Message::Text(
+                    serde_json::json!({"type":"pong","nonce":frame["nonce"]})
+                        .to_string()
+                        .into(),
+                ))
+                .await
+                .unwrap(),
+            Some("drain") => {
+                socket
+                    .send(Message::Text(
+                        serde_json::json!({"type":"draining"}).to_string().into(),
+                    ))
+                    .await
+                    .unwrap();
+                return;
+            }
+            kind => panic!("unexpected executor frame after result: {kind:?}"),
+        }
+    }
 }
 
 async fn create_agent(State(state): State<TestState>, headers: HeaderMap) -> impl IntoResponse {

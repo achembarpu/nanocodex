@@ -1,7 +1,3 @@
-export const HOSTED_TOOLS_PROTOCOL_VERSION = 1 as const;
-export const HOSTED_TOOLS_CAPABILITY = "tools" as const;
-export const HOSTED_TOOLS_CAPABILITY_VERSION = 1 as const;
-
 export const HOSTED_TOOLS_LEASE_MS = 60_000;
 export const HOSTED_TOOL_CALL_TIMEOUT_MS = 120_000;
 export const MAX_HOSTED_TOOLS_FRAME_BYTES = 256 * 1024;
@@ -17,17 +13,9 @@ const MAX_MESSAGE_BYTES = 2 * 1024;
 const MAX_NONCE_BYTES = 128;
 const MAX_OUTPUT_CONTENT_ITEMS = 64;
 const MAX_OUTPUT_TOKEN_BUDGET = 1_000_000;
-const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
-const UUID_V7 = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
-const SHA_256 = /^[0-9a-f]{64}$/;
 const RESERVED_TOOL_NAMES = new Set(["exec", "tool_search", "wait"]);
 const encoder = new TextEncoder();
-
-export type HostedToolsCapability = {
-  name: typeof HOSTED_TOOLS_CAPABILITY;
-  version: typeof HOSTED_TOOLS_CAPABILITY_VERSION;
-};
 
 export type HostedToolDefinition =
   | {
@@ -85,69 +73,26 @@ export type HostedToolCallOutcome =
   | { status: "ambiguous"; message: string }
   | { status: "cancelled"; message: string };
 
-type HostedToolsFrameBase = {
-  protocol_version: typeof HOSTED_TOOLS_PROTOCOL_VERSION;
-  capability: typeof HOSTED_TOOLS_CAPABILITY;
-};
-
 export type HostedToolsHostFrame =
-  | HostedToolsFrameBase & {
-      type: "attach";
-      host_id: string;
-      capabilities: HostedToolsCapability[];
-    }
-  | HostedToolsFrameBase & {
-      type: "catalog_publish";
-      lease_id: string;
-      generation: number;
-      catalog_revision: number;
-      catalog_digest: string;
+  | {
+      type: "catalog";
       tools: HostedToolCatalogEntry[];
     }
-  | HostedToolsFrameBase & {
+  | {
       type: "result";
-      lease_id: string;
-      generation: number;
-      catalog_revision: number;
       call_id: string;
       outcome: HostedToolCallOutcome;
     }
-  | HostedToolsFrameBase & {
-      type: "cancel_ack";
-      lease_id: string;
-      generation: number;
-      catalog_revision: number;
-      call_id: string;
-      outcome: "cancelled" | "too_late";
-    }
-  | HostedToolsFrameBase & {
+  | {
       type: "ping";
-      lease_id: string;
-      generation: number;
-      nonce?: string;
-    };
+      nonce: string;
+    }
+  | { type: "drain" };
 
 export type HostedToolsManagedFrame =
-  | HostedToolsFrameBase & {
-      type: "lease";
-      lease_id: string;
-      generation: number;
-      expires_at: number;
-      capabilities: HostedToolsCapability[];
-    }
-  | HostedToolsFrameBase & {
-      type: "catalog_ack";
-      lease_id: string;
-      generation: number;
-      catalog_revision: number;
-      catalog_digest: string;
-    }
-  | HostedToolsFrameBase & {
+  | { type: "ready" }
+  | {
       type: "call";
-      host_id: string;
-      lease_id: string;
-      generation: number;
-      catalog_revision: number;
       session_id: string;
       call_id: string;
       model: string;
@@ -157,38 +102,24 @@ export type HostedToolsManagedFrame =
       output_byte_budget: number;
       deadline_at: number;
     }
-  | HostedToolsFrameBase & {
+  | {
       type: "cancel";
-      lease_id: string;
-      generation: number;
-      catalog_revision: number;
       call_id: string;
     }
-  | HostedToolsFrameBase & {
-      type: "result_ack";
-      lease_id: string;
-      generation: number;
-      catalog_revision: number;
+  | {
+      type: "ack";
       call_id: string;
     }
-  | HostedToolsFrameBase & {
+  | {
       type: "pong";
-      lease_id: string;
-      generation: number;
-      expires_at: number;
-      nonce?: string;
+      nonce: string;
     }
-  | HostedToolsFrameBase & {
-      type: "fenced";
-      lease_id: string;
-      generation: number;
-      reason: string;
-    };
+  | { type: "draining" };
 
 export type HostedToolsFrame = HostedToolsHostFrame | HostedToolsManagedFrame;
 
-const HOST_FRAME_TYPES = new Set(["attach", "catalog_publish", "result", "cancel_ack", "ping"]);
-const MANAGED_FRAME_TYPES = new Set(["lease", "catalog_ack", "call", "cancel", "result_ack", "pong", "fenced"]);
+const HOST_FRAME_TYPES = new Set(["catalog", "result", "ping", "drain"]);
+const MANAGED_FRAME_TYPES = new Set(["ready", "call", "cancel", "ack", "pong", "draining"]);
 
 export function parseHostedToolsHostFrame(encoded: string): HostedToolsHostFrame {
   const frame = parseHostedToolsFrame(encoded);
@@ -226,79 +157,39 @@ export function parseHostedToolsFrame(encoded: string): HostedToolsFrame {
     throw new HostedToolsProtocolError("invalid_json", "Hosted Tools frames must be JSON objects");
   }
   const frame = objectValue(value, "Hosted Tools frame");
-  if (frame.protocol_version !== HOSTED_TOOLS_PROTOCOL_VERSION) {
-    throw new HostedToolsProtocolError("unsupported_version", "unsupported Hosted Tools protocol version");
-  }
-  if (frame.capability !== HOSTED_TOOLS_CAPABILITY) {
-    throw new HostedToolsProtocolError("unsupported_capability", "unsupported Hosted Tools capability");
-  }
   switch (frame.type) {
-    case "attach":
-      return parseAttach(frame);
-    case "catalog_publish":
-      return parseCatalogPublish(frame);
+    case "catalog":
+      return parseCatalog(frame);
     case "result":
       return parseResult(frame);
-    case "cancel_ack":
-      return parseCancelAck(frame);
     case "ping":
       return parsePing(frame);
-    case "lease":
-      return parseLease(frame);
-    case "catalog_ack":
-      return parseCatalogAck(frame);
+    case "drain":
+      exactKeys(frame, ["type"]);
+      return { type: "drain" };
+    case "ready":
+      exactKeys(frame, ["type"]);
+      return { type: "ready" };
     case "call":
       return parseCall(frame);
     case "cancel":
       return parseCancel(frame);
-    case "result_ack":
-      return parseResultAck(frame);
+    case "ack":
+      return parseAck(frame);
     case "pong":
       return parsePong(frame);
-    case "fenced":
-      return parseFenced(frame);
+    case "draining":
+      exactKeys(frame, ["type"]);
+      return { type: "draining" };
     default:
       throw new HostedToolsProtocolError("unknown_message", "unsupported Hosted Tools frame type");
   }
 }
 
-export function matchesHostedToolsLease(
-  holder: { hostId?: string; leaseId?: string; generation?: number },
-  state: {
-    host_id: string | null;
-    lease_id: string | null;
-    generation: number;
-    lease_expires_at: number;
-  },
-  now: number,
-): boolean {
-  return holder.hostId !== undefined
-    && holder.hostId === state.host_id
-    && holder.leaseId !== undefined
-    && holder.leaseId === state.lease_id
-    && holder.generation !== undefined
-    && holder.generation === state.generation
-    && state.lease_expires_at > now;
-}
-
-function parseAttach(frame: Record<string, unknown>): Extract<HostedToolsHostFrame, { type: "attach" }> {
-  exactKeys(frame, ["protocol_version", "capability", "type", "host_id", "capabilities"]);
-  return {
-    protocol_version: HOSTED_TOOLS_PROTOCOL_VERSION,
-    capability: HOSTED_TOOLS_CAPABILITY,
-    type: "attach",
-    host_id: hostId(frame.host_id),
-    capabilities: capabilities(frame.capabilities),
-  };
-}
-
-function parseCatalogPublish(
+function parseCatalog(
   frame: Record<string, unknown>,
-): Extract<HostedToolsHostFrame, { type: "catalog_publish" }> {
-  exactKeys(frame, [
-    "protocol_version", "capability", "type", "lease_id", "generation",
-    "catalog_revision", "catalog_digest", "tools",
-  ]);
+): Extract<HostedToolsHostFrame, { type: "catalog" }> {
+  exactKeys(frame, ["type", "tools"]);
   if (!Array.isArray(frame.tools) || frame.tools.length > MAX_HOSTED_TOOL_CATALOG_ENTRIES) {
     throw new HostedToolsProtocolError(
       "invalid_catalog",
@@ -323,108 +214,31 @@ function parseCatalogPublish(
     identities.add(identity);
   }
   return {
-    protocol_version: HOSTED_TOOLS_PROTOCOL_VERSION,
-    capability: HOSTED_TOOLS_CAPABILITY,
-    type: "catalog_publish",
-    lease_id: uuid(frame.lease_id, "lease_id"),
-    generation: generation(frame.generation),
-    catalog_revision: revision(frame.catalog_revision),
-    catalog_digest: digest(frame.catalog_digest),
+    type: "catalog",
     tools,
   };
 }
 
 function parseResult(frame: Record<string, unknown>): Extract<HostedToolsHostFrame, { type: "result" }> {
-  exactKeys(frame, [
-    "protocol_version", "capability", "type", "lease_id", "generation",
-    "catalog_revision", "call_id", "outcome",
-  ]);
+  exactKeys(frame, ["type", "call_id", "outcome"]);
   return {
-    protocol_version: HOSTED_TOOLS_PROTOCOL_VERSION,
-    capability: HOSTED_TOOLS_CAPABILITY,
     type: "result",
-    lease_id: uuid(frame.lease_id, "lease_id"),
-    generation: generation(frame.generation),
-    catalog_revision: revision(frame.catalog_revision),
     call_id: identifier(frame.call_id, "call_id"),
     outcome: callOutcome(frame.outcome),
   };
 }
 
-function parseCancelAck(
-  frame: Record<string, unknown>,
-): Extract<HostedToolsHostFrame, { type: "cancel_ack" }> {
-  exactKeys(frame, [
-    "protocol_version", "capability", "type", "lease_id", "generation",
-    "catalog_revision", "call_id", "outcome",
-  ]);
-  if (frame.outcome !== "cancelled" && frame.outcome !== "too_late") {
-    throw new HostedToolsProtocolError(
-      "invalid_outcome",
-      "cancel acknowledgement outcome must be cancelled or too_late",
-    );
-  }
-  return {
-    protocol_version: HOSTED_TOOLS_PROTOCOL_VERSION,
-    capability: HOSTED_TOOLS_CAPABILITY,
-    type: "cancel_ack",
-    lease_id: uuid(frame.lease_id, "lease_id"),
-    generation: generation(frame.generation),
-    catalog_revision: revision(frame.catalog_revision),
-    call_id: identifier(frame.call_id, "call_id"),
-    outcome: frame.outcome,
-  };
-}
-
 function parsePing(frame: Record<string, unknown>): Extract<HostedToolsHostFrame, { type: "ping" }> {
-  exactKeys(frame, ["protocol_version", "capability", "type", "lease_id", "generation", "nonce"]);
+  exactKeys(frame, ["type", "nonce"]);
   return {
-    protocol_version: HOSTED_TOOLS_PROTOCOL_VERSION,
-    capability: HOSTED_TOOLS_CAPABILITY,
     type: "ping",
-    lease_id: uuid(frame.lease_id, "lease_id"),
-    generation: generation(frame.generation),
-    ...optionalNonce(frame.nonce),
-  };
-}
-
-function parseLease(frame: Record<string, unknown>): Extract<HostedToolsManagedFrame, { type: "lease" }> {
-  exactKeys(frame, [
-    "protocol_version", "capability", "type", "lease_id", "generation", "expires_at", "capabilities",
-  ]);
-  return {
-    protocol_version: HOSTED_TOOLS_PROTOCOL_VERSION,
-    capability: HOSTED_TOOLS_CAPABILITY,
-    type: "lease",
-    lease_id: uuid(frame.lease_id, "lease_id"),
-    generation: generation(frame.generation),
-    expires_at: timestamp(frame.expires_at, "expires_at"),
-    capabilities: capabilities(frame.capabilities),
-  };
-}
-
-function parseCatalogAck(
-  frame: Record<string, unknown>,
-): Extract<HostedToolsManagedFrame, { type: "catalog_ack" }> {
-  exactKeys(frame, [
-    "protocol_version", "capability", "type", "lease_id", "generation",
-    "catalog_revision", "catalog_digest",
-  ]);
-  return {
-    protocol_version: HOSTED_TOOLS_PROTOCOL_VERSION,
-    capability: HOSTED_TOOLS_CAPABILITY,
-    type: "catalog_ack",
-    lease_id: uuid(frame.lease_id, "lease_id"),
-    generation: generation(frame.generation),
-    catalog_revision: revision(frame.catalog_revision),
-    catalog_digest: digest(frame.catalog_digest),
+    nonce: boundedText(frame.nonce, 0, MAX_NONCE_BYTES, "nonce"),
   };
 }
 
 function parseCall(frame: Record<string, unknown>): Extract<HostedToolsManagedFrame, { type: "call" }> {
   exactKeys(frame, [
-    "protocol_version", "capability", "type", "host_id", "lease_id", "generation",
-    "catalog_revision", "session_id", "call_id", "model", "name", "input", "output_token_budget",
+    "type", "session_id", "call_id", "model", "name", "input", "output_token_budget",
     "output_byte_budget", "deadline_at",
   ]);
   const input = typeof frame.input === "string"
@@ -432,13 +246,7 @@ function parseCall(frame: Record<string, unknown>): Extract<HostedToolsManagedFr
     : objectValue(frame.input, "call input");
   boundedJson(input, MAX_HOSTED_TOOL_INPUT_BYTES, "input_too_large", "call input");
   return {
-    protocol_version: HOSTED_TOOLS_PROTOCOL_VERSION,
-    capability: HOSTED_TOOLS_CAPABILITY,
     type: "call",
-    host_id: hostId(frame.host_id),
-    lease_id: uuid(frame.lease_id, "lease_id"),
-    generation: generation(frame.generation),
-    catalog_revision: revision(frame.catalog_revision),
     session_id: identifier(frame.session_id, "session_id"),
     call_id: identifier(frame.call_id, "call_id"),
     model: identifier(frame.model, "model"),
@@ -461,61 +269,28 @@ function parseCall(frame: Record<string, unknown>): Extract<HostedToolsManagedFr
 }
 
 function parseCancel(frame: Record<string, unknown>): Extract<HostedToolsManagedFrame, { type: "cancel" }> {
-  exactKeys(frame, [
-    "protocol_version", "capability", "type", "lease_id", "generation", "catalog_revision", "call_id",
-  ]);
+  exactKeys(frame, ["type", "call_id"]);
   return {
-    protocol_version: HOSTED_TOOLS_PROTOCOL_VERSION,
-    capability: HOSTED_TOOLS_CAPABILITY,
     type: "cancel",
-    lease_id: uuid(frame.lease_id, "lease_id"),
-    generation: generation(frame.generation),
-    catalog_revision: revision(frame.catalog_revision),
     call_id: identifier(frame.call_id, "call_id"),
   };
 }
 
-function parseResultAck(
+function parseAck(
   frame: Record<string, unknown>,
-): Extract<HostedToolsManagedFrame, { type: "result_ack" }> {
-  exactKeys(frame, [
-    "protocol_version", "capability", "type", "lease_id", "generation", "catalog_revision", "call_id",
-  ]);
+): Extract<HostedToolsManagedFrame, { type: "ack" }> {
+  exactKeys(frame, ["type", "call_id"]);
   return {
-    protocol_version: HOSTED_TOOLS_PROTOCOL_VERSION,
-    capability: HOSTED_TOOLS_CAPABILITY,
-    type: "result_ack",
-    lease_id: uuid(frame.lease_id, "lease_id"),
-    generation: generation(frame.generation),
-    catalog_revision: revision(frame.catalog_revision),
+    type: "ack",
     call_id: identifier(frame.call_id, "call_id"),
   };
 }
 
 function parsePong(frame: Record<string, unknown>): Extract<HostedToolsManagedFrame, { type: "pong" }> {
-  exactKeys(frame, [
-    "protocol_version", "capability", "type", "lease_id", "generation", "expires_at", "nonce",
-  ]);
+  exactKeys(frame, ["type", "nonce"]);
   return {
-    protocol_version: HOSTED_TOOLS_PROTOCOL_VERSION,
-    capability: HOSTED_TOOLS_CAPABILITY,
     type: "pong",
-    lease_id: uuid(frame.lease_id, "lease_id"),
-    generation: generation(frame.generation),
-    expires_at: timestamp(frame.expires_at, "expires_at"),
-    ...optionalNonce(frame.nonce),
-  };
-}
-
-function parseFenced(frame: Record<string, unknown>): Extract<HostedToolsManagedFrame, { type: "fenced" }> {
-  exactKeys(frame, ["protocol_version", "capability", "type", "lease_id", "generation", "reason"]);
-  return {
-    protocol_version: HOSTED_TOOLS_PROTOCOL_VERSION,
-    capability: HOSTED_TOOLS_CAPABILITY,
-    type: "fenced",
-    lease_id: uuid(frame.lease_id, "lease_id"),
-    generation: generation(frame.generation),
-    reason: boundedText(frame.reason, 1, MAX_MESSAGE_BYTES, "reason"),
+    nonce: boundedText(frame.nonce, 0, MAX_NONCE_BYTES, "nonce"),
   };
 }
 
@@ -747,45 +522,6 @@ function processTrace(value: unknown): HostedToolProcessTrace {
   };
 }
 
-function capabilities(value: unknown): HostedToolsCapability[] {
-  if (!Array.isArray(value) || value.length !== 1) {
-    throw new HostedToolsProtocolError(
-      "invalid_capabilities",
-      "v1 attachments must negotiate exactly one tools capability",
-    );
-  }
-  const capability = objectValue(value[0], "capabilities[0]");
-  exactKeys(capability, ["name", "version"]);
-  if (capability.name !== HOSTED_TOOLS_CAPABILITY
-    || capability.version !== HOSTED_TOOLS_CAPABILITY_VERSION) {
-    throw new HostedToolsProtocolError(
-      "invalid_capabilities",
-      "v1 attachments require tools capability version 1",
-    );
-  }
-  return [{ name: HOSTED_TOOLS_CAPABILITY, version: HOSTED_TOOLS_CAPABILITY_VERSION }];
-}
-
-function optionalNonce(value: unknown): { nonce?: string } {
-  return value === undefined
-    ? {}
-    : { nonce: boundedText(value, 0, MAX_NONCE_BYTES, "nonce") };
-}
-
-function uuid(value: unknown, name: string): string {
-  if (typeof value !== "string" || !UUID_V4.test(value)) {
-    throw new HostedToolsProtocolError("invalid_identity", `${name} must be a lowercase UUID v4`);
-  }
-  return value;
-}
-
-function hostId(value: unknown): string {
-  if (typeof value !== "string" || !UUID_V7.test(value)) {
-    throw new HostedToolsProtocolError("invalid_identity", "host_id must be a lowercase UUID v7");
-  }
-  return value;
-}
-
 function identifier(value: unknown, name: string): string {
   if (typeof value !== "string" || !IDENTIFIER.test(value)) {
     throw new HostedToolsProtocolError(
@@ -802,21 +538,6 @@ function toolName(value: unknown): string {
     throw new HostedToolsProtocolError("invalid_identifier", "tool name is reserved");
   }
   return name;
-}
-
-function digest(value: unknown): string {
-  if (typeof value !== "string" || !SHA_256.test(value)) {
-    throw new HostedToolsProtocolError("invalid_digest", "catalog_digest must be a lowercase SHA-256 digest");
-  }
-  return value;
-}
-
-function generation(value: unknown): number {
-  return boundedInteger(value, 1, Number.MAX_SAFE_INTEGER, "generation");
-}
-
-function revision(value: unknown): number {
-  return boundedInteger(value, 1, Number.MAX_SAFE_INTEGER, "catalog_revision");
 }
 
 function timestamp(value: unknown, name: string): number {
@@ -877,4 +598,3 @@ export class HostedToolsProtocolError extends Error {
     super(message);
   }
 }
-
