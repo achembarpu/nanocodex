@@ -29,6 +29,7 @@
     "smoke": "node scripts/live-smoke.mjs",
     "smoke:cloudflare:multiplayer": "node scripts/live-multiplayer-cloudflare.mjs",
     "smoke:managed": "node scripts/managed-api-smoke.mjs",
+    "smoke:nanocodex2": "node scripts/nanocodex2-local-smoke.mjs",
     "smoke:multiplayer": "node scripts/multiplayer-smoke.mjs",
     "soak": "node scripts/soak.mjs",
     "stress": "node scripts/stress.mjs",

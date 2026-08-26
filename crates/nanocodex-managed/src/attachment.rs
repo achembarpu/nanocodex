@@ -25,15 +25,19 @@ pub(crate) struct AttachmentSupervisor {
 }
 
 impl AttachmentSupervisor {
-    pub(crate) fn spawn(tools: Tools, target: AttachmentTarget) -> Self {
+    pub(crate) async fn connect(
+        tools: Tools,
+        target: AttachmentTarget,
+    ) -> Result<Self, AttachmentError> {
+        let (attachment, _events) = tools.clone().attach(target.clone()).connect().await?;
         let (stop, stop_rx) = watch::channel(false);
         let (outcome_tx, outcome) = watch::channel(None);
-        tokio::spawn(run(tools, target, stop_rx, outcome_tx));
-        Self {
+        tokio::spawn(run(tools, target, Some(attachment), stop_rx, outcome_tx));
+        Ok(Self {
             requested: Arc::new(AtomicBool::new(false)),
             stop,
             outcome,
-        }
+        })
     }
 
     pub(crate) async fn shutdown(&self) -> Result<(), AttachmentError> {
@@ -62,37 +66,43 @@ impl AttachmentSupervisor {
 async fn run(
     tools: Tools,
     target: AttachmentTarget,
+    mut attachment: Option<Attachment>,
     mut stop: watch::Receiver<bool>,
     outcome: watch::Sender<Option<Result<(), AttachmentError>>>,
 ) {
     let mut backoff = INITIAL_BACKOFF;
     let result = loop {
-        let connected = tokio::select! {
-            biased;
-            changed = stop.changed() => {
-                if changed.is_err() || *stop.borrow() {
-                    break Ok(());
+        let current = match attachment.take() {
+            Some(attachment) => attachment,
+            None => {
+                let connected = tokio::select! {
+                    biased;
+                    changed = stop.changed() => {
+                        if changed.is_err() || *stop.borrow() {
+                            break Ok(());
+                        }
+                        continue;
+                    }
+                    connected = tools.clone().attach(target.clone()).connect() => connected,
+                };
+                match connected {
+                    Ok((attachment, _events)) => {
+                        backoff = INITIAL_BACKOFF;
+                        attachment
+                    }
+                    Err(error) if retryable(&error) => {
+                        if wait_or_stop(backoff, &mut stop).await {
+                            break Ok(());
+                        }
+                        backoff = backoff.saturating_mul(2).min(MAX_BACKOFF);
+                        continue;
+                    }
+                    Err(error) => break Err(error),
                 }
-                continue;
             }
-            connected = tools.clone().attach(target.clone()).connect() => connected,
-        };
-        let attachment = match connected {
-            Ok((attachment, _events)) => {
-                backoff = INITIAL_BACKOFF;
-                attachment
-            }
-            Err(error) if retryable(&error) => {
-                if wait_or_stop(backoff, &mut stop).await {
-                    break Ok(());
-                }
-                backoff = backoff.saturating_mul(2).min(MAX_BACKOFF);
-                continue;
-            }
-            Err(error) => break Err(error),
         };
 
-        match drain_until_closed(attachment, &mut stop).await {
+        match drain_until_closed(current, &mut stop).await {
             Ok(()) => break Ok(()),
             Err(error) if retryable(&error) => {
                 if wait_or_stop(backoff, &mut stop).await {

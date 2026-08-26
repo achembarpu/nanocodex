@@ -321,7 +321,7 @@ impl<S> ManagedBuilder<S> {
         #[cfg(feature = "tools")]
         let attachment = match self.tools {
             Some(tools) => {
-                match call(
+                let target = match call(
                     &mut self.managed.service,
                     ManagedRequest::AttachmentTarget {
                         agent_id: agent_id.clone(),
@@ -329,11 +329,15 @@ impl<S> ManagedBuilder<S> {
                 )
                 .await
                 {
-                    Ok(ManagedResponse::AttachmentTarget(target)) => {
-                        Some(AttachmentSupervisor::spawn(tools, target))
-                    }
-                    Ok(_) | Err(_) => None,
-                }
+                    Ok(ManagedResponse::AttachmentTarget(target)) => target,
+                    Ok(_) => return Err(unexpected_response()),
+                    Err(error) => return Err(error),
+                };
+                Some(
+                    AttachmentSupervisor::connect(tools, target)
+                        .await
+                        .map_err(backend_error)?,
+                )
             }
             None => None,
         };
