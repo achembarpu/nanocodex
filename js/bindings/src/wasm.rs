@@ -1021,7 +1021,7 @@ impl WasmSubagents {
 
     async fn close_all(&self, root_session_id: &str) -> std::io::Result<()> {
         self.control.close_all(root_session_id).await?;
-        release_subagent_scope(&self.sessions, root_session_id);
+        release_subagent_scope(&self.sessions, &self.parents, root_session_id);
         self.remove_parent(root_session_id);
         Ok(())
     }
@@ -2652,6 +2652,14 @@ fn forward_subagent_updates(
             .map(|(_, session_id)| session_id)
             .collect::<Vec<_>>();
         for session_id in session_ids {
+            match parents.lock() {
+                Ok(mut parents) => {
+                    parents.remove(&session_id);
+                }
+                Err(poisoned) => {
+                    poisoned.into_inner().remove(&session_id);
+                }
+            }
             host_release_subagent_session(&session_id);
         }
     });
@@ -2659,6 +2667,7 @@ fn forward_subagent_updates(
 
 fn release_subagent_scope(
     sessions: &Rc<RefCell<HashMap<(String, SubagentId), String>>>,
+    parents: &Arc<Mutex<HashMap<String, AgentHandle>>>,
     root_session_id: &str,
 ) {
     let session_ids = {
@@ -2673,6 +2682,14 @@ fn release_subagent_scope(
             .collect::<Vec<_>>()
     };
     for session_id in session_ids {
+        match parents.lock() {
+            Ok(mut parents) => {
+                parents.remove(&session_id);
+            }
+            Err(poisoned) => {
+                poisoned.into_inner().remove(&session_id);
+            }
+        }
         host_release_subagent_session(&session_id);
     }
 }
