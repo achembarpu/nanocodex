@@ -3,16 +3,8 @@ import test from "node:test";
 
 import {
   RESIDENT_IDS,
-  type ResidentId,
   type WorldResidentMemory,
 } from "../src/monsterWorldProtocol.ts";
-import {
-  clearRegionMarket,
-  createTilePolyline,
-  measureFormation,
-  partitionTilePolyline,
-  type TilePoint,
-} from "../src/monsterWorldFormationController.ts";
 import {
   BASE_RESIDENT_COUNT,
   WORLD_ROOM_RETENTION,
@@ -489,93 +481,3 @@ test("eight generic maintained relations converge and follow a perturbed anchor"
     residents.length,
   );
 });
-
-test("a bottom-up formation wave converges, recompiles from live positions, and follows its anchor", () => {
-  const state = createWorldState();
-  setWorldAgentsOnline(state, true);
-  const residents = RESIDENT_IDS.slice(0, 8);
-  for (const id of RESIDENT_IDS) {
-    if (!residents.includes(id)) state.actors[id].presence = "absent";
-  }
-  for (const id of residents) {
-    state.actors[id].scene = state.actors.player.scene;
-    state.actors[id].x = state.actors.player.x - 2;
-    state.actors[id].y = state.actors.player.y + 1;
-    state.actors[id].movement = undefined;
-    state.actors[id].tasks = [];
-  }
-  const circle = [
-    { x: -5, y: -2 }, { x: -2, y: -5 }, { x: 2, y: -5 }, { x: 5, y: -2 },
-    { x: 5, y: 2 }, { x: 2, y: 5 }, { x: -2, y: 5 }, { x: -5, y: 2 },
-  ];
-  applyFormationWave(state, residents, 1, "circle", circle);
-  for (let index = 0; index < 800; index += 1) updateWorld(state, 100);
-  assertFormationNearPath(state, residents, circle, 2.5);
-  assert.ok(residents.every((id) => state.actors[id].formationConstraint?.action.generation === 1));
-
-  const beforeSquare = new Map(residents.map((id) => [id, `${state.actors[id].x},${state.actors[id].y}`]));
-  const square = [
-    { x: -7, y: -7 }, { x: 7, y: -7 }, { x: 7, y: 7 }, { x: -7, y: 7 },
-  ];
-  applyFormationWave(state, residents, 2, "square", square);
-  for (let index = 0; index < 1_000; index += 1) updateWorld(state, 100);
-  assertFormationNearPath(state, residents, square, 3);
-  assert.ok(residents.filter((id) => beforeSquare.get(id) !== `${state.actors[id].x},${state.actors[id].y}`).length >= 6);
-  assert.ok(residents.every((id) => state.actors[id].formationConstraint?.action.generation === 2));
-
-  const beforeAnchorMove = new Map(residents.map((id) => [id, state.actors[id].x]));
-  state.actors.player.x += 2;
-  for (let index = 0; index < 800; index += 1) updateWorld(state, 100);
-  assertFormationNearPath(state, residents, square, 3);
-  assert.ok(residents.filter((id) => state.actors[id].x > (beforeAnchorMove.get(id) ?? Infinity)).length >= 6);
-});
-
-function applyFormationWave(
-  state: ReturnType<typeof createWorldState>,
-  members: readonly ResidentId[],
-  generation: number,
-  formationId: string,
-  pathTiles: readonly TilePoint[],
-): void {
-  const anchor = state.actors.player;
-  const path = createTilePolyline(pathTiles.map(({ x, y }) => ({ x: anchor.x + x, y: anchor.y + y })), true);
-  const regions = partitionTilePolyline(path, members.length, 2);
-  const allocations = clearRegionMarket(members.map((id) => ({
-    id,
-    position: { x: state.actors[id].x, y: state.actors[id].y },
-  })), regions, { generation });
-  const regionByMember = new Map(allocations.map(({ residentId, regionIndex }) => [residentId, regionIndex]));
-  for (const id of members) {
-    const application = applyWorldToolAction(state, {
-      actionId: `${generation}-${formationId}-${id}`,
-      requestId: `${generation}-${formationId}-turn-${id}`,
-      agentId: id,
-      action: {
-        kind: "maintain_formation",
-        generation,
-        formation_id: formationId,
-        anchor: "player",
-        closed: true,
-        path_tiles: pathTiles,
-        region_index: regionByMember.get(id) ?? -1,
-        region_count: regions.length,
-        members,
-      },
-    });
-    assert.equal(application.accepted, true, id);
-  }
-}
-
-function assertFormationNearPath(
-  state: ReturnType<typeof createWorldState>,
-  members: readonly ResidentId[],
-  pathTiles: readonly TilePoint[],
-  maximumMeanDistance: number,
-): void {
-  const anchor = state.actors.player;
-  const path = createTilePolyline(pathTiles.map(({ x, y }) => ({ x: anchor.x + x, y: anchor.y + y })), true);
-  const positions = members.map((id) => ({ x: state.actors[id].x, y: state.actors[id].y }));
-  const metrics = measureFormation(path, positions);
-  assert.ok(metrics.meanCurveDistance <= maximumMeanDistance, JSON.stringify(metrics));
-  assert.equal(new Set(positions.map(({ x, y }) => `${x},${y}`)).size, members.length);
-}

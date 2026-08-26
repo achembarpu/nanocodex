@@ -31,11 +31,9 @@ import {
   type WorldSupplyState,
   type WorldTarget,
   type WorldToolResult,
-  type WorldFormationSnapshot,
 } from "./monsterWorldProtocol.ts";
 import {
   WORLD_ENTRY_PORTALS,
-  WORLD_PORTALS,
   WORLD_PIXEL_HEIGHT as MAP_PIXEL_HEIGHT,
   WORLD_PIXEL_WIDTH as MAP_PIXEL_WIDTH,
   WORLD_POIS as SCENE_WORLD_POIS,
@@ -50,20 +48,6 @@ import {
   type WorldCamera,
   type WorldEntryPortal,
 } from "./monsterWorldMap.ts";
-import {
-  createTilePolyline,
-  clearRegionMarket,
-  deriveDensityTargets,
-  measureFormation,
-  partitionTilePolyline,
-  planJointGridTick,
-  projectOntoTilePolyline,
-  sampleTilePolyline,
-  type FormationResident,
-  type FormationRegion,
-  type RegionAllocation,
-  type TilePoint,
-} from "./monsterWorldFormationController.ts";
 
 export const WORLD_COLUMNS = WORLD_SCENES.town.columns;
 export const WORLD_ROWS = WORLD_SCENES.town.rows;
@@ -138,18 +122,6 @@ type WorldRelativeConstraint = Readonly<{
   requestId: string;
 }>;
 
-type WorldFormationConstraint = {
-  action: Extract<WorldPrimitiveAction, { kind: "maintain_formation" }>;
-  requestId: string;
-  waitAge: number;
-  targetArc?: number;
-  targetOffset?: TilePoint;
-  slotsRematched?: boolean;
-  settledSinceMs?: number;
-};
-
-const FORMATION_HOLD_MS = 320;
-
 export type WorldOrderStatus = "assigned" | "moving" | "completed" | "preempted" | "rejected";
 
 export type WorldOrderAssignment = {
@@ -202,7 +174,6 @@ export type WorldActor = {
   departure?: WorldDeparture;
   tasks: WorldTask[];
   relativeConstraint?: WorldRelativeConstraint;
-  formationConstraint?: WorldFormationConstraint;
   activity: string;
   intent?: string;
   lastOrigin: ActivityOrigin;
@@ -633,8 +604,6 @@ export function setPopulationTarget(state: WorldState, requested: number): Popul
       }
       actor.departure = undefined;
       actor.tasks = [];
-      actor.relativeConstraint = undefined;
-      actor.formationConstraint = undefined;
       actor.activity = "decided to stay in town";
       actor.intent = "stay for one more expedition";
       actor.bubble = { text: "Actually, one more expedition.", untilMs: state.elapsedMs + 3_200 };
@@ -755,8 +724,6 @@ function spawnResident(state: WorldState, id: ResidentId): void {
   };
   actor.departure = undefined;
   actor.tasks = [];
-  actor.relativeConstraint = undefined;
-  actor.formationConstraint = undefined;
   actor.bubble = { text: "Springleaf Guild should be just ahead!", untilMs: state.elapsedMs + 4_000 };
   actor.emote = { icon: "music", untilMs: state.elapsedMs + 1_600 };
   actor.activity = `entering from the ${portal.label} trail`;
@@ -785,8 +752,6 @@ function beginResidentExit(state: WorldState, id: ResidentId): boolean {
   preemptActorOrder(state, actor, "left-world");
   actor.presence = "exiting";
   actor.tasks = [];
-  actor.relativeConstraint = undefined;
-  actor.formationConstraint = undefined;
   actor.activity = "telling themself it's time to head out";
   actor.intent = "walk to the nearest edge and leave the map";
   actor.lastOrigin = "routine";
@@ -844,488 +809,6 @@ export function updateWorld(state: WorldState, deltaMs: number): void {
     for (const id of RESIDENT_IDS) state.decisionVersions[id] += 1;
   }
   for (const id of ACTOR_IDS) updateActor(state, state.actors[id], boundedDelta);
-  updateFormationControllers(state);
-}
-
-function updateFormationControllers(state: WorldState): void {
-  const constraints = RESIDENT_IDS
-    .map((id) => state.actors[id])
-    .filter((actor) => actor.formationConstraint !== undefined);
-  if (constraints.length === 0) return;
-  const groups = new Map<string, WorldActor[]>();
-  for (const actor of constraints) {
-    const action = actor.formationConstraint?.action;
-    if (!action) continue;
-    const key = `${action.generation}:${action.formation_id}`;
-    const group = groups.get(key);
-    if (group) group.push(actor);
-    else groups.set(key, [actor]);
-  }
-
-  const desiredByResident = new Map<ResidentId, WorldPosition>();
-  const settledByResident = new Map<ResidentId, boolean>();
-  const targetClaims = new Set<string>();
-  const routeDistanceCache = new Map<string, number>();
-  for (const group of groups.values()) {
-    group.sort((left, right) => RESIDENT_IDS.indexOf(left.id as ResidentId) - RESIDENT_IDS.indexOf(right.id as ResidentId));
-    const action = group[0]?.formationConstraint?.action;
-    if (!action) continue;
-    const fingerprint = formationFingerprint(action);
-    const inconsistent = !validFormationAction(action, group[0].id as ResidentId)
-      || group.some((member) => {
-        const candidate = member.formationConstraint?.action;
-        return candidate === undefined
-          || !validFormationAction(candidate, member.id as ResidentId)
-          || formationFingerprint(candidate) !== fingerprint
-          || !action.members.includes(member.id as ResidentId);
-      });
-    if (inconsistent) {
-      deactivateFormationWave(state, formationWaveKey(action));
-      continue;
-    }
-    const complete = group.length === action.members.length && action.members.every((memberId) => {
-      const member = state.actors[memberId];
-      const candidate = member.formationConstraint?.action;
-      return member.presence === "active"
-        && candidate !== undefined
-        && formationFingerprint(candidate) === fingerprint;
-    });
-    if (!complete) continue;
-    const anchor = state.actors[action.anchor];
-    const anchorPosition = actorWorldPosition(anchor);
-    const path = createTilePolyline(action.path_tiles.map((point) => ({
-      x: anchorPosition.x + point.x,
-      y: anchorPosition.y + point.y,
-    })), action.closed);
-    const residents: FormationResident<ResidentId>[] = action.members.map((memberId) => {
-      const member = state.actors[memberId];
-      return Object.freeze({ id: memberId, position: actorWorldPosition(member) });
-    });
-    const metrics = measureFormation(path, residents.map(({ position }) => position));
-    const storedSlotKeys = action.members.map((memberId) => {
-      const offset = state.actors[memberId].formationConstraint?.targetOffset;
-      return offset === undefined
-        ? undefined
-        : worldPositionKey({
-            scene: anchorPosition.scene,
-            x: anchorPosition.x + offset.x,
-            y: anchorPosition.y + offset.y,
-          });
-    });
-    const currentPositionKeys = residents.map(({ id }) => (
-      worldPositionKey(actorWorldPosition(state.actors[id]))
-    ));
-    const occupiesCompleteSlotSet = storedSlotKeys.every((key) => key !== undefined)
-      && new Set(storedSlotKeys).size === storedSlotKeys.length
-      && new Set(currentPositionKeys).size === currentPositionKeys.length
-      && currentPositionKeys.every((key) => storedSlotKeys.includes(key));
-    const onFormationManifold = group.every((member) => member.scene === anchorPosition.scene)
-      && group.every((member) => !isPortalEndpoint(actorWorldPosition(member)))
-      && (
-        occupiesCompleteSlotSet
-        || (
-          metrics.maxCurveDistance <= Math.min(1.5, Math.max(0.25, 1.5 * residents.length / path.length))
-          && metrics.maxNormalizedArcGap <= Math.min(1, 3 / residents.length)
-        )
-      );
-    if (onFormationManifold) {
-      for (const resident of residents) {
-        const actor = state.actors[resident.id];
-        const constraint = actor.formationConstraint;
-        if (!constraint) continue;
-        actor.movement = undefined;
-        constraint.settledSinceMs ??= state.elapsedMs;
-        constraint.targetArc = projectOntoTilePolyline(path, resident.position).arc;
-        constraint.targetOffset = Object.freeze({
-          x: resident.position.x - anchorPosition.x,
-          y: resident.position.y - anchorPosition.y,
-        });
-        const current = actorWorldPosition(actor);
-        targetClaims.add(worldPositionKey(current));
-        desiredByResident.set(resident.id, current);
-        settledByResident.set(resident.id, true);
-      }
-      continue;
-    }
-    for (const resident of residents) {
-      const constraint = state.actors[resident.id].formationConstraint;
-      if (constraint) constraint.settledSinceMs = undefined;
-    }
-    const regions = partitionTilePolyline(path, residents.length, action.region_count);
-    const claimCounts = new Map<number, number>();
-    for (const memberId of action.members) {
-      const regionIndex = state.actors[memberId].formationConstraint?.action.region_index;
-      if (regionIndex === undefined) continue;
-      claimCounts.set(regionIndex, (claimCounts.get(regionIndex) ?? 0) + 1);
-    }
-    if (regions.some(({ index, capacity }) => claimCounts.get(index) !== capacity)) {
-      deactivateFormationWave(state, formationWaveKey(action));
-      continue;
-    }
-    const allocations: RegionAllocation<ResidentId>[] = action.members.map((memberId) => {
-      const memberAction = state.actors[memberId].formationConstraint?.action;
-      if (!memberAction) throw new Error(`missing formation claim for ${memberId}`);
-      return Object.freeze({
-        residentId: memberId,
-        regionIndex: memberAction.region_index,
-        travelCost: 0,
-        clearingPrice: 0,
-      });
-    });
-    const targets = deriveDensityTargets(path, residents, regions, allocations, action.generation);
-    rematchFormationSlots(state, action, anchorPosition, residents);
-    const unavailableTargets = unavailableFormationTargetClaims(state, new Set(action.members));
-    for (const target of targets) {
-      const actor = state.actors[target.residentId];
-      const constraint = actor.formationConstraint;
-      if (!constraint) continue;
-      const targetArc = constraint.targetArc ?? target.targetArc;
-      const intendedTarget = constraint.targetOffset === undefined
-        ? sampleTilePolyline(path, targetArc)
-        : {
-            x: anchorPosition.x + constraint.targetOffset.x,
-            y: anchorPosition.y + constraint.targetOffset.y,
-          };
-      const desired = nearestFeasibleFormationTarget(
-        state,
-        actor,
-        anchorPosition.scene,
-        intendedTarget,
-        targetClaims,
-        unavailableTargets,
-      );
-      if (!desired) continue;
-      if (actor.scene === anchorPosition.scene) {
-        constraint.targetArc ??= targetArc;
-        const feasibleX = desired.x - anchorPosition.x;
-        const feasibleY = desired.y - anchorPosition.y;
-        if (
-          constraint.targetOffset === undefined
-          || constraint.targetOffset.x !== feasibleX
-          || constraint.targetOffset.y !== feasibleY
-        ) {
-          constraint.targetOffset = Object.freeze({ x: feasibleX, y: feasibleY });
-          constraint.slotsRematched = false;
-        }
-      }
-      targetClaims.add(worldPositionKey(desired));
-      desiredByResident.set(target.residentId, desired);
-      settledByResident.set(target.residentId, samePosition(actorWorldPosition(actor), desired));
-    }
-  }
-
-  const idle = [...desiredByResident]
-    .map(([residentId, target]) => ({ actor: state.actors[residentId], target }))
-    .filter(({ actor }) => actor.movement === undefined);
-  if (idle.length === 0) return;
-  const sameSceneIdle: typeof idle = [];
-  for (const candidate of idle) {
-    if (candidate.actor.scene === candidate.target.scene) sameSceneIdle.push(candidate);
-    else advanceFormationAcrossScenes(state, candidate.actor, candidate.target);
-  }
-  const idleByScene = new Map<WorldSceneId, typeof idle>();
-  for (const candidate of sameSceneIdle) {
-    const peers = idleByScene.get(candidate.actor.scene);
-    if (peers) peers.push(candidate);
-    else idleByScene.set(candidate.actor.scene, [candidate]);
-  }
-  for (const sceneIdle of idleByScene.values()) {
-    updateFormationSceneController(
-      state,
-      sceneIdle,
-      desiredByResident,
-      settledByResident,
-      routeDistanceCache,
-    );
-  }
-}
-
-function rematchFormationSlots(
-  state: WorldState,
-  action: Extract<WorldPrimitiveAction, { kind: "maintain_formation" }>,
-  anchor: WorldPosition,
-  residents: readonly FormationResident<ResidentId>[],
-): void {
-  if (action.members.some((memberId) => state.actors[memberId].scene !== anchor.scene)) return;
-  if (action.members.some((memberId) => state.actors[memberId].movement !== undefined)) return;
-  const residentsById = new Map(residents.map((resident) => [resident.id, resident]));
-  const slots = action.members.map((memberId) => {
-    const constraint = state.actors[memberId].formationConstraint;
-    return constraint?.targetOffset === undefined || constraint.targetArc === undefined
-      ? undefined
-      : Object.freeze({ offset: constraint.targetOffset, arc: constraint.targetArc });
-  });
-  if (slots.some((slot) => slot === undefined)) return;
-  const completeSlots = slots as readonly Readonly<{ offset: TilePoint; arc: number }>[];
-  if (new Set(completeSlots.map(({ offset }) => `${offset.x},${offset.y}`)).size !== completeSlots.length) return;
-  const slotByPosition = new Map(completeSlots.map((slot) => [
-    worldPositionKey({ scene: anchor.scene, x: anchor.x + slot.offset.x, y: anchor.y + slot.offset.y }),
-    slot,
-  ]));
-  const occupants = action.members.map((memberId) => Object.freeze({
-    memberId,
-    positionKey: worldPositionKey(actorWorldPosition(state.actors[memberId])),
-  }));
-  if (
-    new Set(occupants.map(({ positionKey }) => positionKey)).size === occupants.length
-    && occupants.every(({ positionKey }) => slotByPosition.has(positionKey))
-  ) {
-    for (const { memberId, positionKey } of occupants) {
-      const constraint = state.actors[memberId].formationConstraint;
-      const slot = slotByPosition.get(positionKey);
-      if (!constraint || !slot) continue;
-      constraint.targetOffset = slot.offset;
-      constraint.targetArc = slot.arc;
-      constraint.waitAge = 0;
-      constraint.slotsRematched = true;
-    }
-    return;
-  }
-  if (action.members.every((memberId) => state.actors[memberId].formationConstraint?.slotsRematched)) return;
-  const formationRegions: FormationRegion[] = completeSlots.map(({ offset }, index) => Object.freeze({
-    index,
-    startArc: index,
-    endArc: index + 1,
-    capacity: 1,
-    center: Object.freeze({ x: anchor.x + offset.x, y: anchor.y + offset.y }),
-  }));
-  const previousClaims = new Map(action.members.map((memberId, index) => [memberId, Object.freeze({
-    generation: action.generation,
-    regionIndex: index,
-  })]));
-  const reassigned = clearRegionMarket(
-    action.members.map((memberId) => {
-      const resident = residentsById.get(memberId);
-      if (!resident) throw new Error(`missing formation resident ${memberId}`);
-      return resident;
-    }),
-    formationRegions,
-    {
-      generation: action.generation,
-      previousClaims,
-      congestionWeight: 0,
-      retentionBonus: 2,
-      routeDistance(from, to) {
-        return Math.abs(from.x - to.x) + Math.abs(from.y - to.y);
-      },
-    },
-  );
-  for (const allocation of reassigned) {
-    const constraint = state.actors[allocation.residentId].formationConstraint;
-    const slot = completeSlots[allocation.regionIndex];
-    if (!constraint || !slot) continue;
-    constraint.targetOffset = slot.offset;
-    constraint.targetArc = slot.arc;
-  }
-  for (const memberId of action.members) {
-    const constraint = state.actors[memberId].formationConstraint;
-    if (constraint) constraint.slotsRematched = true;
-  }
-}
-
-function updateFormationSceneController(
-  state: WorldState,
-  idle: readonly Readonly<{ actor: WorldActor; target: WorldPosition }>[],
-  desiredByResident: ReadonlyMap<ResidentId, WorldPosition>,
-  settledByResident: ReadonlyMap<ResidentId, boolean>,
-  routeDistanceCache: Map<string, number>,
-): void {
-  // Ordinary routines may have left several sprites on one tile before the
-  // formation horizon began. Admit one deterministic escapee from each such
-  // pile into this joint tick; the others become fixed claims until that agent
-  // clears the shared origin. This drains inherited overlap without weakening
-  // the joint planner's unique-start and unique-destination contract.
-  const idleByPosition = new Map<string, Array<{ actor: WorldActor; target: WorldPosition }>>();
-  for (const candidate of idle) {
-    const key = worldPositionKey(actorWorldPosition(candidate.actor));
-    const peers = idleByPosition.get(key);
-    if (peers) peers.push(candidate);
-    else idleByPosition.set(key, [candidate]);
-  }
-  const plannerIdle: Array<{ actor: WorldActor; target: WorldPosition }> = [];
-  const deferredOverlap: Array<{ actor: WorldActor; target: WorldPosition }> = [];
-  for (const peers of idleByPosition.values()) {
-    peers.sort((left, right) => (
-      positionDistance(actorWorldPosition(right.actor), right.target)
-      - positionDistance(actorWorldPosition(left.actor), left.target)
-      || RESIDENT_IDS.indexOf(left.actor.id as ResidentId) - RESIDENT_IDS.indexOf(right.actor.id as ResidentId)
-    ));
-    plannerIdle.push(peers[0]);
-    deferredOverlap.push(...peers.slice(1));
-  }
-  for (const { actor } of deferredOverlap) {
-    const constraint = actor.formationConstraint;
-    if (!constraint) continue;
-    constraint.waitAge += 1;
-    actor.activity = `yielding from shared tile within formation ${constraint.action.formation_id}`;
-  }
-  const idleIds = new Set(plannerIdle.map(({ actor }) => actor.id));
-  const settledClaims = new Map<string, ResidentId>();
-  for (const [residentId, settled] of settledByResident) {
-    if (!settled) continue;
-    settledClaims.set(worldPositionKey(actorWorldPosition(state.actors[residentId])), residentId);
-  }
-  const fixedClaims = new Set<string>();
-  const routeBlockers = new Set<string>();
-  for (const id of ACTOR_IDS) {
-    if (idleIds.has(id)) continue;
-    const actor = state.actors[id];
-    if (actor.presence !== "active" && id !== "player") continue;
-    fixedClaims.add(worldPositionKey(actorWorldPosition(actor)));
-    if (actor.movement) fixedClaims.add(worldPositionKey(actor.movement.to));
-    if (!desiredByResident.has(id as ResidentId)) {
-      routeBlockers.add(worldPositionKey(actorWorldPosition(actor)));
-      if (actor.movement) routeBlockers.add(worldPositionKey(actor.movement.to));
-    }
-  }
-  const plan = planJointGridTick(plannerIdle.map(({ actor, target }) => Object.freeze({
-    id: actor.id as ResidentId,
-    position: Object.freeze({ x: actor.x, y: actor.y }),
-    target: Object.freeze({ x: target.x, y: target.y }),
-    waitAge: actor.formationConstraint?.waitAge ?? 0,
-  })), {
-    isBlocked(point, residentId) {
-      const actor = state.actors[residentId];
-      const position = { scene: actor.scene, x: point.x, y: point.y } satisfies WorldPosition;
-      const key = worldPositionKey(position);
-      const settledOwner = settledClaims.get(key);
-      return isWorldPositionBlocked(position)
-        || fixedClaims.has(key)
-        || (settledOwner !== undefined && settledOwner !== residentId);
-    },
-    routeDistance(point, target, residentId) {
-      const actor = state.actors[residentId];
-      const goal = desiredByResident.get(residentId);
-      if (!goal) return Number.POSITIVE_INFINITY;
-      const from = { scene: actor.scene, x: point.x, y: point.y } satisfies WorldPosition;
-      const to = { ...goal, x: target.x, y: target.y } satisfies WorldPosition;
-      if (samePosition(from, to)) return 0;
-      const cacheKey = `${residentId}:${worldPositionKey(from)}>${worldPositionKey(to)}`;
-      const cached = routeDistanceCache.get(cacheKey);
-      if (cached !== undefined) return cached;
-      // Permanent nonparticipant claims shape the route. Transient swarm peer
-      // reservations are enforced only for this joint step by isBlocked and
-      // recursive displacement, so peers do not chase moving distance fields.
-      const route = findWorldRoute(
-        from,
-        to,
-        (position) => {
-          const key = worldPositionKey(position);
-          const settledOwner = settledClaims.get(key);
-          return routeBlockers.has(key)
-            || (settledOwner !== undefined && settledOwner !== residentId);
-        },
-      );
-      const distance = route.length > 0 ? route.length : Number.POSITIVE_INFINITY;
-      routeDistanceCache.set(cacheKey, distance);
-      return distance;
-    },
-  });
-  for (const move of plan.moves) {
-    const actor = state.actors[move.residentId];
-    const constraint = actor.formationConstraint;
-    if (!constraint) continue;
-    constraint.waitAge = plan.nextWaitAges.get(move.residentId) ?? 0;
-    const desired = desiredByResident.get(move.residentId);
-    if (!desired) continue;
-    actor.intent = `maintain ${constraint.action.formation_id} region ${constraint.action.region_index + 1}/${constraint.action.region_count}`;
-    if (!move.moved) {
-      actor.activity = settledByResident.get(move.residentId)
-        ? `holding formation ${constraint.action.formation_id}`
-        : `yielding within formation ${constraint.action.formation_id}`;
-      continue;
-    }
-    const from = actorWorldPosition(actor);
-    const to = { scene: actor.scene, x: move.to.x, y: move.to.y } satisfies WorldPosition;
-    actor.direction = directionBetween(from, to);
-    actor.movement = { from, to, progress: 0, durationMs: tileDuration(actor, 205) };
-    actor.activity = `redistributing within formation ${constraint.action.formation_id}`;
-  }
-}
-
-function nearestFeasibleFormationTarget(
-  state: WorldState,
-  actor: WorldActor,
-  scene: WorldSceneId,
-  target: TilePoint,
-  claimed: ReadonlySet<string>,
-  unavailable: ReadonlySet<string>,
-): WorldPosition | undefined {
-  const start = actorWorldPosition(actor);
-  // Preserve the semantic contour while projecting crowded or obstructed slots
-  // into a bounded local feasible set. The wider horizon matters for subgroup
-  // contours beside buildings, where a six-tile neighborhood can contain fewer
-  // free tiles than residents even though nearby town space is available.
-  for (let radius = 0; radius <= 12; radius += 1) {
-    const candidates: WorldPosition[] = [];
-    for (let dx = -radius; dx <= radius; dx += 1) {
-      const dy = radius - Math.abs(dx);
-      candidates.push({ scene, x: target.x + dx, y: target.y - dy });
-      if (dy > 0) candidates.push({ scene, x: target.x + dx, y: target.y + dy });
-    }
-    candidates.sort((left, right) => left.y - right.y || left.x - right.x);
-    for (const candidate of candidates) {
-      if (
-        isWorldPositionBlocked(candidate)
-        || isPortalEndpoint(candidate)
-        || claimed.has(worldPositionKey(candidate))
-        || unavailable.has(worldPositionKey(candidate))
-      ) continue;
-      const path = findWorldRoute(start, candidate);
-      if (path.length > 0 || samePosition(start, candidate)) return Object.freeze(candidate);
-    }
-  }
-  return undefined;
-}
-
-function isPortalEndpoint(position: WorldPosition): boolean {
-  return WORLD_PORTALS.some(({ from, to }) => (
-    samePosition(position, from) || samePosition(position, to)
-  ));
-}
-
-function advanceFormationAcrossScenes(
-  state: WorldState,
-  actor: WorldActor,
-  target: WorldPosition,
-): void {
-  const constraint = actor.formationConstraint;
-  if (!constraint) return;
-  actor.intent = `maintain ${constraint.action.formation_id} region ${constraint.action.region_index + 1}/${constraint.action.region_count}`;
-  const from = actorWorldPosition(actor);
-  const next = findWorldRoute(from, target)[0];
-  if (!next || !worldStepAvailable(state, actor, next)) {
-    constraint.waitAge += 1;
-    actor.activity = `waiting for a clear formation route to ${sceneLabel(target.scene)}`;
-    return;
-  }
-  constraint.waitAge = 0;
-  if (next.scene !== actor.scene) {
-    if (!traverseDeclaredPortal(state, actor, next)) {
-      actor.activity = `waiting for a clear formation portal to ${sceneLabel(target.scene)}`;
-    }
-    return;
-  }
-  actor.direction = directionBetween(from, next);
-  actor.movement = { from, to: next, progress: 0, durationMs: tileDuration(actor, 205) };
-  actor.activity = `routing to ${sceneLabel(target.scene)} for formation ${constraint.action.formation_id}`;
-}
-
-function unavailableFormationTargetClaims(
-  state: WorldState,
-  members: ReadonlySet<ResidentId>,
-): ReadonlySet<string> {
-  const claims = new Set<string>();
-  for (const id of ACTOR_IDS) {
-    if (id !== "player" && members.has(id as ResidentId)) continue;
-    const actor = state.actors[id];
-    if (id !== "player" && actor.presence !== "active") continue;
-    claims.add(worldPositionKey(actorWorldPosition(actor)));
-    if (actor.movement) claims.add(worldPositionKey(actor.movement.to));
-    const reserved = actor.tasks[0]?.goal;
-    if (reserved) claims.add(worldPositionKey(reserved));
-  }
-  return claims;
 }
 
 export function movePlayer(state: WorldState, direction: Direction): boolean {
@@ -1393,7 +876,6 @@ export function playerSpeak(
   for (const id of boardReaders) {
     const actor = state.actors[id];
     actor.relativeConstraint = undefined;
-    actor.formationConstraint = undefined;
     if (heardBy.includes(id)) {
       actor.direction = directionBetween(actorRenderPoint(actor), actorRenderPoint(player));
       actor.emote = { icon: "!", untilMs: state.elapsedMs + 1_100 + (actor.sprite % 5) * 120 };
@@ -2038,21 +1520,10 @@ export function applyWorldToolAction(
 ): WorldToolActionApplication {
   const actor = state.actors[request.agentId];
   if (
-    request.action.kind === "maintain_formation"
-    && !validFormationAction(request.action, request.agentId)
-  ) {
-    deactivateFormationWave(state, formationWaveKey(request.action));
-    return { accepted: false, reason: "invalid" };
-  }
-  if (
     actor.presence !== "active"
     || !actionTargetsPresent(state, request.action)
     || (
-      (
-        request.action.kind === "move_relative"
-        || request.action.kind === "maintain_relative"
-        || request.action.kind === "maintain_formation"
-      )
+      (request.action.kind === "move_relative" || request.action.kind === "maintain_relative")
       && request.action.anchor === request.agentId
     )
     || (
@@ -2070,45 +1541,7 @@ export function applyWorldToolAction(
 
   // The reducer is the single writer. A later embodied call from this resident
   // replaces only its own earlier control horizon.
-  if (request.action.kind === "maintain_formation") {
-    const waveKey = formationWaveKey(request.action);
-    const fingerprint = formationFingerprint(request.action);
-    const inconsistent = RESIDENT_IDS.some((id) => {
-      const candidate = state.actors[id].formationConstraint?.action;
-      return candidate !== undefined
-        && formationWaveKey(candidate) === waveKey
-        && (
-          !validFormationAction(candidate, id)
-          || formationFingerprint(candidate) !== fingerprint
-        );
-    });
-    if (inconsistent) {
-      deactivateFormationWave(state, waveKey);
-      return { accepted: false, reason: "invalid" };
-    }
-    const previous = actor.formationConstraint;
-    if (previous !== undefined && formationWaveKey(previous.action) !== waveKey) {
-      deactivateFormationWave(state, formationWaveKey(previous.action));
-    }
-    actor.relativeConstraint = undefined;
-    actor.formationConstraint = {
-      action: request.action,
-      requestId: request.actionId,
-      waitAge: previous !== undefined && formationFingerprint(previous.action) === fingerprint
-        ? previous.waitAge
-        : 0,
-      ...(previous !== undefined && formationFingerprint(previous.action) === fingerprint
-        ? {
-            targetArc: previous.targetArc,
-            targetOffset: previous.targetOffset,
-            slotsRematched: previous.slotsRematched,
-            settledSinceMs: previous.settledSinceMs,
-          }
-        : {}),
-    };
-    actor.tasks = [];
-  } else if (request.action.kind === "maintain_relative") {
-    actor.formationConstraint = undefined;
+  if (request.action.kind === "maintain_relative") {
     actor.relativeConstraint = Object.freeze({
       action: request.action,
       requestId: request.actionId,
@@ -2116,10 +1549,11 @@ export function applyWorldToolAction(
     actor.tasks = [];
     ensureRelativeControllerTask(state, actor);
   } else {
-    if (actionRequiresPositionalControl(request.action)) {
-      actor.relativeConstraint = undefined;
-      actor.formationConstraint = undefined;
-    }
+    if (
+      request.action.kind === "move"
+      || request.action.kind === "move_relative"
+      || request.action.kind === "interact"
+    ) actor.relativeConstraint = undefined;
     actor.tasks = tasksFor([request.action], "nanocodex", request.actionId);
   }
   actor.intent = actionLabel(request.action);
@@ -2138,76 +1572,6 @@ export function applyWorldToolAction(
       activityCursor: state.nextActivityId - 1,
     }),
   };
-}
-
-function validFormationAction(
-  action: Extract<WorldPrimitiveAction, { kind: "maintain_formation" }>,
-  residentId: ResidentId,
-): boolean {
-  return Number.isSafeInteger(action.generation)
-    && action.generation >= 0
-    && action.formation_id.length > 0
-    && action.formation_id.length <= 64
-    && (ACTOR_IDS as readonly string[]).includes(action.anchor)
-    && typeof action.closed === "boolean"
-    && action.path_tiles.length >= 2
-    && action.path_tiles.length <= 12
-    && action.path_tiles.every(({ x, y }) => (
-      Number.isSafeInteger(x) && x >= -24 && x <= 24
-      && Number.isSafeInteger(y) && y >= -24 && y <= 24
-    ))
-    && new Set(action.path_tiles.map(({ x, y }) => `${x},${y}`)).size === action.path_tiles.length
-    && action.members.length > 0
-    && action.members.length <= RESIDENT_IDS.length
-    && action.members.every(isResidentId)
-    && new Set(action.members).size === action.members.length
-    && action.members.includes(residentId)
-    && Number.isSafeInteger(action.region_count)
-    && action.region_count >= 1
-    && action.region_count <= action.members.length
-    && Number.isSafeInteger(action.region_index)
-    && action.region_index >= 0
-    && action.region_index < action.region_count;
-}
-
-function formationWaveKey(
-  action: Extract<WorldPrimitiveAction, { kind: "maintain_formation" }>,
-): string {
-  return `${action.generation}:${action.formation_id}`;
-}
-
-function formationFingerprint(
-  action: Extract<WorldPrimitiveAction, { kind: "maintain_formation" }>,
-): string {
-  return JSON.stringify({
-    generation: action.generation,
-    formationId: action.formation_id,
-    anchor: action.anchor,
-    closed: action.closed,
-    path: action.path_tiles.map(({ x, y }) => [x, y]),
-    regionCount: action.region_count,
-    members: [...action.members].sort(),
-  });
-}
-
-function deactivateFormationWave(state: WorldState, waveKey: string): void {
-  for (const id of RESIDENT_IDS) {
-    const actor = state.actors[id];
-    const constraint = actor.formationConstraint;
-    if (!constraint || formationWaveKey(constraint.action) !== waveKey) continue;
-    actor.formationConstraint = undefined;
-    actor.intent = undefined;
-    actor.activity = `formation ${constraint.action.formation_id} became inactive`;
-    state.decisionVersions[id] += 1;
-  }
-}
-
-function actionRequiresPositionalControl(action: WorldAction): boolean {
-  if (action.kind === "say" || action.kind === "emote") return false;
-  if (action.kind === "random_choice") {
-    return [...action.if_true, ...action.if_false].some(actionRequiresPositionalControl);
-  }
-  return true;
 }
 
 export function applyWorldRoomSend(
@@ -2260,30 +1624,6 @@ export function worldToolResultAtDecisionBoundary(
     )
   ) {
     return worldToolResult(state, pending, "blocked", actor.activity);
-  }
-  if (
-    pending.action.kind === "maintain_formation"
-  ) {
-    const action = pending.action;
-    const constraint = actor.formationConstraint;
-    if (!constraint) {
-      return worldToolResult(state, pending, "rejected", "The formation wave is no longer active.");
-    }
-    if (constraint.requestId !== pending.actionId) {
-      return worldToolResult(state, pending, "superseded", "A newer formation horizon replaced this action.");
-    }
-    const snapshot = formationSnapshotFor(state, action.generation);
-    const wave = snapshot.waves.find(({ formationId }) => (
-      formationId === action.formation_id
-    ));
-    const settled = wave?.status === "holding";
-    if (!settled && state.elapsedMs - pending.startedAtMs < controlHorizonMs) return undefined;
-    return worldToolResult(
-      state,
-      pending,
-      settled ? "completed" : "in_progress",
-      actor.activity,
-    );
   }
   if (
     pending.action.kind === "maintain_relative"
@@ -2350,62 +1690,7 @@ function worldToolResult(
     ...(observation.playerOrder === undefined ? {} : { playerOrder: observation.playerOrder }),
     ...(observation.guildCall === undefined ? {} : { guildCall: observation.guildCall }),
     relevantEvents: Object.freeze(relevantEvents),
-    ...(pending.action.kind === "maintain_formation"
-      ? { formationSnapshot: formationSnapshotFor(state, pending.action.generation) }
-      : {}),
   });
-}
-
-export function formationSnapshotFor(
-  state: WorldState,
-  generation: number,
-): WorldFormationSnapshot {
-  const groups = new Map<string, WorldActor[]>();
-  for (const residentId of RESIDENT_IDS) {
-    const actor = state.actors[residentId];
-    const action = actor.formationConstraint?.action;
-    if (!action || action.generation !== generation) continue;
-    const group = groups.get(action.formation_id);
-    if (group) group.push(actor);
-    else groups.set(action.formation_id, [actor]);
-  }
-  const waves = [...groups].sort(([left], [right]) => left.localeCompare(right)).map(([, group]) => {
-    const action = group[0].formationConstraint?.action;
-    if (!action) throw new Error("formation snapshot lost its canonical action");
-    const fingerprint = formationFingerprint(action);
-    const members = Object.freeze([...action.members]);
-    const complete = group.length === members.length && members.every((residentId) => {
-      const candidate = state.actors[residentId].formationConstraint?.action;
-      return candidate !== undefined && formationFingerprint(candidate) === fingerprint;
-    });
-    const heldSince = complete ? members.map((residentId) => (
-      state.actors[residentId].formationConstraint?.settledSinceMs
-    )) : [];
-    const heldForMs = heldSince.length === members.length && heldSince.every((value) => value !== undefined)
-      ? Math.max(0, state.elapsedMs - Math.max(...heldSince as number[]))
-      : 0;
-    const holding = complete
-      && heldForMs >= FORMATION_HOLD_MS
-      && members.every((residentId) => state.actors[residentId].movement === undefined);
-    const unresolvedMembers = holding ? [] : members.filter((residentId) => {
-      const actor = state.actors[residentId];
-      const constraint = actor.formationConstraint;
-      return constraint === undefined
-        || formationFingerprint(constraint.action) !== fingerprint
-        || actor.movement !== undefined
-        || constraint.settledSinceMs === undefined
-        || state.elapsedMs - constraint.settledSinceMs < FORMATION_HOLD_MS;
-    });
-    return Object.freeze({
-      generation,
-      formationId: action.formation_id,
-      status: holding ? "holding" as const : "forming" as const,
-      heldForMs,
-      members,
-      unresolvedMembers: Object.freeze(unresolvedMembers),
-    });
-  });
-  return Object.freeze({ observedAtMs: state.elapsedMs, waves: Object.freeze(waves) });
 }
 
 function planTargetsPresent(state: WorldState, steps: readonly WorldAction[]): boolean {
@@ -2427,10 +1712,6 @@ function actionTargetsPresent(state: WorldState, action: WorldAction): boolean {
   }
   if (action.kind === "maintain_relative") {
     return action.anchor === "player" || state.actors[action.anchor].presence === "active";
-  }
-  if (action.kind === "maintain_formation") {
-    return (action.anchor === "player" || state.actors[action.anchor].presence === "active")
-      && action.members.every((memberId) => state.actors[memberId].presence === "active");
   }
   if (action.kind !== "move" && action.kind !== "interact") return true;
   return !isActorId(action.target)
@@ -2545,11 +1826,7 @@ export function setWorldAgentsOnline(state: WorldState, online: boolean): void {
   for (const id of activeResidents) {
     const actor = state.actors[id];
     state.decisionVersions[id] += 1;
-    if (!online) {
-      actor.relativeConstraint = undefined;
-      actor.formationConstraint = undefined;
-      continue;
-    }
+    if (!online) continue;
     actor.tasks = actor.tasks.filter(({ origin }) => origin !== "routine");
     if (actor.activeOrderId !== undefined || actor.tasks.length > 0) continue;
     actor.activity = actor.movement
@@ -2746,12 +2023,6 @@ function updateActor(state: WorldState, actor: WorldActor, deltaMs: number): voi
   if (actor.presence === "entering") return;
   if (traversePortalAtCurrentPosition(state, actor)) return;
   if (actor.id === "player") return;
-  if (
-    actor.formationConstraint !== undefined
-    && actor.tasks[0]?.action.kind !== "say"
-    && actor.tasks[0]?.action.kind !== "emote"
-    && actor.tasks[0]?.action.kind !== "random_choice"
-  ) return;
   if (actor.tasks.length === 0) ensureRelativeControllerTask(state, actor);
   const task = actor.tasks[0];
   if (!task) {
@@ -4014,9 +3285,6 @@ function actionLabel(action: WorldAction): string {
   }
   if (action.kind === "maintain_relative") {
     return `maintain ${action.dx_pixels}px x / ${action.dy_pixels}px y from ${action.anchor} within ${action.tolerance_pixels}px`;
-  }
-  if (action.kind === "maintain_formation") {
-    return `hold region ${action.region_index + 1}/${action.region_count} of ${action.formation_id}`;
   }
   if (action.kind === "random_choice") {
     return `choose between ${action.true_label} and ${action.false_label}`;

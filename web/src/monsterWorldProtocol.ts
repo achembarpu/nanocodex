@@ -1,4 +1,4 @@
-export const WORLD_PROTOCOL = "nanocodex.monster-world.v7" as const;
+export const WORLD_PROTOCOL = "nanocodex.monster-world.v6" as const;
 
 export const WORLD_SCENE_IDS = ["town", "guild_hall", "trail_shop"] as const;
 export const WORLD_ITEM_KINDS = ["sunberry", "supply_pack"] as const;
@@ -130,17 +130,6 @@ export type WorldPrimitiveAction =
       dx_pixels: number;
       dy_pixels: number;
       tolerance_pixels: number;
-    }>
-  | Readonly<{
-      kind: "maintain_formation";
-      generation: number;
-      formation_id: string;
-      anchor: ActorId;
-      closed: boolean;
-      path_tiles: readonly Readonly<{ x: number; y: number }>[];
-      region_index: number;
-      region_count: number;
-      members: readonly ResidentId[];
     }>
   | Readonly<{ kind: "say"; text: string; to?: ActorId }>
   | Readonly<{ kind: "emote"; icon: WorldEmote }>
@@ -290,20 +279,6 @@ export type WorldActionOutcome = Readonly<{
   detail: string;
 }>;
 
-export type WorldFormationWaveSnapshot = Readonly<{
-  generation: number;
-  formationId: string;
-  status: "forming" | "holding";
-  heldForMs: number;
-  members: readonly ResidentId[];
-  unresolvedMembers: readonly ResidentId[];
-}>;
-
-export type WorldFormationSnapshot = Readonly<{
-  observedAtMs: number;
-  waves: readonly WorldFormationWaveSnapshot[];
-}>;
-
 export type WorldToolResult = Readonly<{
   worldRevision: number;
   outcome: WorldActionOutcome;
@@ -313,7 +288,6 @@ export type WorldToolResult = Readonly<{
   playerOrder?: WorldPlayerOrder;
   guildCall?: HeardGuildCall;
   relevantEvents: readonly string[];
-  formationSnapshot?: WorldFormationSnapshot;
 }>;
 
 export type WorldResidentDecision = Readonly<{
@@ -584,7 +558,6 @@ function isWorldToolResult(value: unknown, agentId: ResidentId): value is WorldT
     || (result.playerOrder !== undefined && !isWorldPlayerOrder(result.playerOrder))
     || (result.guildCall !== undefined && !isHeardGuildCall(result.guildCall))
     || !isDenseArrayOf(result.relevantEvents, isString)
-    || (result.formationSnapshot !== undefined && !isWorldFormationSnapshot(result.formationSnapshot))
   ) return false;
   const outcome = result.outcome as Partial<WorldActionOutcome>;
   return (
@@ -596,31 +569,6 @@ function isWorldToolResult(value: unknown, agentId: ResidentId): value is WorldT
   )
     && typeof outcome.detail === "string"
     && isWorldPrimitiveAction(outcome.action);
-}
-
-function isWorldFormationSnapshot(value: unknown): value is WorldFormationSnapshot {
-  if (!isJsonObject(value)) return false;
-  const snapshot = value as Partial<WorldFormationSnapshot>;
-  return typeof snapshot.observedAtMs === "number"
-    && Number.isFinite(snapshot.observedAtMs)
-    && snapshot.observedAtMs >= 0
-    && isDenseArrayOf(snapshot.waves, (candidate): candidate is WorldFormationWaveSnapshot => {
-      if (!isJsonObject(candidate)) return false;
-      const wave = candidate as Partial<WorldFormationWaveSnapshot>;
-      return Number.isSafeInteger(wave.generation)
-        && (wave.generation as number) >= 0
-        && typeof wave.formationId === "string"
-        && wave.formationId.length > 0
-        && wave.formationId.length <= 64
-        && (wave.status === "forming" || wave.status === "holding")
-        && typeof wave.heldForMs === "number"
-        && Number.isFinite(wave.heldForMs)
-        && wave.heldForMs >= 0
-        && isDenseArrayOf(wave.members, isResidentId)
-        && new Set(wave.members).size === wave.members.length
-        && isDenseArrayOf(wave.unresolvedMembers, isResidentId)
-        && wave.unresolvedMembers.every((residentId) => wave.members?.includes(residentId));
-    });
 }
 
 export function isResidentId(value: unknown): value is ResidentId {
@@ -955,38 +903,6 @@ function decodePrimitiveAction(action: JsonObject, kind: string): WorldPrimitive
       tolerance_pixels: integer(action.tolerance_pixels, "action.tolerance_pixels", 8, 32),
     });
   }
-  if (kind === "maintain_formation") {
-    if (!Array.isArray(action.path_tiles) || action.path_tiles.length < 2 || action.path_tiles.length > 12) {
-      throw new Error("action.path_tiles must contain 2-12 tile-relative points");
-    }
-    const pathTiles = action.path_tiles.map((value, index) => {
-      const point = object(value, `action.path_tiles[${index}]`);
-      return Object.freeze({
-        x: integer(point.x, `action.path_tiles[${index}].x`, -24, 24),
-        y: integer(point.y, `action.path_tiles[${index}].y`, -24, 24),
-      });
-    });
-    if (new Set(pathTiles.map(({ x, y }) => `${x},${y}`)).size !== pathTiles.length) {
-      throw new Error("action.path_tiles must contain distinct points");
-    }
-    const regionCount = integer(action.region_count, "action.region_count", 1, 48);
-    const regionIndex = integer(action.region_index, "action.region_index", 0, 47);
-    if (regionIndex >= regionCount) throw new Error("action.region_index must be inside region_count");
-    if (!isUniqueResidentList(action.members)) {
-      throw new Error("action.members must contain unique resident IDs");
-    }
-    return Object.freeze({
-      kind,
-      generation: integer(action.generation, "action.generation", 0, Number.MAX_SAFE_INTEGER),
-      formation_id: text(action.formation_id, "action.formation_id", 64),
-      anchor: member(action.anchor, ACTOR_IDS, "action.anchor"),
-      closed: boolean(action.closed, "action.closed"),
-      path_tiles: Object.freeze(pathTiles),
-      region_index: regionIndex,
-      region_count: regionCount,
-      members: Object.freeze([...action.members]),
-    });
-  }
   if (kind === "say") {
     const dialogue = sanitizeDialogue(text(action.text, "action.text", 140));
     if (!dialogue) throw new Error("action.text must contain visible dialogue");
@@ -1060,11 +976,6 @@ function integer(value: unknown, label: string, min: number, max: number): numbe
     throw new Error(`${label} must be an integer from ${min} to ${max}`);
   }
   return value as number;
-}
-
-function boolean(value: unknown, label: string): boolean {
-  if (typeof value !== "boolean") throw new Error(`${label} must be a boolean`);
-  return value;
 }
 
 function member<const values extends readonly string[]>(

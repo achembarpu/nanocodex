@@ -49,6 +49,8 @@ test("Formation Lab presets are natural-language prompt helpers only", () => {
   assert.match(worker, /canonical subagent messages/);
   assert.match(worker, /anchor-relative maintenance/);
   assert.match(worker, /Subagents\.create\(\{ maxConcurrency: 48 \}\)/);
+  assert.match(worker, /Cover every supplied squad leader exactly once/);
+  assert.match(worker, /The setup must implement the raw objective rather than assuming a circle/);
   assert.doesNotMatch(worker, /exec_command|messages\.jsonl|CALL-<id> CONTRACT/);
   assert.doesNotMatch(worker, /independently derive your group and place/);
   assert.doesNotMatch(worker, /phasePositionAction|distance_pixels|Math\.cos\(radians\)/);
@@ -91,11 +93,10 @@ test("helper and arbitrary formation language never becomes reducer-owned destin
 test("task-tree completion requires current reducer evidence from every resident", () => {
   const worker = source("../src/monsterWorldAgent.worker.ts");
   assert.match(worker, /feedback: Map<ResidentId, ResidentActEvidence>/);
-  assert.doesNotMatch(worker, /coordinatorPrompt|MANDATORY GLOBAL REVIEW/);
-  assert.match(worker, /const unresolved = \[\.\.\.active\.addressed\]\.filter/);
-  assert.match(worker, /World reducer finished without holding evidence/);
-  assert.match(worker, /active\.feedback\.get\(residentId\)\?\.result\.outcome\.status !== "completed"/);
-  assert.doesNotMatch(worker, /result\.evidence/);
+  assert.match(worker, /validateCoordinationCompletion\(active, result\.finalMessage\)/);
+  assert.match(worker, /World coordination completed without fresh action evidence/);
+  assert.match(worker, /result\.remainingGaps\.length !== 0/);
+  assert.match(worker, /evidence\.worldRevision !== latest\.result\.worldRevision/);
   assert.doesNotMatch(worker, /full roster, current order/);
 });
 
