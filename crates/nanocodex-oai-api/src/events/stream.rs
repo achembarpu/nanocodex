@@ -409,8 +409,10 @@ struct EventChannel {
     turn_admission: Option<Arc<AtomicU64>>,
 }
 
-const TURN_TERMINAL: u64 = 1 << 63;
-const TURN_ADMISSIONS: u64 = TURN_TERMINAL - 1;
+const TURN_COMMITTED: u64 = 1 << 63;
+const TURN_CLAIMING: u64 = 1 << 62;
+const TURN_ADMISSIONS: u64 = TURN_CLAIMING - 1;
+const TERMINAL_SPINS_BEFORE_YIELD: usize = 64;
 
 struct TurnAdmission<'a> {
     state: &'a AtomicU64,
@@ -429,6 +431,8 @@ struct TerminalClaim<'a> {
 
 impl TerminalClaim<'_> {
     fn commit(mut self) {
+        self.state.fetch_or(TURN_COMMITTED, Ordering::Release);
+        self.state.fetch_and(!TURN_CLAIMING, Ordering::Release);
         self.committed = true;
     }
 }
@@ -436,8 +440,7 @@ impl TerminalClaim<'_> {
 impl Drop for TerminalClaim<'_> {
     fn drop(&mut self) {
         if !self.committed {
-            debug_assert_eq!(self.state.load(Ordering::Relaxed), TURN_TERMINAL);
-            self.state.store(0, Ordering::Release);
+            self.state.fetch_and(!TURN_CLAIMING, Ordering::Release);
         }
     }
 }
@@ -480,7 +483,7 @@ impl EventChannel {
     fn turn_is_terminal(&self) -> bool {
         self.turn_admission
             .as_ref()
-            .is_some_and(|state| state.load(Ordering::Acquire) & TURN_TERMINAL != 0)
+            .is_some_and(|state| state.load(Ordering::Acquire) & TURN_COMMITTED != 0)
     }
 
     fn admit_non_terminal(&self) -> Result<Option<TurnAdmission<'_>>, EventError> {
@@ -489,10 +492,15 @@ impl EventChannel {
         };
         let mut current = state.load(Ordering::Acquire);
         loop {
-            if current & TURN_TERMINAL != 0 {
+            if current & TURN_COMMITTED != 0 {
                 return Err(EventError::TurnAlreadyTerminal);
             }
-            if current == TURN_ADMISSIONS {
+            if current & TURN_CLAIMING != 0 {
+                wait_for_terminal_claim(state, current);
+                current = state.load(Ordering::Acquire);
+                continue;
+            }
+            if current & TURN_ADMISSIONS == TURN_ADMISSIONS {
                 return Err(EventError::SequenceExhausted);
             }
             match state.compare_exchange_weak(
@@ -508,18 +516,40 @@ impl EventChannel {
     }
 
     /// Atomically closes admission, then waits for publications admitted before
-    /// the terminal to finish routing. The low 63 bits count those admissions,
-    /// so exhaustion requires `2^63 - 1` simultaneous in-flight publications.
+    /// the terminal to finish routing. The low 62 bits count those admissions.
     fn claim_terminal(&self) -> Result<Option<TerminalClaim<'_>>, EventError> {
         let Some(state) = self.turn_admission.as_deref() else {
             return Ok(None);
         };
-        let previous = state.fetch_or(TURN_TERMINAL, Ordering::AcqRel);
-        if previous & TURN_TERMINAL != 0 {
-            return Err(EventError::TurnAlreadyTerminal);
+        let mut current = state.load(Ordering::Acquire);
+        loop {
+            if current & TURN_COMMITTED != 0 {
+                return Err(EventError::TurnAlreadyTerminal);
+            }
+            if current & TURN_CLAIMING != 0 {
+                wait_for_terminal_claim(state, current);
+                current = state.load(Ordering::Acquire);
+                continue;
+            }
+            match state.compare_exchange_weak(
+                current,
+                current | TURN_CLAIMING,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(observed) => current = observed,
+            }
         }
-        while state.load(Ordering::Acquire) != TURN_TERMINAL {
-            std::hint::spin_loop();
+        let mut spins = 0;
+        while state.load(Ordering::Acquire) & TURN_ADMISSIONS != 0 {
+            if spins < TERMINAL_SPINS_BEFORE_YIELD {
+                spins += 1;
+                std::hint::spin_loop();
+            } else {
+                spins = 0;
+                std::thread::yield_now();
+            }
         }
         Ok(Some(TerminalClaim {
             state,
@@ -573,7 +603,7 @@ impl EventChannel {
         if kind.is_terminal()
             && let Some(state) = &self.turn_admission
         {
-            state.fetch_or(TURN_TERMINAL, Ordering::Release);
+            state.fetch_or(TURN_COMMITTED, Ordering::Release);
         }
     }
 
@@ -590,6 +620,19 @@ impl EventChannel {
         drop(self.session.send(event.clone()));
         if let Some(turn) = &self.turn {
             drop(turn.send(event));
+        }
+    }
+}
+
+fn wait_for_terminal_claim(state: &AtomicU64, observed: u64) {
+    let mut spins = 0;
+    while state.load(Ordering::Acquire) == observed {
+        if spins < TERMINAL_SPINS_BEFORE_YIELD {
+            spins += 1;
+            std::hint::spin_loop();
+        } else {
+            spins = 0;
+            std::thread::yield_now();
         }
     }
 }
@@ -792,10 +835,7 @@ impl EventSink {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
-    #[cfg(feature = "client")]
-    use std::sync::atomic::Ordering;
+    use std::sync::{Arc, atomic::Ordering};
 
     #[cfg(feature = "client")]
     use serde::{Serialize, Serializer};
@@ -1049,19 +1089,28 @@ mod tests {
             .expect("non-terminal publication should hold admission");
         let terminal_publisher = publisher.clone();
         let terminal_thread = std::thread::spawn(move || terminal_publisher.publish(terminal));
-        while !publisher.turn_is_terminal() {
+        while publisher
+            .channel
+            .turn_admission
+            .as_ref()
+            .unwrap()
+            .load(Ordering::Acquire)
+            & super::TURN_CLAIMING
+            == 0
+        {
             std::thread::yield_now();
         }
-        assert!(matches!(
-            publisher.publish(AgentEvent {
+        assert!(!publisher.turn_is_terminal());
+        let successor = publisher.clone();
+        let successor_thread = std::thread::spawn(move || {
+            successor.publish(AgentEvent {
                 protocol_version: AGENT_EVENT_PROTOCOL_VERSION,
                 request_id: Arc::from("request-1"),
                 seq: 3,
                 kind: AgentEventKind::AssistantDelta,
                 payload: Arc::from(serde_json::from_str::<Box<RawValue>>("{}").unwrap()),
-            }),
-            Err(EventError::TurnAlreadyTerminal)
-        ));
+            })
+        });
         assert!(session.receiver.try_recv().is_err());
         assert!(turn.receiver.try_recv().is_err());
 
@@ -1074,6 +1123,10 @@ mod tests {
         });
         drop(admission);
         terminal_thread.join().unwrap().unwrap();
+        assert!(matches!(
+            successor_thread.join().unwrap(),
+            Err(EventError::TurnAlreadyTerminal)
+        ));
 
         assert_eq!(
             session.receiver.try_recv().unwrap().event.kind,
@@ -1093,6 +1146,72 @@ mod tests {
         );
         assert!(session.receiver.try_recv().is_err());
         assert!(turn.receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn failed_terminal_claim_reopens_admission_without_appearing_committed() {
+        let (publisher, mut session) = AgentEventPublisher::channel("request-1");
+        let (publisher, _turn) = publisher.mirrored_channel();
+        let claim = publisher.channel.claim_terminal().unwrap().unwrap();
+        assert!(!publisher.turn_is_terminal());
+
+        let waiting = publisher.clone();
+        let publish_thread = std::thread::spawn(move || {
+            waiting.publish(AgentEvent {
+                protocol_version: AGENT_EVENT_PROTOCOL_VERSION,
+                request_id: Arc::from("request-1"),
+                seq: 1,
+                kind: AgentEventKind::AssistantDelta,
+                payload: Arc::from(serde_json::from_str::<Box<RawValue>>("{}").unwrap()),
+            })
+        });
+        assert!(matches!(
+            publisher.channel.reserve_exact_sequence(2),
+            Err(EventError::SequenceMismatch {
+                expected: 1,
+                actual: 2
+            })
+        ));
+        drop(claim);
+
+        publish_thread.join().unwrap().unwrap();
+        assert_eq!(
+            session.receiver.try_recv().unwrap().event.kind,
+            AgentEventKind::AssistantDelta
+        );
+        assert!(!publisher.turn_is_terminal());
+    }
+
+    #[cfg(feature = "client")]
+    #[test]
+    fn failed_terminal_claim_preserves_a_local_terminal() {
+        let (sink, _session) = EventSink::channel("request-1".to_owned());
+        let (sink, _turn) = sink.mirrored_channel();
+        let publisher = sink.publisher();
+        let claim = publisher.channel.claim_terminal().unwrap().unwrap();
+        assert!(!publisher.turn_is_terminal());
+
+        sink.emit(AgentEventKind::RunCompleted, json!({})).unwrap();
+        assert!(matches!(
+            publisher.channel.reserve_exact_sequence(3),
+            Err(EventError::SequenceMismatch {
+                expected: 2,
+                actual: 3
+            })
+        ));
+        drop(claim);
+
+        assert!(publisher.turn_is_terminal());
+        assert!(matches!(
+            publisher.publish(AgentEvent {
+                protocol_version: AGENT_EVENT_PROTOCOL_VERSION,
+                request_id: Arc::from("request-1"),
+                seq: 2,
+                kind: AgentEventKind::AssistantDelta,
+                payload: Arc::from(serde_json::from_str::<Box<RawValue>>("{}").unwrap()),
+            }),
+            Err(EventError::TurnAlreadyTerminal)
+        ));
     }
 
     #[cfg(feature = "client")]
