@@ -68,7 +68,6 @@ test("local Connect API routing owns the complete dialog protocol", async () => 
   const paths = [
     "/v1/account-link",
     "/v1/connections",
-    "/v1/connectors/github",
     "/v1/access-keys/0x0000000000000000000000000000000000000000/0x0000000000000000000000000000000000000000",
     `/v1/grants/0x${"0".repeat(64)}`,
   ];
@@ -83,6 +82,22 @@ test("local Connect API routing owns the complete dialog protocol", async () => 
     }, new URL(request.url));
   }
   assert.deepEqual(seen, paths);
+});
+
+test("overlapping connector routes are left to the explicit Connect or managed router", () => {
+  const binding = { fetch: () => Promise.resolve(new Response()) };
+  for (const path of [
+    "/v1/connectors",
+    "/v1/connectors/github",
+    "/v1/connectors/github/callback",
+  ]) {
+    const request = new Request(`http://passkey-a.nanocodex.localhost:5273${path}`);
+    assert.equal(routeLocalConnectApi(
+      request,
+      { NANOCODEX_CONNECT_API: binding },
+      new URL(request.url),
+    ), undefined);
+  }
 });
 
 function fetcher(fetch: (request: Request) => Promise<Response>): Fetcher {

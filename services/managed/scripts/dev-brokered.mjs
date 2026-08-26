@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { realpathSync } from "node:fs";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -47,6 +47,7 @@ async function main() {
   const agentEnvPath = join(temporaryDirectory, "agent.env");
   const brokerStatePath = join(temporaryDirectory, "broker-state");
   const agentStatePath = join(temporaryDirectory, "agent-state");
+  const managedConfigPath = join(temporaryDirectory, "wrangler.managed.json");
   const processHandles = [];
   const children = [];
   const exits = [];
@@ -57,6 +58,7 @@ async function main() {
   try {
     const brokerEnvironment = [
       envLine("ENVIRONMENT", "development"),
+      envLine("ALLOW_LOCAL_CREDENTIAL_CLAIM", "true"),
       envLine("ALLOWED_POLICIES", brokerPolicyForAuthMode(authMode)),
       envLine("NANOCODEX_BROKER_PROBE_TOKEN", brokerProbeToken),
     ];
@@ -92,6 +94,12 @@ async function main() {
       credentialDescription = "OPENAI_API_KEY from the broker process environment";
     }
 
+    const historyAiSearchInstance = process.env.NANOCODEX_HISTORY_AI_SEARCH_INSTANCE?.trim();
+    let managedConfig;
+    if (!brokerOnly && historyAiSearchInstance) {
+      const base = JSON.parse(await readFile(join(workersRoot, "wrangler.jsonc"), "utf8"));
+      managedConfig = managedDevConfig(base, historyAiSearchInstance);
+    }
     const environmentWrites = [
       writeFile(brokerEnvPath, `${brokerEnvironment.join("\n")}\n`, { mode: 0o600 }),
     ];
@@ -103,6 +111,13 @@ async function main() {
         envLine("AGENT_IDLE_TIMEOUT_MS", process.env.AGENT_IDLE_TIMEOUT_MS ?? "1000"),
         "",
       ].join("\n"), { mode: 0o600 }));
+      if (managedConfig) {
+        environmentWrites.push(writeFile(
+          managedConfigPath,
+          `${JSON.stringify(managedConfig)}\n`,
+          { mode: 0o600 },
+        ));
+      }
     }
     await Promise.all(environmentWrites);
 
@@ -152,6 +167,7 @@ async function main() {
       const managedHandle = spawnProcessGroup(process.execPath, [
         agentWrangler,
         "dev",
+        ...(managedConfig ? ["-c", managedConfigPath] : []),
         "--env-file",
         agentEnvPath,
         "--persist-to",
@@ -235,16 +251,33 @@ async function startLocalChatGptRelay() {
   };
 }
 
+export function managedDevConfig(base, historyAiSearchInstance) {
+  if (typeof historyAiSearchInstance !== "string"
+    || historyAiSearchInstance.length > 32
+    || !/^[a-z0-9_]+(?:-[a-z0-9_]+)*$/.test(historyAiSearchInstance)) {
+    throw new Error("NANOCODEX_HISTORY_AI_SEARCH_INSTANCE is not a valid AI Search instance name");
+  }
+  return {
+    ...base,
+    main: resolve(workersRoot, "src/index.ts"),
+    ai_search: [{
+      binding: "HISTORY_AI_SEARCH",
+      instance_name: historyAiSearchInstance,
+      remote: true,
+    }],
+  };
+}
+
 export function agentProcessEnvironment(source = process.env) {
   const environment = { ...source };
   for (const name of [
     "OPENAI_API_KEY",
     "CODEX_HOME",
     "CODEX_OAUTH_BOOTSTRAP",
-    "CODEX_RELAY_URL",
-    "ALLOW_LOCAL_CREDENTIAL_CLAIM",
-    "ALLOW_INSECURE_LOOPBACK_RELAY",
     "LOCAL_CHATGPT_BOOTSTRAP",
+    "ALLOW_LOCAL_CREDENTIAL_CLAIM",
+    "CODEX_RELAY_URL",
+    "ALLOW_INSECURE_LOOPBACK_RELAY",
     "NANOCODEX_CODEX_RELAY_URL",
     "CHATGPT_ACCESS_TOKEN",
     "CHATGPT_ACCOUNT_ID",

@@ -12,6 +12,7 @@ function isLocalDevelopmentHost(hostname: string): boolean {
 type CredentialClaim = Readonly<{
   userId: string;
   promise: Promise<boolean>;
+  settled: boolean;
 }>;
 
 /**
@@ -25,27 +26,40 @@ export function createLocalDevelopmentCredentialResource(
   const enabled = isLocalDevelopmentHost(hostname);
   let current: CredentialClaim | undefined;
 
+  const claim = (userId: string): Promise<boolean> => {
+    let guarded!: Promise<boolean>;
+    let active!: CredentialClaim;
+    guarded = request("/v1/credentials/local-claim", {
+      method: "POST",
+      credentials: "same-origin",
+    }).then(async (response) => {
+      await response.body?.cancel();
+      if (!response.ok) {
+        throw new Error(`Local development credential claim failed (HTTP ${response.status})`);
+      }
+      active = { ...active, settled: true };
+      if (current?.promise === guarded) current = active;
+      return true;
+    }).catch((error) => {
+      if (current?.promise === guarded) current = undefined;
+      throw error;
+    });
+    active = { userId, promise: guarded, settled: false };
+    current = active;
+    return guarded;
+  };
+
   return Object.freeze({
+    enabled,
     ensure(userId: string): Promise<boolean> {
       if (!enabled) return Promise.resolve(false);
       if (current?.userId === userId) return current.promise;
-
-      let guarded!: Promise<boolean>;
-      guarded = request("/v1/credentials/local-claim", {
-        method: "POST",
-        credentials: "same-origin",
-      }).then(async (response) => {
-        await response.body?.cancel();
-        if (!response.ok) {
-          throw new Error(`Local development credential claim failed (HTTP ${response.status})`);
-        }
-        return true;
-      }).catch((error) => {
-        if (current?.promise === guarded) current = undefined;
-        throw error;
-      });
-      current = { userId, promise: guarded };
-      return guarded;
+      return claim(userId);
+    },
+    refresh(userId: string): Promise<boolean> {
+      if (!enabled) return Promise.resolve(false);
+      if (current?.userId === userId && !current.settled) return current.promise;
+      return claim(userId);
     },
   });
 }

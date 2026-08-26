@@ -1,36 +1,59 @@
 import { Provider, Storage, webAuthn } from "accounts";
 import { loadStripe } from "@stripe/stripe-js/pure";
 import type { Stripe, StripeElements } from "@stripe/stripe-js";
-import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { Dialog } from "nanocodex/connect";
 
 import { classifyMachineUsdOrder } from "./machineUsdOrder.mjs";
 import {
   accountLoginCapabilities,
   appVisibilityPermissions,
+  chatGptConnectorDisposition,
+  connectorApprovalDisposition,
   connectApiOrigin,
+  createMcpCallbackContinuation,
+  deviceMcpReturnPath,
+  focusedConnectorFromResources,
+  focusedMcpConnection,
   isLocalDevelopmentOrigin,
+  mcpConnectionApprovalDisposition,
+  mcpConnectionsFromWire,
   registeredApp,
+  restoreMcpCallbackContinuation,
+  sanitizeCliWalletResult,
   sanitizeWalletResult,
   signedAppResources,
   usesBrowserLocalWebAuthn,
 } from "./connectPolicy.mjs";
-import { parentDialog, type WalletRequest } from "./protocol";
-
+import type { ConnectRequest, McpConnection, WalletRequest } from "./connectTypes";
 const browserLocalWebAuthn = usesBrowserLocalWebAuthn(window.location.origin);
 const provider = createProvider(browserLocalWebAuthn);
-let browserSession: Promise<void> | undefined;
+const providerStore = (provider as unknown as {
+  store: {
+    getState(): { accounts: readonly ProviderStoreAccount[] };
+    subscribe(listener: () => void): () => void;
+  };
+}).store;
+let browserSession: Promise<BrowserSession> | undefined;
 
 export async function logoutAccount() {
-  await provider.request({ method: "wallet_disconnect" });
+  try {
+    await provider.request({ method: "wallet_disconnect" });
+  } finally {
+    invalidateBrowserSession();
+  }
 }
 
 const connectorIds = ["github", "gmail", "gdrive", "x", "chatgpt"] as const;
+const connectDialogRoutingHeaders = { "x-nanocodex-connect-client": "onboarding" } as const;
+const connectDeviceRoutingHeaders = { "x-nanocodex-connect-client": "device" } as const;
 const connectorResourcePrefix = "urn:nanocodex:connector:";
 const connectorsResourcePrefix = "urn:nanocodex:connectors:";
-const nanocodexOrigin = isLocalDevelopmentOrigin(window.location.origin)
-  ? window.location.origin
-  : "https://nanocodex.gakonst.workers.dev";
+const mcpConnectionResourcePrefix = "urn:nanocodex:mcp:";
+const mcpFocusResourcePrefix = "urn:nanocodex:mcp-focus:";
+const hostedAuthorizationResource = "urn:nanocodex:authorization:hosted";
+const productionNanocodexOrigin = "https://nanocodex.gakonst.workers.dev";
+const mcpCallbackContinuationPrefix = "nanocodex:mcp-callback:";
 type ConnectorId = typeof connectorIds[number];
 type ConnectorStatus = Readonly<{
   connected: boolean;
@@ -43,6 +66,8 @@ type PendingApproval = Readonly<{
   apiUrl: string;
   result: unknown;
   requestId: string;
+  requestedConnectors: readonly ConnectorId[];
+  requestedMcpConnections: readonly McpConnection[];
   token: string;
 }>;
 type ConnectorAttempt = {
@@ -56,21 +81,55 @@ type ConnectorAttempt = {
   token: string;
 };
 type CeremonyAttempt = Readonly<{ requestId: string }>;
+type BrowserSession = Readonly<{ id: string; persistent: boolean }>;
+type ProviderStoreAccount = Readonly<{
+  address: `0x${string}`;
+  credential?: Readonly<{ id: string }> | undefined;
+  label?: string | undefined;
+}>;
+type StoredPasskey = Readonly<{
+  address: `0x${string}`;
+  credentialId: string;
+  label?: string | undefined;
+}>;
+type WizardAccountSelection = Readonly<{
+  mode: "login" | "register";
+  label: string;
+  address?: `0x${string}` | undefined;
+  credentialId?: string | undefined;
+  discoverCredential?: boolean | undefined;
+}>;
 
-export function App() {
-  const subscribe = useCallback(
-    (listener: () => void) => parentDialog.subscribe?.(listener) ?? (() => {}),
-    [],
-  );
-  const getSnapshot = useCallback(() => parentDialog.getRequest?.(), []);
-  const request = useSyncExternalStore(subscribe, getSnapshot, () => undefined);
+export type { ConnectRequest } from "./connectTypes";
+
+export type ConnectOnboardingHost = Readonly<{
+  reject(error?: unknown): Promise<unknown>;
+  respond(result: unknown): Promise<unknown>;
+}>;
+
+export function ConnectOnboarding({
+  host,
+  presentation = "dialog",
+  request,
+}: Readonly<{
+  host: ConnectOnboardingHost;
+  presentation?: "dialog" | "wizard";
+  request: ConnectRequest | undefined;
+}>) {
+  const wizard = presentation === "wizard";
+  const connectRoutingHeaders = wizard ? connectDeviceRoutingHeaders : connectDialogRoutingHeaders;
   const requestPolicyError = walletRequestPolicyError(request);
   const [ceremonyRequestId, setCeremonyRequestId] = useState<string>();
   const [failure, setFailure] = useState<Readonly<{ id: string; message: string }>>();
   const [accountMode, setAccountMode] = useState<"login" | "register">("login");
+  const [wizardAccount, setWizardAccount] = useState<WizardAccountSelection>();
   const [pendingApproval, setPendingApproval] = useState<PendingApproval>();
   const [connectorStatuses, setConnectorStatuses] = useState<ConnectorStatuses>();
   const [connectorAction, setConnectorAction] = useState<ConnectorId>();
+  const [mcpConnections, setMcpConnections] = useState<readonly McpConnection[]>();
+  const [mcpConnectionAction, setMcpConnectionAction] = useState<string>();
+  const [completedRequestId, setCompletedRequestId] = useState<string>();
+  const [settlingRequestId, setSettlingRequestId] = useState<string>();
   const [deviceCode, setDeviceCode] = useState<Readonly<{
     code: string;
     expiresAt?: number | undefined;
@@ -78,7 +137,21 @@ export function App() {
   }>>();
   const activeConnector = useRef<ConnectorAttempt | undefined>(undefined);
   const activeCeremony = useRef<CeremonyAttempt | undefined>(undefined);
+  const automaticallyStartedRequestId = useRef<string | undefined>(undefined);
   const currentRequestId = useRef<string | undefined>(undefined);
+  const providerAccounts = useSyncExternalStore(
+    providerStore.subscribe,
+    () => providerStore.getState().accounts,
+    () => providerStore.getState().accounts,
+  );
+  const storedPasskeys = useMemo(() => providerAccounts.flatMap((account) => {
+    if (!("credential" in account) || !account.credential?.id) return [];
+    return [{
+      address: account.address,
+      credentialId: account.credential.id,
+      label: account.label,
+    } satisfies StoredPasskey];
+  }), [providerAccounts]);
   currentRequestId.current = request?.id;
 
   const finishConnectorAttempt = useCallback((attempt: ConnectorAttempt, closePopup = true) => {
@@ -90,6 +163,10 @@ export function App() {
     if (attempt.popupClosed !== undefined) window.clearTimeout(attempt.popupClosed);
     if (closePopup && attempt.popup && !attempt.popup.closed) attempt.popup.close();
     setConnectorAction(undefined);
+    setMcpConnections(undefined);
+    setMcpConnectionAction(undefined);
+    setCompletedRequestId(undefined);
+    setSettlingRequestId(undefined);
     return true;
   }, []);
 
@@ -97,6 +174,7 @@ export function App() {
     const previous = activeConnector.current;
     if (previous) finishConnectorAttempt(previous);
     setAccountMode("login");
+    setWizardAccount(undefined);
     setPendingApproval(undefined);
     setConnectorStatuses(undefined);
     setConnectorAction(undefined);
@@ -114,6 +192,90 @@ export function App() {
       if (attempt.popup && !attempt.popup.closed) attempt.popup.close();
     }
   }, []);
+
+  useEffect(() => {
+    if (!request || request.type !== "walletConnect") return;
+    if (request.returnedConnectorResult === "cancelled") {
+      setFailure({ id: request.id, message: "The account authorization was cancelled. Connect again when you are ready." });
+    } else if (request.returnedConnectorResult === "failed") {
+      setFailure({ id: request.id, message: "The account provider could not complete authorization. Try connecting again." });
+    } else if (request.returnedMcpResult === "cancelled") {
+      setFailure({ id: request.id, message: "The MCP authorization was cancelled. Connect again when you are ready." });
+    } else if (request.returnedMcpResult === "failed") {
+      setFailure({ id: request.id, message: "The MCP provider could not complete authorization. Try connecting again." });
+    }
+  }, [request?.id, request?.type === "walletConnect" ? request.returnedConnectorResult : undefined,
+    request?.type === "walletConnect" ? request.returnedMcpResult : undefined]);
+
+  useEffect(() => {
+    if (!request || request.type !== "walletConnect"
+      || (!request.returnedConnector && !request.returnedMcpConnection)) return;
+    const key = mcpCallbackContinuationKey(request.id);
+    const serialized = window.sessionStorage.getItem(key);
+    window.sessionStorage.removeItem(key);
+    if (!serialized) return;
+    try {
+      const view = walletView(request);
+      const restored = restoreMcpCallbackContinuation(JSON.parse(serialized), {
+        requestId: request.id,
+        apiUrl: connectApiUrl(request),
+        returnedConnector: request.returnedConnector,
+        returnedMcpConnection: request.returnedMcpConnection,
+        requestedConnectors: requestedConnectorIdsFromResources(view.auth.resources),
+        requestedMcpConnections: view.mcpConnections,
+      });
+      const approval: PendingApproval = {
+        accountAddress: restored.accountAddress,
+        apiUrl: restored.apiUrl,
+        result: restored.result,
+        requestId: restored.requestId,
+        requestedConnectors: restored.requestedConnectors,
+        requestedMcpConnections: restored.requestedMcpConnections,
+        token: restored.token,
+      };
+      setPendingApproval(approval);
+      setConnectorStatuses(undefined);
+      setMcpConnections(view.mcpConnections);
+      void refreshConnectors(approval);
+    } catch (error) {
+      setFailure({ id: request.id, message: errorMessage(error) });
+    }
+  }, [request?.id, request?.type === "walletConnect" ? request.returnedConnector : undefined,
+    request?.type === "walletConnect" ? request.returnedMcpConnection : undefined]);
+
+  useEffect(() => {
+    if (
+      !wizard
+      || request?.type !== "walletConnect"
+      || !allowsAutomaticSavedAccount(request)
+      || request.returnedConnector
+      || request.returnedConnectorResult
+      || request.returnedMcpConnection
+      || request.returnedMcpResult
+      || storedPasskeys.length !== 1
+      || automaticallyStartedRequestId.current === request.id
+    ) return;
+    const account = storedPasskeys[0]!;
+    const selection: WizardAccountSelection = {
+      mode: "login",
+      label: account.label || shortAddress(account.address),
+      address: account.address,
+      credentialId: account.credentialId,
+    };
+    automaticallyStartedRequestId.current = request.id;
+    setWizardAccount(selection);
+    void ensureBrowserSession().then((session) => {
+      if (currentRequestId.current !== request.id) return;
+      void approve(selection, session.persistent);
+    }).catch((error) => {
+      if (currentRequestId.current === request.id) {
+        setFailure({ id: request.id, message: errorMessage(error) });
+      }
+    });
+  }, [request?.id, request?.type === "walletConnect" ? request.returnedConnector : undefined,
+    request?.type === "walletConnect" ? request.returnedConnectorResult : undefined,
+    request?.type === "walletConnect" ? request.returnedMcpConnection : undefined,
+    request?.type === "walletConnect" ? request.returnedMcpResult : undefined, storedPasskeys, wizard]);
 
   useEffect(() => {
     if (!pendingApproval) return;
@@ -169,8 +331,8 @@ export function App() {
 
   useEffect(() => {
     if (!request || !requestPolicyError) return;
-    void parentDialog.reject(new Error(requestPolicyError));
-  }, [request?.id, requestPolicyError]);
+    void host.reject(new Error(requestPolicyError));
+  }, [host, request?.id, requestPolicyError]);
 
   useEffect(() => {
     if (
@@ -189,41 +351,145 @@ export function App() {
   useEffect(() => {
     if (
       !pendingApproval
-      || !connectorStatuses?.chatgpt?.connected
+      || !connectorStatuses
+      || !mcpConnections
+      || !approvalReady(pendingApproval, connectorStatuses, mcpConnections)
       || ceremonyRequestId === pendingApproval.requestId
       || connectorAction
+      || mcpConnectionAction
     ) return;
     const completed = pendingApproval;
-    setPendingApproval(undefined);
-    void parentDialog.respond(completed.result);
-  }, [connectorAction, connectorStatuses?.chatgpt?.connected, pendingApproval, ceremonyRequestId]);
+    setSettlingRequestId(completed.requestId);
+    void host.respond(completed.result).then(() => {
+      if (currentRequestId.current !== completed.requestId) return;
+      clearMcpCallbackContinuation(completed.requestId);
+      setCompletedRequestId(completed.requestId);
+    }).catch((error) => {
+      if (currentRequestId.current === completed.requestId) {
+        setSettlingRequestId(undefined);
+        setFailure({ id: completed.requestId, message: errorMessage(error) });
+      }
+    });
+  }, [connectorAction, connectorStatuses, mcpConnectionAction, mcpConnections, pendingApproval, ceremonyRequestId, host]);
 
   if (!request || requestPolicyError) return null;
+  if (request.type === "deviceError" || request.type === "deviceComplete") {
+    const complete = request.type === "deviceComplete";
+    return (
+      <section
+        className={`connect-onboarding ${wizard ? "connect-wizard" : "dialog-shell"}`}
+        data-request={request.type}
+        data-testid={complete ? "device-connect-complete" : "device-connect-error"}
+      >
+        {!wizard ? <header className="dialog-header">
+          <span className="wordmark">nanocodex/connect</span>
+          <span className="secure-label"><span aria-hidden="true" /> device</span>
+        </header> : null}
+        <div className={wizard ? "wizard-content wizard-complete" : "dialog-content"}>
+          <section className="request-title" aria-labelledby="device-error-heading">
+            <h1 id="device-error-heading">{complete
+              ? request.status === "approved"
+                ? request.connectorName ? `${request.connectorName} connected` : "Installation approved"
+                : request.connectorName ? `${request.connectorName} not connected` : "Installation not approved"
+              : "Device authorization unavailable"}</h1>
+            <p className="request-copy">{complete
+              ? "Return to the terminal to continue."
+              : <>Start a new <code>nanocodex login</code> request in the terminal.</>}</p>
+            {wizard && complete && request.status === "approved" ? (
+              <div className="completion-actions">
+                <a href="/connect">Connect more accounts</a>
+              </div>
+            ) : null}
+          </section>
+          {!complete ? <p className="dialog-error" role="alert">{request.message}</p> : null}
+        </div>
+      </section>
+    );
+  }
 
   const ceremonyActive = ceremonyRequestId === request.id;
 
-  async function approve() {
+  async function completeRequest(result: unknown, requestId: string) {
+    setSettlingRequestId(requestId);
+    try {
+      await host.respond(result);
+      if (currentRequestId.current === requestId) setCompletedRequestId(requestId);
+    } catch (error) {
+      if (currentRequestId.current === requestId) setSettlingRequestId(undefined);
+      throw error;
+    }
+  }
+
+  async function approve(
+    selectedAccount?: WizardAccountSelection,
+    authenticatedSavedAccount = false,
+  ) {
     const activeRequest = request;
-    if (!activeRequest || activeCeremony.current) return;
+    if (!activeRequest
+      || activeRequest.type === "deviceError"
+      || activeRequest.type === "deviceComplete"
+      || activeCeremony.current) return;
     setFailure(undefined);
     if (activeRequest.type === "machineUsdFund") return;
+
+    const focusedConnector = activeRequest.type === "walletConnect" && wizard
+      ? walletView(activeRequest).focusConnector
+      : undefined;
+    const focusedMcp = activeRequest.type === "walletConnect" && wizard
+      ? walletView(activeRequest).focusMcpConnection
+      : undefined;
 
     const attempt: CeremonyAttempt = { requestId: activeRequest.id };
     activeCeremony.current = attempt;
     setCeremonyRequestId(activeRequest.id);
     try {
+      const selectedMode = selectedAccount?.mode ?? accountMode;
+      const hostedAuthorization = activeRequest.type === "walletConnect"
+        && (selectedMode === "register" || authenticatedSavedAccount)
+        && activeRequest.confirmationCode !== undefined
+        && walletConnectContext(activeRequest).resources.includes(hostedAuthorizationResource)
+        && !walletConnectContext(activeRequest).resources.includes("urn:nanocodex:mpp:machusd:spend");
+      if (authenticatedSavedAccount && (!hostedAuthorization
+        || selectedMode !== "login"
+        || !selectedAccount?.address)) {
+        throw new Error("This saved account requires passkey authentication.");
+      }
+      setAccountMode(selectedMode);
+      let registrationUserId: string | undefined;
       if (
         activeRequest.type === "walletConnect"
-        && accountMode === "register"
+        && selectedMode === "register"
         && !browserLocalWebAuthn
       ) {
-        await ensureBrowserSession();
+        registrationUserId = await prepareRegistrationSession();
       }
-      const result = await provider.request(
-        (activeRequest.type === "walletConnect"
-          ? walletRequest(activeRequest, accountMode)
-          : activeRequest.rpc) as never,
-      ) as undefined | { accounts: readonly Readonly<{ address: `0x${string}` }>[] };
+      let result: undefined | { accounts: readonly Readonly<{ address: `0x${string}` }>[] };
+      if (authenticatedSavedAccount) {
+        result = { accounts: [{ address: selectedAccount!.address! }] };
+      } else {
+        try {
+          if (activeRequest.type === "walletConnect"
+            && browserLocalWebAuthn
+            && selectedAccount?.discoverCredential) {
+            await clearPortableCredential(connectApiUrl(activeRequest));
+          }
+          result = await provider.request(
+            (activeRequest.type === "walletConnect"
+              ? walletRequest(
+                  activeRequest,
+                  selectedMode,
+                  registrationUserId,
+                  selectedAccount?.credentialId,
+                  selectedAccount?.label,
+                  selectedAccount?.discoverCredential,
+                  hostedAuthorization,
+                )
+              : activeRequest.rpc) as never,
+          ) as typeof result;
+        } finally {
+          if (activeRequest.type === "walletConnect") invalidateBrowserSession();
+        }
+      }
       if (currentRequestId.current !== attempt.requestId) {
         throw new DOMException("The Connect request changed.", "AbortError");
       }
@@ -235,38 +501,94 @@ export function App() {
           address: `0x${string}`;
           capabilities?: Readonly<{ auth?: Readonly<{
             connectors?: ConnectorStatuses;
+            mcp_connections?: readonly McpConnection[];
             profile?: Readonly<{ linked?: boolean }>;
             token?: string;
           }> }>;
         }>;
         const auth = account.capabilities?.auth;
+        if (hostedAuthorization) {
+          const hosted = await authorizeHostedRegistration(activeRequest, account.address);
+          const next: PendingApproval = {
+            accountAddress: account.address,
+            apiUrl: connectApiUrl(activeRequest),
+            result: sanitizeCliWalletResult({
+              accounts: [{
+                address: account.address,
+                capabilities: {
+                  auth: { approval_id: hosted.approvalId, mode: "hosted" },
+                },
+              }],
+            }),
+            requestId: activeRequest.id,
+            requestedConnectors: requestedConnectorIdsFromResources(
+              walletConnectContext(activeRequest).resources,
+            ),
+            requestedMcpConnections: walletView(activeRequest).mcpConnections,
+            token: hosted.token,
+          };
+          setConnectorStatuses(hosted.connectors);
+          setMcpConnections(hosted.mcpConnections);
+          if (approvalReady(next, hosted.connectors, hosted.mcpConnections)) {
+            await completeRequest(next.result, next.requestId);
+            return;
+          }
+          setPendingApproval(next);
+          if (focusedConnector) {
+            void connectDeviceConnector(next, hosted.connectors, focusedConnector);
+          } else if (focusedMcp) {
+            void connectMcpConnection(next, hosted.mcpConnections, focusedMcp, true);
+          }
+          return;
+        }
         const token = auth?.token;
         if (!token) throw new Error("Accounts did not return an authenticated Connect session.");
         const next: PendingApproval = {
           accountAddress: account.address,
           apiUrl: connectApiUrl(activeRequest),
-          result: sanitizeWalletResult(result),
+          result: activeRequest.confirmationCode
+            ? sanitizeCliWalletResult(result)
+            : sanitizeWalletResult(result),
           requestId: activeRequest.id,
+          requestedConnectors: requestedConnectorIdsFromResources(
+            walletConnectContext(activeRequest).resources,
+          ),
+          requestedMcpConnections: walletView(activeRequest).mcpConnections,
           token,
         };
         if (auth?.connectors && auth.profile?.linked === true) {
+          const authenticatedMcpConnections = requestedMcpConnections(
+            next.requestedMcpConnections,
+            auth.mcp_connections,
+          );
           setConnectorStatuses(auth.connectors);
-          if (auth.connectors.chatgpt?.connected) {
-            await parentDialog.respond(next.result);
+          setMcpConnections(authenticatedMcpConnections);
+          if (approvalReady(next, auth.connectors, authenticatedMcpConnections)) {
+            await completeRequest(next.result, next.requestId);
             return;
           }
           setPendingApproval(next);
+          if (focusedConnector) {
+            void connectDeviceConnector(next, auth.connectors, focusedConnector);
+          } else if (focusedMcp) {
+            void connectMcpConnection(next, authenticatedMcpConnections, focusedMcp, true);
+          }
           return;
         }
-        const connectors = await authorizeNanocodexAccount(next);
-        if (connectors.chatgpt?.connected) {
-          await parentDialog.respond(next.result);
+        const accountState = await authorizeNanocodexAccount(next);
+        if (approvalReady(next, accountState.connectors, accountState.mcpConnections)) {
+          await completeRequest(next.result, next.requestId);
           return;
         }
         setPendingApproval(next);
+        if (focusedConnector) {
+          void connectDeviceConnector(next, accountState.connectors, focusedConnector);
+        } else if (focusedMcp) {
+          void connectMcpConnection(next, accountState.mcpConnections, focusedMcp, true);
+        }
         return;
       }
-      await parentDialog.respond(result);
+      await completeRequest(result, activeRequest.id);
     } catch (error) {
       if (currentRequestId.current === attempt.requestId) {
         setFailure({ id: activeRequest.id, message: errorMessage(error) });
@@ -281,7 +603,10 @@ export function App() {
 
   async function refreshConnectors(approval: PendingApproval) {
     const response = await fetch(`${approval.apiUrl}/v1/connectors`, {
-      headers: { authorization: `Bearer ${approval.token}` },
+      headers: {
+        authorization: `Bearer ${approval.token}`,
+        ...connectRoutingHeaders,
+      },
     });
     const body = await response.json() as Readonly<{
       connectors?: ConnectorStatuses;
@@ -298,7 +623,10 @@ export function App() {
     return { connectors: body.connectors };
   }
 
-  async function authorizeNanocodexAccount(approval: PendingApproval): Promise<ConnectorStatuses> {
+  async function authorizeNanocodexAccount(approval: PendingApproval): Promise<Readonly<{
+    connectors: ConnectorStatuses;
+    mcpConnections: readonly McpConnection[];
+  }>> {
     const start = await fetch(`${approval.apiUrl}/v1/account-link`, {
       method: "POST",
       headers: { authorization: `Bearer ${approval.token}` },
@@ -307,7 +635,7 @@ export function App() {
     if (!start.ok) throw new Error(apiError(started, "Unable to authorize your Nanocodex account."));
     const authorizationUrl = new URL(requiredUrl(started.authorization_url));
     const state = opaqueToken(started.state, "account-link state");
-    if (authorizationUrl.origin !== nanocodexOrigin
+    if (authorizationUrl.origin !== nanocodexOriginFor(approval.apiUrl)
       || authorizationUrl.pathname !== "/v1/connect/account-link"
       || authorizationUrl.searchParams.get("state") !== state) {
       throw new Error("The Nanocodex account authorization is invalid.");
@@ -337,6 +665,7 @@ export function App() {
     const completed = await complete.json() as Readonly<{
       connectors?: ConnectorStatuses;
       linked?: boolean;
+      mcp_connections?: unknown;
     }> & Record<string, any>;
     if (!complete.ok || completed.linked !== true || !completed.connectors) {
       throw new Error(apiError(completed, "Unable to authorize your Nanocodex account."));
@@ -345,8 +674,198 @@ export function App() {
       throw new DOMException("The Connect request changed.", "AbortError");
     }
     setConnectorStatuses(completed.connectors);
+    const completedMcpConnections = requestedMcpConnections(
+      approval.requestedMcpConnections,
+      completed.mcp_connections,
+    );
+    setMcpConnections(completedMcpConnections);
     if (completed.connectors.chatgpt?.connected) setDeviceCode(undefined);
-    return completed.connectors;
+    return { connectors: completed.connectors, mcpConnections: completedMcpConnections };
+  }
+
+  async function authorizeHostedRegistration(
+    activeRequest: WalletRequest,
+    accountAddress: `0x${string}`,
+  ): Promise<{
+    approvalId: string;
+    connectors: ConnectorStatuses;
+    mcpConnections: readonly McpConnection[];
+    token: string;
+  }> {
+    const resources = walletConnectContext(activeRequest).resources;
+    const websiteOrigin = nanocodexOriginFor(connectApiUrl(activeRequest));
+    const authorize = await fetch(`${websiteOrigin}/v1/connect/hosted-authorization/authorize`, {
+      method: "POST",
+      credentials: "include",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        account_address: accountAddress,
+        app_id: "nanocodex-cli",
+        app_origin: "https://cli.nanocodex.xyz",
+        resources,
+      }),
+    });
+    const authorized = await authorize.json() as Record<string, unknown>;
+    if (!authorize.ok) {
+      throw new Error(apiError(authorized, "Unable to authorize this hosted Nanocodex account."));
+    }
+    const code = opaqueToken(authorized.code, "hosted authorization code");
+    const exchange = await fetch(`${connectApiUrl(activeRequest)}/v1/hosted-authorizations`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...connectRoutingHeaders,
+      },
+      body: JSON.stringify({
+        account_address: accountAddress,
+        app_id: "nanocodex-cli",
+        app_origin: "https://cli.nanocodex.xyz",
+        code,
+        resources,
+      }),
+    });
+    const exchanged = await exchange.json() as Readonly<{
+      account_address?: string;
+      approval_id?: string;
+      connectors?: ConnectorStatuses;
+      mcp_connections?: unknown;
+      profile?: Readonly<{ linked?: boolean }>;
+      token?: string;
+    }> & Record<string, unknown>;
+    if (!exchange.ok
+      || exchanged.account_address?.toLowerCase() !== accountAddress.toLowerCase()
+      || !exchanged.connectors
+      || exchanged.profile?.linked !== true
+      || typeof exchanged.approval_id !== "string"
+      || typeof exchanged.token !== "string") {
+      throw new Error(apiError(exchanged, "Unable to create the hosted Nanocodex authorization."));
+    }
+    return {
+      approvalId: exchanged.approval_id,
+      connectors: exchanged.connectors,
+      mcpConnections: requestedMcpConnections(
+        walletView(activeRequest).mcpConnections,
+        exchanged.mcp_connections,
+      ),
+      token: exchanged.token,
+    };
+  }
+
+  async function connectDeviceConnector(
+    approval: PendingApproval,
+    statuses: ConnectorStatuses,
+    id: ConnectorId,
+  ) {
+    if (activeConnector.current || statuses[id]?.connected) return;
+    setFailure(undefined);
+    setConnectorAction(id);
+    try {
+      const response = await fetch(`${approval.apiUrl}/v1/connectors/${id}`, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${approval.token}`,
+          "content-type": "application/json",
+          ...connectDeviceRoutingHeaders,
+        },
+        body: JSON.stringify({ return_to: deviceReturnPath() }),
+      });
+      const body = await response.json() as Record<string, any>;
+      if (!response.ok) throw new Error(apiError(body, `Unable to connect ${id}.`));
+      if (id === "chatgpt") {
+        const disposition = chatGptConnectorDisposition(body);
+        if (disposition !== "connected") {
+          throw new Error(disposition === "device"
+            ? "This ChatGPT login needs an interactive provider ceremony. Use the Account page to continue."
+            : "The broker returned an invalid ChatGPT connection status.");
+        }
+        setConnectorStatuses({
+          ...statuses,
+          chatgpt: {
+            connected: true,
+            ...(typeof body.account_id === "string" ? { account_id: body.account_id } : {}),
+          },
+        });
+        setConnectorAction(undefined);
+        return;
+      }
+      const authorizationUrl = requiredUrl(body.authorization_url);
+      const continuation = createMcpCallbackContinuation({
+        requestId: approval.requestId,
+        apiUrl: approval.apiUrl,
+        accountAddress: approval.accountAddress,
+        token: approval.token,
+        requestedConnectors: approval.requestedConnectors,
+        requestedMcpConnections: approval.requestedMcpConnections,
+        connectorStatuses: statuses,
+        result: approval.result,
+      });
+      window.sessionStorage.setItem(
+        mcpCallbackContinuationKey(approval.requestId),
+        JSON.stringify(continuation),
+      );
+      window.location.assign(authorizationUrl);
+    } catch (error) {
+      if (currentRequestId.current === approval.requestId && !isAbortError(error)) {
+        setConnectorAction(undefined);
+        setFailure({ id: approval.requestId, message: errorMessage(error) });
+      }
+    }
+  }
+
+  async function connectMcpConnection(
+    approval: PendingApproval,
+    connections: readonly McpConnection[],
+    id: string,
+    automatic = false,
+  ) {
+    const current = connections.find((connection) => connection.id === id);
+    if (!current || current.status === "connected" || mcpConnectionAction || connectorAction) return;
+    if (automatic && request?.type === "walletConnect" && request.returnedMcpConnection === id) return;
+    setFailure(undefined);
+    setMcpConnectionAction(id);
+    try {
+      const response = await fetch(`${approval.apiUrl}/v1/mcp-connections/${encodeURIComponent(id)}`, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${approval.token}`,
+          "content-type": "application/json",
+          ...connectRoutingHeaders,
+        },
+        body: JSON.stringify(wizard ? {
+          return_to: deviceReturnPath(),
+        } : {}),
+      });
+      const body = await response.json() as Record<string, unknown>;
+      if (!response.ok) throw new Error(apiError(body, `Unable to connect ${current.name}.`));
+      const connection = mcpConnectionFromStartResponse(body, id);
+      const updated = replaceMcpConnection(connections, connection);
+      setMcpConnections(updated);
+      if (connection.status === "connected") {
+        setMcpConnectionAction(undefined);
+        return;
+      }
+      const authorizationUrl = requiredUrl(body.authorization_url);
+      const continuation = createMcpCallbackContinuation({
+        requestId: approval.requestId,
+        apiUrl: approval.apiUrl,
+        accountAddress: approval.accountAddress,
+        token: approval.token,
+        requestedConnectors: approval.requestedConnectors,
+        requestedMcpConnections: approval.requestedMcpConnections,
+        connectorStatuses: connectorStatuses ?? {},
+        result: approval.result,
+      });
+      window.sessionStorage.setItem(
+        mcpCallbackContinuationKey(approval.requestId),
+        JSON.stringify(continuation),
+      );
+      window.location.assign(authorizationUrl);
+    } catch (error) {
+      if (currentRequestId.current === approval.requestId && !isAbortError(error)) {
+        setMcpConnectionAction(undefined);
+        setFailure({ id: approval.requestId, message: errorMessage(error) });
+      }
+    }
   }
 
   async function connectConnector(id: ConnectorId) {
@@ -357,30 +876,68 @@ export function App() {
       || !connectorStatuses
       || connectorStatuses[id]?.connected
     ) return;
-    setFailure(undefined);
-    const popup = id === "chatgpt" ? undefined : window.open("about:blank", "nanocodex-connect-oauth", "popup,width=520,height=720");
-    if (id !== "chatgpt" && !popup) {
-      setFailure({ id: pendingApproval.requestId, message: "The account authorization popup was blocked. Allow popups and try again." });
+    if (wizard) {
+      await connectDeviceConnector(pendingApproval, connectorStatuses, id);
       return;
     }
+    const popup = id === "chatgpt"
+      ? undefined
+      : window.open("about:blank", "nanocodex-connect-oauth", "popup,width=520,height=720") ?? undefined;
+    if (id !== "chatgpt" && !popup) {
+      setFailure({
+        id: pendingApproval.requestId,
+        message: "The account authorization popup was blocked. Allow popups and try again.",
+      });
+      return;
+    }
+    await startConnector(pendingApproval, connectorStatuses, id, popup);
+  }
+
+  async function connectRequestedMcp(id: string) {
+    if (!pendingApproval || ceremonyActive || connectorAction || mcpConnectionAction || !mcpConnections) return;
+    await connectMcpConnection(pendingApproval, mcpConnections, id);
+  }
+
+  async function startConnector(
+    approval: PendingApproval,
+    statuses: ConnectorStatuses,
+    id: ConnectorId,
+    popup: Window | undefined,
+  ) {
+    if (
+      activeConnector.current
+      || statuses[id]?.connected
+      || (id !== "chatgpt" && (!popup || popup.closed))
+    ) {
+      popup?.close();
+      if (!statuses[id]?.connected && currentRequestId.current === approval.requestId) {
+        setFailure({
+          id: approval.requestId,
+          message: `The ${connectorDefinition(id).name} window closed before the connection started. Try again.`,
+        });
+      }
+      return;
+    }
+    setFailure(undefined);
     const attempt: ConnectorAttempt = {
       abort: new AbortController(),
       connector: id,
-      popup: popup ?? undefined,
-      requestId: pendingApproval.requestId,
+      popup,
+      requestId: approval.requestId,
       token: crypto.randomUUID(),
     };
     activeConnector.current = attempt;
     setConnectorAction(id);
     if (id !== "chatgpt") monitorPopup(attempt);
     try {
-      const response = await fetch(`${pendingApproval.apiUrl}/v1/connectors/${id}`, {
+      const response = await fetch(`${approval.apiUrl}/v1/connectors/${id}`, {
         method: "POST",
-        headers: {
-          authorization: `Bearer ${pendingApproval.token}`,
-          "content-type": "application/json",
+      headers: {
+        authorization: `Bearer ${approval.token}`,
+        "content-type": "application/json",
+        ...connectRoutingHeaders,
         },
-        body: "{}",
+        body: JSON.stringify(wizard ? { return_to: deviceReturnPath() } : {}),
         signal: attempt.abort.signal,
       });
       const body = await response.json() as Record<string, unknown>;
@@ -401,11 +958,20 @@ export function App() {
             setFailure({ id: attempt.requestId, message: "The ChatGPT device code expired. Try again." });
           }
         }, expiresAt - Date.now());
-        const chatGptPopup = window.open(url, "nanocodex-connect-chatgpt", "popup,width=520,height=720");
+        const preparedChatGptPopup = popup && !popup.closed ? popup : undefined;
+        const chatGptPopup = preparedChatGptPopup
+          ?? window.open(url, "nanocodex-connect-chatgpt", "popup,width=520,height=720")
+          ?? undefined;
         if (!chatGptPopup) {
-          setFailure({ id: attempt.requestId, message: "The ChatGPT popup was blocked. Open the verification link below to continue." });
-        } else attempt.popup = chatGptPopup;
-        void pollChatGpt(attempt, pendingApproval, expiresAt, pollDelay(body.poll_after_ms));
+          setFailure({
+            id: attempt.requestId,
+            message: "The ChatGPT popup was blocked. Open the verification link below to continue.",
+          });
+        } else {
+          attempt.popup = chatGptPopup;
+          if (preparedChatGptPopup) preparedChatGptPopup.location.href = url;
+        }
+        void pollChatGpt(attempt, approval, expiresAt, pollDelay(body.poll_after_ms));
         return;
       }
       const authorizationUrl = requiredUrl(body.authorization_url);
@@ -431,7 +997,10 @@ export function App() {
         await abortableDelay(Math.min(delay, remaining), attempt.abort.signal);
         if (!isActiveConnector(activeConnector.current, attempt, currentRequestId.current)) return;
         const response = await fetch(`${approval.apiUrl}/v1/connectors/chatgpt`, {
-          headers: { authorization: `Bearer ${approval.token}` },
+          headers: {
+            authorization: `Bearer ${approval.token}`,
+            ...connectRoutingHeaders,
+          },
           signal: attempt.abort.signal,
         });
         const body = await response.json() as Record<string, unknown>;
@@ -477,52 +1046,102 @@ export function App() {
   }
 
   function reject() {
+    const requestId = request?.id;
+    if (!requestId) return;
+    clearMcpCallbackContinuation(requestId);
     const attempt = activeConnector.current;
     if (attempt) finishConnectorAttempt(attempt);
     setFailure(undefined);
-    void parentDialog.reject(new Error("The request was not approved."));
+    void host.reject(new Error("The request was not approved.")).catch((error) => {
+      if (currentRequestId.current === requestId) {
+        setFailure({ id: requestId, message: errorMessage(error) });
+      }
+    });
   }
 
-  const approvalDisabled = ceremonyActive;
+  const requestCompleted = completedRequestId === request.id || settlingRequestId === request.id;
+  const approvalDisabled = ceremonyActive || requestCompleted;
+  const connectionRequest = request.type === "walletConnect" ? walletView(request) : undefined;
 
   return (
-    <main className="dialog-shell" data-request={request.type} data-testid="remote-connect-dialog">
-      <header className="dialog-header">
+    <section
+      className={`connect-onboarding ${wizard ? "connect-wizard" : "dialog-shell"}`}
+      data-presentation={presentation}
+      data-request={request.type}
+      data-testid={wizard ? "device-connect-wizard" : "remote-connect-dialog"}
+    >
+      {!wizard ? <header className="dialog-header">
         <span className="wordmark">nanocodex/connect</span>
-        <span className="secure-label">
-          <span aria-hidden="true" /> passkey
-        </span>
-      </header>
+        <span className="secure-label"><span aria-hidden="true" /> passkey</span>
+      </header> : null}
 
       {request.type === "walletConnect" ? (
         <>
-          <div className="dialog-content">
+          <div className={wizard ? "wizard-content" : "dialog-content"}>
             <ConnectionApproval
               accountMode={accountMode}
               connectorAction={connectorAction}
               connectorStatuses={connectorStatuses}
-              disabled={ceremonyActive || connectorAction !== undefined}
+              completed={requestCompleted}
+              confirmationCode={request.confirmationCode}
+              disabled={approvalDisabled || connectorAction !== undefined || mcpConnectionAction !== undefined}
               deviceCode={deviceCode}
+              mcpConnectionAction={mcpConnectionAction}
+              mcpConnections={mcpConnections}
               onAccountModeChange={setAccountMode}
+              onChooseAccount={(account) => {
+                if (wizard) {
+                  setWizardAccount(account);
+                  void approve(account);
+                  return;
+                }
+                setWizardAccount(account);
+              }}
+              onCancel={reject}
               onConnectConnector={connectConnector}
-              request={walletView(request)}
+              onConnectMcp={connectRequestedMcp}
+              accountAddress={pendingApproval?.accountAddress}
+              presentation={presentation}
+              request={connectionRequest!}
+              selectedAccount={wizardAccount}
+              storedPasskeys={storedPasskeys}
             />
             {failure?.id === request.id ? (
               <p className="dialog-error" role="alert">{failure.message}</p>
             ) : null}
           </div>
-          <div className="dialog-actions">
-            <button type="button" disabled={ceremonyActive} onClick={reject}>Cancel</button>
-            {!pendingApproval ? (
+          {requestCompleted || (wizard && !pendingApproval && !wizardAccount) ? null : <div className={wizard ? "wizard-actions" : "dialog-actions"}>
+            <button
+              type="button"
+              disabled={approvalDisabled}
+              onClick={wizard && !pendingApproval ? () => setWizardAccount(undefined) : reject}
+            >
+              {wizard && !pendingApproval ? "Back" : "Cancel"}
+            </button>
+            {!pendingApproval && !wizard ? (
               <button
                 type="button"
                 disabled={approvalDisabled}
                 onClick={() => void approve()}
               >
-                {accountMode === "login" ? "Approve" : "Create & approve"}
+                {wizard
+                  ? accountMode === "login" ? "Sign in with passkey" : "Create account"
+                  : accountMode === "login" ? "Approve" : "Create & approve"}
+              </button>
+            ) : !pendingApproval && wizardAccount ? (
+              <button
+                type="button"
+                disabled={approvalDisabled}
+                onClick={() => void approve(wizardAccount)}
+              >
+                {connectionRequest?.focusConnector
+                  ? `Connect ${connectorDefinition(connectionRequest.focusConnector).name}`
+                  : connectionRequest?.focusMcpConnection
+                    ? `Connect ${connectionRequest.mcpConnections.find(({ id }) => id === connectionRequest.focusMcpConnection)?.name ?? "MCP"}`
+                  : "Authorize Nanocodex CLI"}
               </button>
             ) : null}
-          </div>
+          </div>}
         </>
       ) : request.type === "walletRevokeAccessKey" ? (
         <>
@@ -540,9 +1159,9 @@ export function App() {
           </div>
         </>
       ) : (
-        <FundingApproval request={request} onReject={reject} />
+        <FundingApproval host={host} request={request} onReject={reject} />
       )}
-    </main>
+    </section>
   );
 }
 
@@ -568,28 +1187,76 @@ function RevocationApproval({ request }: Readonly<{ request: WalletRequest }>) {
 type ConnectionView = Omit<Dialog.ConnectionRequest, "auth" | "accessKey"> & Readonly<{
   auth: Readonly<{ message?: string; resources: readonly string[] }>;
   accessKey?: Omit<Dialog.ConnectionRequest["accessKey"], "witness"> & Readonly<{ witness?: `0x${string}` }>;
+  focusConnector?: ConnectorId | undefined;
+  focusMcpConnection?: string | undefined;
+  mcpConnections: readonly McpConnection[];
 }>;
 
 function ConnectionApproval({
+  accountAddress,
   accountMode,
   connectorAction,
   connectorStatuses,
+  completed,
+  confirmationCode,
   disabled,
   deviceCode,
+  mcpConnectionAction,
+  mcpConnections,
   onAccountModeChange,
+  onChooseAccount,
+  onCancel,
   onConnectConnector,
+  onConnectMcp,
+  presentation,
   request,
+  selectedAccount,
+  storedPasskeys,
 }: Readonly<{
+  accountAddress?: `0x${string}` | undefined;
   accountMode: "login" | "register";
   connectorAction?: ConnectorId | undefined;
   connectorStatuses?: ConnectorStatuses | undefined;
+  completed: boolean;
+  confirmationCode?: string | undefined;
   disabled: boolean;
   deviceCode?: Readonly<{ code: string; expiresAt?: number | undefined; url: string }> | undefined;
+  mcpConnectionAction?: string | undefined;
+  mcpConnections?: readonly McpConnection[] | undefined;
   onAccountModeChange(mode: "login" | "register"): void;
+  onChooseAccount(account: WizardAccountSelection): void;
+  onCancel(): void;
   onConnectConnector(id: ConnectorId): void;
+  onConnectMcp(id: string): void;
+  presentation: "dialog" | "wizard";
   request: ConnectionView;
+  selectedAccount?: WizardAccountSelection | undefined;
+  storedPasskeys: readonly StoredPasskey[];
 }>) {
   const appVisibility = appVisibilityPermissions(request.auth.resources);
+  if (presentation === "wizard") {
+    return (
+      <ConnectionWizard
+        accountAddress={accountAddress}
+        appVisibility={appVisibility}
+        connectorAction={connectorAction}
+        connectorStatuses={connectorStatuses}
+        completed={completed}
+        confirmationCode={confirmationCode}
+        disabled={disabled}
+        deviceCode={deviceCode}
+        mcpConnectionAction={mcpConnectionAction}
+        mcpConnections={mcpConnections}
+        onChooseAccount={onChooseAccount}
+        onCancel={onCancel}
+        onConnectConnector={onConnectConnector}
+        onConnectMcp={onConnectMcp}
+        request={request}
+        selectedAccount={selectedAccount}
+        storedPasskeys={storedPasskeys}
+      />
+    );
+  }
   return (
     <>
       <section className="consent-hero" aria-labelledby="approval-heading">
@@ -599,6 +1266,13 @@ function ConnectionApproval({
           <span>{request.accessKey ? "New key" : "Active key"}</span>
         </div>
       </section>
+
+      {confirmationCode ? (
+        <div className="terminal-code" role="status">
+          <span>Confirm this code matches your terminal</span>
+          <strong>{confirmationCode.slice(0, 4)}-{confirmationCode.slice(4)}</strong>
+        </div>
+      ) : null}
 
       {!connectorStatuses ? <div className="account-mode" role="group" aria-label="Nanocodex account">
         <button
@@ -693,6 +1367,16 @@ function ConnectionApproval({
         ) : null}
       </section>
 
+      {request.mcpConnections.length > 0 ? (
+        <McpConnectionList
+          action={mcpConnectionAction}
+          connections={mcpConnections ?? request.mcpConnections}
+          disabled={disabled}
+          focusedId={request.focusMcpConnection}
+          onConnect={onConnectMcp}
+        />
+      ) : null}
+
       {deviceCode ? (
         <a className="device-code" href={deviceCode.url} rel="noreferrer" target="_blank">
           <span>ChatGPT</span>
@@ -722,6 +1406,358 @@ function ConnectionApproval({
   );
 }
 
+function ConnectionWizard({
+  accountAddress,
+  appVisibility,
+  connectorAction,
+  connectorStatuses,
+  completed,
+  confirmationCode,
+  disabled,
+  deviceCode,
+  mcpConnectionAction,
+  mcpConnections,
+  onChooseAccount,
+  onCancel,
+  onConnectConnector,
+  onConnectMcp,
+  request,
+  selectedAccount,
+  storedPasskeys,
+}: Readonly<{
+  accountAddress?: `0x${string}` | undefined;
+  appVisibility: ReturnType<typeof appVisibilityPermissions>;
+  connectorAction?: ConnectorId | undefined;
+  connectorStatuses?: ConnectorStatuses | undefined;
+  completed: boolean;
+  confirmationCode?: string | undefined;
+  disabled: boolean;
+  deviceCode?: Readonly<{ code: string; expiresAt?: number | undefined; url: string }> | undefined;
+  mcpConnectionAction?: string | undefined;
+  mcpConnections?: readonly McpConnection[] | undefined;
+  onChooseAccount(account: WizardAccountSelection): void;
+  onCancel(): void;
+  onConnectConnector(id: ConnectorId): void;
+  onConnectMcp(id: string): void;
+  request: ConnectionView;
+  selectedAccount?: WizardAccountSelection | undefined;
+  storedPasskeys: readonly StoredPasskey[];
+}>) {
+  const [creatingAccount, setCreatingAccount] = useState(false);
+  const focused = request.focusConnector ? connectorDefinition(request.focusConnector) : undefined;
+  const focusedMcp = request.focusMcpConnection
+    ? request.mcpConnections.find(({ id }) => id === request.focusMcpConnection)
+    : undefined;
+  const redirectingFocusedMcp = focusedMcp !== undefined
+    && mcpConnectionAction === focusedMcp.id;
+  if ((!selectedAccount && !connectorStatuses && !accountAddress) || redirectingFocusedMcp) {
+    return (
+      <div className="wizard-page wizard-account-page">
+        <header className="wizard-intro">
+          <div className="wizard-app">
+            <h1>Choose an account</h1>
+            <p>Continue to Nanocodex CLI with a saved passkey, or create a new account.</p>
+          </div>
+          {confirmationCode ? (
+            <div className="wizard-terminal-code" role="status">
+              <span>Terminal code</span>
+              <strong>{confirmationCode.slice(0, 4)}-{confirmationCode.slice(4)}</strong>
+            </div>
+          ) : null}
+        </header>
+
+        <div className="wizard-account-chooser" role="group" aria-label="Choose a Nanocodex account">
+          {storedPasskeys.map((account) => (
+            <button
+              className="wizard-account-choice"
+              disabled={disabled}
+              key={account.credentialId}
+              onClick={() => onChooseAccount({
+                mode: "login",
+                label: account.label || shortAddress(account.address),
+                address: account.address,
+                credentialId: account.credentialId,
+              })}
+              type="button"
+            >
+              <span className="wizard-account-avatar" aria-hidden="true">
+                {(account.label?.trim().slice(0, 1) || "N").toUpperCase()}
+              </span>
+              <span className="wizard-account-copy">
+                <strong>{account.label || shortAddress(account.address)}</strong>
+                <small>{account.label ? shortAddress(account.address) : "Saved passkey"}</small>
+              </span>
+              <span className="wizard-account-arrow" aria-hidden="true">→</span>
+            </button>
+          ))}
+          <button
+            className="wizard-account-choice"
+            disabled={disabled}
+            onClick={() => onChooseAccount({
+              mode: "login",
+              label: "Another passkey",
+              discoverCredential: true,
+            })}
+            type="button"
+          >
+            <span className="wizard-account-avatar wizard-passkey-avatar" aria-hidden="true">◇</span>
+            <span className="wizard-account-copy">
+              <strong>{storedPasskeys.length ? "Use another passkey" : "Continue with passkey"}</strong>
+              <small>Choose a passkey available on this device.</small>
+            </span>
+            <span className="wizard-account-arrow" aria-hidden="true">→</span>
+          </button>
+          {creatingAccount ? (
+            <form
+              className="wizard-account-choice wizard-account-create-form"
+              onSubmit={(event) => {
+                event.preventDefault();
+                const name = String(new FormData(event.currentTarget).get("account-name") ?? "").trim();
+                if (!name) return;
+                onChooseAccount({ mode: "register", label: name.slice(0, 80) });
+              }}
+            >
+              <span className="wizard-account-avatar" aria-hidden="true">+</span>
+              <label className="wizard-account-copy" htmlFor="wizard-account-name">
+                <strong>Name this account</strong>
+                <input
+                  autoFocus
+                  id="wizard-account-name"
+                  maxLength={80}
+                  name="account-name"
+                  placeholder="Work, personal, laptop…"
+                  required
+                />
+              </label>
+              <button
+                aria-label="Cancel new account"
+                disabled={disabled}
+                onClick={() => setCreatingAccount(false)}
+                type="button"
+              >×</button>
+              <button disabled={disabled} type="submit">Continue</button>
+            </form>
+          ) : (
+            <button
+              className="wizard-account-choice wizard-new-account"
+              disabled={disabled}
+              onClick={() => setCreatingAccount(true)}
+              type="button"
+            >
+              <span className="wizard-account-avatar" aria-hidden="true">+</span>
+              <span className="wizard-account-copy">
+                <strong>Create a new account</strong>
+                <small>Create one passkey to sign in and authorize this hosted CLI connection.</small>
+              </span>
+              <span className="wizard-account-arrow" aria-hidden="true">→</span>
+            </button>
+          )}
+        </div>
+        <button className="wizard-cancel" disabled={disabled} onClick={onCancel} type="button">Cancel</button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="wizard-page wizard-review-page">
+      <header className="wizard-intro">
+        <div className="wizard-app">
+          <h1>{focused ? `Connect ${focused.name}` : focusedMcp ? `Connect ${focusedMcp.name}` : "Authorize Nanocodex CLI"}</h1>
+          <p>{accountAddress
+            ? `Signed in as ${shortAddress(accountAddress)}. `
+            : selectedAccount
+              ? `${selectedAccount.mode === "register" ? "Create" : "Use"} ${selectedAccount.label}. `
+            : ""}{focused
+                ? connectorStatuses?.[focused.id]?.connected
+                  ? `${focused.name} is connected. You can return to the terminal.`
+                  : connectorAction === focused.id
+                  ? `Continue in ${focused.name}. You’ll return here when it is connected.`
+                  : "Continue with your passkey."
+                : focusedMcp
+                  ? mcpConnections?.find(({ id }) => id === focusedMcp.id)?.status === "connected"
+                    ? `${focusedMcp.name} is connected. You can return to the terminal.`
+                    : mcpConnectionAction === focusedMcp.id
+                      ? `Continue in ${focusedMcp.name}. You’ll return here when it is connected.`
+                      : "Continue with your passkey."
+                : "Review this CLI installation’s hosted access."}</p>
+        </div>
+        {confirmationCode ? (
+          <div className="wizard-terminal-code" role="status">
+            <span>Confirm this matches your terminal</span>
+            <strong>{confirmationCode.slice(0, 4)}-{confirmationCode.slice(4)}</strong>
+          </div>
+        ) : null}
+      </header>
+
+      <div className="wizard-sections">
+        {request.permission.connectors.length ? <section className="wizard-section" aria-labelledby="wizard-services-heading">
+          <header className="wizard-section-title">
+            <div><span>Service</span><h2 id="wizard-services-heading">{focused ? focused.name : "Connections"}</h2></div>
+            <small>{focused ? "Requested by CLI" : `${request.permission.connectors.length} requested by CLI`}</small>
+          </header>
+          <WizardConnectorList connectorAction={connectorAction} connectorStatuses={connectorStatuses} disabled={disabled} onConnectConnector={onConnectConnector} request={request} />
+          {deviceCode ? (
+            <a className="wizard-device-code" href={deviceCode.url} rel="noreferrer" target="_blank">
+              <span>Continue in ChatGPT with code</span>
+              <strong>{deviceCode.code}</strong>
+            </a>
+          ) : null}
+        </section> : null}
+
+        {request.mcpConnections.length ? <section className="wizard-section" aria-labelledby="wizard-mcp-heading">
+          <header className="wizard-section-title">
+            <div><span>MCP</span><h2 id="wizard-mcp-heading">{focusedMcp ? focusedMcp.name : "MCP connections"}</h2></div>
+            <small>{focusedMcp ? "Requested by CLI" : `${request.mcpConnections.length} requested by CLI`}</small>
+          </header>
+          <McpConnectionList
+            action={mcpConnectionAction}
+            connections={mcpConnections ?? request.mcpConnections}
+            disabled={disabled}
+            focusedId={request.focusMcpConnection}
+            onConnect={onConnectMcp}
+          />
+        </section> : null}
+
+        {!focused && !focusedMcp ? <section className="wizard-section" aria-labelledby="wizard-access-heading">
+          <header className="wizard-section-title">
+            <div><span>Access</span><h2 id="wizard-access-heading">CLI access</h2></div>
+            <small>{request.accessKey ? "30-day key" : "Active key"}</small>
+          </header>
+          <WizardRequestSummary appVisibility={appVisibility} request={request} />
+        </section> : null}
+      </div>
+      {completed ? (
+        <div className="completion-actions">
+          <a href="/connect">Connect more accounts</a>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function WizardConnectorList({ connectorAction, connectorStatuses, disabled, onConnectConnector, request }: Readonly<{
+  connectorAction?: ConnectorId | undefined;
+  connectorStatuses?: ConnectorStatuses | undefined;
+  disabled: boolean;
+  onConnectConnector(id: ConnectorId): void;
+  request: ConnectionView;
+}>) {
+  const connectors = request.focusConnector
+    ? request.permission.connectors.filter((connector) => connector.id === request.focusConnector)
+    : request.permission.connectors;
+  return (
+    <div className="wizard-connectors" role="list">
+      {connectors.map((connector) => {
+        const id = connector.id as ConnectorId;
+        const status = connectorStatuses?.[id];
+        const resolved = connectorStatuses !== undefined;
+        const actionDisabled = disabled || connectorAction !== undefined || !resolved || status?.connected;
+        return (
+          <div className="wizard-connector-card" key={id} role="listitem">
+            <button
+              className={`connection-card${status?.connected ? " is-connected" : ""}`}
+              disabled={actionDisabled}
+              onClick={() => onConnectConnector(id)}
+              type="button"
+            >
+              <ConnectorLogo id={id} name={connector.name} />
+              <span className="connection-card-copy">
+                <strong>{permissionTitle(id, connector.name)}</strong>
+                <span>{status?.connected
+                  ? status.label ? `Connected as ${status.label}` : "Connected"
+                  : connector.detail}</span>
+              </span>
+              <span className="connection-card-action">
+                {!resolved
+                  ? "Required"
+                  : status?.connected
+                    ? "Connected"
+                    : connectorAction === id ? "Connecting…" : "Connect"}
+              </span>
+            </button>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function McpConnectionList({ action, connections, disabled, focusedId, onConnect }: Readonly<{
+  action?: string | undefined;
+  connections: readonly McpConnection[];
+  disabled: boolean;
+  focusedId?: string | undefined;
+  onConnect(id: string): void;
+}>) {
+  const visible = focusedId
+    ? connections.filter(({ id }) => id === focusedId)
+    : connections;
+  return (
+    <div className="mcp-connections" role="list" aria-label="MCP connections">
+      {visible.map((connection) => {
+        const connected = connection.status === "connected";
+        const canConnect = mcpConnectionCanAuthorize(connection.status);
+        return (
+          <div className={`mcp-connection-card${connected ? " is-connected" : ""}`} key={connection.id} role="listitem">
+            <span className="mcp-connection-logo" aria-hidden="true">M</span>
+            <span className="mcp-connection-copy">
+              <strong>{connection.name}</strong>
+              <small>{mcpConnectionStatusLabel(connection.status)}</small>
+            </span>
+            {canConnect ? (
+              <button
+                disabled={disabled || action !== undefined}
+                onClick={() => onConnect(connection.id)}
+                type="button"
+              >
+                {action === connection.id
+                  ? "Connecting…"
+                  : connection.status === "reauthorization_required" ? "Reconnect" : "Connect"}
+              </button>
+            ) : (
+              <span className="mcp-connection-state">{connected ? "Connected" : mcpConnectionStatusLabel(connection.status)}</span>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function WizardRequestSummary({ appVisibility, request }: Readonly<{
+  appVisibility: ReturnType<typeof appVisibilityPermissions>;
+  request: ConnectionView;
+}>) {
+  return (
+    <section className="wizard-request-summary" aria-labelledby="wizard-request-heading">
+      <h2 className="sr-only" id="wizard-request-heading">Installation capabilities</h2>
+      <div className="wizard-visibility" role="list" aria-label="App sees">
+        {appVisibility.map((permission) => (
+          <div key={permission.resource} role="listitem">
+            <span>✓</span>
+            <div><strong>{permission.label}</strong><small>{permission.detail}</small></div>
+          </div>
+        ))}
+      </div>
+      <details className="advanced-details">
+        <summary>Technical details</summary>
+        <dl className="key-details">
+          <Detail label="App" value={request.app.origin} />
+          {request.accessKey ? (
+            <>
+              <Detail label="Key" value={request.accessKey.keyId} />
+              <Detail label="Expires" value={formatExpiry(request.accessKey.expiry)} />
+            </>
+          ) : <Detail label="Key" value="Reuse the app's active delegated signer" />}
+        </dl>
+        <ul className="resource-list" aria-label="Connect capability resources">
+          {request.auth.resources.map((resource) => <li key={resource}>{resource}</li>)}
+        </ul>
+      </details>
+    </section>
+  );
+}
+
 type FundingAttempt = Readonly<{
   clientSecret: string;
   id: string;
@@ -729,7 +1765,8 @@ type FundingAttempt = Readonly<{
   stripe: Stripe;
 }>;
 
-function FundingApproval({ request, onReject }: Readonly<{
+function FundingApproval({ host, request, onReject }: Readonly<{
+  host: ConnectOnboardingHost;
   request: Dialog.FundingRequest;
   onReject(): void;
 }>) {
@@ -830,7 +1867,7 @@ function FundingApproval({ request, onReject }: Readonly<{
       });
       if (confirmed.error) throw new Error(confirmed.error.message);
       const order = await waitForOrder(request.apiUrl, attempt);
-      await parentDialog.respond({
+      await host.respond({
         order: {
           id: order.id,
           status: order.status,
@@ -1062,16 +2099,26 @@ function shortAddress(value: unknown) {
     : "Unavailable";
 }
 
-function walletRequest(request: WalletRequest, accountMode: "login" | "register") {
+function walletRequest(
+  request: WalletRequest,
+  accountMode: "login" | "register",
+  registrationUserId?: string,
+  selectedCredentialId?: string,
+  selectedLabel?: string,
+  discoverCredential?: boolean,
+  hostedRegistration = false,
+) {
   const params = record(firstParam(request.rpc.params));
   const capabilities = record(params.capabilities);
   const { resources } = walletConnectContext(request);
   const {
+    auth: _auth,
     credentialId: _credentialId,
     method: _method,
     name: _name,
     selectAccount: _selectAccount,
     userId: _userId,
+    authorizeAccessKey,
     ...sharedCapabilities
   } = capabilities;
   const apiUrl = connectApiUrl(request);
@@ -1095,18 +2142,38 @@ function walletRequest(request: WalletRequest, accountMode: "login" | "register"
       capabilities: {
         ...sharedCapabilities,
         ...(accountMode === "login"
-          ? accountLoginCapabilities(storedProviderAccounts())
-          : { method: "register", name: "Nanocodex Connect" }),
-        ...(walletAuth ? { auth: walletAuth } : {}),
+          ? selectedCredentialId
+            ? { method: "login", credentialId: selectedCredentialId }
+            : discoverCredential
+              ? { method: "login", selectAccount: true }
+              : accountLoginCapabilities(storedProviderAccounts())
+          : {
+              method: "register",
+              name: selectedLabel || (registrationUserId
+                ? `Nanocodex ${registrationUserId}`
+                : "Nanocodex Connect"),
+              ...(registrationUserId ? { userId: registrationUserId } : {}),
+            }),
+        ...(!hostedRegistration && walletAuth ? { auth: walletAuth } : {}),
+        ...(!hostedRegistration && authorizeAccessKey ? { authorizeAccessKey } : {}),
       },
     }],
   };
 }
 
 function storedProviderAccounts(): unknown {
-  return (provider as unknown as {
-    store: { getState(): { accounts: unknown } };
-  }).store.getState().accounts;
+  return providerStore.getState().accounts;
+}
+
+async function clearPortableCredential(apiUrl: string): Promise<void> {
+  const response = await fetch(`${apiUrl}/webauthn/portable-credential`, {
+    credentials: "include",
+    method: "DELETE",
+  });
+  await response.body?.cancel();
+  if (!response.ok) {
+    throw new Error("Could not reset the saved passkey. Reload and try again.");
+  }
 }
 
 function createProvider(browserLocal: boolean) {
@@ -1147,14 +2214,31 @@ async function ensureBrowserSession() {
     ) {
       throw new Error("The Nanocodex account service returned an invalid browser session.");
     }
+    return { id: body.user.id, persistent: body.user.persistent };
   })();
   browserSession = attempt;
   try {
-    await attempt;
+    return await attempt;
   } catch (error) {
     if (browserSession === attempt) browserSession = undefined;
     throw error;
   }
+}
+
+function invalidateBrowserSession() {
+  browserSession = undefined;
+}
+
+async function prepareRegistrationSession() {
+  let session = await ensureBrowserSession();
+  if (!session.persistent) return session.id;
+  await provider.request({ method: "wallet_disconnect" });
+  invalidateBrowserSession();
+  session = await ensureBrowserSession();
+  if (session.persistent) {
+    throw new Error("Nanocodex could not start a new browser account. Sign out and try again.");
+  }
+  return session.id;
 }
 
 function walletView(request: WalletRequest): ConnectionView {
@@ -1162,6 +2246,8 @@ function walletView(request: WalletRequest): ConnectionView {
   const capabilities = record(params.capabilities);
   const { app, resources } = walletConnectContext(request);
   const requestedConnectors = requestedConnectorIdsFromResources(resources);
+  const focusConnector = focusedConnectorFromResources(resources, requestedConnectors);
+  const mcpRequest = requestedMcpConnectionsFromRequest(request, resources);
   const access = record(capabilities.authorizeAccessKey);
   const limits = array(access.limits).map((value) => {
     const limit = record(value);
@@ -1210,6 +2296,9 @@ function walletView(request: WalletRequest): ConnectionView {
       description: "Run an app-owned Nanocodex agent with your approved capabilities.",
       connectors: requestedConnectors.map(connectorDefinition),
     },
+    mcpConnections: mcpRequest.connections,
+    ...(focusConnector ? { focusConnector } : {}),
+    ...(mcpRequest.focus ? { focusMcpConnection: mcpRequest.focus } : {}),
     ...(preparedAccessKey ? { accessKey: preparedAccessKey } : {}),
     ...(resources.includes("urn:nanocodex:mpp:machusd:spend") ? {
       mpp: {
@@ -1235,6 +2324,53 @@ function requestedConnectorIdsFromResources(resources: readonly string[]): Conne
   }).filter(isConnectorId))];
 }
 
+function requestedMcpConnectionIdsFromResources(resources: readonly string[]): string[] {
+  const ids = resources.flatMap((resource) => resource.startsWith(mcpConnectionResourcePrefix)
+    ? [resource.slice(mcpConnectionResourcePrefix.length)]
+    : []);
+  if (ids.some((id) => !/^[A-Za-z0-9_-]{43}$/.test(id)) || new Set(ids).size !== ids.length) {
+    throw new Error("The requested MCP connection resources are invalid.");
+  }
+  return ids;
+}
+
+function requestedMcpConnectionsFromRequest(
+  request: WalletRequest,
+  resources: readonly string[],
+): Readonly<{ connections: readonly McpConnection[]; focus?: string | undefined }> {
+  const ids = requestedMcpConnectionIdsFromResources(resources);
+  const connections = request.requestedMcpConnections === undefined
+    ? mcpConnectionsFromWire(ids.map((id) => ({
+        id,
+        name: "MCP connection",
+        status: "authorization_required",
+      })))
+    : mcpConnectionsFromWire(request.requestedMcpConnections);
+  if (connections.length !== ids.length
+    || connections.some(({ id }) => !ids.includes(id))) {
+    throw new Error("The requested MCP connections do not match the signed resources.");
+  }
+  const signedFocus = resources.flatMap((resource) => resource.startsWith(mcpFocusResourcePrefix)
+    ? [resource.slice(mcpFocusResourcePrefix.length)]
+    : []);
+  if (signedFocus.some((id) => !/^[A-Za-z0-9_-]{43}$/.test(id)) || signedFocus.length > 1) {
+    throw new Error("The focused MCP connection is invalid.");
+  }
+  const focus = focusedMcpConnection(request.focusMcpConnection ?? signedFocus[0], connections);
+  if (request.focusMcpConnection !== undefined && signedFocus[0] !== request.focusMcpConnection) {
+    throw new Error("The focused MCP connection does not match the signed resources.");
+  }
+  if (request.returnedMcpConnection !== undefined
+    && (!/^[A-Za-z0-9_-]{43}$/.test(request.returnedMcpConnection)
+      || !ids.includes(request.returnedMcpConnection))) {
+    throw new Error("The returned MCP connection is invalid.");
+  }
+  if (focus && focusedConnectorFromResources(resources, requestedConnectorIdsFromResources(resources))) {
+    throw new Error("Nanocodex Connect received more than one focused connection.");
+  }
+  return { connections, ...(focus ? { focus } : {}) };
+}
+
 function connectorDefinition(id: ConnectorId) {
   if (id === "github") return { id, name: "GitHub", detail: "Repositories and workflows" };
   if (id === "gmail") return { id, name: "Gmail", detail: "Read and send email" };
@@ -1252,6 +2388,11 @@ function connectApiUrl(request: WalletRequest) {
   return connectApiOrigin(record(params.capabilities).auth, window.location.origin);
 }
 
+function nanocodexOriginFor(apiUrl: string) {
+  const origin = new URL(apiUrl).origin;
+  return isLocalDevelopmentOrigin(origin) ? origin : productionNanocodexOrigin;
+}
+
 function walletConnectContext(request: WalletRequest) {
   const params = record(firstParam(request.rpc.params));
   const auth = record(record(params.capabilities).auth);
@@ -1265,6 +2406,8 @@ function walletConnectContext(request: WalletRequest) {
     window.parent === window,
   );
   signedAppResources(resources, app);
+  focusedConnectorFromResources(resources, requestedConnectorIdsFromResources(resources));
+  requestedMcpConnectionsFromRequest(request, resources);
   return { app, resources };
 }
 
@@ -1284,8 +2427,11 @@ function isConnectorCompletion(value: unknown): value is Readonly<{
     && (value.message === undefined || typeof value.message === "string");
 }
 
-function walletRequestPolicyError(request: ReturnType<typeof parentDialog.getRequest>) {
-  if (!request || request.type === "machineUsdFund") return undefined;
+function walletRequestPolicyError(request: ConnectRequest | undefined) {
+  if (!request
+    || request.type === "machineUsdFund"
+    || request.type === "deviceError"
+    || request.type === "deviceComplete") return undefined;
   try {
     if (request.type === "walletConnect") {
       walletConnectContext(request);
@@ -1299,6 +2445,17 @@ function walletRequestPolicyError(request: ReturnType<typeof parentDialog.getReq
   }
 }
 
+function allowsAutomaticSavedAccount(request: WalletRequest): boolean {
+  if (request.confirmationCode === undefined) return false;
+  try {
+    const resources = walletConnectContext(request).resources;
+    return resources.includes(hostedAuthorizationResource)
+      && !resources.includes("urn:nanocodex:mpp:machusd:spend");
+  } catch {
+    return false;
+  }
+}
+
 function isActiveConnector(
   current: ConnectorAttempt | undefined,
   expected: ConnectorAttempt,
@@ -1308,6 +2465,69 @@ function isActiveConnector(
     && current.token === expected.token
     && requestId === expected.requestId
     && !expected.abort.signal.aborted;
+}
+
+function requestedConnectorsReady(
+  approval: PendingApproval,
+  statuses: ConnectorStatuses,
+): boolean {
+  return approval.requestedConnectors.every((connector) => statuses[connector]?.connected === true);
+}
+
+function requestedMcpConnections(
+  requested: readonly McpConnection[],
+  wire: unknown,
+): readonly McpConnection[] {
+  if (requested.length === 0) return [];
+  const available = mcpConnectionsFromWire(wire);
+  const requestedIds = new Set(requested.map(({ id }) => id));
+  const selected = available.filter(({ id }) => requestedIds.has(id));
+  if (selected.length !== requestedIds.size) {
+    throw new Error("The account broker did not return every requested MCP connection.");
+  }
+  return selected;
+}
+
+function approvalReady(
+  approval: PendingApproval,
+  connectors: ConnectorStatuses,
+  mcpConnections: readonly McpConnection[],
+): boolean {
+  return connectorApprovalDisposition(approval.requestedConnectors, connectors) === "respond"
+    && mcpConnectionApprovalDisposition(approval.requestedMcpConnections, mcpConnections) === "respond";
+}
+
+function mcpConnectionFromStartResponse(body: Record<string, unknown>, expectedId: string): McpConnection {
+  const candidate = body.mcp_connection ?? body.connection;
+  const parsed = mcpConnectionsFromWire([candidate]);
+  if (parsed[0]?.id !== expectedId) {
+    throw new Error("The account broker returned the wrong MCP connection.");
+  }
+  return parsed[0];
+}
+
+function replaceMcpConnection(
+  connections: readonly McpConnection[],
+  replacement: McpConnection,
+): readonly McpConnection[] {
+  return connections.map((connection) => connection.id === replacement.id ? replacement : connection);
+}
+
+function mcpConnectionCanAuthorize(status: McpConnection["status"]): boolean {
+  return status === "authorization_required"
+    || status === "reauthorization_required";
+}
+
+function deviceReturnPath(): string {
+  return deviceMcpReturnPath(window.location.href);
+}
+
+function mcpConnectionStatusLabel(status: McpConnection["status"]): string {
+  if (status === "connected") return "Connected";
+  if (status === "authorization_required") return "Authorization required";
+  if (status === "reauthorization_required") return "Reconnect required";
+  if (status === "disabled") return "Disabled";
+  return "Revoked";
 }
 
 function abortableDelay(milliseconds: number, signal: AbortSignal) {
@@ -1357,6 +2577,14 @@ function requiredUrl(value: unknown) {
   return url.href;
 }
 
+function mcpCallbackContinuationKey(requestId: string) {
+  return `${mcpCallbackContinuationPrefix}${requestId}`;
+}
+
+function clearMcpCallbackContinuation(requestId: string) {
+  window.sessionStorage.removeItem(mcpCallbackContinuationKey(requestId));
+}
+
 function requiredText(value: unknown, label: string) {
   if (typeof value !== "string" || value.length === 0) throw new Error(`${label} is missing.`);
   return value;
@@ -1395,7 +2623,16 @@ function hex(value: unknown): `0x${string}` {
 }
 
 function errorMessage(error: unknown) {
-  if (error instanceof Error && error.message) return error.message;
-  if (typeof error === "string" && error) return error;
+  const message = error instanceof Error ? error.message : typeof error === "string" ? error : "";
+  if (message.includes("Server Authentication verify endpoint") && message.includes("401")) {
+    return "That passkey is not linked to this Nanocodex account. Choose another passkey or create a new account.";
+  }
+  if (/unknown credential/i.test(message)) {
+    return "This localhost instance does not know that passkey. Choose the saved passkey or create a new account.";
+  }
+  if (error instanceof DOMException && error.name === "NotAllowedError") {
+    return "No matching passkey was available, or the request was cancelled. Choose another passkey or create a new account.";
+  }
+  if (message) return message;
   return "The passkey ceremony failed. Try again or reject the request.";
 }

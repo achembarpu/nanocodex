@@ -15,6 +15,8 @@ mod eval;
 )))]
 #[path = "eval_unsupported.rs"]
 mod eval;
+mod login;
+mod managed_memory;
 mod mcp;
 #[cfg_attr(not(feature = "tempo"), path = "mpp_disabled.rs")]
 mod mpp;
@@ -91,6 +93,14 @@ struct Cli {
 enum Command {
     /// Manage `ChatGPT` subscription login.
     Auth(auth::Auth),
+    /// Sign in to Nanocodex Connect and authorize this installation.
+    Login(login::Login),
+    /// Connect one or more hosted services to this Nanocodex installation.
+    Connect(login::Connect),
+    /// Show the current Nanocodex Connect login without displaying secrets.
+    Status(login::Status),
+    /// Revoke and remove this installation's Nanocodex Connect login.
+    Logout(login::Logout),
     /// Inspect or purchase Nanocodex NANOUSD credits.
     #[cfg(feature = "tempo")]
     Credits(credits::Credits),
@@ -183,6 +193,10 @@ fn process_exit_code(error: &eyre::Report) -> u8 {
 async fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Some(Command::Auth(command)) => command.run().await,
+        Some(Command::Login(command)) => command.run().await,
+        Some(Command::Connect(command)) => command.run().await,
+        Some(Command::Status(command)) => command.run().await,
+        Some(Command::Logout(command)) => command.run().await,
         #[cfg(feature = "tempo")]
         Some(Command::Credits(command)) => command.run().await,
         Some(Command::Eval(command)) => command.run().await,
@@ -298,6 +312,35 @@ mod tests {
             cli.agent.responses_transport(),
             nanocodex::oai::transport::ResponsesTransport::WebSocket
         );
+    }
+
+    #[test]
+    fn hosted_connectors_have_a_focused_top_level_command() {
+        let cli = Cli::try_parse_from(["nanocodex", "connect", "github"]).unwrap();
+        assert!(matches!(cli.command, Some(Command::Connect(_))));
+
+        let login = Cli::try_parse_from(["nanocodex", "login", "--no-open"]).unwrap();
+        assert!(matches!(login.command, Some(Command::Login(_))));
+
+        let connect = Cli::try_parse_from(["nanocodex", "connect", "github", "--no-open"]).unwrap();
+        assert!(matches!(connect.command, Some(Command::Connect(_))));
+
+        let multiple = Cli::try_parse_from([
+            "nanocodex",
+            "connect",
+            "gmail",
+            "gdrive",
+            "github",
+            "--no-open",
+        ])
+        .unwrap();
+        assert!(matches!(multiple.command, Some(Command::Connect(_))));
+        assert!(Cli::try_parse_from(["nanocodex", "connect"]).is_err());
+
+        let chatgpt = Cli::try_parse_from(["nanocodex", "auth", "login", "--no-open"]).unwrap();
+        assert!(matches!(chatgpt.command, Some(Command::Auth(_))));
+
+        assert!(Cli::try_parse_from(["nanocodex", "login", "--github"]).is_err());
     }
 
     #[test]

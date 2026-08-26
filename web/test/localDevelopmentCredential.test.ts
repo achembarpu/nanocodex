@@ -37,7 +37,34 @@ test("a changed browser identity receives its own localhost credential claim", a
   assert.deepEqual(users, ["claim", "claim"]);
 });
 
-test("the canonical browser hostname receives the local credential claim", async () => {
+test("a fresh localhost credential claim replaces a disconnected broker credential", async () => {
+  let calls = 0;
+  const resource = createLocalDevelopmentCredentialResource(async () => {
+    calls += 1;
+    return new Response(null, { status: 204 });
+  }, "localhost");
+
+  assert.equal(resource.enabled, true);
+  assert.equal(await resource.ensure("user-a"), true);
+  assert.equal(await resource.ensure("user-a"), true);
+  assert.equal(calls, 1);
+  assert.equal(await resource.refresh("user-a"), true);
+  assert.equal(calls, 2);
+});
+
+test("legacy .local hosts cannot trigger a local credential claim", async () => {
+  let calls = 0;
+  const resource = createLocalDevelopmentCredentialResource(async () => {
+    calls += 1;
+    return new Response(null, { status: 204 });
+  }, "nanocodex.local");
+
+  assert.equal(resource.enabled, false);
+  assert.equal(await resource.ensure("user-a"), false);
+  assert.equal(calls, 0);
+});
+
+test("the portable browser hostname receives the local credential claim", async () => {
   let calls = 0;
   const resource = createLocalDevelopmentCredentialResource(async () => {
     calls += 1;
@@ -78,6 +105,8 @@ test("production hosts never expose the localhost credential claim", async () =>
     return new Response(null, { status: 204 });
   }, "nanocodex.gakonst.workers.dev");
 
+  assert.equal(resource.enabled, false);
   assert.equal(await resource.ensure("user-a"), false);
+  assert.equal(await resource.refresh("user-a"), false);
   assert.equal(calls, 0);
 });

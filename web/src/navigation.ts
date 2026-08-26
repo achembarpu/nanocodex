@@ -8,7 +8,8 @@ export type Surface =
   | "code"
   | "commits"
   | "requests"
-  | "evals";
+  | "evals"
+  | "connect";
 
 export type ProductNavigationItem = Readonly<{
   surface: Surface;
@@ -17,6 +18,12 @@ export type ProductNavigationItem = Readonly<{
 }>;
 
 export const connectDemoUrl = "https://nanocodex-connect-playground.gakonst.workers.dev";
+
+export const accountNavigation = {
+  surface: "connect",
+  label: "Account",
+  description: "Identity & connections",
+} as const satisfies ProductNavigationItem;
 
 export const demoNavigation = [
   { surface: "agent", label: "Durable Agent", description: "Managed durable agent" },
@@ -46,6 +53,7 @@ const surfacePaths: Record<Surface, string> = {
   commits: "/commits",
   requests: "/requests",
   evals: "/evals",
+  connect: "/connect",
 };
 
 const surfaces = new Set<Surface>(Object.keys(surfacePaths) as Surface[]);
@@ -65,6 +73,7 @@ export function surfaceFromUrl(url: Pick<URL, "pathname" | "searchParams">): Sur
 
   if (pathname === "/evals" || pathname.startsWith("/evals/")) return "evals";
   if (pathname === "/docs" || pathname.startsWith("/docs/")) return "docs";
+  if (pathname === "/connect/device") return "connect";
 
   const pathMatch = (Object.entries(surfacePaths) as Array<[Surface, string]>).find(
     ([, path]) => path === pathname,

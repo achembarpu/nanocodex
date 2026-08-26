@@ -16,6 +16,7 @@ test("Cloudflare routes preview documents, images, and protocol endpoints throug
     "/code",
     "/commits",
     "/requests",
+    "/connect",
     "/connect-dialog",
     "/connect-dialog/*",
     "/docs",
@@ -44,6 +45,11 @@ test("Cloudflare routes preview documents, images, and protocol endpoints throug
     {
       binding: "NANOCODEX_BACKEND",
       service: "nanocodex-durable-agent",
+      remote: false,
+    },
+    {
+      binding: "NANOCODEX_CONNECT_DIALOG",
+      service: "nanocodex-connect-dialog",
       remote: false,
     },
     {

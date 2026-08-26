@@ -1,5 +1,6 @@
 import {
   authenticate,
+  authenticatePersistentAccount,
   requireSameOriginMutation,
   type AccountAuthEnv,
 } from "./account-auth";
@@ -29,9 +30,18 @@ export async function routeCredentialRequest(
   if (!methods.has(request.method)) return json({ error: "method_not_allowed" }, 405);
   if (url.search) return json({ error: "invalid_request" }, 400);
 
-  const principal = await authenticate(request, env, url);
+  // Metadata reads are safe for an ephemeral browser identity, but mutations
+  // must be tied to a passkey-backed account so a user-supplied provider secret
+  // cannot outlive the anonymous session that submitted it.
+  const principal = request.method === "GET"
+    ? await authenticate(request, env, url)
+    : await authenticatePersistentAccount(request, env, url);
   if (!principal || principal.kind !== "account_session") {
     return json({ error: "unauthorized" }, 401);
+  }
+  if (request.method === "PUT" && url.pathname === "/v1/credentials/openai"
+    && !request.headers.get("content-type")?.toLowerCase().startsWith("application/json")) {
+    return json({ error: "invalid_content_type" }, 415);
   }
   if (request.method !== "GET") {
     const originFailure = requireSameOriginMutation(request, url, principal);

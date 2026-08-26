@@ -3,11 +3,39 @@ import {
   requireSameOriginMutation,
   type AccountAuthEnv,
 } from "./account-auth";
+import {
+  localConnectorAuthorization,
+  wrapLocalConnectorAuthorizationState,
+} from "../../../web/localConnectorCallback";
 
-type ConnectorEnv = AccountAuthEnv & { NANOCODEX: Fetcher };
+type ConnectorEnv = AccountAuthEnv & {
+  NANOCODEX: Fetcher;
+  NANOCODEX_LOCAL_OAUTH_RELAY_HMAC_KEY?: string;
+};
 type ConnectorId = "github" | "gmail" | "gdrive" | "x";
+type McpConnectionStatus =
+  | "authorization_required"
+  | "connected"
+  | "reauthorization_required"
+  | "disabled"
+  | "revoked";
+type McpConnection = Readonly<{
+  id: string;
+  name: string;
+  status: McpConnectionStatus;
+}>;
 
 const CONNECTOR = /^(github|gmail|gdrive|x)$/;
+const MCP_CONNECTION_ID = /^[A-Za-z0-9_-]{43}$/;
+const MCP_CONNECTION_NAME = /^[^\u0000-\u001f\u007f]{1,256}$/u;
+const MCP_CONNECTION_STATUSES = new Set<McpConnectionStatus>([
+  "authorization_required",
+  "connected",
+  "reauthorization_required",
+  "disabled",
+  "revoked",
+]);
+const MAX_MCP_CONNECTIONS = 64;
 const CALLBACK_SUFFIX = "/callback";
 const CONNECTOR_ERROR_CODES = new Set([
   "authorization_code_missing",
@@ -27,6 +55,37 @@ export async function routeConnectorRequest(
   env: ConnectorEnv,
   url: URL,
 ): Promise<Response | undefined> {
+  if (url.pathname === "/v1/connectors/mcp-connections") {
+    if (request.method !== "GET" || url.search) return json({ error: "method_not_allowed" }, 405);
+    const principal = await authenticatePersistentAccount(request, env, url);
+    if (!principal) return json({ error: "unauthorized" }, 401);
+    return publicMcpConnectionList(await env.NANOCODEX.fetch(
+      `https://broker.internal/users/${encodeURIComponent(principal.userId)}/mcp-connections`,
+    ));
+  }
+
+  const mcpMatch = url.pathname.match(/^\/v1\/connectors\/mcp-connections\/([^/]+)$/);
+  if (mcpMatch) {
+    const connectionId = mcpConnectionId(mcpMatch[1]);
+    if (!connectionId) return json({ error: "not_found" }, 404);
+    if (request.method !== "DELETE") return json({ error: "method_not_allowed" }, 405);
+    const principal = await authenticatePersistentAccount(request, env, url);
+    if (!principal) return json({ error: "unauthorized" }, 401);
+    const originFailure = requireSameOriginMutation(request, url, principal);
+    if (originFailure) return originFailure;
+    if (url.search) return json({ error: "invalid_request" }, 400);
+    const response = await env.NANOCODEX.fetch(
+      `https://broker.internal/users/${encodeURIComponent(principal.userId)}/mcp-connections/${connectionId}`,
+      { method: "DELETE" },
+    );
+    await response.body?.cancel();
+    if (!response.ok) return json({ error: "mcp_broker_failed" }, 502);
+    return new Response(null, {
+      status: 204,
+      headers: { "cache-control": "no-store" },
+    });
+  }
+
   if (url.pathname === "/v1/connectors") {
     if (request.method !== "GET" || url.search) return json({ error: "method_not_allowed" }, 405);
     const principal = await authenticatePersistentAccount(request, env, url);
@@ -70,14 +129,34 @@ export async function routeConnectorRequest(
 
   const returnTo = await decodeReturnTo(request, url);
   if (!returnTo) return json({ error: "invalid_return_to" }, 400);
-  return env.NANOCODEX.fetch(target, {
+  const local = localConnectorAuthorization(url.origin, connector, "managed");
+  const response = await env.NANOCODEX.fetch(target, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
-      redirect_uri: `${url.origin}/v1/connectors/${connector}/callback`,
+      redirect_uri: local?.redirectUri ?? `${url.origin}/v1/connectors/${connector}/callback`,
       return_to: returnTo,
     }),
   });
+  if (!local || !response.ok) return response;
+  const value: unknown = await response.json().catch(() => undefined);
+  if (!isRecord(value) || typeof value.authorization_url !== "string") {
+    return json({ error: "connector_broker_failed" }, 502);
+  }
+  let authorizationUrl: URL;
+  try { authorizationUrl = new URL(value.authorization_url); } catch {
+    return json({ error: "connector_broker_failed" }, 502);
+  }
+  try {
+    await wrapLocalConnectorAuthorizationState(
+      authorizationUrl,
+      local,
+      env.NANOCODEX_LOCAL_OAUTH_RELAY_HMAC_KEY ?? "",
+    );
+  } catch {
+    return json({ error: "connector_broker_failed" }, 502);
+  }
+  return json({ ...value, authorization_url: authorizationUrl.href }, 200);
 }
 
 async function finishCallback(
@@ -143,6 +222,51 @@ function redirectResult(
 
 function connectorId(value: string | undefined): ConnectorId | undefined {
   return value && CONNECTOR.test(value) ? value as ConnectorId : undefined;
+}
+
+function mcpConnectionId(value: string | undefined): string | undefined {
+  return value && MCP_CONNECTION_ID.test(value) ? value : undefined;
+}
+
+async function publicMcpConnectionList(response: Response): Promise<Response> {
+  if (!response.ok) {
+    await response.body?.cancel();
+    return json({ error: "mcp_broker_failed" }, 502);
+  }
+  const value: unknown = await response.json().catch(() => undefined);
+  if (!isRecord(value) || !Array.isArray(value.mcp_connections)
+    || value.mcp_connections.length > MAX_MCP_CONNECTIONS) {
+    return json({ error: "mcp_broker_invalid" }, 502);
+  }
+  const seen = new Set<string>();
+  const connections: McpConnection[] = [];
+  for (const candidate of value.mcp_connections) {
+    const connection = publicMcpConnection(candidate);
+    if (!connection || seen.has(connection.id)) {
+      return json({ error: "mcp_broker_invalid" }, 502);
+    }
+    seen.add(connection.id);
+    if (connection.status === "authorization_required" || connection.status === "revoked") {
+      continue;
+    }
+    connections.push(connection);
+  }
+  return json({ mcp_connections: connections }, 200);
+}
+
+function publicMcpConnection(value: unknown): McpConnection | undefined {
+  if (!isRecord(value)
+    || !mcpConnectionId(typeof value.id === "string" ? value.id : undefined)
+    || typeof value.name !== "string"
+    || !MCP_CONNECTION_NAME.test(value.name)
+    || value.name.trim().length === 0
+    || typeof value.status !== "string"
+    || !MCP_CONNECTION_STATUSES.has(value.status as McpConnectionStatus)) return undefined;
+  return {
+    id: value.id as string,
+    name: value.name,
+    status: value.status as McpConnectionStatus,
+  };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

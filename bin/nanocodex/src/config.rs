@@ -26,6 +26,8 @@ use nanocodex::{
 };
 
 use crate::browser::{BrowserArgs, ConfiguredBrowser};
+use crate::login::load_managed_mcp_credential;
+use crate::managed_memory::{ConfiguredManagedMemory, MEMORY_INSTRUCTIONS};
 use crate::mcp::{ConfiguredMcp, McpArgs};
 use crate::mpp::{MppAdapter, MppArgs};
 use crate::subagents::{self, ChildAgents, DEFAULT_MAX_SUBAGENTS, SubagentToolSet};
@@ -186,6 +188,15 @@ pub(crate) struct AgentArgs {
     )]
     rollouts: bool,
 
+    /// Enable hosted Nanocodex session search and durable organization memory.
+    #[arg(
+        long,
+        env = "NANOCODEX_MEMORY",
+        default_value_t = false,
+        action = ArgAction::Set
+    )]
+    memory: bool,
+
     /// Responses API WebSocket endpoint.
     #[arg(long, env = "OPENAI_RESPONSES_WEBSOCKET_URL")]
     websocket_url: Option<String>,
@@ -320,7 +331,18 @@ impl AgentArgs {
         let web_search = self.web_search();
         let codex_home = default_codex_home()?;
         let responses_transport = self.responses_transport();
-        let session = prepare_session_build(self.cwd, self.rollouts, &codex_home, durable)?;
+        let mut session = prepare_session_build(self.cwd, self.rollouts, &codex_home, durable)?;
+        if self.memory && session.session_id.is_none() {
+            session.session_id = Some(SessionId::new());
+        }
+        let managed_memory = if self.memory {
+            let root_session_id = session.session_id.ok_or_else(|| {
+                eyre!("memory-enabled sessions require an explicit session identity")
+            })?;
+            Some(ConfiguredManagedMemory::connect(&codex_home, root_session_id).await?)
+        } else {
+            None
+        };
         let configured_browser = self.browser.configure(&session.workspace)?;
         let mpp_enabled = self.mpp.is_enabled();
         if mpp_enabled && !matches!(responses_transport, ResponsesTransport::Https) {
@@ -376,7 +398,14 @@ impl AgentArgs {
             .map_or_else(Tools::builder, ConfiguredVm::tools_builder)
             .web_search(web_search)
             .image_generation(self.image_generation);
-        let mcp = self.mcp.build(&codex_home, mpp_adapter.as_ref())?;
+        let managed_mcp = if self.mcp.loads_managed() {
+            load_managed_mcp_credential(&codex_home).await?
+        } else {
+            None
+        };
+        let mcp = self
+            .mcp
+            .build(&codex_home, mpp_adapter.as_ref(), managed_mcp.as_ref())?;
         let mcp_handle = mcp.as_ref().map(|mcp| mcp.handle.clone());
         if let Some(ConfiguredMcp { provider, .. }) = mcp {
             tools = tools.provider(provider);
@@ -389,6 +418,9 @@ impl AgentArgs {
         }
         if let Some(browser) = &configured_browser {
             tools = tools.provider(browser.tool());
+        }
+        if let Some(managed_memory) = &managed_memory {
+            tools = managed_memory.install(tools);
         }
         let tools = tools.build()?;
         let generic_subagents = self.subagents;
@@ -426,7 +458,11 @@ impl AgentArgs {
         } else {
             builder.tools(tools)
         };
-        let instructions = session_instructions(self.instructions, generic_subagents);
+        let instructions = session_instructions(
+            self.instructions,
+            generic_subagents,
+            managed_memory.is_some(),
+        );
         let builder = if let Some(instructions) = instructions {
             builder.instructions(instructions)
         } else {
@@ -486,15 +522,25 @@ const SUBAGENT_INSTRUCTIONS: &str = concat!(
     "verification."
 );
 
-fn session_instructions(custom: Option<String>, subagents_enabled: bool) -> Option<String> {
-    if !subagents_enabled {
+fn session_instructions(
+    custom: Option<String>,
+    subagents_enabled: bool,
+    memory_enabled: bool,
+) -> Option<String> {
+    if !subagents_enabled && !memory_enabled {
         return custom;
     }
     let mut instructions =
         custom.unwrap_or_else(|| ResponsesServiceConfig::default().system_prompt.to_string());
     if !instructions.contains(SUBAGENT_INSTRUCTIONS) {
+        if subagents_enabled {
+            instructions.push_str("\n\n");
+            instructions.push_str(SUBAGENT_INSTRUCTIONS);
+        }
+    }
+    if memory_enabled && !instructions.contains(MEMORY_INSTRUCTIONS) {
         instructions.push_str("\n\n");
-        instructions.push_str(SUBAGENT_INSTRUCTIONS);
+        instructions.push_str(MEMORY_INSTRUCTIONS);
     }
     Some(instructions)
 }
@@ -856,14 +902,28 @@ mod tests {
     fn subagent_instructions_follow_the_enable_switch() {
         let custom = "custom instructions".to_owned();
         assert_eq!(
-            session_instructions(Some(custom.clone()), false),
+            session_instructions(Some(custom.clone()), false, false),
             Some(custom.clone())
         );
 
-        let enabled = session_instructions(Some(custom), true).unwrap();
+        let enabled = session_instructions(Some(custom), true, false).unwrap();
         assert!(enabled.starts_with("custom instructions\n\n"));
         assert!(enabled.ends_with(SUBAGENT_INSTRUCTIONS));
         assert_eq!(enabled.matches(SUBAGENT_INSTRUCTIONS).count(), 1);
+    }
+
+    #[test]
+    fn memory_instructions_follow_the_enable_switch() {
+        let custom = "custom instructions".to_owned();
+        assert_eq!(
+            session_instructions(Some(custom.clone()), false, false),
+            Some(custom.clone())
+        );
+
+        let enabled = session_instructions(Some(custom), false, true).unwrap();
+        assert!(enabled.starts_with("custom instructions\n\n"));
+        assert!(enabled.ends_with(MEMORY_INSTRUCTIONS));
+        assert_eq!(enabled.matches(MEMORY_INSTRUCTIONS).count(), 1);
     }
 
     #[test]

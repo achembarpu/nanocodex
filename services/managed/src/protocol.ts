@@ -1,4 +1,5 @@
 import type { AgentEvent, PromptInput, TurnUsage } from "nanocodex";
+import type { HistoryCitation } from "./history-search";
 
 export type ClientCommand =
   | { type: "prompt"; id: string; input: PromptInput }
@@ -12,7 +13,7 @@ export type TurnCompleted = {
   id: string;
   final_message: string;
   usage: TurnUsage | null;
-  citations: [];
+  citations: readonly HistoryCitation[];
   usage_error?: string;
 };
 

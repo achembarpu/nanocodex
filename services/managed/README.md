@@ -294,6 +294,77 @@ attempt count and exponential retry time; an ambiguous operation becomes
 the agent. Deletion clears the journal, managed rows, event log, and Computer
 workspace.
 
+## Organization history and memory
+
+The first browser account gets its own unnamed one-user organization and
+unnamed root team. All agents created by that principal retain its organization
+and team, and one `MemoryScope` Durable Object keyed by the organization ID owns
+the shared search projection and explicit durable memories. An owner account
+session can read or rename the organization with `GET /v1/organization` or a
+same-origin `PATCH /v1/organization` (`{"name":"Research"}`; `null` clears the
+name).
+
+Completed turns are projected idempotently into that scope with their team ID,
+session and turn IDs, exact user/assistant text, durable source cursor, and
+deletion tombstone. Retrieval is authenticated and currently filters to the
+principal's exact team:
+
+```sh
+curl -fsS -X POST \
+  -H "Authorization: Bearer $account_api_key" \
+  -H 'Content-Type: application/json' \
+  --data '{"query":"memory scope","limit":8}' \
+  http://127.0.0.1:8787/v1/history/sessions/search
+
+curl -fsS -X POST \
+  -H "Authorization: Bearer $account_api_key" \
+  -H 'Content-Type: application/json' \
+  --data '{"turn_ids":["turn-42"]}' \
+  http://127.0.0.1:8787/v1/history/sessions/<session-id>/read
+```
+
+`find_sessions` and `read_session` expose the same boundary to managed agents.
+Search and read responses include citations grouped by session, with exact turn
+IDs and source cursors; a completed agent turn carries the citations recorded
+by those tools. Hosted deployments may bind AutoVectorize AI Search as
+`HISTORY_AI_SEARCH`; results are rehydrated from authoritative SQLite and merged
+with local FTS, which remains the fallback while indexing is pending or hosted
+search is absent or unavailable. Set `NANOCODEX_HISTORY_AI_SEARCH_INSTANCE` for
+the remote binding during local development; otherwise Wrangler is FTS-only.
+
+The `memory` agent tool and authenticated `POST /v1/memory` endpoint expose one
+closed Tact-style operation surface: `scan`, `read`, `put`, and `delete`.
+Operations are atomic. Queries are limited to 512 UTF-8 bytes and five scan
+results; stored values are limited to 1,024 UTF-8 bytes, 512 records, and 256
+KiB total organization content. New or replaced memories enter seven-day
+probation and are pruned if never read; reading marks them used. Every put
+requires a fresh scan by the same principal, exact normalized duplicates and
+likely secrets are rejected, and replacement/deletion uses the returned
+`{id, version}` key as compare-and-swap.
+
+Every account session and `ncx_live_...` API key resolves to an organization,
+team, role, authorization epoch, and explicit capabilities. History requires
+`history:read`; memory requires `memory:read`, plus `memory:write` for put and
+delete. API keys are created, listed, and revoked through `/v1/api-keys` by the
+authenticated browser account and carry its validated organization grant.
+
+The managed JavaScript client mirrors these routes as `Agent.memory`,
+`Agent.getOrganization`, and `Agent.updateOrganization`; memory accepts a cookie
+or API key according to its capabilities, while organization metadata remains
+restricted to an owner account session.
+
+Nested-team creation and membership administration are not yet exposed. The
+stored team shape already has a nullable parent link; the intended permission
+rule is a tree, not overlapping groups. A grant anchored at a parent team may
+act on that team's descendant resources, while a child grant cannot see its
+parent or siblings. Explicit capabilities are always intersected with that
+team closure. The `Organization` object will remain the sole authority that
+computes the closure; clients and models will never submit an authorized-team
+list. Session history stays team-owned, while the curated atomic memory corpus
+documented above is deliberately organization-wide. This inheritance and its
+administration API must be implemented and tested before any child team can be
+created.
+
 Start workerd in one terminal and run the live probes in another:
 
 ```sh

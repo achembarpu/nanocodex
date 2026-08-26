@@ -39,10 +39,7 @@ export type ReadSessionResponse = Readonly<{
   turns: readonly SessionTurn[];
   citations: readonly HistoryCitation[];
 }>;
-export type MemoryKey = Readonly<{
-  id: number;
-  version: number;
-}>;
+export type MemoryKey = Readonly<{ id: number; version: number }>;
 export type MemoryRecord = Readonly<{
   key: MemoryKey;
   content: string;
@@ -54,6 +51,58 @@ export type MemoryRecord = Readonly<{
   use_count: number;
   probation_until_ms: number | null;
 }>;
+export type MemoryCandidate = Readonly<{
+  key: MemoryKey;
+  preview: string;
+  score: number;
+}>;
+export type MemoryScanOperation = Readonly<{
+  operation: "scan";
+  query: string;
+  limit?: number | undefined;
+}>;
+export type MemoryReadOperation = Readonly<{ operation: "read"; keys: readonly MemoryKey[] }>;
+export type MemoryPutOperation = Readonly<{
+  operation: "put";
+  content: string;
+  replace?: MemoryKey | undefined;
+}>;
+export type MemoryDeleteOperation = Readonly<{ operation: "delete"; key: MemoryKey }>;
+export type MemoryOperation =
+  | MemoryScanOperation
+  | MemoryReadOperation
+  | MemoryPutOperation
+  | MemoryDeleteOperation;
+export type MemoryScanResult = Readonly<{
+  operation: "scan";
+  abstained: boolean;
+  candidates: readonly MemoryCandidate[];
+}>;
+export type MemoryReadResult = Readonly<{
+  operation: "read";
+  memories: readonly MemoryRecord[];
+}>;
+export type MemoryPutResult = Readonly<{
+  operation: "put";
+  memory: MemoryRecord;
+  replaced: boolean;
+}>;
+export type MemoryDeleteResult = Readonly<{ operation: "delete"; key: MemoryKey }>;
+export type MemoryResult =
+  | MemoryScanResult
+  | MemoryReadResult
+  | MemoryPutResult
+  | MemoryDeleteResult;
+
+export type Organization = Readonly<{
+  id: string;
+  name: string | null;
+  rootTeam: Readonly<{ id: string; name: string | null }>;
+  authorizationEpoch: number;
+  createdAt: number;
+  updatedAt: number;
+}>;
+export type OrganizationUpdate = Readonly<{ name: string | null }>;
 
 export type Options = Readonly<{
   /** Managed service origin. Defaults to the current browser origin. */
@@ -256,3 +305,10 @@ export function readSession(request: ReadSessionRequest, options?: Options): Pro
 export function listMemories(options?: Options): Promise<readonly MemoryRecord[]>;
 /** Compare-and-swap delete one hosted durable memory; deleting an absent id is idempotent. */
 export function deleteMemory(key: MemoryKey, options?: Options): Promise<void>;
+export function memory(operation: MemoryScanOperation, options?: Options): Promise<MemoryScanResult>;
+export function memory(operation: MemoryReadOperation, options?: Options): Promise<MemoryReadResult>;
+export function memory(operation: MemoryPutOperation, options?: Options): Promise<MemoryPutResult>;
+export function memory(operation: MemoryDeleteOperation, options?: Options): Promise<MemoryDeleteResult>;
+export function memory(operation: MemoryOperation, options?: Options): Promise<MemoryResult>;
+export function getOrganization(options?: Options): Promise<Organization>;
+export function updateOrganization(request: OrganizationUpdate, options?: Options): Promise<Organization>;

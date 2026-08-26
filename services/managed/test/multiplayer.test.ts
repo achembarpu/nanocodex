@@ -1912,6 +1912,12 @@ async function seedApiKey(userId: string, token: string): Promise<void> {
     },
   );
   expect(account.ok).toBe(true);
+  const accountRecord = await account.json<{ organizationId: string }>();
+  const organization = await testEnv.NANOCODEX_ORGANIZATIONS.getByName(
+    accountRecord.organizationId,
+  ).fetch("https://organization.internal/metadata");
+  expect(organization.ok).toBe(true);
+  const metadata = await organization.json<{ rootTeam: { id: string } }>();
   const key = testEnv.NANOCODEX_API_KEYS.getByName(digest);
   await key.fetch("https://api-key.internal/record", { method: "DELETE" });
   const record = await key.fetch(
@@ -1926,6 +1932,22 @@ async function seedApiKey(userId: string, token: string): Promise<void> {
         createdAt: Date.now(),
         digest,
         userId,
+        organizationId: accountRecord.organizationId,
+        teamId: metadata.rootTeam.id,
+        role: "owner",
+        authorizationEpoch: 1,
+        capabilities: [
+          "agents:read",
+          "agents:write",
+          "api_keys:read",
+          "api_keys:write",
+          "history:read",
+          "memory:read",
+          "memory:write",
+          "tools:use",
+          "organization:read",
+          "organization:write",
+        ],
       }),
     },
   );

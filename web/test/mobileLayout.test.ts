@@ -80,7 +80,7 @@ test("phone headers expose readable product navigation in an owned modal", () =>
   assert.match(application, /onClick=\{toggleMobileNavigation\}/);
   assert.match(application, /className="mobile-navigation-backdrop"[\s\S]*?onClick=\{closeMobileNavigation\}/);
   assert.doesNotMatch(application, /onPointerDown=\{closeMobileNavigation\}/);
-  assert.match(application, /<AccountMenu/);
+  assert.match(application, /surfaceNavigationLink\(accountNavigation, "mobile"\)/);
   assert.match(application, /<span>\{item\.label\}<\/span><small>\{item\.description\}<\/small>/);
   assert.match(application, /className="mobile-navigation-group" aria-labelledby="mobile-demos-title"/);
   assert.match(application, /className="mobile-navigation-group" aria-labelledby="mobile-git-title"/);

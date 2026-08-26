@@ -1,7 +1,7 @@
 type WorkerConfiguration = {
   compatibility_date?: string;
   name?: string;
-  services?: Array<Record<string, unknown>>;
+  services?: Array<{ binding: string; service: string; remote?: boolean }>;
   vars?: Record<string, unknown>;
 };
 
@@ -15,8 +15,10 @@ const LOCAL_MANAGED_WORKER = "nanocodex-durable-agent";
 const LOCAL_EGRESS_WORKER = "nanocodex-egress";
 const LOCAL_CONNECT_API_WORKER = "nanocodex-connect-api";
 const LOCAL_CONNECT_API_COMPATIBILITY_DATE = "2026-08-18";
+const LOCAL_WEBSITE_WORKER = "nanocodex-development";
 const DEVELOPMENT_SIGNING_KEY = "nanocodex-local-room-signing-key";
 const DEVELOPMENT_WEBAUTHN_HMAC_KEY = "nanocodex-local-passkey-portability-v1";
+const DEVELOPMENT_OAUTH_RELAY_HMAC_KEY = "nanocodex-local-oauth-relay-hmac-v1-only";
 
 /**
  * Cloudflare requires Workers that share external Durable Objects or upgraded
@@ -31,6 +33,10 @@ export function localManagedAuxiliaryWorkers(
     || DEVELOPMENT_SIGNING_KEY;
   const idleTimeout = environment.NANOCODEX_LOCAL_AGENT_IDLE_TIMEOUT_MS?.trim() || "1000";
   const relayUrl = environment.NANOCODEX_LOCAL_CODEX_RELAY_URL?.trim();
+  const webAuthnHmacKey = environment.NANOCODEX_LOCAL_WEBAUTHN_HMAC_KEY?.trim()
+    || DEVELOPMENT_WEBAUTHN_HMAC_KEY;
+  const oauthRelayHmacKey = environment.NANOCODEX_LOCAL_OAUTH_RELAY_HMAC_KEY?.trim()
+    || DEVELOPMENT_OAUTH_RELAY_HMAC_KEY;
   const connectorVars = localConnectorVars(environment);
   if (!/^[1-9][0-9]*$/.test(idleTimeout)) {
     throw new Error("local managed Worker idle timeout must be a positive integer");
@@ -74,7 +80,8 @@ export function localManagedAuxiliaryWorkers(
           // isolated worktrees. It authenticates public passkey metadata in a
           // shared browser cookie; it is not a provider credential or a
           // production trust root.
-          NANOCODEX_LOCAL_WEBAUTHN_HMAC_KEY: DEVELOPMENT_WEBAUTHN_HMAC_KEY,
+          NANOCODEX_LOCAL_WEBAUTHN_HMAC_KEY: webAuthnHmacKey,
+          NANOCODEX_LOCAL_OAUTH_RELAY_HMAC_KEY: oauthRelayHmacKey,
         },
       }),
     },
@@ -84,9 +91,15 @@ export function localManagedAuxiliaryWorkers(
       config: (configuration) => ({
         compatibility_date: LOCAL_CONNECT_API_COMPATIBILITY_DATE,
         name: LOCAL_CONNECT_API_WORKER,
-        services: configuration.services?.map((service) => service.binding === "NANOCODEX"
-          ? { ...service, service: "nanocodex-development" }
-          : service),
+        services: [
+          { binding: "ACCOUNTS", service: LOCAL_MANAGED_WORKER, remote: false },
+          { binding: "EGRESS", service: LOCAL_EGRESS_WORKER, remote: false },
+          { binding: "NANOCODEX", service: LOCAL_WEBSITE_WORKER, remote: false },
+        ],
+        vars: {
+          ...configuration.vars,
+          NANOCODEX_LOCAL_OAUTH_RELAY_HMAC_KEY: oauthRelayHmacKey,
+        },
       }),
     },
   ];

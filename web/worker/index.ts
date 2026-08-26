@@ -35,6 +35,11 @@ import {
   type ConnectDialogProxyEnv,
 } from "./connectDialogProxy.ts";
 import { routeLocalConnectApi, type LocalConnectApiEnv } from "./localConnectApi.ts";
+import { routeConnectApi, type ConnectApiProxyEnv } from "./connectApiProxy.ts";
+import {
+  routeLocalConnectorCallbackReturn,
+  type LocalConnectorCallbackRelayEnv,
+} from "./localConnectorCallbackRelay.ts";
 import {
   fetchManagedModel,
   fetchManagedRealtimeCall,
@@ -90,6 +95,8 @@ const GIT_SHA_PATTERN = /^[0-9a-f]{40}$/;
 type WorkerEnv = GitStorageEnv & ThreadGitStorageEnv & EvalStorageEnv & ChatGptEgressEnv
   & ConnectDialogProxyEnv
   & LocalConnectApiEnv
+  & ConnectApiProxyEnv
+  & LocalConnectorCallbackRelayEnv
   & PublicSecurityEnv & CredentialVaultEnv & {
   ASSETS?: Fetcher;
   ENVIRONMENT: string;
@@ -126,10 +133,14 @@ export default {
     const url = new URL(request.url);
     const insecure = enforceHttps(request, env, url);
     if (insecure) return insecure;
+    const connectorCallbackReturn = await routeLocalConnectorCallbackReturn(request, env, url);
+    if (connectorCallbackReturn != null) return connectorCallbackReturn;
+    const localConnectApi = await routeLocalConnectApi(request, env, url);
+    if (localConnectApi != null) return localConnectApi;
+    const connectApi = await routeConnectApi(request, env, url);
+    if (connectApi != null) return connectApi;
     const connectDialog = await routeConnectDialog(request, env, url);
     if (connectDialog != null) return connectDialog;
-    const connectApi = await routeLocalConnectApi(request, env, url);
-    if (connectApi != null) return connectApi;
     const managed = await routeManaged(request, env, url);
     if (managed != null) return managed;
     const evalMutation = await routeEvalMutation(request, env, url);

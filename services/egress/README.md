@@ -4,6 +4,27 @@ This private ordinary Cloudflare Worker owns provider credentials for managed
 Nanocodex users. It has `workers_dev = false`, no routes, and is reachable only
 through a Service Binding. It does not use Workers for Platforms.
 
+## Manual API secrets
+
+The managed account may submit an OpenAI API key through the authenticated
+`PUT /v1/credentials/openai` route. The broker accepts that request only from
+the managed account session, encrypts the key before Durable Object storage,
+and returns `204` without a secret-shaped response. `GET /v1/credentials`
+returns connection state only. Model egress resolves the opaque subject to its
+owning user and injects the decrypted key only into the fixed OpenAI request;
+the browser, CLI, agent tools, and connector callers receive neither the key
+nor a credential-bearing response.
+
+Cloudflare Secrets Store is an account-level, statically bound Worker resource:
+its binding exposes `get()` to the Worker, and the value is not viewable after
+creation. It is therefore appropriate for the broker's encryption key, but not
+for dynamically creating one account secret per user from a request. The vault
+accepts either the existing `CREDENTIAL_ENCRYPTION_KEY` Worker secret or a
+Secrets Store binding with that name, so deployments can move the encryption
+key to Secrets Store without changing the per-user Durable Object contract.
+Keep the binding on the private broker Worker only; do not add it to managed,
+browser, or agent configurations.
+
 Each local Nanocodex user ID selects one `UserCredentialBroker` Durable Object.
 An `AgentSubjectDirectory` stores only the mapping from a hidden opaque Durable
 Object subject to that user ID. Agent and room code retain the subject, never a
@@ -32,6 +53,9 @@ or `test` and `ALLOW_LOCAL_CREDENTIAL_CLAIM=true`. It consumes
 `LOCAL_CHATGPT_BOOTSTRAP` from the broker environment, accepts no provider
 material in the request, and the subject directory permits one claiming user.
 Production returns `404` even if the endpoint is called.
+The claim is missing-only: a healthy retained ChatGPT credential is left
+unchanged, while a missing or dead credential may be installed from the local
+bootstrap. Repeated explicit claims are therefore idempotent.
 When this local-claim profile is enabled, starting an interactive ChatGPT
 device login fails with `409 local_credential_claim_required`.
 

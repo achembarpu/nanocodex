@@ -20,18 +20,18 @@ ignored = ["chrono", "vergen"]
 default = []
 # Keep paid-provider composition out of the direct-agent development graph.
 tempo = [
-    "dep:alloy-primitives",
     "dep:mpp",
     "dep:nanocodex-egress",
     "dep:nanousd",
-    "dep:rand",
-    "dep:tempo-alloy",
 ]
 
 [dependencies]
 arboard.workspace = true
 async-trait.workspace = true
-alloy-primitives = { workspace = true, optional = true }
+alloy-primitives.workspace = true
+alloy-rlp.workspace = true
+alloy-signer.workspace = true
+alloy-signer-local.workspace = true
 base64.workspace = true
 clap.workspace = true
 crossterm.workspace = true
@@ -54,7 +54,7 @@ nanousd = { workspace = true, optional = true }
 pulldown-cmark.workspace = true
 mpp = { workspace = true, optional = true, features = ["middleware", "sqlite", "tempo", "reqwest-rustls-tls-no-provider"] }
 nanocodex-egress = { workspace = true, optional = true }
-rand = { workspace = true, optional = true }
+rand.workspace = true
 ratatui.workspace = true
 ratatex.workspace = true
 reqwest = { workspace = true, features = ["blocking", "stream"] }
@@ -70,7 +70,7 @@ tempfile.workspace = true
 thiserror.workspace = true
 toml.workspace = true
 tokio = { workspace = true, features = ["fs", "io-std", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
-tempo-alloy = { workspace = true, optional = true }
+tempo-alloy.workspace = true
 tracing.workspace = true
 unicode-segmentation.workspace = true
 unicode-width.workspace = true
@@ -93,6 +93,7 @@ vergen = { workspace = true, features = ["build", "git", "gitcl"] }
 
 [dev-dependencies]
 criterion.workspace = true
+nanocodex-tools.workspace = true
 
 [[bench]]
 name = "tui_render"
@@ -101,6 +102,14 @@ harness = false
 [[test]]
 name = "tui_split"
 path = "tests/tui_split.rs"
+
+[[test]]
+name = "managed_memory"
+path = "tests/managed_memory.rs"
+
+[[test]]
+name = "login"
+path = "tests/login.rs"
 
 [[bin]]
 name = "nanocodex"

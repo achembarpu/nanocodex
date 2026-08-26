@@ -558,6 +558,52 @@ describe("per-user credential broker", () => {
     expect(localRelayRequest?.headers.get("authorization")).toMatch(/^Bearer [^.]+\.[^.]+\.[^.]+$/);
     expect(localRelayRequest?.headers.get("x-nanocodex-subject")).toBeNull();
 
+    const capability = "C".repeat(43);
+    let capabilityRequest: Request | undefined;
+    const throughCapability = await handleEgress(
+      modelRequest(subject),
+      {
+        ...workerEnv,
+        CODEX_RELAY_URL: `http://127.0.0.1:49152/v1/${capability}`,
+        ALLOW_INSECURE_LOOPBACK_RELAY: "true",
+      },
+      undefined,
+      async (input, init) => {
+        capabilityRequest = input instanceof Request ? input : new Request(input, init);
+        return Response.json({ ok: true });
+      },
+    );
+    expect(throughCapability.status).toBe(200);
+    expect(capabilityRequest?.url).toBe(
+      `http://127.0.0.1:49152/v1/${capability}/http/codex-web-search`,
+    );
+
+    let capabilitySocketRequest: Request | undefined;
+    const throughCapabilitySocket = await handleEgress(
+      new Request("https://nanocodex.internal/v1/responses", {
+        headers: {
+          authorization: "Bearer NANOCODEX_PROVIDER_CREDENTIAL",
+          "openai-beta": "responses_websockets=2026-02-06",
+          upgrade: "websocket",
+          "x-nanocodex-subject": subject,
+        },
+      }),
+      {
+        ...workerEnv,
+        CODEX_RELAY_URL: `http://127.0.0.1:49152/v1/${capability}`,
+        ALLOW_INSECURE_LOOPBACK_RELAY: "true",
+      },
+      undefined,
+      async (input, init) => {
+        capabilitySocketRequest = input instanceof Request ? input : new Request(input, init);
+        return Response.json({ ok: true });
+      },
+    );
+    expect(throughCapabilitySocket.status).toBe(200);
+    expect(capabilitySocketRequest?.url).toBe(
+      `http://127.0.0.1:49152/v1/${capability}`,
+    );
+
     let containerRequest: Request | undefined;
     let containerName: string | undefined;
     const throughContainer = await handleEgress(
@@ -722,6 +768,142 @@ describe("per-user credential broker", () => {
     expect(JSON.stringify(otherStatus)).not.toContain("local-access");
   });
 
+  it("claims the local bootstrap atomically only when ChatGPT is missing or dead", async () => {
+    const stub = workerEnv.USER_CREDENTIALS.getByName("user-local-claim-missing-only");
+    const claims = await Promise.all([
+      claimLocalCredential(stub),
+      claimLocalCredential(stub),
+    ]);
+    const publicStatuses = await Promise.all(
+      claims.map(async (response) => ({
+        status: response.status,
+        body: await response.json<Record<string, unknown>>(),
+      })),
+    );
+    expect(publicStatuses).toEqual([
+      expect.objectContaining({
+        status: 200,
+        body: expect.objectContaining({
+          active: "chatgpt",
+          chatgpt: expect.objectContaining({ connected: true, account_id: "local-account" }),
+        }),
+      }),
+      expect.objectContaining({
+        status: 200,
+        body: expect.objectContaining({
+          active: "chatgpt",
+          chatgpt: expect.objectContaining({ connected: true, account_id: "local-account" }),
+        }),
+      }),
+    ]);
+    expect(JSON.stringify(publicStatuses)).not.toMatch(/local-access|local-refresh-secret/);
+    expect(await credential(stub)).toMatchObject({
+      status: 200,
+      body: { kind: "chatgpt", revision: 0 },
+    });
+
+    let now = localBootstrapExpiry - 4 * 60_000;
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    const provider = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response(null, { status: 401 }));
+    expect(await credential(stub)).toEqual({
+      status: 422,
+      body: { error: "chatgpt_credential_dead" },
+    });
+    expect(provider).toHaveBeenCalledOnce();
+
+    const replacement = await claimLocalCredential(stub);
+    expect(replacement.status).toBe(200);
+    const replacementStatus = await replacement.json<Record<string, unknown>>();
+    expect(replacementStatus).toMatchObject({
+      active: "chatgpt",
+      chatgpt: { connected: true, account_id: "local-account" },
+    });
+    expect(JSON.stringify(replacementStatus)).not.toMatch(/local-access|local-refresh-secret/);
+    now = Date.parse("2026-08-26T00:00:00Z");
+    expect(await credential(stub)).toMatchObject({
+      status: 200,
+      body: { kind: "chatgpt", revision: 1 },
+    });
+  });
+
+  it("checks the local gate before retaining a healthy claim without parsing bootstrap", async () => {
+    const stub = workerEnv.USER_CREDENTIALS.getByName("user-local-claim-retained");
+    expect((await claimLocalCredential(stub)).status).toBe(200);
+
+    const retained = await runInDurableObject(
+      stub,
+      async (instance: UserCredentialBroker) => {
+        const brokerEnv = (instance as unknown as { env: EgressEnv }).env;
+        const originalEnvironment = brokerEnv.ENVIRONMENT;
+        const originalBootstrap = brokerEnv.LOCAL_CHATGPT_BOOTSTRAP;
+        try {
+          brokerEnv.LOCAL_CHATGPT_BOOTSTRAP = "{invalid-bootstrap";
+          const repeated = await claimLocalCredential(instance);
+          const repeatedBody = await repeated.json<Record<string, unknown>>();
+          brokerEnv.ENVIRONMENT = "production";
+          const hidden = await claimLocalCredential(instance);
+          return {
+            repeated: { status: repeated.status, body: repeatedBody },
+            hidden: {
+              status: hidden.status,
+              body: await hidden.json<Record<string, unknown>>(),
+            },
+          };
+        } finally {
+          brokerEnv.ENVIRONMENT = originalEnvironment;
+          brokerEnv.LOCAL_CHATGPT_BOOTSTRAP = originalBootstrap;
+        }
+      },
+    );
+    expect(retained).toEqual({
+      repeated: {
+        status: 200,
+        body: expect.objectContaining({
+          active: "chatgpt",
+          chatgpt: expect.objectContaining({ connected: true, account_id: "local-account" }),
+        }),
+      },
+      hidden: { status: 404, body: { error: "not_found" } },
+    });
+    expect(JSON.stringify(retained)).not.toMatch(/local-access|local-refresh-secret/);
+    expect(await credential(stub)).toMatchObject({
+      status: 200,
+      body: { kind: "chatgpt", revision: 0 },
+    });
+
+    const missingStub = workerEnv.USER_CREDENTIALS.getByName("user-local-claim-invalid-missing");
+    const failures = await runInDurableObject(
+      missingStub,
+      async (instance: UserCredentialBroker) => {
+        const brokerEnv = (instance as unknown as { env: EgressEnv }).env;
+        const originalBootstrap = brokerEnv.LOCAL_CHATGPT_BOOTSTRAP;
+        try {
+          brokerEnv.LOCAL_CHATGPT_BOOTSTRAP = "{invalid-bootstrap";
+          const invalid = await claimLocalCredential(instance);
+          delete brokerEnv.LOCAL_CHATGPT_BOOTSTRAP;
+          const unavailable = await claimLocalCredential(instance);
+          return {
+            invalid: {
+              status: invalid.status,
+              body: await invalid.json<Record<string, unknown>>(),
+            },
+            unavailable: {
+              status: unavailable.status,
+              body: await unavailable.json<Record<string, unknown>>(),
+            },
+          };
+        } finally {
+          brokerEnv.LOCAL_CHATGPT_BOOTSTRAP = originalBootstrap;
+        }
+      },
+    );
+    expect(failures).toEqual({
+      invalid: { status: 503, body: { error: "invalid_local_chatgpt_bootstrap" } },
+      unavailable: { status: 503, body: { error: "local_chatgpt_bootstrap_unavailable" } },
+    });
+  });
+
   it("hides the local bootstrap claim route outside local development", async () => {
     const response = await handleEgress(
       new Request("https://broker.test/users/production-user/credentials/chatgpt/local-claim", {
@@ -771,18 +953,30 @@ describe("per-user credential broker", () => {
     );
     expect(await emptyPayload.json()).toEqual({ ready: true });
 
-    const payloadDenied = await SELF.fetch(
-      "https://broker.test/.well-known/nanocodex/broker-readiness",
-      {
+    const streamedEmptyPost = await handleEgress(
+      new Request("https://broker.test/.well-known/nanocodex/broker-readiness", {
+        method: "POST",
+        headers: {
+          authorization: "Bearer probe-token-that-is-at-least-thirty-two-bytes",
+        },
+        body: new Uint8Array(),
+      }),
+      workerEnv,
+    );
+    expect(await streamedEmptyPost.json()).toEqual({ ready: true });
+
+    const bodyRejected = await handleEgress(
+      new Request("https://broker.test/.well-known/nanocodex/broker-readiness", {
         method: "POST",
         headers: {
           authorization: "Bearer probe-token-that-is-at-least-thirty-two-bytes",
         },
         body: "unexpected",
-      },
+      }),
+      workerEnv,
     );
-    expect(payloadDenied.status).toBe(404);
-    expect(await payloadDenied.json()).toEqual({ error: "not_found" });
+    expect(bodyRejected.status).toBe(404);
+    expect(await bodyRejected.json()).toEqual({ error: "not_found" });
   });
 
   it("stores only opaque subject mappings in the directory DO", async () => {
@@ -796,6 +990,18 @@ describe("per-user credential broker", () => {
 });
 
 describe("per-user OAuth connectors", () => {
+  it("accepts the fixed loopback relay used by every browser development stack", async () => {
+    const started = await control("/users/connector-localhost/connectors/github", "POST", {
+      redirect_uri: "http://127.0.0.1:47891/v1/connectors/github/callback",
+      return_to: "/connect?thread=connector-localhost",
+    });
+    expect(started.status).toBe(200);
+    const authorization = new URL((await started.json<{ authorization_url: string }>()).authorization_url);
+    expect(authorization.searchParams.get("redirect_uri")).toBe(
+      "http://127.0.0.1:47891/v1/connectors/github/callback",
+    );
+  });
+
   for (const connector of ["github", "gmail", "gdrive", "x"] as const) {
     it(`completes ${connector} authorization without returning provider credentials`, async () => {
       const user = `connector-${connector}`;
@@ -1449,8 +1655,10 @@ function realtimeRequest(
   });
 }
 
-function claimLocalCredential(stub: DurableObjectStub<UserCredentialBroker>): Promise<Response> {
-  return stub.fetch("https://broker.internal/v1/chatgpt/local-claim", { method: "POST" });
+function claimLocalCredential(broker: Pick<UserCredentialBroker, "fetch">): Promise<Response> {
+  return broker.fetch(new Request("https://broker.internal/v1/chatgpt/local-claim", {
+    method: "POST",
+  }));
 }
 
 async function brokerCall(

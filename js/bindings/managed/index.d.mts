@@ -9,6 +9,8 @@ export type {
   ReadSessionResponse as ManagedReadSessionResponse,
   MemoryKey as ManagedMemoryKey,
   MemoryRecord as ManagedMemoryRecord,
+  MemoryResult as ManagedMemoryResult,
+  Organization as ManagedOrganization,
   Turn as ManagedTurn,
   TurnResult as ManagedTurnResult,
 } from "./Agent.mjs";

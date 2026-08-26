@@ -1,4 +1,4 @@
-:root {
+:root.connect-dialog-standalone {
   color-scheme: dark;
   font-family: "Berkeley Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
     "Liberation Mono", monospace;
@@ -18,18 +18,20 @@
   color: var(--text);
 }
 
-* {
+.connect-dialog-standalone *,
+.connect-onboarding,
+.connect-onboarding * {
   box-sizing: border-box;
 }
 
-html,
-body,
-#root {
+.connect-dialog-standalone,
+.connect-dialog-standalone body,
+.connect-dialog-standalone #root {
   min-width: 0;
   height: 100%;
 }
 
-body {
+.connect-dialog-standalone body {
   display: grid;
   place-items: center;
   margin: 0;
@@ -40,26 +42,39 @@ body {
   line-height: 1.45;
 }
 
-button {
+.connect-onboarding button {
   color: inherit;
   font: inherit;
 }
 
-button:focus-visible,
-summary:focus-visible {
+.connect-onboarding button:focus-visible,
+.connect-onboarding summary:focus-visible {
   outline: 1px solid var(--text);
   outline-offset: 2px;
 }
 
-h1,
-h2,
-p,
-dl,
-dd {
+.connect-onboarding h1,
+.connect-onboarding h2,
+.connect-onboarding p,
+.connect-onboarding dl,
+.connect-onboarding dd {
   margin: 0;
 }
 
-.dialog-shell {
+.connect-onboarding {
+  --muted: rgba(255, 255, 255, 0.62);
+  --faint: rgba(255, 255, 255, 0.4);
+  --border-strong: rgba(255, 255, 255, 0.2);
+  --warning: #e8c77a;
+  color: var(--text);
+  font-family: "Berkeley Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+    "Liberation Mono", monospace;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+@scope (.connect-onboarding) {
+:scope.dialog-shell {
   display: flex;
   width: min(408px, calc(100vw - 24px));
   max-height: min(650px, calc(100vh - 24px));
@@ -71,7 +86,7 @@ dd {
   box-shadow: 0 28px 80px rgba(0, 0, 0, 0.55);
 }
 
-.dialog-shell[data-request="machineUsdFund"] {
+:scope.dialog-shell[data-request="machineUsdFund"] {
   height: min(650px, calc(100vh - 24px));
 }
 
@@ -84,7 +99,7 @@ dd {
   gap: 12px;
 }
 
-.dialog-shell {
+:scope.dialog-shell {
   flex-direction: column;
 }
 
@@ -170,6 +185,28 @@ dd {
   font-size: 8px;
   text-transform: uppercase;
   letter-spacing: 0.06em;
+}
+
+.terminal-code {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 13px;
+  padding: 10px;
+  border: 1px solid rgba(115, 216, 155, 0.4);
+  background: rgba(115, 216, 155, 0.06);
+}
+
+.terminal-code span {
+  color: var(--muted);
+  font-size: 8px;
+}
+
+.terminal-code strong {
+  color: var(--positive);
+  font-size: 12px;
+  letter-spacing: 0.08em;
 }
 
 .eyebrow {
@@ -475,6 +512,76 @@ dd {
   color: var(--text);
   font-size: 11px;
   letter-spacing: 0.08em;
+}
+
+.mcp-connections {
+  display: grid;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+  gap: 7px;
+}
+
+.mcp-connection-card {
+  display: grid;
+  min-width: 0;
+  min-height: 46px;
+  align-items: center;
+  padding: 7px;
+  border: 1px solid var(--border);
+  grid-template-columns: 30px minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
+.mcp-connection-card.is-connected {
+  border-color: rgba(115, 216, 155, 0.58);
+}
+
+.mcp-connection-logo {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  background: var(--surface-raised);
+  color: var(--text);
+  font-size: 10px;
+}
+
+.mcp-connection-copy {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.mcp-connection-copy strong {
+  overflow: hidden;
+  font-size: 10px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mcp-connection-copy small,
+.mcp-connection-state {
+  color: var(--muted);
+  font-size: 8px;
+}
+
+.mcp-connection-card.is-connected .mcp-connection-state {
+  color: var(--positive);
+}
+
+.mcp-connection-card button {
+  min-height: 30px;
+  padding: 0 9px;
+  border: 1px solid var(--border-strong);
+  background: transparent;
+  cursor: pointer;
+  font-size: 8px;
+}
+
+.mcp-connection-card button:disabled {
+  cursor: default;
+  opacity: 0.48;
 }
 
 .grant-boundary {
@@ -906,12 +1013,7 @@ dd {
 }
 
 @media (max-width: 440px) {
-  #root {
-    display: grid;
-    place-items: end center;
-  }
-
-  .dialog-shell {
+  :scope.dialog-shell {
     width: 100vw;
     max-height: 90dvh;
     margin: 0;
@@ -948,6 +1050,17 @@ dd {
     width: 44px;
     height: 44px;
   }
+
+  .app-sees {
+    flex-wrap: wrap;
+  }
+
+  .app-sees-permission {
+    display: inline-flex;
+    min-width: 44px;
+    min-height: 44px;
+    align-items: center;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -955,5 +1068,13 @@ dd {
   *::before,
   *::after {
     transition-duration: 0.01ms !important;
+  }
+}
+}
+
+@media (max-width: 440px) {
+  .connect-dialog-standalone #root {
+    display: grid;
+    place-items: end center;
   }
 }

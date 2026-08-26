@@ -1,19 +1,9 @@
 import type { Dialog } from "nanocodex/connect";
 import { Wata, postMessage } from "wata/host";
 import { registeredApp } from "./connectPolicy.mjs";
+import type { ConnectRequest, WalletRequest } from "./connectTypes";
 
-type WalletRequestBase = Readonly<{
-  appId: string;
-  id: string;
-  origin: string;
-  rpc: Readonly<{ method: string; params?: unknown }>;
-}>;
-
-export type WalletRequest =
-  | WalletRequestBase & Readonly<{ type: "walletConnect" }>
-  | WalletRequestBase & Readonly<{ type: "walletRevokeAccessKey" }>;
-
-export type Request = WalletRequest | Dialog.FundingRequest;
+export type Request = Exclude<ConnectRequest, { type: "deviceError" | "deviceComplete" }>;
 
 type WalletEvent = Readonly<{
   request: WalletRequest["rpc"];
@@ -148,6 +138,7 @@ function settle() {
   fundingParent = undefined;
   publish(undefined);
 }
+
 
 function parseOrigin(value: string | null) {
   if (!value) return undefined;

@@ -1,10 +1,24 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import { rewriteConnectDialogDevModuleUrl } from "../vite/connectDialogDevModules.ts";
 import { rewriteDocsDevModuleUrl } from "../vite/docsDevModules.ts";
 import { documentStatusForPath } from "../worker/linkPreview.ts";
 
 const config = readFileSync(new URL("../vite.config.ts", import.meta.url), "utf8");
+
+test("the dev server keeps shared Connect modules out of the public dialog proxy", () => {
+  const rewritten = rewriteConnectDialogDevModuleUrl("/connect-dialog/src/App.tsx?import");
+  assert.match(
+    rewritten ?? "",
+    /^\/@fs\/.*\/web\/connect-dialog\/src\/App\.tsx\?import$/,
+  );
+  assert.equal(rewriteConnectDialogDevModuleUrl("/connect-dialog"), undefined);
+  assert.equal(rewriteConnectDialogDevModuleUrl("/connect-dialog/assets/app.js"), undefined);
+  assert.equal(rewriteConnectDialogDevModuleUrl("/connect-dialog/src/%2e%2e/secrets.ts"), undefined);
+  assert.equal(rewriteConnectDialogDevModuleUrl("//"), undefined);
+  assert.match(config, /request\.url = connectDialogModuleUrl/);
+});
 
 test("the SPA fallback leaves Vite raw documentation modules untouched", () => {
   const rewritten = rewriteDocsDevModuleUrl("/docs/src/pages/harness/focused-run.mdx?import&raw");

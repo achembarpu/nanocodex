@@ -1,13 +1,36 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { isRecord, responseFailure } from "./AccountSession";
 import { clientFailureMessage } from "./clientFailure";
+import { ConnectionLogo } from "./ConnectionLogo";
 
 type ConnectorId = "github" | "gmail" | "gdrive" | "x";
 type ConnectorStatus = Readonly<{
   connected: boolean;
   accountId?: string;
   label?: string;
+  unavailable?: string;
 }>;
+type McpConnectionStatus =
+  | "authorization_required"
+  | "connected"
+  | "reauthorization_required"
+  | "disabled"
+  | "revoked";
+type McpConnection = Readonly<{
+  id: string;
+  name: string;
+  status: McpConnectionStatus;
+}>;
+
+const mcpConnectionId = /^[A-Za-z0-9_-]{43}$/;
+const mcpConnectionName = /^[^\u0000-\u001f\u007f]{1,256}$/u;
+const mcpConnectionStatuses = new Set<McpConnectionStatus>([
+  "authorization_required",
+  "connected",
+  "reauthorization_required",
+  "disabled",
+  "revoked",
+]);
 
 const connectorDefinitions = [
   { id: "github", label: "GitHub", description: "Clone, push, and manage repositories and workflows" },
@@ -32,9 +55,12 @@ export function ProfileConnectors({
   refreshSession(): Promise<void>;
 }) {
   const [connectors, setConnectors] = useState<Record<ConnectorId, ConnectorStatus> | null>(null);
+  const [mcpConnections, setMcpConnections] = useState<readonly McpConnection[] | null>(null);
+  const [mcpError, setMcpError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [operation, setOperation] = useState<ConnectorId | null>(null);
+  const [operation, setOperation] = useState<string | null>(null);
   const request = useRef<Promise<void> | undefined>(undefined);
+  const mcpRequest = useRef<Promise<void> | undefined>(undefined);
   const [result] = useState(readConnectorResult);
 
   const load = useCallback((): Promise<void> => {
@@ -52,7 +78,9 @@ export function ProfileConnectors({
         setConnectors(decodeConnectorStatus(await response.json()));
         setError(null);
       } catch (cause) {
-        setError(failureMessage(cause, "Couldn’t load connectors."));
+        const message = failureMessage(cause, "Couldn’t load connectors.");
+        setConnectors(unavailableConnectorStatuses(message));
+        setError(null);
       }
     })().finally(() => {
       if (request.current === current) request.current = undefined;
@@ -61,12 +89,39 @@ export function ProfileConnectors({
     return current;
   }, [refreshSession]);
 
+  const loadMcpConnections = useCallback((): Promise<void> => {
+    if (mcpRequest.current) return mcpRequest.current;
+    let current!: Promise<void>;
+    current = (async () => {
+      try {
+        const response = await connectorRequest("/v1/connectors/mcp-connections");
+        if (response.status === 401) {
+          await response.body?.cancel();
+          await refreshSession();
+          return;
+        }
+        if (!response.ok) throw await responseFailure(response, "Couldn’t load MCP connections.");
+        setMcpConnections(decodeMcpConnections(await response.json()));
+        setMcpError(null);
+      } catch (cause) {
+        setMcpError(failureMessage(cause, "Couldn’t load MCP connections."));
+      }
+    })().finally(() => {
+      if (mcpRequest.current === current) mcpRequest.current = undefined;
+    });
+    mcpRequest.current = current;
+    return current;
+  }, [refreshSession]);
+
   useEffect(() => {
     setConnectors(null);
+    setMcpConnections(null);
+    setMcpError(null);
     setError(null);
     if (requiresLogin) return;
     void load();
-  }, [accountId, load, requiresLogin]);
+    void loadMcpConnections();
+  }, [accountId, load, loadMcpConnections, requiresLogin]);
 
   const connect = async (id: ConnectorId) => {
     if (operation) return;
@@ -108,25 +163,52 @@ export function ProfileConnectors({
     }
   };
 
+  const disconnectMcp = async (connection: McpConnection) => {
+    if (operation || connection.status !== "connected") return;
+    setOperation(connection.id);
+    setMcpError(null);
+    try {
+      const response = await connectorRequest(
+        `/v1/connectors/mcp-connections/${encodeURIComponent(connection.id)}`,
+        { method: "DELETE" },
+      );
+      if (!response.ok) {
+        throw await responseFailure(response, `Couldn’t disconnect ${connection.name}.`);
+      }
+      await response.body?.cancel();
+      await loadMcpConnections();
+    } catch (cause) {
+      setMcpError(failureMessage(cause, `Couldn’t disconnect ${connection.name}.`));
+    } finally {
+      setOperation(null);
+    }
+  };
+
   if (requiresLogin) {
     return (
-      <div className="profile-connectors profile-connectors--locked">
+      <div className="profile-connectors connection-grid profile-connectors--locked">
         {children}
         {connectorDefinitions.map((definition) => (
-          <div className="account-provider-row connector-row" key={definition.id}>
-            <div>
+          <button
+            className="connection-card connector-row"
+            disabled
+            key={definition.id}
+            type="button"
+          >
+            <ConnectionLogo id={definition.id} />
+            <span className="connection-card-copy">
               <strong>{definition.label}</strong>
               <span>{definition.description}</span>
-            </div>
-            <button type="button" disabled>Requires login</button>
-          </div>
+            </span>
+            <span className="connection-card-action">Connect</span>
+          </button>
         ))}
       </div>
     );
   }
 
   return (
-    <div className="profile-connectors">
+    <div className="profile-connectors connection-grid">
       {children}
       {result ? (
         <p className={`connector-result connector-result--${result.result}`} role="status">
@@ -141,26 +223,68 @@ export function ProfileConnectors({
       ) : null}
       {connectors ? connectorDefinitions.map((definition) => {
         const status = connectors[definition.id];
+        const unavailable = status.unavailable;
         return (
-          <div className="account-provider-row connector-row" key={definition.id}>
-            <div>
+          <button
+            className={`connection-card connector-row${status.connected ? " is-connected" : ""}${unavailable ? " is-unavailable" : ""}`}
+            key={definition.id}
+            type="button"
+            disabled={operation !== null || unavailable !== undefined}
+            onClick={() => void (status.connected
+              ? disconnect(definition.id)
+              : connect(definition.id))}
+          >
+            <ConnectionLogo id={definition.id} />
+            <span className="connection-card-copy">
               <strong>{definition.label}</strong>
-              <span>{status.connected
+              <span>{unavailable
+                ? unavailable
+                : status.connected
                 ? status.label || status.accountId || "Connected"
                 : definition.description}</span>
-            </div>
-            <button
-              type="button"
-              disabled={operation !== null}
-              onClick={() => void (status.connected
-                ? disconnect(definition.id)
-                : connect(definition.id))}
-            >
-              {status.connected ? "Disconnect" : "Connect"}
-            </button>
-          </div>
+            </span>
+            <span className="connection-card-action">
+              {unavailable ? "Unavailable" : status.connected ? "Disconnect" : "Connect"}
+            </span>
+          </button>
         );
       }) : null}
+      {mcpError ? (
+        <button
+          className="connection-card connector-row mcp-connector-row is-unavailable"
+          disabled={operation !== null}
+          onClick={() => void loadMcpConnections()}
+          type="button"
+        >
+          <ConnectionLogo id="mcp" />
+          <span className="connection-card-copy">
+            <strong>MCP connections</strong>
+            <span>{mcpError}</span>
+          </span>
+          <span className="connection-card-action">Retry</span>
+        </button>
+      ) : null}
+      {mcpConnections?.map((connection) => {
+        const connected = connection.status === "connected";
+        return (
+          <button
+            className={`connection-card connector-row mcp-connector-row${connected ? " is-connected" : ""}`}
+            disabled={operation !== null || !connected}
+            key={connection.id}
+            onClick={() => void disconnectMcp(connection)}
+            type="button"
+          >
+            <ConnectionLogo id="mcp" />
+            <span className="connection-card-copy">
+              <strong>{connection.name}</strong>
+              <span>{mcpConnectionStatusLabel(connection.status)}</span>
+            </span>
+            <span className="connection-card-action">
+              {connected ? "Disconnect" : mcpConnectionStatusLabel(connection.status)}
+            </span>
+          </button>
+        );
+      })}
     </div>
   );
 }
@@ -185,7 +309,7 @@ function decodeConnectorStatus(value: unknown): Record<ConnectorId, ConnectorSta
   return Object.fromEntries(connectorDefinitions.map(({ id }) => {
     const candidate = encoded[id];
     if (!isRecord(candidate) || typeof candidate.connected !== "boolean") {
-      throw new Error("Invalid connector response.");
+      return [id, { connected: false, unavailable: "Status unavailable." }];
     }
     return [id, {
       connected: candidate.connected,
@@ -193,6 +317,46 @@ function decodeConnectorStatus(value: unknown): Record<ConnectorId, ConnectorSta
       ...(typeof candidate.label === "string" ? { label: candidate.label } : {}),
     }];
   })) as Record<ConnectorId, ConnectorStatus>;
+}
+
+function unavailableConnectorStatuses(message: string): Record<ConnectorId, ConnectorStatus> {
+  return Object.fromEntries(connectorDefinitions.map(({ id }) => [id, {
+    connected: false,
+    unavailable: message,
+  }])) as Record<ConnectorId, ConnectorStatus>;
+}
+
+function decodeMcpConnections(value: unknown): readonly McpConnection[] {
+  if (!isRecord(value) || !Array.isArray(value.mcp_connections)
+    || value.mcp_connections.length > 64) {
+    throw new Error("Invalid MCP connection response.");
+  }
+  const seen = new Set<string>();
+  return value.mcp_connections.map((candidate): McpConnection => {
+    if (!isRecord(candidate)
+      || typeof candidate.id !== "string" || !mcpConnectionId.test(candidate.id)
+      || seen.has(candidate.id)
+      || typeof candidate.name !== "string" || !mcpConnectionName.test(candidate.name)
+      || candidate.name.trim().length === 0
+      || typeof candidate.status !== "string"
+      || !mcpConnectionStatuses.has(candidate.status as McpConnectionStatus)) {
+      throw new Error("Invalid MCP connection response.");
+    }
+    seen.add(candidate.id);
+    return {
+      id: candidate.id,
+      name: candidate.name,
+      status: candidate.status as McpConnectionStatus,
+    };
+  }).filter(({ status }) => status !== "revoked");
+}
+
+function mcpConnectionStatusLabel(status: McpConnectionStatus): string {
+  if (status === "connected") return "Connected";
+  if (status === "authorization_required") return "Authorization required";
+  if (status === "reauthorization_required") return "Reconnect required";
+  if (status === "disabled") return "Disabled";
+  return "Revoked";
 }
 
 function connectorReturnTo(): string {

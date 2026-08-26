@@ -1,0 +1,16 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "nanocodex-memory-fixture-loader",
+  "main": "scripts/history-fixture-worker.ts",
+  "compatibility_date": "2026-07-29",
+  "workers_dev": true,
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "NANOCODEX_MEMORY",
+        "class_name": "MemoryScope",
+        "script_name": "nanocodex-memory-search-dev"
+      }
+    ]
+  }
+}

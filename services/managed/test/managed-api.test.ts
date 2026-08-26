@@ -7,21 +7,42 @@ import {
 } from "cloudflare:test";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
-import { NanocodexSession, UserAccount, type Env } from "../src/index";
+import { MemoryScope, NanocodexSession, UserAccount, type Env } from "../src/index";
 import { DurableEventLog } from "../src/durable-events";
 import { ManagedEventArchive } from "../src/managed-event-archive";
+import type { OrganizationCapability } from "../src/account-auth";
 
 const testEnv = env as unknown as Env;
 const USER_ID = "11111111-1111-4111-8111-111111111111";
 const API_KEY = `ncx_live_${"k".repeat(12)}_${"s".repeat(43)}`;
 const OTHER_USER_ID = "33333333-3333-4333-8333-333333333333";
 const OTHER_API_KEY = `ncx_live_${"o".repeat(12)}_${"p".repeat(43)}`;
+const READ_ONLY_API_KEY = `ncx_live_${"r".repeat(12)}_${"q".repeat(43)}`;
+const WRITE_ONLY_API_KEY = `ncx_live_${"w".repeat(12)}_${"v".repeat(43)}`;
+const AGENT_TOOLS_API_KEY = `ncx_live_${"t".repeat(12)}_${"u".repeat(43)}`;
+const HOSTED_PASSKEY_PUBLIC_KEY = "0x046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c2964fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5";
+const HOSTED_PASSKEY_ADDRESS = "0xd3a9f047ad43d7e2e4e7e491f1fe2e657a2651b6";
+const OWNER_CAPABILITIES = [
+  "agents:read",
+  "agents:write",
+  "api_keys:read",
+  "api_keys:write",
+  "history:read",
+  "memory:read",
+  "memory:write",
+  "tools:use",
+  "organization:read",
+  "organization:write",
+] as const satisfies readonly OrganizationCapability[];
 const createdAgents = new Set<string>();
 const SELF = { fetch: managedFetch };
 
 beforeAll(async () => {
   await seedApiKey(USER_ID, API_KEY);
   await seedApiKey(OTHER_USER_ID, OTHER_API_KEY);
+  await seedApiKey(USER_ID, READ_ONLY_API_KEY, ["agents:read"]);
+  await seedApiKey(USER_ID, WRITE_ONLY_API_KEY, ["agents:write"]);
+  await seedApiKey(USER_ID, AGENT_TOOLS_API_KEY, ["agents:write", "tools:use"]);
 });
 
 afterEach(async () => {
@@ -704,6 +725,203 @@ describe("managed agents REST and resumable SSE", () => {
     expect(disconnected.status).toBe(204);
   });
 
+  it("projects an owner-bound MCP catalog without broker-private connection material", async () => {
+    const userId = "66666666-6666-4666-8666-666666666666";
+    const token = "m".repeat(43);
+    const cookie = `nanocodex_account=${token}`;
+    const connectionId = "L".repeat(43);
+    await seedPasskeySession(userId, token);
+
+    const originalBroker = testEnv.NANOCODEX;
+    const brokerRequests: Request[] = [];
+    let listing: "valid" | "invalid" | "failed" = "valid";
+    testEnv.NANOCODEX = {
+      async fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+        const request = new Request(input, init);
+        brokerRequests.push(request);
+        if (request.method === "GET") {
+          if (listing === "failed") {
+            return Response.json({ access_token: "must-not-leak" }, { status: 503 });
+          }
+          return Response.json({
+            endpoint: "https://must-not-leak.example/mcp",
+            mcp_connections: [
+              {
+                id: connectionId,
+                name: listing === "invalid" ? "\u0000unsafe" : "Linear workspace",
+                status: "connected",
+                endpoint: "https://must-not-leak.example/mcp",
+                requested_scopes: ["admin"],
+                access_token: "must-not-leak",
+              },
+              {
+                id: "b".repeat(43),
+                name: "Linear workspace",
+                status: "authorization_required",
+              },
+              {
+                id: "c".repeat(43),
+                name: "Linear workspace",
+                status: "revoked",
+              },
+            ],
+          });
+        }
+        if (request.method === "DELETE") {
+          return Response.json({
+            mcp_connections: [{ id: connectionId, name: "Linear workspace", status: "revoked" }],
+            refresh_token: "must-not-leak",
+          });
+        }
+        return Response.json({ error: "method_not_allowed" }, { status: 405 });
+      },
+    } as Fetcher;
+
+    try {
+      const anonymous = await RAW_SELF.fetch("https://example.test/v1/connectors/mcp-connections");
+      expect(anonymous.status).toBe(401);
+      expect(brokerRequests).toHaveLength(0);
+
+      const listed = await RAW_SELF.fetch("https://example.test/v1/connectors/mcp-connections", {
+        headers: { cookie },
+      });
+      expect(listed.status).toBe(200);
+      expect(listed.headers.get("cache-control")).toBe("no-store");
+      expect(await listed.json()).toEqual({
+        mcp_connections: [{ id: connectionId, name: "Linear workspace", status: "connected" }],
+      });
+      expect(brokerRequests).toHaveLength(1);
+      expect(brokerRequests[0]?.url).toBe(
+        `https://broker.internal/users/${userId}/mcp-connections`,
+      );
+      expect(brokerRequests[0]?.body).toBeNull();
+
+      for (const origin of [undefined, "https://attacker.test"]) {
+        const denied = await RAW_SELF.fetch(
+          `https://example.test/v1/connectors/mcp-connections/${connectionId}`,
+          {
+            method: "DELETE",
+            headers: { cookie, ...(origin ? { origin } : {}) },
+          },
+        );
+        expect(denied.status).toBe(403);
+      }
+      expect(brokerRequests).toHaveLength(1);
+
+      const disconnected = await RAW_SELF.fetch(
+        `https://example.test/v1/connectors/mcp-connections/${connectionId}`,
+        { method: "DELETE", headers: { cookie, origin: "https://example.test" } },
+      );
+      expect(disconnected.status).toBe(204);
+      expect(await disconnected.text()).toBe("");
+      expect(brokerRequests).toHaveLength(2);
+      expect(brokerRequests[1]?.url).toBe(
+        `https://broker.internal/users/${userId}/mcp-connections/${connectionId}`,
+      );
+      expect(brokerRequests[1]?.method).toBe("DELETE");
+      expect(brokerRequests[1]?.body).toBeNull();
+
+      listing = "invalid";
+      const invalid = await RAW_SELF.fetch("https://example.test/v1/connectors/mcp-connections", {
+        headers: { cookie },
+      });
+      expect(invalid.status).toBe(502);
+      expect(await invalid.json()).toEqual({ error: "mcp_broker_invalid" });
+
+      listing = "failed";
+      const failed = await RAW_SELF.fetch("https://example.test/v1/connectors/mcp-connections", {
+        headers: { cookie },
+      });
+      expect(failed.status).toBe(502);
+      expect(await failed.json()).toEqual({ error: "mcp_broker_failed" });
+    } finally {
+      testEnv.NANOCODEX = originalBroker;
+    }
+  });
+
+  it("requires a persistent account for credential mutations without requiring bodies", async () => {
+    const anonymousSession = await RAW_SELF.fetch("https://example.test/v1/me");
+    const anonymousCookie = anonymousSession.headers.get("set-cookie")?.split(";", 1)[0];
+    expect(anonymousCookie).toMatch(/^nanocodex_account=a_[A-Za-z0-9_-]{43}$/);
+
+    const originalBroker = testEnv.NANOCODEX;
+    const brokerRequests: Request[] = [];
+    testEnv.NANOCODEX = {
+      async fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+        const request = new Request(input, init);
+        brokerRequests.push(request);
+        return new Response(null, { status: 204 });
+      },
+    } as Fetcher;
+
+    try {
+      const anonymousDelete = await RAW_SELF.fetch("https://example.test/v1/credentials/openai", {
+        method: "DELETE",
+        headers: { cookie: anonymousCookie!, origin: "https://example.test" },
+      });
+      expect(anonymousDelete.status).toBe(401);
+      expect(brokerRequests).toHaveLength(0);
+
+      const anonymousPut = await RAW_SELF.fetch("https://example.test/v1/credentials/openai", {
+        method: "PUT",
+        headers: {
+          cookie: anonymousCookie!,
+          origin: "https://example.test",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ api_key: "sk-anonymous-must-not-store" }),
+      });
+      expect(anonymousPut.status).toBe(401);
+      expect(brokerRequests).toHaveLength(0);
+
+      const anonymousApiKey = await RAW_SELF.fetch("https://example.test/v1/api-keys", {
+        method: "POST",
+        headers: {
+          cookie: anonymousCookie!,
+          origin: "https://example.test",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ label: "must-not-create" }),
+      });
+      expect(anonymousApiKey.status).toBe(401);
+      expect(brokerRequests).toHaveLength(0);
+
+      const userId = "88888888-8888-4888-8888-888888888888";
+      const token = "p".repeat(43);
+      await seedPasskeySession(userId, token);
+      const cookie = `nanocodex_account=${token}`;
+
+      const persistentPut = await RAW_SELF.fetch("https://example.test/v1/credentials/openai", {
+        method: "PUT",
+        headers: {
+          cookie,
+          origin: "https://example.test",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ api_key: "sk-persistent-secret" }),
+      });
+      expect(persistentPut.status).toBe(204);
+
+      const persistentDelete = await RAW_SELF.fetch("https://example.test/v1/credentials/openai", {
+        method: "DELETE",
+        headers: { cookie, origin: "https://example.test" },
+      });
+      expect(persistentDelete.status).toBe(204);
+
+      const localClaim = await RAW_SELF.fetch("https://example.test/v1/credentials/local-claim", {
+        method: "POST",
+        headers: { cookie, origin: "https://example.test" },
+      });
+      expect(localClaim.status).toBe(204);
+      expect(brokerRequests).toHaveLength(3);
+      expect(brokerRequests[0]?.body).not.toBeNull();
+      expect(brokerRequests[1]?.body).toBeNull();
+      expect(brokerRequests[2]?.body).toBeNull();
+    } finally {
+      testEnv.NANOCODEX = originalBroker;
+    }
+  });
+
   it("bootstraps one browser identity and binds passkey options to it", async () => {
     const first = await RAW_SELF.fetch("https://example.test/v1/me");
     expect(first.status).toBe(200);
@@ -902,6 +1120,163 @@ describe("managed agents REST and resumable SSE", () => {
     );
     expect(exchange.status).toBe(200);
     expect(await exchange.json()).toEqual({ linked: true, user_id: userId });
+  });
+
+  it("issues and atomically exchanges a hosted authorization derived from the active passkey", async () => {
+    const userId = "88888888-8888-4888-8888-888888888888";
+    const otherUserId = "99999999-9999-4999-8999-999999999999";
+    const token = "h".repeat(43);
+    const otherToken = "j".repeat(43);
+    const cookie = `nanocodex_account=${token}`;
+    const resources = [
+      "urn:nanocodex:capability:agent.run",
+      "urn:nanocodex:connectors:github",
+    ];
+    await seedPasskeySession(userId, token, HOSTED_PASSKEY_PUBLIC_KEY);
+
+    const authorize = (cookieHeader: string, body: Record<string, unknown>) => RAW_SELF.fetch(
+      "https://example.test/v1/connect/hosted-authorization/authorize",
+      {
+        method: "POST",
+        headers: {
+          cookie: cookieHeader,
+          "content-type": "application/json",
+          origin: "https://example.test",
+        },
+        body: JSON.stringify(body),
+      },
+    );
+    const authorizationBody = {
+      account_address: HOSTED_PASSKEY_ADDRESS.toUpperCase().replace("0X", "0x"),
+      app_id: "nanocodex-cli",
+      app_origin: "https://cli.nanocodex.xyz",
+      resources,
+    };
+
+    const unauthenticated = await authorize("", authorizationBody);
+    expect(unauthenticated.status).toBe(401);
+
+    const crossOrigin = await RAW_SELF.fetch(
+      "https://example.test/v1/connect/hosted-authorization/authorize",
+      {
+        method: "POST",
+        headers: { cookie, "content-type": "application/json", origin: "https://attacker.test" },
+        body: JSON.stringify(authorizationBody),
+      },
+    );
+    expect(crossOrigin.status).toBe(403);
+
+    const wrongAddress = await authorize(cookie, {
+      ...authorizationBody,
+      account_address: "0x1111111111111111111111111111111111111111",
+    });
+    expect(wrongAddress.status).toBe(403);
+    expect(await wrongAddress.json()).toEqual({ error: "account_address_mismatch" });
+
+    const first = await authorize(cookie, authorizationBody);
+    expect(first.status).toBe(200);
+    const firstBody = await first.json<{ code: string }>();
+    expect(firstBody).toEqual({ code: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/) });
+
+    const exchange = (code: string, requestedResources = resources) => RAW_SELF.fetch(
+      "https://nanocodex.internal/connect/hosted-authorizations/exchange",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          account_address: HOSTED_PASSKEY_ADDRESS,
+          app_id: "nanocodex-cli",
+          app_origin: "https://cli.nanocodex.xyz",
+          code,
+          resources: requestedResources,
+        }),
+      },
+    );
+
+    const mismatched = await exchange(firstBody.code, [...resources].reverse());
+    expect(mismatched.status).toBe(403);
+    expect((await exchange(firstBody.code)).status).toBe(403);
+
+    const secondBody = await (await authorize(cookie, authorizationBody)).json<{ code: string }>();
+    const linked = await exchange(secondBody.code);
+    expect(linked.status).toBe(200);
+    expect(await linked.json()).toEqual({
+      linked: true,
+      user_id: userId,
+      account_address: HOSTED_PASSKEY_ADDRESS,
+      resources,
+    });
+    expect((await exchange(secondBody.code)).status).toBe(403);
+
+    const reuseBody = await (await authorize(cookie, authorizationBody)).json<{ code: string }>();
+    expect((await exchange(reuseBody.code)).status).toBe(200);
+
+    await seedPasskeySession(otherUserId, otherToken, HOSTED_PASSKEY_PUBLIC_KEY);
+    const conflicting = await authorize(`nanocodex_account=${otherToken}`, authorizationBody);
+    const conflictingBody = await conflicting.json<{ code: string }>();
+    expect((await exchange(conflictingBody.code)).status).toBe(409);
+  });
+
+  it("strictly bounds hosted authorization authority and rejects MPP", async () => {
+    const userId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const token = "i".repeat(43);
+    const cookie = `nanocodex_account=${token}`;
+    await seedPasskeySession(userId, token, HOSTED_PASSKEY_PUBLIC_KEY);
+    const authorize = (body: unknown) => RAW_SELF.fetch(
+      "https://example.test/v1/connect/hosted-authorization/authorize",
+      {
+        method: "POST",
+        headers: { cookie, "content-type": "application/json", origin: "https://example.test" },
+        body: JSON.stringify(body),
+      },
+    );
+    const valid = {
+      account_address: HOSTED_PASSKEY_ADDRESS,
+      app_id: "nanocodex-cli",
+      app_origin: "https://cli.nanocodex.xyz",
+      resources: ["urn:nanocodex:capability:agent.run"],
+    };
+
+    const sessionUserId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const passkeyUserId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    const mismatchedToken = `a_${"p".repeat(43)}`;
+    await seedPasskeySession(sessionUserId, "k".repeat(43), HOSTED_PASSKEY_PUBLIC_KEY);
+    await seedPasskeySession(passkeyUserId, mismatchedToken, HOSTED_PASSKEY_PUBLIC_KEY);
+    await seedBrowserAccountSession(sessionUserId, mismatchedToken);
+    const mismatchedIdentity = await RAW_SELF.fetch(
+      "https://example.test/v1/connect/hosted-authorization/authorize",
+      {
+        method: "POST",
+        headers: {
+          cookie: `nanocodex_account=${mismatchedToken}`,
+          "content-type": "application/json",
+          origin: "https://example.test",
+        },
+        body: JSON.stringify(valid),
+      },
+    );
+    expect(mismatchedIdentity.status).toBe(401);
+
+    for (const body of [
+      { ...valid, extra: true },
+      { ...valid, app_id: "atlas-workspace" },
+      { ...valid, app_origin: "https://attacker.test" },
+      { ...valid, resources: [] },
+      { ...valid, resources: [valid.resources[0], valid.resources[0]] },
+      { ...valid, resources: Array.from({ length: 33 }, (_, index) => `urn:test:${index}`) },
+    ]) {
+      expect((await authorize(body)).status).toBe(400);
+    }
+
+    const mpp = await authorize({
+      ...valid,
+      resources: ["urn:nanocodex:mpp:machusd:spend"],
+    });
+    expect(mpp.status).toBe(400);
+    expect(await mpp.json()).toEqual({ error: "hosted_mpp_forbidden" });
+
+    const oversized = await authorize({ ...valid, resources: ["r".repeat(21 * 1_024)] });
+    expect(oversized.status).toBe(413);
   });
 
   it("rejects malformed bearer authentication instead of minting a browser identity", async () => {
@@ -1634,6 +2009,254 @@ describe("managed agents REST and resumable SSE", () => {
     await events.cancel();
   });
 
+  it("projects completed turns into the account memory scope and tombstones deleted threads", async () => {
+    const agent = await createAgent();
+    const accepted = await submit(
+      agent,
+      "turn-memory",
+      "COPPER_LIGHTHOUSE_MEMORY release:artifact_42",
+    );
+    const events = sseReader(await SELF.fetch(
+      `${agent.events_url}?cursor=${accepted.accepted_cursor}`,
+    ));
+    let terminal;
+    do {
+      terminal = await nextWithin(events, "memory projection source turn");
+    } while (!String(terminal.data.type).startsWith("turn_completed"));
+    expect(terminal.data).toMatchObject({
+      type: "turn_completed",
+      id: "turn-memory",
+      citations: [],
+    });
+    await events.cancel();
+
+    const found = await eventuallyHistoryFindSessions("copper lighthouse", API_KEY, (body) => (
+      body.results.length === 1
+    ));
+    expect(found).toMatchObject({
+      query: "copper lighthouse",
+      results: [{
+        session_id: agent.agent_id,
+        turn_id: "turn-memory",
+        cursor: expect.any(String),
+        snippet: expect.stringContaining("COPPER_LIGHTHOUSE_MEMORY"),
+      }],
+      citations: [{
+        thread_id: agent.agent_id,
+        sources: [{ turn_id: "turn-memory", cursor: expect.any(String) }],
+      }],
+    });
+
+    const candidates = await historyFindSessions("copper lighthouse", API_KEY);
+    expect(candidates).toMatchObject({
+      query: "copper lighthouse",
+      results: [{
+        session_id: agent.agent_id,
+        turn_id: "turn-memory",
+      }],
+      citations: [{
+        thread_id: agent.agent_id,
+        sources: [{ turn_id: "turn-memory", cursor: expect.any(String) }],
+      }],
+    });
+    const read = await historyReadSession(agent.agent_id, ["turn-memory"], API_KEY);
+    expect(read).toMatchObject({
+      turns: [{
+        session_id: agent.agent_id,
+        turn_id: "turn-memory",
+        user: "COPPER_LIGHTHOUSE_MEMORY release:artifact_42",
+        assistant: expect.any(String),
+      }],
+      citations: [{
+        thread_id: agent.agent_id,
+        sources: [{ turn_id: "turn-memory", cursor: expect.any(String) }],
+      }],
+    });
+
+    const crowdedOut = await historyFindSessions(
+      "copper lighthouse nonexistent insurance policy",
+      API_KEY,
+    );
+    expect(crowdedOut.results).toEqual([]);
+    expect(crowdedOut.citations).toEqual([]);
+
+    const exact = await historyFindSessions("COPPER_LIGHTHOUSE_MEMORY", API_KEY);
+    expect(exact.results).toMatchObject([{
+      session_id: agent.agent_id,
+      turn_id: "turn-memory",
+    }]);
+    const colonExact = await historyFindSessions("release:artifact_42", API_KEY);
+    expect(colonExact.results).toMatchObject([{
+      session_id: agent.agent_id,
+      turn_id: "turn-memory",
+    }]);
+
+    const isolated = await historyFindSessions("copper lighthouse", OTHER_API_KEY);
+    expect(isolated.results).toEqual([]);
+    expect(isolated.citations).toEqual([]);
+    expect((await historyReadSession(agent.agent_id, ["turn-memory"], OTHER_API_KEY)).turns).toEqual([]);
+
+    const consumer = await createAgent();
+    const consumed = await submit(consumer, "turn-memory-consumer", "E2E_MEMORY_TOOL");
+    const consumerEvents = sseReader(await SELF.fetch(
+      `${consumer.events_url}?cursor=${consumed.accepted_cursor}`,
+    ));
+    let consumerTerminal;
+    do {
+      consumerTerminal = await nextWithin(consumerEvents, "managed memory tool completion");
+    } while (consumerTerminal.data.type !== "turn_completed");
+    expect(consumerTerminal.data).toMatchObject({
+      type: "turn_completed",
+      id: "turn-memory-consumer",
+      final_message: "MANAGED_MEMORY_TOOLS_OK",
+      citations: [{
+        thread_id: agent.agent_id,
+        sources: [{ turn_id: "turn-memory", cursor: expect.any(String) }],
+      }],
+    });
+    await consumerEvents.cancel();
+
+    const deleted = await SELF.fetch(agent.events_url.replace(/\/events$/, ""), { method: "DELETE" });
+    expect(deleted.status).toBe(204);
+    createdAgents.delete(agent.agent_id);
+    const tombstoned = await eventuallyHistoryFindSessions("copper lighthouse", API_KEY, (body) => (
+      body.results.length === 0
+    ));
+    expect(tombstoned.citations).toEqual([]);
+  });
+
+  it("requires account authentication for every public history operation", async () => {
+    const requests = [
+      new Request("https://example.test/v1/history/sessions/search", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ query: "memory", limit: 8 }),
+      }),
+      new Request("https://example.test/v1/history/sessions/018f1f9a-7b3c-7a09-8000-000000000009/read", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ turn_ids: ["turn-1"] }),
+      }),
+      new Request("https://example.test/v1/memory", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ operation: "scan", query: "memory" }),
+      }),
+    ];
+    for (const request of requests) {
+      const response = await RAW_SELF.fetch(request);
+      expect(response.status).toBe(401);
+      expect(await response.json()).toEqual({ error: "unauthorized" });
+    }
+  });
+
+  it("stores Tact-style atomic memory per organization with scan-before-put and version CAS", async () => {
+    const premature = await memoryRequest(API_KEY, {
+      operation: "put",
+      content: "Production deploys happen on Tuesdays.",
+    });
+    expect(premature.status).toBe(400);
+    expect(await premature.json()).toMatchObject({ error: "memory_scan_required" });
+
+    await memoryJson(API_KEY, { operation: "scan", query: "credential retention" });
+    const secret = await memoryRequest(API_KEY, {
+      operation: "put",
+      content: `The active Nanocodex credential is ${API_KEY}`,
+    });
+    expect(secret.status).toBe(422);
+    expect(await secret.json()).toMatchObject({ error: "memory_secret_rejected" });
+
+    expect((await memoryJson(API_KEY, {
+      operation: "scan",
+      query: "production deploy schedule",
+    })).abstained).toBe(true);
+    const created = await memoryJson(API_KEY, {
+      operation: "put",
+      content: "Production deploys happen on Tuesdays.",
+    });
+    expect(created).toMatchObject({
+      operation: "put",
+      replaced: false,
+      memory: {
+        key: { id: expect.any(Number), version: 1 },
+        probation_until_ms: expect.any(Number),
+        use_count: 0,
+      },
+    });
+
+    const key = created.memory.key as { id: number; version: number };
+    const otherScan = await memoryJson(OTHER_API_KEY, {
+      operation: "scan",
+      query: "production deploy schedule",
+    });
+    expect(otherScan.candidates).toEqual([]);
+
+    const scanned = await memoryJson(API_KEY, {
+      operation: "scan",
+      query: "Tuesday production deploy",
+    });
+    expect(scanned.candidates).toMatchObject([{ key }]);
+    const read = await memoryJson(API_KEY, { operation: "read", keys: [key] });
+    expect(read).toMatchObject({
+      memories: [{
+        key,
+        content: "Production deploys happen on Tuesdays.",
+        probation_until_ms: null,
+        use_count: 1,
+      }],
+    });
+
+    const replaced = await memoryJson(API_KEY, {
+      operation: "put",
+      content: "Production deploys happen on Wednesdays.",
+      replace: key,
+    });
+    expect(replaced).toMatchObject({
+      replaced: true,
+      memory: { key: { id: key.id, version: 2 }, use_count: 0 },
+    });
+    const staleDelete = await memoryRequest(API_KEY, { operation: "delete", key });
+    expect(staleDelete.status).toBe(409);
+    expect(await staleDelete.json()).toMatchObject({ error: "memory_conflict" });
+    const currentKey = replaced.memory.key as { id: number; version: number };
+    expect(await memoryJson(API_KEY, { operation: "delete", key: currentKey })).toEqual({
+      operation: "delete",
+      key: currentKey,
+    });
+  });
+
+  it("lets one managed agent remember an atomic conclusion and another recall it", async () => {
+    const writer = await createAgent();
+    const stored = await submit(writer, "turn-atomic-store", "E2E_ATOMIC_MEMORY_REMEMBER");
+    const writerEvents = sseReader(await SELF.fetch(
+      `${writer.events_url}?cursor=${stored.accepted_cursor}`,
+    ));
+    let writerTerminal;
+    do {
+      writerTerminal = await nextWithin(writerEvents, "atomic memory store completion");
+    } while (writerTerminal.data.type !== "turn_completed");
+    expect(writerTerminal.data).toMatchObject({
+      final_message: "ATOMIC_MEMORY_STORED",
+      citations: [],
+    });
+    await writerEvents.cancel();
+
+    const reader = await createAgent();
+    const recalled = await submit(reader, "turn-atomic-recall", "E2E_ATOMIC_MEMORY_RECALL");
+    const readerEvents = sseReader(await SELF.fetch(
+      `${reader.events_url}?cursor=${recalled.accepted_cursor}`,
+    ));
+    let readerTerminal;
+    do {
+      readerTerminal = await nextWithin(readerEvents, "atomic memory recall completion");
+    } while (readerTerminal.data.type !== "turn_completed");
+    expect(readerTerminal.data).toMatchObject({
+      final_message: "ATOMIC_MEMORY_RECALLED",
+      citations: [],
+    });
+    await readerEvents.cancel();
+  });
+
   it("does not let an unrelated bearer mint managed agents", async () => {
     const response = await RAW_SELF.fetch("https://example.test/v1/agents", {
       method: "POST",
@@ -2078,15 +2701,102 @@ describe("managed agents REST and resumable SSE", () => {
     expect(await stopped.json()).toMatchObject({ stopped: true });
   });
 
+  it("enforces per-agent capabilities and refuses API-key WebSocket authority", async () => {
+    const agent = await createAgent();
+    const stateUrl = agent.events_url.replace(/\/events$/, "");
+    const readOnly = { authorization: `Bearer ${READ_ONLY_API_KEY}` };
+    const writeOnly = { authorization: `Bearer ${WRITE_ONLY_API_KEY}` };
+
+    expect((await RAW_SELF.fetch(stateUrl, { headers: readOnly })).status).toBe(200);
+    const events = await RAW_SELF.fetch(agent.events_url, { headers: readOnly });
+    expect(events.status).toBe(200);
+    await events.body?.cancel();
+    expect((await RAW_SELF.fetch(stateUrl, { headers: writeOnly })).status).toBe(403);
+    expect((await RAW_SELF.fetch(agent.events_url, { headers: writeOnly })).status).toBe(403);
+
+    const turnsUrl = agent.events_url.replace(/\/events$/, "/turns");
+    const readOnlyMutation = await RAW_SELF.fetch(turnsUrl, {
+      method: "POST",
+      headers: { ...readOnly, "content-type": "application/json" },
+      body: JSON.stringify({ id: "forbidden-read-only", input: "do not forward" }),
+    });
+    expect(readOnlyMutation.status).toBe(403);
+    expect((await RAW_SELF.fetch(stateUrl, { method: "DELETE", headers: readOnly })).status).toBe(403);
+
+    const missingTools = await RAW_SELF.fetch(turnsUrl, {
+      method: "POST",
+      headers: { ...writeOnly, "content-type": "application/json" },
+      body: JSON.stringify({ id: "forbidden-without-tools", input: "do not forward" }),
+    });
+    expect(missingTools.status).toBe(403);
+
+    const websocket = await RAW_SELF.fetch(agent.websocket_url.replace("wss:", "https:"), {
+      headers: {
+        authorization: `Bearer ${API_KEY}`,
+        upgrade: "websocket",
+      },
+    });
+    expect(websocket.status).toBe(403);
+    expect(await websocket.json()).toEqual({ error: "forbidden" });
+  });
+
+  it("does not let agent execution capabilities imply history or durable-memory authority", async () => {
+    const agent = await createAgent();
+    const originalFetch = MemoryScope.prototype.fetch;
+    const internalMemoryRequests: string[] = [];
+    const memorySpy = vi.spyOn(MemoryScope.prototype, "fetch").mockImplementation(
+      async function (this: MemoryScope, request: Request): Promise<Response> {
+        internalMemoryRequests.push(new URL(request.url).pathname);
+        return originalFetch.call(this, request);
+      },
+    );
+    try {
+      const accepted = await submitWithApiKey(
+        agent,
+        "turn-without-memory-authority",
+        "E2E_MEMORY_TOOL",
+        AGENT_TOOLS_API_KEY,
+      );
+      const events = sseReader(await SELF.fetch(
+        `${agent.events_url}?cursor=${accepted.accepted_cursor}`,
+      ));
+      let terminal;
+      do {
+        terminal = await nextWithin(events, "capability-scoped memory tool rejection");
+      } while (terminal.data.type !== "turn_completed");
+      expect(terminal.data).toMatchObject({
+        final_message: "MANAGED_MEMORY_TOOLS_BAD",
+        citations: [],
+      });
+      expect(internalMemoryRequests.filter((path) => (
+        path === "/search" || path === "/read" || path === "/memory"
+      ))).toEqual([]);
+      await events.cancel();
+    } finally {
+      memorySpy.mockRestore();
+    }
+  });
+
   it("forwards one owner-asserted session request and overwrites caller assertions", async () => {
     const agent = await createAgent();
     const stateUrl = agent.events_url.replace(/\/events$/, "");
     const originalFetch = NanocodexSession.prototype.fetch;
-    const forwarded: Array<{ owner: string | null; path: string }> = [];
+    const forwarded: Array<{
+      owner: string | null;
+      organization: string | null;
+      team: string | null;
+      epoch: string | null;
+      capabilities: string | null;
+      path: string;
+    }> = [];
     const fetchSpy = vi.spyOn(NanocodexSession.prototype, "fetch").mockImplementation(
       async function (this: NanocodexSession, request: Request): Promise<Response> {
         forwarded.push({
           owner: request.headers.get("x-nanocodex-owner-id"),
+          organization: request.headers.get("x-nanocodex-session-organization-id"),
+          team: request.headers.get("x-nanocodex-session-team-id"),
+          epoch: request.headers.get("x-nanocodex-authorization-epoch"),
+          capabilities: request.headers.get("x-nanocodex-capabilities"),
           path: new URL(request.url).pathname,
         });
         return originalFetch.call(this, request);
@@ -2094,10 +2804,23 @@ describe("managed agents REST and resumable SSE", () => {
     );
     try {
       const owner = await SELF.fetch(stateUrl, {
-        headers: { "x-nanocodex-owner-id": OTHER_USER_ID },
+        headers: {
+          "x-nanocodex-owner-id": OTHER_USER_ID,
+          "x-nanocodex-session-organization-id": crypto.randomUUID(),
+          "x-nanocodex-session-team-id": crypto.randomUUID(),
+          "x-nanocodex-authorization-epoch": "999",
+          "x-nanocodex-capabilities": "[]",
+        },
       });
       expect(owner.status).toBe(200);
-      expect(forwarded).toEqual([{ owner: USER_ID, path: "/state" }]);
+      expect(forwarded).toEqual([{
+        owner: USER_ID,
+        organization: expect.stringMatching(/^[0-9a-f-]{36}$/),
+        team: expect.stringMatching(/^[0-9a-f-]{36}$/),
+        epoch: "1",
+        capabilities: JSON.stringify(OWNER_CAPABILITIES),
+        path: "/state",
+      }]);
 
       forwarded.length = 0;
       const other = await RAW_SELF.fetch(stateUrl, {
@@ -2108,7 +2831,27 @@ describe("managed agents REST and resumable SSE", () => {
       });
       expect(other.status).toBe(404);
       expect(await other.json()).toEqual({ error: "not_found" });
-      expect(forwarded).toEqual([{ owner: OTHER_USER_ID, path: "/state" }]);
+      expect(forwarded).toEqual([{
+        owner: OTHER_USER_ID,
+        organization: expect.stringMatching(/^[0-9a-f-]{36}$/),
+        team: expect.stringMatching(/^[0-9a-f-]{36}$/),
+        epoch: "1",
+        capabilities: JSON.stringify(OWNER_CAPABILITIES),
+        path: "/state",
+      }]);
+
+      const assertions = forwarded[0]!;
+      const stale = await testEnv.NANOCODEX_SESSIONS.getByName(agent.agent_id).fetch(
+        "https://session.internal/state",
+        { headers: {
+          "x-nanocodex-owner-id": USER_ID,
+          "x-nanocodex-session-organization-id": assertions.organization!,
+          "x-nanocodex-session-team-id": crypto.randomUUID(),
+          "x-nanocodex-authorization-epoch": assertions.epoch!,
+          "x-nanocodex-capabilities": assertions.capabilities!,
+        } },
+      );
+      expect(stale.status).toBe(404);
     } finally {
       fetchSpy.mockRestore();
     }
@@ -3030,27 +3773,38 @@ describe("managed agents REST and resumable SSE", () => {
   it("carries Unicode conversation summaries through an ASCII-only internal header", async () => {
     const agent = await createAgent();
     const prompt = "Ship 🦀 a durable conversation title that is deliberately longer than fifty-six characters";
-    const response = await testEnv.NANOCODEX_SESSIONS.getByName(agent.agent_id).fetch(
-      "https://session.internal/turns?public_origin=https%3A%2F%2Fexample.test",
-      {
+    const originalFetch = NanocodexSession.prototype.fetch;
+    let internalHeader: string | null = null;
+    const fetchSpy = vi.spyOn(NanocodexSession.prototype, "fetch").mockImplementation(
+      async function (this: NanocodexSession, request: Request): Promise<Response> {
+        const response = await originalFetch.call(this, request);
+        if (request.method === "POST" && new URL(request.url).pathname === "/turns") {
+          internalHeader = response.headers.get("x-nanocodex-turn-summary");
+        }
+        return response;
+      },
+    );
+    try {
+      const response = await SELF.fetch(agent.events_url.replace(/\/events$/, "/turns"), {
         method: "POST",
         headers: {
           "content-type": "application/json",
           "idempotency-key": "request-unicode-summary-turn",
-          "x-nanocodex-owner-id": USER_ID,
         },
         body: JSON.stringify({ id: "unicode-summary-turn", input: prompt }),
-      },
-    );
+      });
 
-    expect(response.status).toBe(202);
-    const header = response.headers.get("x-nanocodex-turn-summary");
-    expect(header).toMatch(/^[\x20-\x7e]+$/);
-    expect(JSON.parse(header!)).toMatchObject({
-      title: expect.stringMatching(/^Ship 🦀 .+…$/u),
-      turnCount: 1,
-    });
-    await response.body?.cancel();
+      expect(response.status).toBe(202);
+      expect(response.headers.get("x-nanocodex-turn-summary")).toBeNull();
+      expect(internalHeader).toMatch(/^[\x20-\x7e]+$/);
+      expect(JSON.parse(internalHeader!)).toMatchObject({
+        title: expect.stringMatching(/^Ship 🦀 .+…$/u),
+        turnCount: 1,
+      });
+      await response.body?.cancel();
+    } finally {
+      fetchSpy.mockRestore();
+    }
   });
 
   it("reports acceptance for prompts containing lone UTF-16 surrogates", async () => {
@@ -3440,13 +4194,14 @@ describe("managed agents REST and resumable SSE", () => {
         const now = Date.now();
         state.storage.sql.exec(
           `INSERT INTO managed_turns (
-             id, request_key, request_hash, input_json, state,
+             id, request_key, request_hash, input_json, authorization_json, state,
              accepted_cursor, may_have_inner_operation, created_at, accepted_at, updated_at
-           ) VALUES (?, ?, ?, ?, 'accepted', 1, 0, ?, ?, ?)`,
+           ) VALUES (?, ?, ?, ?, ?, 'accepted', 1, 0, ?, ?, ?)`,
           id,
           `request-${id}`,
           `hash-${id}`,
           JSON.stringify("recover accepted work before considering idle shutdown"),
+          JSON.stringify({ capabilities: [] }),
           now,
           now,
           now,
@@ -4385,6 +5140,12 @@ type ManagedRealtimeRouteResponse = {
   voice_session_id: string;
 };
 
+type HistorySearchBody = {
+  query: string;
+  results: Array<Record<string, unknown>>;
+  citations: Array<Record<string, unknown>>;
+};
+
 async function createAgent(): Promise<AgentReceipt> {
   const response = await SELF.fetch("https://example.test/v1/agents", {
     method: "POST",
@@ -4402,7 +5163,11 @@ async function managedFetch(input: RequestInfo | URL, init?: RequestInit): Promi
   return RAW_SELF.fetch(new Request(request, { headers }));
 }
 
-async function seedApiKey(userId: string, token: string): Promise<void> {
+async function seedApiKey(
+  userId: string,
+  token: string,
+  capabilities: readonly OrganizationCapability[] = OWNER_CAPABILITIES,
+): Promise<void> {
   const digestBytes = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token)));
   let binary = "";
   for (const byte of digestBytes) binary += String.fromCharCode(byte);
@@ -4414,6 +5179,11 @@ async function seedApiKey(userId: string, token: string): Promise<void> {
     body: JSON.stringify({ id: userId, persistent: true }),
   });
   expect(provisioned.ok).toBe(true);
+  const accountRecord = await provisioned.json<{ organizationId: string }>();
+  const organization = testEnv.NANOCODEX_ORGANIZATIONS.getByName(accountRecord.organizationId);
+  const organizationRecord = await organization.fetch("https://organization.internal/metadata");
+  expect(organizationRecord.ok).toBe(true);
+  const metadata = await organizationRecord.json<{ rootTeam: { id: string } }>();
   const key = testEnv.NANOCODEX_API_KEYS.getByName(digest);
   await key.fetch("https://api-key.internal/record", { method: "DELETE" });
   const record = await key.fetch(
@@ -4428,13 +5198,22 @@ async function seedApiKey(userId: string, token: string): Promise<void> {
         createdAt: Date.now(),
         digest,
         userId,
+        organizationId: accountRecord.organizationId,
+        teamId: metadata.rootTeam.id,
+        role: "owner",
+        authorizationEpoch: 1,
+        capabilities,
       }),
     },
   );
   expect(record.status).toBe(201);
 }
 
-async function seedPasskeySession(userId: string, token: string): Promise<void> {
+async function seedPasskeySession(
+  userId: string,
+  token: string,
+  publicKey = "0x01",
+): Promise<void> {
   const account = testEnv.NANOCODEX_USERS.getByName(userId);
   const provisioned = await account.fetch("https://user.internal/account", {
     method: "PUT",
@@ -4454,11 +5233,28 @@ async function seedPasskeySession(userId: string, token: string): Promise<void> 
       body: JSON.stringify({
         value: {
           credentialId: `credential-${token}`,
-          publicKey: "0x01",
+          publicKey,
           userId: encodedUserId,
           issuedAt: now,
           expiresAt: now + 60,
         },
+        ttl: 60,
+      }),
+    },
+  );
+  expect(stored.ok).toBe(true);
+}
+
+async function seedBrowserAccountSession(userId: string, token: string): Promise<void> {
+  const now = Math.floor(Date.now() / 1_000);
+  const auth = testEnv.NANOCODEX_AUTH.getByName("account");
+  const stored = await auth.fetch(
+    `https://do.invalid/set?key=${encodeURIComponent(`session:${token}`)}`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        value: { userId, issuedAt: now, expiresAt: now + 60 },
         ttl: 60,
       }),
     },
@@ -4505,6 +5301,88 @@ function publicRealtimeCallBody(sdp = "v=0"): string {
       delegation: { type: "client" },
     },
   });
+}
+
+async function submitWithApiKey(
+  agent: AgentReceipt,
+  id: string,
+  input: string,
+  apiKey: string,
+): Promise<ManagedTurnView> {
+  const response = await RAW_SELF.fetch(agent.events_url.replace(/\/events$/, "/turns"), {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${apiKey}`,
+      "content-type": "application/json",
+      "idempotency-key": `request-${id}`,
+    },
+    body: JSON.stringify({ id, input }),
+  });
+  expect(response.status).toBe(202);
+  return response.json<ManagedTurnView>();
+}
+
+async function historyFindSessions(query: string, apiKey: string): Promise<HistorySearchBody> {
+  const response = await RAW_SELF.fetch("https://example.test/v1/history/sessions/search", {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${apiKey}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ query, limit: 8 }),
+  });
+  expect(response.status).toBe(200);
+  return response.json<HistorySearchBody>();
+}
+
+async function historyReadSession(sessionId: string, turnIds: string[], apiKey: string) {
+  const response = await RAW_SELF.fetch(
+    `https://example.test/v1/history/sessions/${sessionId}/read`,
+    {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${apiKey}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ turn_ids: turnIds }),
+    },
+  );
+  expect(response.status).toBe(200);
+  return response.json<{
+    turns: Array<Record<string, unknown>>;
+    citations: Array<Record<string, unknown>>;
+  }>();
+}
+
+async function memoryRequest(apiKey: string, operation: unknown): Promise<Response> {
+  return RAW_SELF.fetch("https://example.test/v1/memory", {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${apiKey}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify(operation),
+  });
+}
+
+async function memoryJson(apiKey: string, operation: unknown): Promise<any> {
+  const response = await memoryRequest(apiKey, operation);
+  expect(response.status).toBe(200);
+  return response.json();
+}
+
+async function eventuallyHistoryFindSessions(
+  query: string,
+  apiKey: string,
+  ready: (body: HistorySearchBody) => boolean,
+): Promise<HistorySearchBody> {
+  let latest: HistorySearchBody | undefined;
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    latest = await historyFindSessions(query, apiKey);
+    if (ready(latest)) return latest;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(`history search did not converge: ${JSON.stringify(latest)}`);
 }
 
 function sseReader(response: Response) {

@@ -21,9 +21,24 @@ import { brokerPolicyForAuthMode } from "../scripts/model-auth-mode.mjs";
 import {
   agentProcessEnvironment,
   isBrokerReadinessResponse,
+  managedDevConfig,
   sendReadinessAttestation,
   waitForReadiness,
 } from "../scripts/dev-brokered.mjs";
+
+test("brokered dev can opt into one remote hosted history index", () => {
+  const configured = managedDevConfig({ main: "src/index.ts", ai_search: [{ binding: "OLD" }] }, "memory-test_1");
+  assert.deepEqual(configured.ai_search, [{
+    binding: "HISTORY_AI_SEARCH",
+    instance_name: "memory-test_1",
+    remote: true,
+  }]);
+  assert.ok(configured.main.endsWith("/services/managed/src/index.ts"));
+  assert.throws(
+    () => managedDevConfig({}, "Invalid instance"),
+    /not a valid AI Search instance name/,
+  );
+});
 
 test("each managed auth mode selects exactly one broker policy", () => {
   assert.equal(brokerPolicyForAuthMode("chatgpt"), "codex");
@@ -81,9 +96,9 @@ test("managed agents have no provider-credential or direct transport path", asyn
   const packageJson = JSON.parse(packageText);
   assert.equal(packageJson.scripts.dev, "node scripts/dev-brokered.mjs");
   assert.match(launcher, /envLine\("ENVIRONMENT", "development"\)/);
+  assert.match(launcher, /envLine\("ALLOW_LOCAL_CREDENTIAL_CLAIM", "true"\)/);
   assert.match(launcher, /envLine\("ALLOWED_POLICIES", brokerPolicyForAuthMode\(authMode\)\)/);
   assert.match(launcher, /const auth = await readCodexSubscription\(authPath\)/);
-  assert.match(launcher, /envLine\("ALLOW_LOCAL_CREDENTIAL_CLAIM", "true"\)/);
   assert.match(launcher, /envLine\("LOCAL_CHATGPT_BOOTSTRAP", \{/);
   assert.match(launcher, /envLine\("NANOCODEX_BROKER_PROBE_TOKEN", brokerProbeToken\)/);
   assert.match(launcher, /env: agentProcessEnvironment\(\)/);
@@ -126,6 +141,8 @@ test("managed Worker environment receives neither provider nor probe authority",
     CHATGPT_REFRESH_TOKEN: "refresh-token",
     CODEX_HOME: "/private/codex-home",
     CODEX_OAUTH_BOOTSTRAP: "oauth-bootstrap",
+    LOCAL_CHATGPT_BOOTSTRAP: "local-bootstrap",
+    ALLOW_LOCAL_CREDENTIAL_CLAIM: "true",
     CODEX_RELAY_URL: "https://relay.example/private",
     LOCAL_CHATGPT_BOOTSTRAP: "local-oauth-bootstrap",
     NANOCODEX_BROKER_PROBE_TOKEN: "probe-token",

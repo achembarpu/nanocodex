@@ -519,6 +519,12 @@ body.agent-viewport-locked {
   line-height: 1.5;
 }
 
+.account-auth-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 9px;
+}
+
 .account-auth-actions .account-primary-action {
   color: var(--text-inverse);
   background: var(--text);
@@ -569,6 +575,14 @@ body.agent-viewport-locked {
 }
 
 .profile-connectors--locked .connector-row {
+  opacity: 0.55;
+}
+
+.profile-connectors--locked .connector-row:disabled {
+  cursor: default;
+}
+
+.account-api-keys.is-locked .api-key-create {
   opacity: 0.55;
 }
 
@@ -3072,6 +3086,11 @@ html[data-theme="dark"] .tui-syntax .shiki span {
 
   .mobile-navigation-home {
     min-height: 52px !important;
+  }
+
+  .mobile-navigation-account {
+    grid-template-columns: 1fr;
+    border-top: 1px solid var(--border-soft);
   }
 
   .mobile-navigation-group {

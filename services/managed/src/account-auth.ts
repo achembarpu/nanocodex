@@ -1,12 +1,15 @@
 import { DurableObject } from "cloudflare:workers";
 import { fetchResponseWithDeadline } from "./deadline";
 import { Handler, Kv } from "accounts/server";
+import { Address, PublicKey } from "ox";
 
 const ACCOUNT_COOKIE = "nanocodex_account";
 const LOCAL_PORTABLE_CREDENTIAL_COOKIE = "nanocodex_local_passkey";
 const LOCAL_WEBAUTHN_RP_ID = "nanocodex.localhost";
+const LOCAL_WEBAUTHN_HOST = /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)?nanocodex\.localhost$/;
 const SESSION_TTL_SECONDS = 30 * 24 * 60 * 60;
 const USER_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const API_KEY = /^ncx_live_([A-Za-z0-9_-]{12})_([A-Za-z0-9_-]{43})$/;
 const ANONYMOUS_SESSION_TOKEN = /^a_[A-Za-z0-9_-]{43}$/;
 const PORTABLE_CREDENTIAL_ID = /^[A-Za-z0-9_-]{1,512}$/;
@@ -28,19 +31,93 @@ export interface AccountAuthEnv {
   NANOCODEX_USERS: DurableObjectNamespace<UserAccount>;
   NANOCODEX_API_KEYS: DurableObjectNamespace<ApiKeyRecord>;
   NANOCODEX_LOCAL_WEBAUTHN_HMAC_KEY?: string;
+  NANOCODEX_ORGANIZATIONS: DurableObjectNamespace<Organization>;
 }
+
+export type OrganizationRole = "owner" | "writer" | "reader";
+
+export type OrganizationCapability =
+  | "agents:read"
+  | "agents:write"
+  | "api_keys:read"
+  | "api_keys:write"
+  | "history:read"
+  | "memory:read"
+  | "memory:write"
+  | "tools:use"
+  | "organization:read"
+  | "organization:write";
+
+const OWNER_CAPABILITIES = [
+  "agents:read",
+  "agents:write",
+  "api_keys:read",
+  "api_keys:write",
+  "history:read",
+  "memory:read",
+  "memory:write",
+  "tools:use",
+  "organization:read",
+  "organization:write",
+] as const satisfies readonly OrganizationCapability[];
 
 export type Principal = Readonly<{
   kind: "account_session" | "api_key" | "connect_grant";
   userId: string;
+  organizationId: string;
+  teamId: string;
+  role: OrganizationRole;
+  subjectId: `user:${string}` | `api_key:${string}`;
+  credentialId: string;
+  authorizationEpoch: number;
+  capabilities: readonly OrganizationCapability[];
 }>;
 
 type UserRecord = Readonly<{
   id: string;
+  organizationId: string;
   persistent: boolean;
   createdAt: number;
   lastAuthenticatedAt: number;
 }>;
+
+type OrganizationGrant = Readonly<{
+  organizationId: string;
+  teamId: string;
+  role: OrganizationRole;
+  authorizationEpoch: number;
+  capabilities: readonly OrganizationCapability[];
+}>;
+
+type OrganizationMetadata = Readonly<{
+  id: string;
+  name: string | null;
+  rootTeamId: string;
+  authorizationEpoch: number;
+  createdAt: number;
+  updatedAt: number;
+}>;
+
+type TeamRecord = Readonly<{
+  id: string;
+  organizationId: string;
+  parentTeamId: string | null;
+  name: string | null;
+  createdAt: number;
+  updatedAt: number;
+}>;
+
+type OrganizationMembership = Readonly<{
+  userId: string;
+  organizationId: string;
+  teamId: string;
+  role: OrganizationRole;
+  capabilities: readonly OrganizationCapability[];
+  createdAt: number;
+}>;
+
+const teamStorageKey = (teamId: string) => `team:${teamId}`;
+const userMembershipStorageKey = (userId: string) => `membership:user:${userId}`;
 
 type AccountSessionPayload = Readonly<{
   userId: string;
@@ -54,16 +131,24 @@ type PortableCredential = Readonly<{
   userId: string;
 }>;
 
-type ApiKeyMetadata = Readonly<{
+export type ApiKeyMetadata = Readonly<{
   id: string;
   label: string;
   prefix: string;
   createdAt: number;
 }>;
 
-type StoredApiKey = ApiKeyMetadata & Readonly<{
+type ApiKeyBase = ApiKeyMetadata & Readonly<{
   digest: string;
   userId: string;
+}>;
+
+type StoredApiKey = ApiKeyBase & Readonly<{
+  organizationId: string;
+  teamId: string;
+  role: OrganizationRole;
+  capabilities: readonly OrganizationCapability[];
+  authorizationEpoch: number;
 }>;
 
 export type AgentSummary = Readonly<{
@@ -90,6 +175,30 @@ export async function routeAccountRequest(
 ): Promise<Response | undefined> {
   if (url.pathname === "/auth" || url.pathname.startsWith("/auth/")) {
     return json({ error: "not_found" }, { status: 404 });
+  }
+  if (url.pathname === "/webauthn/portable-credential") {
+    if (request.method !== "DELETE") return methodNotAllowed();
+    const originFailure = requireBrowserOrigin(request, url);
+    if (originFailure) return originFailure;
+    const rpId = portableLocalWebAuthnRpId(url);
+    if (!rpId || !portableLocalWebAuthnKey(env, url)) {
+      return json({ error: "not_found" }, { status: 404 });
+    }
+    return new Response(null, {
+      status: 204,
+      headers: {
+        "cache-control": "no-store",
+        "set-cookie": [
+          `${LOCAL_PORTABLE_CREDENTIAL_COOKIE}=`,
+          "Path=/",
+          `Domain=${rpId}`,
+          "Max-Age=0",
+          "HttpOnly",
+          "SameSite=Lax",
+          "Secure",
+        ].join("; "),
+      },
+    });
   }
   if (url.pathname.startsWith("/webauthn/")) {
     const originFailure = requireBrowserOrigin(request, url);
@@ -143,18 +252,63 @@ export async function routeAccountRequest(
         id: principal.userId,
         persistent: resolved.persistent,
       },
+      organization: { id: principal.organizationId },
+      team: { id: principal.teamId },
+      role: principal.role,
       authentication: principal.kind,
     }, resolved.cookie || portableCookie
       ? { headers: { "set-cookie": resolved.cookie ?? portableCookie! } }
       : undefined);
   }
-  if (url.pathname === "/v1/api-keys") {
+  if (url.pathname === "/v1/organization") {
     const principal = await authenticate(request, env, url);
+    if (!principal) return unauthorized();
+    if (principal.kind !== "account_session") {
+      return json({ error: "forbidden" }, { status: 403 });
+    }
+    const organization = env.NANOCODEX_ORGANIZATIONS.getByName(principal.organizationId);
+    if (request.method === "GET") {
+      if (!principal.capabilities.includes("organization:read")) {
+        return json({ error: "forbidden" }, { status: 403 });
+      }
+      return proxyOrganizationResponse(await organization.fetch("https://organization.internal/metadata"));
+    }
+    if (request.method === "PATCH") {
+      if (!principal.capabilities.includes("organization:write")) {
+        return json({ error: "forbidden" }, { status: 403 });
+      }
+      const originFailure = requireSameOriginMutation(request, url, principal);
+      if (originFailure) return originFailure;
+      const body = await readJson(request);
+      if (body instanceof Response) return body;
+      if (Object.keys(body).length !== 1 || !("name" in body)) {
+        return json({ error: "invalid_organization" }, { status: 400 });
+      }
+      const name = organizationName(body.name);
+      if (name === undefined) return json({ error: "invalid_organization" }, { status: 400 });
+      return proxyOrganizationResponse(await organization.fetch("https://organization.internal/metadata", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name }),
+      }));
+    }
+    return methodNotAllowed();
+  }
+  if (url.pathname === "/v1/api-keys") {
+    const principal = request.method === "GET"
+      ? await authenticate(request, env, url)
+      : await authenticatePersistentAccount(request, env, url);
     if (!principal || principal.kind !== "account_session") return unauthorized();
     if (request.method === "GET") {
+      if (!principal.capabilities.includes("api_keys:read")) {
+        return json({ error: "forbidden" }, { status: 403 });
+      }
       return json({ data: await listApiKeys(env, principal.userId) });
     }
     if (request.method === "POST") {
+      if (!principal.capabilities.includes("api_keys:write")) {
+        return json({ error: "forbidden" }, { status: 403 });
+      }
       const originFailure = requireSameOriginMutation(request, url, principal);
       if (originFailure) return originFailure;
       const body = await readJson(request);
@@ -162,16 +316,19 @@ export async function routeAccountRequest(
       const label = typeof body.label === "string" && body.label.trim()
         ? body.label.trim().slice(0, 120)
         : "API key";
-      const created = await createApiKey(env, principal.userId, label);
+      const created = await createApiKey(env, principal, label);
       return json({ api_key: created.token, key: created.metadata }, { status: 201 });
     }
     return methodNotAllowed();
   }
   const keyMatch = url.pathname.match(/^\/v1\/api-keys\/([A-Za-z0-9_-]{12})$/);
   if (keyMatch) {
-    const principal = await authenticate(request, env, url);
+    const principal = await authenticatePersistentAccount(request, env, url);
     if (!principal || principal.kind !== "account_session") return unauthorized();
     if (request.method !== "DELETE") return methodNotAllowed();
+    if (!principal.capabilities.includes("api_keys:write")) {
+      return json({ error: "forbidden" }, { status: 403 });
+    }
     const originFailure = requireSameOriginMutation(request, url, principal);
     if (originFailure) return originFailure;
     const deleted = await revokeApiKey(env, principal.userId, keyMatch[1]!);
@@ -187,17 +344,31 @@ export async function authenticate(
 ): Promise<Principal | undefined> {
   const connectUser = request.headers.get(CONNECT_USER_HEADER);
   if (url.origin === CONNECT_SERVICE_ORIGIN && isUserId(connectUser)) {
-    return { kind: "connect_grant", userId: connectUser };
+    const principal = await resolveUserPrincipal(
+      env,
+      connectUser,
+      `connect_grant:${connectUser}`,
+    );
+    return principal ? { ...principal, kind: "connect_grant" } : undefined;
   }
   const cookie = cookieValue(request, ACCOUNT_COOKIE);
   if (cookie && ANONYMOUS_SESSION_TOKEN.test(cookie)) {
     const session = await readBrowserSession(request, env);
-    if (session) return { kind: "account_session", userId: session.userId };
+    if (session) {
+      return resolveUserPrincipal(
+        env,
+        session.userId,
+        `account_session:${await sha256(cookie)}`,
+      );
+    }
   } else {
     const passkey = await webAuthnHandler(env, url).getSession(request);
     const passkeyUserId = passkey?.userId ? decodeUserId(passkey.userId) : undefined;
     if (isUserId(passkeyUserId)) {
-      return { kind: "account_session", userId: passkeyUserId };
+      const credentialId = typeof passkey?.credentialId === "string" && passkey.credentialId
+        ? passkey.credentialId
+        : passkeyUserId;
+      return resolveUserPrincipal(env, passkeyUserId, credentialId);
     }
   }
   const authorization = request.headers.get("authorization");
@@ -212,8 +383,48 @@ export async function authenticate(
     return undefined;
   }
   const record = await response.json<StoredApiKey>();
-  if (record.digest !== digest || !isUserId(record.userId)) return undefined;
-  return { kind: "api_key", userId: record.userId };
+  if (record.digest !== digest || !isStoredApiKey(record)) return undefined;
+  const account = await readAccount(env, record.userId);
+  if (!account || account.organizationId !== record.organizationId) {
+    return undefined;
+  }
+  const grant = await resolveOrganizationGrant(env, account);
+  if (!grant
+    || grant.teamId !== record.teamId
+    || grant.authorizationEpoch !== record.authorizationEpoch
+    || organizationRoleRank(record.role) > organizationRoleRank(grant.role)
+    || record.capabilities.some((capability) => !grant.capabilities.includes(capability))) {
+    return undefined;
+  }
+  return {
+    kind: "api_key",
+    userId: record.userId,
+    organizationId: record.organizationId,
+    teamId: record.teamId,
+    role: record.role,
+    subjectId: `api_key:${record.id}`,
+    credentialId: record.id,
+    authorizationEpoch: record.authorizationEpoch,
+    capabilities: record.capabilities,
+  };
+}
+
+async function resolveUserPrincipal(
+  env: AccountAuthEnv,
+  userId: string,
+  credentialId: string,
+): Promise<Principal | undefined> {
+  const account = await readAccount(env, userId);
+  if (!account) return undefined;
+  const grant = await resolveOrganizationGrant(env, account);
+  if (!grant) return undefined;
+  return {
+    kind: "account_session",
+    userId,
+    ...grant,
+    subjectId: `user:${userId}`,
+    credentialId,
+  };
 }
 
 export async function authenticatePersistentAccount(
@@ -225,6 +436,42 @@ export async function authenticatePersistentAccount(
   if (!principal || principal.kind !== "account_session") return undefined;
   const account = await readAccount(env, principal.userId);
   return account?.persistent === true ? principal : undefined;
+}
+
+export type PersistentPasskeyAccount = Readonly<{
+  accountAddress: string;
+  credentialId: string;
+  principal: Principal;
+  publicKey: string;
+}>;
+
+export async function authenticatePersistentPasskeyAccount(
+  request: Request,
+  env: AccountAuthEnv,
+  url = new URL(request.url),
+): Promise<PersistentPasskeyAccount | undefined> {
+  const principal = await authenticatePersistentAccount(request, env, url);
+  if (!principal) return undefined;
+  const session = await webAuthnHandler(env, url).getSession(request);
+  const userId = session?.userId ? decodeUserId(session.userId) : undefined;
+  if (!session
+    || userId !== principal.userId
+    || typeof session.credentialId !== "string"
+    || !PORTABLE_CREDENTIAL_ID.test(session.credentialId)
+    || typeof session.publicKey !== "string"
+    || !PORTABLE_PUBLIC_KEY.test(session.publicKey)) return undefined;
+  try {
+    const publicKey = PublicKey.fromHex(session.publicKey as `0x${string}`);
+    if (publicKey.y === undefined) return undefined;
+    return {
+      accountAddress: Address.fromPublicKey(publicKey).toLowerCase(),
+      credentialId: session.credentialId,
+      principal,
+      publicKey: session.publicKey,
+    };
+  } catch {
+    return undefined;
+  }
 }
 
 export function requireSameOriginMutation(
@@ -464,14 +711,10 @@ function isPortableCredential(value: unknown): value is PortableCredential {
 }
 
 function portableLocalWebAuthnRpId(url: URL): string | undefined {
-  if (
-    (url.protocol === "http:" || url.protocol === "https:")
-    && (url.hostname === LOCAL_WEBAUTHN_RP_ID
-      || url.hostname.endsWith(`.${LOCAL_WEBAUTHN_RP_ID}`))
-  ) {
-    return LOCAL_WEBAUTHN_RP_ID;
-  }
-  return undefined;
+  return (url.protocol === "http:" || url.protocol === "https:")
+    && LOCAL_WEBAUTHN_HOST.test(url.hostname.toLowerCase())
+    ? LOCAL_WEBAUTHN_RP_ID
+    : undefined;
 }
 
 function portableLocalWebAuthnKey(env: AccountAuthEnv, url: URL): string | undefined {
@@ -560,7 +803,31 @@ async function readAccount(env: AccountAuthEnv, userId: string): Promise<UserRec
     await response.body?.cancel();
     return undefined;
   }
-  return response.json<UserRecord>();
+  const record = await response.json<UserRecord>();
+  return isUserRecord(record) ? record : undefined;
+}
+
+export async function isPersistentAccount(env: AccountAuthEnv, userId: string): Promise<boolean> {
+  return (await readAccount(env, userId))?.persistent === true;
+}
+
+async function resolveOrganizationGrant(
+  env: AccountAuthEnv,
+  account: UserRecord,
+): Promise<OrganizationGrant | undefined> {
+  const response = await env.NANOCODEX_ORGANIZATIONS.getByName(account.organizationId).fetch(
+    `https://organization.internal/resolve?userId=${encodeURIComponent(account.id)}`,
+  );
+  if (!response.ok) {
+    await response.body?.cancel();
+    return undefined;
+  }
+  const grant = await response.json<OrganizationGrant>();
+  if (!isOrganizationGrant(grant)
+    || grant.organizationId !== account.organizationId) {
+    return undefined;
+  }
+  return grant;
 }
 
 async function resolveOrCreateBrowserAccount(
@@ -570,9 +837,10 @@ async function resolveOrCreateBrowserAccount(
 ): Promise<{ principal: Principal; persistent: boolean; cookie?: string } | Response> {
   const principal = await authenticate(request, env, url);
   if (principal) {
-    const cookie = cookieValue(request, ACCOUNT_COOKIE);
     if (principal.kind === "account_session") {
-      return { principal, persistent: !cookie || !ANONYMOUS_SESSION_TOKEN.test(cookie) };
+      const account = await readAccount(env, principal.userId);
+      if (!account) throw new Error("browser account is unavailable");
+      return { principal, persistent: account.persistent };
     }
     const account = await readAccount(env, principal.userId);
     if (!account) throw new Error("API key account is unavailable");
@@ -601,8 +869,14 @@ async function resolveOrCreateBrowserAccount(
       expiresAt: issuedAt + SESSION_TTL_SECONDS,
     } satisfies AccountSessionPayload, { ttl: SESSION_TTL_SECONDS }),
   ]);
+  const createdPrincipal = await resolveUserPrincipal(
+    env,
+    userId,
+    `account_session:${await sha256(token)}`,
+  );
+  if (!createdPrincipal) throw new Error("account organization provisioning failed");
   return {
-    principal: { kind: "account_session", userId },
+    principal: createdPrincipal,
     persistent: false,
     cookie: serializeAccountCookie(token, new URL(request.url).protocol),
   };
@@ -683,29 +957,58 @@ async function listApiKeys(env: AccountAuthEnv, userId: string): Promise<ApiKeyM
   return response.json<ApiKeyMetadata[]>();
 }
 
-async function createApiKey(
-  env: AccountAuthEnv,
-  userId: string,
-  label: string,
-): Promise<{ token: string; metadata: ApiKeyMetadata }> {
+export type ApiKeyMaterial = Readonly<{ id: string; token: string; createdAt: number }>;
+
+export function newApiKeyMaterial(): ApiKeyMaterial {
   const id = randomBase64Url(9);
-  const token = `ncx_live_${id}_${randomBase64Url(32)}`;
+  return { id, token: `ncx_live_${id}_${randomBase64Url(32)}`, createdAt: Date.now() };
+}
+
+export async function createApiKey(
+  env: AccountAuthEnv,
+  principal: Principal,
+  label: string,
+  material = newApiKeyMaterial(),
+): Promise<{ token: string; metadata: ApiKeyMetadata }> {
+  const { id, token, createdAt } = material;
+  if (token.match(API_KEY)?.[1] !== id) throw new Error("invalid API key material");
   const digest = await sha256(token);
   const metadata: ApiKeyMetadata = {
     id,
     label,
     prefix: `ncx_live_${id}`,
-    createdAt: Date.now(),
+    createdAt,
   };
   const key = env.NANOCODEX_API_KEYS.getByName(digest);
+  const record = {
+    ...metadata,
+    digest,
+    userId: principal.userId,
+    organizationId: principal.organizationId,
+    teamId: principal.teamId,
+    role: principal.role,
+    capabilities: principal.capabilities,
+    authorizationEpoch: principal.authorizationEpoch,
+  } satisfies StoredApiKey;
   const initialized = await key.fetch("https://api-key.internal/record", {
     method: "PUT",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ ...metadata, digest, userId } satisfies StoredApiKey),
+    body: JSON.stringify(record),
   });
-  if (initialized.status !== 201) throw new Error("API key creation failed");
-  await initialized.body?.cancel();
-  const attached = await env.NANOCODEX_USERS.getByName(userId).fetch(
+  const inserted = initialized.status === 201;
+  if (!inserted) {
+    await initialized.body?.cancel();
+    const existing = material === undefined ? undefined : await key.fetch("https://api-key.internal/resolve");
+    if (!existing?.ok) {
+      await existing?.body?.cancel();
+      throw new Error("API key creation failed");
+    }
+    const existingRecord = await existing.json<unknown>();
+    if (!sameStoredApiKey(existingRecord, record)) throw new Error("API key creation conflict");
+  } else {
+    await initialized.body?.cancel();
+  }
+  const attached = await env.NANOCODEX_USERS.getByName(principal.userId).fetch(
     "https://user.internal/api-keys",
     {
       method: "POST",
@@ -714,27 +1017,48 @@ async function createApiKey(
     },
   );
   if (!attached.ok) {
-    await key.fetch("https://api-key.internal/record", { method: "DELETE" });
+    if (inserted) await key.fetch("https://api-key.internal/record", { method: "DELETE" });
     throw new Error("API key attachment failed");
   }
   await attached.body?.cancel();
   return { token, metadata };
 }
 
-async function revokeApiKey(env: AccountAuthEnv, userId: string, id: string): Promise<boolean> {
+export async function revokeApiKey(
+  env: AccountAuthEnv,
+  userId: string,
+  id: string,
+  token?: string,
+): Promise<boolean> {
   const account = env.NANOCODEX_USERS.getByName(userId);
-  const found = await account.fetch(`https://user.internal/api-keys/${id}`);
-  if (!found.ok) {
-    await found.body?.cancel();
-    return false;
+  let digest: string;
+  if (token !== undefined) {
+    if (token.match(API_KEY)?.[1] !== id) throw new Error("invalid API key material");
+    digest = await sha256(token);
+  } else {
+    const found = await account.fetch(`https://user.internal/api-keys/${id}`);
+    if (!found.ok) {
+      await found.body?.cancel();
+      return false;
+    }
+    digest = (await found.json<ApiKeyMetadata & { digest: string }>()).digest;
   }
-  const record = await found.json<ApiKeyMetadata & { digest: string }>();
-  await env.NANOCODEX_API_KEYS.getByName(record.digest).fetch(
+  const deleted = await env.NANOCODEX_API_KEYS.getByName(digest).fetch(
     "https://api-key.internal/record",
     { method: "DELETE" },
   );
+  if (!deleted.ok) {
+    await deleted.body?.cancel();
+    throw new Error("API key revocation failed");
+  }
+  await deleted.body?.cancel();
   const detached = await account.fetch(`https://user.internal/api-keys/${id}`, { method: "DELETE" });
-  return detached.ok;
+  if (!detached.ok && detached.status !== 404) {
+    await detached.body?.cancel();
+    throw new Error("API key detachment failed");
+  }
+  await detached.body?.cancel();
+  return true;
 }
 
 export class UserAccount extends DurableObject<AccountAuthEnv> {
@@ -769,13 +1093,35 @@ export class UserAccount extends DurableObject<AccountAuthEnv> {
         }
         const now = Date.now();
         const current = await this.ctx.storage.get<UserRecord>("account");
+        if (current && (!isUserRecord(current) || current.id !== id)) {
+          return json({ error: "invalid_account_state" }, { status: 409 });
+        }
         const record: UserRecord = {
           id,
+          organizationId: current?.organizationId ?? crypto.randomUUID(),
           persistent: current?.persistent === true || body.persistent,
           createdAt: current?.createdAt ?? now,
           lastAuthenticatedAt: now,
         };
         await this.ctx.storage.put("account", record);
+        const rootTeamId = crypto.randomUUID();
+        const initialized = await this.env.NANOCODEX_ORGANIZATIONS.getByName(record.organizationId).fetch(
+          "https://organization.internal/initialize",
+          {
+            method: "PUT",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              organizationId: record.organizationId,
+              rootTeamId,
+              ownerUserId: record.id,
+            }),
+          },
+        );
+        if (!initialized.ok) {
+          await initialized.body?.cancel();
+          return json({ error: "organization_provisioning_failed" }, { status: 500 });
+        }
+        await initialized.body?.cancel();
         return json(record);
       }
       if (request.method === "GET") {
@@ -792,6 +1138,10 @@ export class UserAccount extends DurableObject<AccountAuthEnv> {
         const metadata = await request.json<ApiKeyMetadata & { digest?: unknown }>();
         if (!/^[A-Za-z0-9_-]{12}$/.test(metadata.id) || typeof metadata.digest !== "string") {
           return json({ error: "invalid_api_key" }, { status: 400 });
+        }
+        const current = keys[metadata.id];
+        if (current && current.digest !== metadata.digest) {
+          return json({ error: "conflict" }, { status: 409 });
         }
         keys[metadata.id] = metadata as ApiKeyMetadata & { digest: string };
         await this.ctx.storage.put("apiKeys", keys);
@@ -949,17 +1299,145 @@ function agentSummary(row: AgentRegistryRow): AgentSummary {
   };
 }
 
+export class Organization extends DurableObject<AccountAuthEnv> {
+  async fetch(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+    if (url.pathname === "/initialize" && request.method === "PUT") {
+      const body = await request.json<{
+        organizationId?: unknown;
+        rootTeamId?: unknown;
+        ownerUserId?: unknown;
+      }>();
+      if (!isUuid(body.organizationId) || !isUuid(body.rootTeamId) || !isUserId(body.ownerUserId)) {
+        return json({ error: "invalid_organization" }, { status: 400 });
+      }
+      const existing = await this.ctx.storage.get<OrganizationMetadata>("metadata");
+      if (existing) {
+        const [membership, rootTeam] = await Promise.all([
+          this.ctx.storage.get<OrganizationMembership>(userMembershipStorageKey(body.ownerUserId)),
+          this.ctx.storage.get<TeamRecord>(teamStorageKey(existing.rootTeamId)),
+        ]);
+        if (!isOrganizationMetadata(existing)
+          || !isOrganizationMembership(membership)
+          || !isTeamRecord(rootTeam)
+          || existing.id !== body.organizationId
+          || rootTeam.id !== existing.rootTeamId
+          || rootTeam.organizationId !== existing.id
+          || membership.userId !== body.ownerUserId
+          || membership.organizationId !== existing.id
+          || membership.teamId !== existing.rootTeamId) {
+          return json({ error: "conflict" }, { status: 409 });
+        }
+        return json(await organizationMetadataView(this.ctx.storage, existing));
+      }
+      const now = Date.now();
+      const metadata: OrganizationMetadata = {
+        id: body.organizationId,
+        name: null,
+        rootTeamId: body.rootTeamId,
+        authorizationEpoch: 1,
+        createdAt: now,
+        updatedAt: now,
+      };
+      const rootTeam: TeamRecord = {
+        id: body.rootTeamId,
+        organizationId: body.organizationId,
+        parentTeamId: null,
+        name: null,
+        createdAt: now,
+        updatedAt: now,
+      };
+      const ownerMembership: OrganizationMembership = {
+        userId: body.ownerUserId,
+        organizationId: body.organizationId,
+        teamId: body.rootTeamId,
+        role: "owner",
+        capabilities: OWNER_CAPABILITIES,
+        createdAt: now,
+      };
+      await this.ctx.storage.put({
+        metadata,
+        [teamStorageKey(rootTeam.id)]: rootTeam,
+        [userMembershipStorageKey(ownerMembership.userId)]: ownerMembership,
+      });
+      return json(await organizationMetadataView(this.ctx.storage, metadata), { status: 201 });
+    }
+    if (url.pathname === "/resolve" && (request.method === "GET" || request.method === "POST")) {
+      let userId: unknown = url.searchParams.get("userId");
+      if (request.method === "POST") {
+        const body = await request.json<{ userId?: unknown }>();
+        userId = body.userId;
+      }
+      if (!isUserId(userId)) return json({ error: "invalid_subject" }, { status: 400 });
+      const [metadata, membership] = await Promise.all([
+        this.ctx.storage.get<OrganizationMetadata>("metadata"),
+        this.ctx.storage.get<OrganizationMembership>(userMembershipStorageKey(userId)),
+      ]);
+      if (!isOrganizationMetadata(metadata)
+        || !isOrganizationMembership(membership)
+        || membership.userId !== userId
+        || membership.organizationId !== metadata.id) {
+        return json({ error: "not_found" }, { status: 404 });
+      }
+      const team = await this.ctx.storage.get<TeamRecord>(teamStorageKey(membership.teamId));
+      if (!isTeamRecord(team)
+        || team.id !== membership.teamId
+        || team.organizationId !== metadata.id) {
+        return json({ error: "not_found" }, { status: 404 });
+      }
+      return json({
+        organizationId: metadata.id,
+        teamId: membership.teamId,
+        role: membership.role,
+        authorizationEpoch: metadata.authorizationEpoch,
+        capabilities: membership.role === "owner" ? OWNER_CAPABILITIES : membership.capabilities,
+      } satisfies OrganizationGrant);
+    }
+    if (url.pathname === "/metadata") {
+      const metadata = await this.ctx.storage.get<OrganizationMetadata>("metadata");
+      if (!metadata || !isOrganizationMetadata(metadata)) {
+        return json({ error: "not_found" }, { status: 404 });
+      }
+      if (request.method === "GET") return json(await organizationMetadataView(this.ctx.storage, metadata));
+      if (request.method === "PATCH") {
+        const body = await request.json<{ name?: unknown }>();
+        if (Object.keys(body).length !== 1 || !("name" in body)) {
+          return json({ error: "invalid_organization" }, { status: 400 });
+        }
+        const name = organizationName(body.name);
+        if (name === undefined) return json({ error: "invalid_organization" }, { status: 400 });
+        const updated = { ...metadata, name, updatedAt: Date.now() } satisfies OrganizationMetadata;
+        await this.ctx.storage.put("metadata", updated);
+        return json(await organizationMetadataView(this.ctx.storage, updated));
+      }
+      return methodNotAllowed();
+    }
+    return json({ error: "not_found" }, { status: 404 });
+  }
+}
+
 export class ApiKeyRecord extends DurableObject<AccountAuthEnv> {
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname === "/resolve" && request.method === "GET") {
       const record = await this.ctx.storage.get<StoredApiKey>("record");
-      return record ? json(record) : json({ error: "not_found" }, { status: 404 });
+      return isStoredApiKey(record) ? json(record) : json({ error: "not_found" }, { status: 404 });
     }
     if (url.pathname === "/record" && request.method === "PUT") {
       if (await this.ctx.storage.get("record")) return json({ error: "conflict" }, { status: 409 });
-      const record = await request.json<StoredApiKey>();
-      if (!isUserId(record.userId) || !/^[A-Za-z0-9_-]{43}$/.test(record.digest)) {
+      const input = await request.json<unknown>();
+      if (!isApiKeyBase(input)) {
+        return json({ error: "invalid_api_key" }, { status: 400 });
+      }
+      if (!isStoredApiKey(input)) return json({ error: "invalid_api_key" }, { status: 400 });
+      const record = input;
+      const account = await readAccount(this.env, record.userId);
+      const grant = account ? await resolveOrganizationGrant(this.env, account) : undefined;
+      if (!account
+        || !grant
+        || account.organizationId !== record.organizationId
+        || grant.teamId !== record.teamId
+        || grant.authorizationEpoch !== record.authorizationEpoch) {
         return json({ error: "invalid_api_key" }, { status: 400 });
       }
       await this.ctx.storage.put("record", record);
@@ -971,6 +1449,168 @@ export class ApiKeyRecord extends DurableObject<AccountAuthEnv> {
     }
     return json({ error: "not_found" }, { status: 404 });
   }
+}
+
+function isUuid(value: unknown): value is string {
+  return typeof value === "string" && UUID.test(value);
+}
+
+async function organizationMetadataView(
+  storage: DurableObjectStorage,
+  metadata: OrganizationMetadata,
+): Promise<Readonly<{
+  id: string;
+  name: string | null;
+  rootTeam: Readonly<{ id: string; name: string | null }>;
+  authorizationEpoch: number;
+  createdAt: number;
+  updatedAt: number;
+}>> {
+  const rootTeam = await storage.get<TeamRecord>(teamStorageKey(metadata.rootTeamId));
+  if (!isTeamRecord(rootTeam)
+    || rootTeam.id !== metadata.rootTeamId
+    || rootTeam.organizationId !== metadata.id) {
+    throw new Error("organization root team is unavailable");
+  }
+  return {
+    id: metadata.id,
+    name: metadata.name,
+    rootTeam: { id: rootTeam.id, name: rootTeam.name },
+    authorizationEpoch: metadata.authorizationEpoch,
+    createdAt: metadata.createdAt,
+    updatedAt: metadata.updatedAt,
+  };
+}
+
+function isUserRecord(value: unknown): value is UserRecord {
+  if (typeof value !== "object" || value === null) return false;
+  const record = value as Partial<UserRecord>;
+  return isUserId(record.id)
+    && isUuid(record.organizationId)
+    && typeof record.persistent === "boolean"
+    && Number.isFinite(record.createdAt)
+    && Number.isFinite(record.lastAuthenticatedAt);
+}
+
+function isOrganizationMetadata(value: unknown): value is OrganizationMetadata {
+  if (typeof value !== "object" || value === null) return false;
+  const metadata = value as Partial<OrganizationMetadata>;
+  return isUuid(metadata.id)
+    && (metadata.name === null || typeof metadata.name === "string")
+    && isUuid(metadata.rootTeamId)
+    && Number.isSafeInteger(metadata.authorizationEpoch)
+    && Number(metadata.authorizationEpoch) >= 1
+    && Number.isFinite(metadata.createdAt)
+    && Number.isFinite(metadata.updatedAt);
+}
+
+function isOrganizationMembership(value: unknown): value is OrganizationMembership {
+  if (typeof value !== "object" || value === null) return false;
+  const membership = value as Partial<OrganizationMembership>;
+  return isUserId(membership.userId)
+    && isUuid(membership.organizationId)
+    && isUuid(membership.teamId)
+    && isOrganizationRole(membership.role)
+    && isOrganizationCapabilities(membership.capabilities)
+    && Number.isFinite(membership.createdAt);
+}
+
+function isTeamRecord(value: unknown): value is TeamRecord {
+  if (typeof value !== "object" || value === null) return false;
+  const team = value as Partial<TeamRecord>;
+  return isUuid(team.id)
+    && isUuid(team.organizationId)
+    && (team.parentTeamId === null || isUuid(team.parentTeamId))
+    && (team.name === null || typeof team.name === "string")
+    && Number.isFinite(team.createdAt)
+    && Number.isFinite(team.updatedAt);
+}
+
+function isOrganizationRole(value: unknown): value is OrganizationRole {
+  return value === "owner" || value === "writer" || value === "reader";
+}
+
+function organizationRoleRank(role: OrganizationRole): number {
+  return role === "owner" ? 2 : role === "writer" ? 1 : 0;
+}
+
+export function isOrganizationCapabilities(value: unknown): value is readonly OrganizationCapability[] {
+  if (!Array.isArray(value) || new Set(value).size !== value.length) return false;
+  return value.every((capability) =>
+    capability === "agents:read"
+    || capability === "agents:write"
+    || capability === "api_keys:read"
+    || capability === "api_keys:write"
+    || capability === "history:read"
+    || capability === "memory:read"
+    || capability === "memory:write"
+    || capability === "tools:use"
+    || capability === "organization:read"
+    || capability === "organization:write"
+  );
+}
+
+function isOrganizationGrant(value: unknown): value is OrganizationGrant {
+  if (typeof value !== "object" || value === null) return false;
+  const grant = value as Partial<OrganizationGrant>;
+  return isUuid(grant.organizationId)
+    && isUuid(grant.teamId)
+    && isOrganizationRole(grant.role)
+    && Number.isSafeInteger(grant.authorizationEpoch)
+    && Number(grant.authorizationEpoch) >= 1
+    && isOrganizationCapabilities(grant.capabilities);
+}
+
+function isApiKeyBase(value: unknown): value is ApiKeyBase {
+  if (typeof value !== "object" || value === null) return false;
+  const record = value as Partial<ApiKeyBase>;
+  return typeof record.id === "string"
+    && /^[A-Za-z0-9_-]{12}$/.test(record.id)
+    && typeof record.label === "string"
+    && record.label.length <= 120
+    && record.prefix === `ncx_live_${record.id}`
+    && Number.isFinite(record.createdAt)
+    && typeof record.digest === "string"
+    && /^[A-Za-z0-9_-]{43}$/.test(record.digest)
+    && isUserId(record.userId);
+}
+
+function isStoredApiKey(value: unknown): value is StoredApiKey {
+  if (!isApiKeyBase(value)) return false;
+  const record = value as Partial<StoredApiKey>;
+  return isUuid(record.organizationId)
+    && isUuid(record.teamId)
+    && isOrganizationRole(record.role)
+    && isOrganizationCapabilities(record.capabilities)
+    && Number.isSafeInteger(record.authorizationEpoch)
+    && Number(record.authorizationEpoch) >= 1;
+}
+
+function sameStoredApiKey(value: unknown, expected: StoredApiKey): boolean {
+  if (!isStoredApiKey(value)) return false;
+  return value.id === expected.id
+    && value.label === expected.label
+    && value.prefix === expected.prefix
+    && value.createdAt === expected.createdAt
+    && value.digest === expected.digest
+    && value.userId === expected.userId
+    && value.organizationId === expected.organizationId
+    && value.teamId === expected.teamId
+    && value.role === expected.role
+    && value.authorizationEpoch === expected.authorizationEpoch
+    && value.capabilities.length === expected.capabilities.length
+    && value.capabilities.every((capability, index) => capability === expected.capabilities[index]);
+}
+
+function organizationName(value: unknown): string | null | undefined {
+  if (value === null) return null;
+  if (typeof value !== "string") return undefined;
+  const name = value.trim();
+  return name.length <= 120 ? name : undefined;
+}
+
+function proxyOrganizationResponse(response: Response): Response {
+  return response;
 }
 
 function randomBase64Url(bytes: number): string {

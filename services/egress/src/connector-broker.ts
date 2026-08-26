@@ -2,7 +2,6 @@ import { DurableObject } from "cloudflare:workers";
 
 import {
   CredentialVault,
-  type CredentialVaultEnv,
   type EncryptedEnvelope,
 } from "./credential-vault";
 import {
@@ -28,6 +27,10 @@ import {
   decodeGDriveTokenResponse,
 } from "./connectors/gdrive";
 import { canonicalConnectorPath } from "./connector-path";
+import {
+  McpConnectionOwner,
+  type McpConnectionBrokerEnv,
+} from "./mcp-connection-owner";
 import {
   buildXAuthorizationUrl,
   buildXIdentityRequest,
@@ -87,7 +90,7 @@ const PROVIDER_RULES: readonly ProviderRule[] = [
 
 export type ConnectorId = "github" | "gmail" | "gdrive" | "x";
 
-export interface ConnectorBrokerEnv extends CredentialVaultEnv {
+export interface ConnectorBrokerEnv extends McpConnectionBrokerEnv {
   GITHUB_OAUTH_CLIENT_ID?: string;
   GITHUB_OAUTH_CLIENT_SECRET?: string;
   GOOGLE_OAUTH_CLIENT_ID?: string;
@@ -127,6 +130,7 @@ export class UserConnectorBroker extends DurableObject<ConnectorBrokerEnv> {
   readonly #state: DurableObjectState;
   readonly #env: ConnectorBrokerEnv;
   readonly #vault: CredentialVault;
+  readonly #mcpConnections: McpConnectionOwner;
   readonly #ready: Promise<void>;
   #connectors: ConnectorState = { version: 1, connectors: {}, pending: {} };
   #tail: Promise<void> = Promise.resolve();
@@ -136,6 +140,7 @@ export class UserConnectorBroker extends DurableObject<ConnectorBrokerEnv> {
     this.#state = state;
     this.#env = env;
     this.#vault = new CredentialVault(env, `connectors/${state.id.toString()}`);
+    this.#mcpConnections = new McpConnectionOwner(state, env);
     this.#ready = state.blockConcurrencyWhile(() => this.#initialize());
   }
 
@@ -155,11 +160,15 @@ export class UserConnectorBroker extends DurableObject<ConnectorBrokerEnv> {
   }
 
   async #initialize(): Promise<void> {
-    const row = await this.#state.storage.get<StoredRow>(STATE_KEY);
-    if (!row) return;
-    const opened = await this.#vault.open<ConnectorState>(row.envelope);
-    this.#connectors = opened.value;
-    if (opened.reseal) await this.#persist();
+    const [row] = await Promise.all([
+      this.#state.storage.get<StoredRow>(STATE_KEY),
+      this.#mcpConnections.initialize(),
+    ]);
+    if (row) {
+      const opened = await this.#vault.open<ConnectorState>(row.envelope);
+      this.#connectors = opened.value;
+      if (opened.reseal) await this.#persist();
+    }
   }
 
   async #dispatch(request: Request): Promise<Response> {
@@ -167,6 +176,9 @@ export class UserConnectorBroker extends DurableObject<ConnectorBrokerEnv> {
     let auditAction: ConnectorAuditAction | undefined;
     let auditConnector: ConnectorId | undefined;
     try {
+      if (url.origin === "https://mcp-connections.internal") {
+        return this.#mcpConnections.fetch(request);
+      }
       const provider = providerRule(url);
       if (provider) {
         auditAction = "use";
@@ -931,7 +943,9 @@ function validRedirectUri(value: string, env: ConnectorBrokerEnv): boolean {
     const local = environment === "local" || environment === "development" || environment === "test";
     return !url.username && !url.password && !url.hash
       && (url.protocol === "https:" || (local && url.protocol === "http:"
-        && (url.hostname === "localhost" || url.hostname === "127.0.0.1")));
+        && (url.hostname === "localhost"
+          || url.hostname.endsWith(".localhost")
+          || url.hostname === "127.0.0.1")));
   } catch { return false; }
 }
 

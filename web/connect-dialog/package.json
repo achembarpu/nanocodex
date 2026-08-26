@@ -13,7 +13,7 @@
   "dependencies": {
     "@stripe/stripe-js": "7.9.0",
     "@tanstack/react-query": "^5.101.4",
-    "accounts": "0.16.2",
+    "accounts": "0.17.0",
     "nanocodex": "file:../../js/bindings",
     "nanocodex-react": "file:../../js/react",
     "react": "19.2.6",

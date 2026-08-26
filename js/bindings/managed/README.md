@@ -89,6 +89,33 @@ await Agent.deleteMemory(memories[0].key, {
 Managed agents access this same hosted store through their `memory` tool. It is
 never mirrored into a browser, TUI, or other local persistence layer.
 
+Account memory uses the same derived organization scope and supports scan, read,
+put, and delete operations. Scan before writing so the service can reject
+duplicates, and retain returned `{ id, version }` keys for compare-and-swap
+updates:
+
+```js
+const scanned = await Agent.memory(
+  { operation: "scan", query: "production deploy schedule" },
+  { baseUrl: process.env.NANOCODEX_MANAGED_URL, apiKey: process.env.NANOCODEX_API_KEY },
+);
+const stored = await Agent.memory(
+  { operation: "put", content: "Production deploys happen on Tuesdays." },
+  { baseUrl: process.env.NANOCODEX_MANAGED_URL, apiKey: process.env.NANOCODEX_API_KEY },
+);
+```
+
+Browser account owners can read and rename their organization:
+
+```js
+const organization = await Agent.getOrganization();
+await Agent.updateOrganization({ name: `${organization.name ?? "Personal"} workspace` });
+```
+
+Memory accepts either account-cookie or API-key authentication. Organization
+metadata and mutation remain subject to the server's principal and owner policy;
+the client sends supplied credentials without weakening that policy.
+
 `Agent.list()` returns agent handles, `agent.state()` reads current state, and
 `agent.delete()` removes the agent and its retained state. `agent.events.watch`
 is an async iterator over durable events. Pass its last decimal `cursor` to a

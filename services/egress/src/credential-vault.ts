@@ -3,8 +3,18 @@ const DEVELOPMENT_KEY = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY";
 
 export interface CredentialVaultEnv {
   ENVIRONMENT?: string;
-  CREDENTIAL_ENCRYPTION_KEY?: string;
+  /**
+   * A normal Worker secret, or an account-level Secrets Store binding. The
+   * latter deliberately stays optional so local/test deployments can keep
+   * using the ordinary string fixture.
+   */
+  CREDENTIAL_ENCRYPTION_KEY?: string | SecretsStoreSecret;
   CREDENTIAL_ENCRYPTION_KEY_PREVIOUS?: string;
+}
+
+/** Minimal structural type for Cloudflare's `Secrets Store` binding. */
+export interface SecretsStoreSecret {
+  get(): Promise<string>;
 }
 
 export type EncryptedEnvelope = Readonly<{
@@ -17,14 +27,14 @@ export type EncryptedEnvelope = Readonly<{
 /** AES-GCM envelope encryption for provider material stored by a user DO. */
 export class CredentialVault {
   readonly #scope: Uint8Array<ArrayBuffer>;
-  readonly #current: string;
+  readonly #current: string | SecretsStoreSecret;
   readonly #previous: string | undefined;
 
   constructor(env: CredentialVaultEnv, scope: string) {
     const environment = env.ENVIRONMENT?.trim().toLowerCase();
     const development = environment === "development" || environment === "local"
       || environment === "test";
-    const configured = env.CREDENTIAL_ENCRYPTION_KEY?.trim();
+    const configured = env.CREDENTIAL_ENCRYPTION_KEY;
     if (!development && !configured) {
       throw new Error("CREDENTIAL_ENCRYPTION_KEY is required outside local development");
     }
@@ -34,7 +44,7 @@ export class CredentialVault {
   }
 
   async seal(value: unknown): Promise<EncryptedEnvelope> {
-    const material = await keyMaterial(this.#current);
+    const material = await keyMaterial(await secretValue(this.#current));
     const iv: Uint8Array<ArrayBuffer> = crypto.getRandomValues(new Uint8Array(12));
     const plaintext = ownedBytes(new TextEncoder().encode(JSON.stringify(value)));
     const ciphertext = await crypto.subtle.encrypt(
@@ -53,10 +63,10 @@ export class CredentialVault {
   async open<T>(value: unknown): Promise<{ value: T; reseal: boolean }> {
     if (!isEnvelope(value)) throw new Error("stored credential is not an encrypted envelope");
     const candidates = [this.#current, this.#previous].filter(
-      (candidate): candidate is string => Boolean(candidate),
+      (candidate): candidate is string | SecretsStoreSecret => Boolean(candidate),
     );
     for (let index = 0; index < candidates.length; index += 1) {
-      const material = await keyMaterial(candidates[index]!);
+      const material = await keyMaterial(await secretValue(candidates[index]!));
       if (material.id !== value.keyId) continue;
       try {
         const plaintext = await crypto.subtle.decrypt(
@@ -79,6 +89,15 @@ export class CredentialVault {
     }
     throw new Error("stored credential uses an unavailable encryption key");
   }
+}
+
+async function secretValue(value: string | SecretsStoreSecret): Promise<string> {
+  if (typeof value === "string") return value;
+  const secret = await value.get();
+  if (!secret || secret.trim() !== secret || /[\u0000-\u001f\u007f]/.test(secret)) {
+    throw new Error("CREDENTIAL_ENCRYPTION_KEY binding returned an invalid value");
+  }
+  return secret;
 }
 
 async function keyMaterial(encoded: string): Promise<{ id: string; key: CryptoKey }> {

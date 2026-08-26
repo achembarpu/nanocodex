@@ -144,6 +144,13 @@ test("the base and generated production configs keep every required DO binding",
   assert.ok(config.durable_objects.bindings.some((binding) => (
     binding.name === "USER_CONNECTORS" && binding.class_name === "UserConnectorBroker"
   )));
+  assert.ok(config.durable_objects.bindings.some((binding) => (
+    binding.name === "MCP_CONNECTIONS" && binding.class_name === "McpConnectionDirectory"
+  )));
+  assert.ok(config.migrations.some((migration) => (
+    migration.tag === "v5"
+      && migration.new_sqlite_classes?.includes("McpConnectionDirectory")
+  )));
   assert.throws(
     () => buildProductionBrokerConfig({
       ...base,
@@ -158,7 +165,7 @@ test("the base and generated production configs keep every required DO binding",
   );
   assert.throws(
     () => buildProductionBrokerConfig({ ...base, migrations: [] }, { mainPath: "/fixed/egress.ts" }),
-    /v2\/v3\/v4 DO migration chain/,
+    /v2\/v3\/v4\/v5 DO migration chain/,
   );
 });
 

@@ -13,12 +13,15 @@ import {
   LocalStackLifecycle,
   acquireLocalDevelopmentLease,
   assertLocalDevelopmentPortAvailable,
+  ensureLocalOAuthRelay,
   localDevelopmentInstance,
   localDevelopmentOrigin,
   localDevelopmentPublicOrigin,
   localDevelopmentStatePath,
   localConnectorEnvironment,
   localDependencyRequirements,
+  localOAuthRelayChildLaunch,
+  localOAuthRelayKey,
   localStackChildIsAlive,
   localStackChildOptions,
   loadRootEnvironment,
@@ -33,6 +36,7 @@ import {
   terminateLocalStackChild,
   verifyLocalGitAdvertisement,
   verifyLocalHealthResponse,
+  verifyLocalConnectHealthResponse,
   verifyLocalModelPreconnect,
   verifyLocalState,
   verifyLocalMultiplayer,
@@ -41,6 +45,7 @@ import {
   websiteChildLaunch,
 } from "./dev-local.mjs";
 import { prepareDevWasm } from "./check-dev-wasm.mjs";
+import { localOAuthRelayChallengeProof } from "../localOAuthRelayEnvelope.mjs";
 
 const execFileAsync = promisify(execFile);
 const devLocalScript = fileURLToPath(new URL("./dev-local.mjs", import.meta.url));
@@ -171,12 +176,14 @@ function forceStopFixture(harness) {
 
 test("local development installs every package required to start the web stack", () => {
   const requirements = localDependencyRequirements();
+  const bindings = requirements.find(({ root }) => basename(root) === "bindings");
   const react = requirements.find(({ root }) => basename(root) === "react");
   const terminal = requirements.find(({ root }) => basename(root) === "terminal");
   const web = requirements.find(({ root }) => basename(root) === "web");
   const connectDialog = requirements.find(({ root }) => basename(root) === "connect-dialog");
   const connectPlayground = requirements.find(({ root }) => basename(root) === "connect-playground");
   const connectApi = requirements.find(({ root }) => basename(root) === "connect-api");
+  assert.deepEqual(bindings?.requiredFiles, ["node_modules/wata/package.json"]);
   assert.deepEqual(react?.requiredFiles, ["node_modules/nanocodex/package.json"]);
   assert.ok(terminal);
   assert.deepEqual(terminal.requiredFiles, [
@@ -190,8 +197,12 @@ test("local development installs every package required to start the web stack",
   ]);
   assert.deepEqual(connectDialog?.requiredFiles, ["node_modules/wrangler/bin/wrangler.js"]);
   assert.deepEqual(connectPlayground?.requiredFiles, ["node_modules/wrangler/bin/wrangler.js"]);
-  assert.deepEqual(connectApi?.requiredFiles, ["node_modules/wrangler/bin/wrangler.js"]);
-  assert.equal(requirements.length, 8);
+  assert.ok(connectApi);
+  assert.deepEqual(connectApi.requiredFiles, [
+    "node_modules/accounts/package.json",
+    "node_modules/wrangler/bin/wrangler.js",
+  ]);
+  assert.equal(requirements.length, 9);
 });
 
 test("completed one-shot commands surrender their process-group capabilities", async () => {
@@ -354,6 +365,16 @@ test("local connector app credentials use private auxiliary names", () => {
     NANOCODEX_LOCAL_GOOGLE_OAUTH_CLIENT_SECRET: "google-secret",
     NANOCODEX_LOCAL_X_OAUTH_CLIENT_ID: "x-client",
     NANOCODEX_LOCAL_X_OAUTH_CLIENT_SECRET: "x-secret",
+  });
+  assert.deepEqual(localConnectorEnvironment({
+    GH_CLIENT_ID: "ambient-github-id",
+    GOOGLE_CLIENT_ID: "ambient-google-id",
+    X_CLIENT_ID: "ambient-x-id",
+  }), {});
+  assert.deepEqual(localConnectorEnvironment({
+    NANOCODEX_GOOGLE_OAUTH_CLIENT_ID: "explicit-incomplete-id",
+  }), {
+    NANOCODEX_LOCAL_GOOGLE_OAUTH_CLIENT_ID: "explicit-incomplete-id",
   });
 });
 
@@ -918,7 +939,6 @@ test("local development gives the primary checkout and worktrees stable isolated
     localDevelopmentInstance("/tmp/other", { requestedName: "review-v2" }).id,
     "review-v2",
   );
-
   assert.equal(
     localDevelopmentPublicOrigin(primary.publicOrigin).origin,
     "http://nanocodex.localhost:5173",
@@ -946,6 +966,44 @@ test("local development gives the primary checkout and worktrees stable isolated
       /must be HTTP under nanocodex\.localhost with an explicit port/,
     );
   }
+});
+
+test("the fixed OAuth relay is adopted without Docker or provider credentials", async () => {
+  assert.equal(localOAuthRelayKey({}), "nanocodex-local-oauth-relay-hmac-v1-only");
+  assert.throws(
+    () => localOAuthRelayKey({ NANOCODEX_LOCAL_OAUTH_RELAY_HMAC_KEY: "short" }),
+    /32 through 1024/,
+  );
+  const launch = localOAuthRelayChildLaunch(
+    { PATH: "/bin", OPENAI_API_KEY: "must-not-cross" },
+    "oauth-key-with-at-least-thirty-two-characters",
+  );
+  assert.equal(launch.command, process.execPath);
+  assert.match(launch.arguments[0], /local-oauth-relay\.mjs$/);
+  assert.equal(launch.options.detached, true);
+  assert.deepEqual(launch.options.env, {
+    NANOCODEX_LOCAL_OAUTH_RELAY_HMAC_KEY: "oauth-key-with-at-least-thirty-two-characters",
+    PATH: "/bin",
+  });
+
+  let spawned = false;
+  const adopted = await ensureLocalOAuthRelay({}, {
+    fetchRelay: async (input) => {
+      const challenge = new URL(input).searchParams.get("challenge");
+      return Response.json({
+        service: "nanocodex-local-oauth-relay",
+        status: "ok",
+        version: 1,
+        proof: await localOAuthRelayChallengeProof(
+          challenge,
+          "nanocodex-local-oauth-relay-hmac-v1-only",
+        ),
+      });
+    },
+    spawnRelay: () => { spawned = true; throw new Error("must not spawn"); },
+  });
+  assert.deepEqual(adopted, { adopted: true, origin: "http://127.0.0.1:47891" });
+  assert.equal(spawned, false);
 });
 
 test("each instance state admits one owner without blocking another instance", async () => {

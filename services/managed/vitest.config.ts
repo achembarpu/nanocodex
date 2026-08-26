@@ -243,6 +243,24 @@ export default {
       const submitOutput = input.find((item) => (
         item?.type === "function_call_output" && item.call_id === "managed-submit"
       ));
+      const managedMemoryFind = input.find((item) => (
+        item?.type === "function_call_output" && item.call_id === "managed-memory-find"
+      ));
+      const managedMemoryRead = input.find((item) => (
+        item?.type === "function_call_output" && item.call_id === "managed-memory-read"
+      ));
+      const atomicStoreScan = input.find((item) => (
+        item?.type === "function_call_output" && item.call_id === "atomic-store-scan"
+      ));
+      const atomicStorePut = input.find((item) => (
+        item?.type === "function_call_output" && item.call_id === "atomic-store-put"
+      ));
+      const atomicRecallScan = input.find((item) => (
+        item?.type === "function_call_output" && item.call_id === "atomic-recall-scan"
+      ));
+      const atomicRecallRead = input.find((item) => (
+        item?.type === "function_call_output" && item.call_id === "atomic-recall-read"
+      ));
       pendingResponse = setTimeout(() => {
         pendingResponse = undefined;
         if (hostedPriorityOutput) {
@@ -403,6 +421,124 @@ export default {
                 type: "message",
                 role: "assistant",
                 content: [{ type: "output_text", text: valid ? "COMPUTER_TOOLS_OK" : "COMPUTER_TOOLS_BAD" }],
+              }],
+              usage: null,
+            },
+          }));
+          return;
+        }
+        if (atomicRecallRead) {
+          const valid = String(atomicRecallRead.output).includes("Production deploys happen on Tuesdays.");
+          server.send(JSON.stringify({
+            type: "response.completed",
+            response: {
+              id: crypto.randomUUID(),
+              status: "completed",
+              output: [{
+                type: "message",
+                role: "assistant",
+                content: [{ type: "output_text", text: valid ? "ATOMIC_MEMORY_RECALLED" : "ATOMIC_MEMORY_BAD" }],
+              }],
+              usage: null,
+            },
+          }));
+          return;
+        }
+        if (atomicRecallScan) {
+          let scanned;
+          try { scanned = JSON.parse(String(atomicRecallScan.output)); } catch {}
+          server.send(JSON.stringify({
+            type: "response.completed",
+            response: {
+              id: crypto.randomUUID(),
+              status: "completed",
+              output: [{
+                type: "function_call",
+                call_id: "atomic-recall-read",
+                name: "memory",
+                arguments: JSON.stringify({
+                  operation: "read",
+                  keys: scanned?.candidates?.[0]?.key ? [scanned.candidates[0].key] : [],
+                }),
+              }],
+              usage: null,
+            },
+          }));
+          return;
+        }
+        if (atomicStorePut) {
+          server.send(JSON.stringify({
+            type: "response.completed",
+            response: {
+              id: crypto.randomUUID(),
+              status: "completed",
+              output: [{
+                type: "message",
+                role: "assistant",
+                content: [{ type: "output_text", text: "ATOMIC_MEMORY_STORED" }],
+              }],
+              usage: null,
+            },
+          }));
+          return;
+        }
+        if (atomicStoreScan) {
+          server.send(JSON.stringify({
+            type: "response.completed",
+            response: {
+              id: crypto.randomUUID(),
+              status: "completed",
+              output: [{
+                type: "function_call",
+                call_id: "atomic-store-put",
+                name: "memory",
+                arguments: JSON.stringify({
+                  operation: "put",
+                  content: "Production deploys happen on Tuesdays.",
+                }),
+              }],
+              usage: null,
+            },
+          }));
+          return;
+        }
+        if (managedMemoryRead) {
+          const valid = String(managedMemoryRead.output).includes("COPPER_LIGHTHOUSE_MEMORY");
+          server.send(JSON.stringify({
+            type: "response.completed",
+            response: {
+              id: crypto.randomUUID(),
+              status: "completed",
+              output: [{
+                type: "message",
+                role: "assistant",
+                content: [{
+                  type: "output_text",
+                  text: valid ? "MANAGED_MEMORY_TOOLS_OK" : "MANAGED_MEMORY_TOOLS_BAD",
+                }],
+              }],
+              usage: null,
+            },
+          }));
+          return;
+        }
+        if (managedMemoryFind) {
+          let found;
+          try { found = JSON.parse(String(managedMemoryFind.output)); } catch {}
+          const hit = found?.sessions?.[0];
+          server.send(JSON.stringify({
+            type: "response.completed",
+            response: {
+              id: crypto.randomUUID(),
+              status: "completed",
+              output: [{
+                type: "function_call",
+                call_id: "managed-memory-read",
+                name: "read_session",
+                arguments: JSON.stringify({
+                  session_id: hit?.session_id,
+                  turn_ids: hit?.turn_id ? [hit.turn_id] : [],
+                }),
               }],
               usage: null,
             },
@@ -589,6 +725,60 @@ export default {
           }));
           return;
         }
+        if (text.includes("E2E_MEMORY_TOOL")) {
+          server.send(JSON.stringify({
+            type: "response.completed",
+            response: {
+              id: crypto.randomUUID(),
+              status: "completed",
+              output: [{
+                type: "function_call",
+                call_id: "managed-memory-find",
+                name: "find_sessions",
+                arguments: JSON.stringify({
+                  query: "copper lighthouse",
+                  limit: 8,
+                }),
+              }],
+              usage: null,
+            },
+          }));
+          return;
+        }
+        if (text.includes("E2E_ATOMIC_MEMORY_REMEMBER")) {
+          server.send(JSON.stringify({
+            type: "response.completed",
+            response: {
+              id: crypto.randomUUID(),
+              status: "completed",
+              output: [{
+                type: "function_call",
+                call_id: "atomic-store-scan",
+                name: "memory",
+                arguments: JSON.stringify({ operation: "scan", query: "production deploy schedule" }),
+              }],
+              usage: null,
+            },
+          }));
+          return;
+        }
+        if (text.includes("E2E_ATOMIC_MEMORY_RECALL")) {
+          server.send(JSON.stringify({
+            type: "response.completed",
+            response: {
+              id: crypto.randomUUID(),
+              status: "completed",
+              output: [{
+                type: "function_call",
+                call_id: "atomic-recall-scan",
+                name: "memory",
+                arguments: JSON.stringify({ operation: "scan", query: "Tuesday production deploy" }),
+              }],
+              usage: null,
+            },
+          }));
+          return;
+        }
         server.send(JSON.stringify({
           type: "response.completed",
           response: {
@@ -619,7 +809,9 @@ export default {
 export default defineConfig({
   plugins: [
     cloudflareTest({
-      wrangler: { configPath: "./wrangler.jsonc" },
+      // Unit/integration tests exercise the local lexical fallback. The hosted
+      // smoke suite owns the real, billable AI Search binding.
+      wrangler: { configPath: "./wrangler.test.jsonc" },
       miniflare: {
         bindings: {
           AGENT_IDLE_TIMEOUT_MS: "1000",

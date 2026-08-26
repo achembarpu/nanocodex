@@ -99,6 +99,8 @@ export function buildProductionBrokerConfig(base, { mainPath }) {
       && binding.class_name === "AgentSubjectDirectory")
     || !bindings.some((binding) => binding.name === "USER_CONNECTORS"
       && binding.class_name === "UserConnectorBroker")
+    || !bindings.some((binding) => binding.name === "MCP_CONNECTIONS"
+      && binding.class_name === "McpConnectionDirectory")
     || !bindings.some((binding) => binding.name === "CHATGPT_EGRESS"
       && binding.class_name === "ChatGptEgress"
       && binding.script_name === "nanocodex")) {
@@ -107,11 +109,13 @@ export function buildProductionBrokerConfig(base, { mainPath }) {
   const creates = base.migrations?.find((migration) => migration.tag === "v2");
   const deletes = base.migrations?.find((migration) => migration.tag === "v3");
   const connectorCreates = base.migrations?.find((migration) => migration.tag === "v4");
+  const mcpCreates = base.migrations?.find((migration) => migration.tag === "v5");
   if (!creates?.new_sqlite_classes?.includes("UserCredentialBroker")
     || !creates.new_sqlite_classes.includes("AgentSubjectDirectory")
     || !deletes?.deleted_classes?.includes("CodexOAuthBroker")
-    || !connectorCreates?.new_sqlite_classes?.includes("UserConnectorBroker")) {
-    throw new Error("production broker requires the current v2/v3/v4 DO migration chain");
+    || !connectorCreates?.new_sqlite_classes?.includes("UserConnectorBroker")
+    || !mcpCreates?.new_sqlite_classes?.includes("McpConnectionDirectory")) {
+    throw new Error("production broker requires the current v2/v3/v4/v5 DO migration chain");
   }
   return {
     ...base,

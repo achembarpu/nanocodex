@@ -10,8 +10,6 @@ import {
 } from "react";
 import { Provider, Storage, webAuthn } from "accounts";
 import { clientFailureMessage } from "./clientFailure";
-import { deploymentHealth } from "./deploymentHealth";
-import { localDevelopmentCredential } from "./localDevelopmentCredential";
 
 export type AuthenticatedAccount = Readonly<{
   id: string;
@@ -62,42 +60,17 @@ export function AccountSessionProvider({ children }: { children: ReactNode }) {
   const [operation, setOperation] = useState<AccountOperation | null>(null);
   const requestId = useRef(0);
   const refreshRequest = useRef<Promise<void> | undefined>(undefined);
-  const localClaim = useRef<Readonly<{
-    userId: string;
-    promise: Promise<void>;
-  }> | undefined>(undefined);
-
-  const claimLocalCredential = useCallback((userId: string) => {
-    if (localClaim.current?.userId === userId) return localClaim.current.promise;
-    let current!: Promise<void>;
-    current = localDevelopmentCredential.ensure(userId).then((claimed) => {
-      if (localClaim.current?.promise === current && claimed) {
-        notifyModelCredentialChanged();
-      }
-    }, () => {
-      if (localClaim.current?.promise === current) {
-        localClaim.current = undefined;
-      }
-    });
-    localClaim.current = { userId, promise: current };
-    return current;
-  }, []);
 
   const refresh = useCallback((): Promise<void> => {
     if (refreshRequest.current) return refreshRequest.current;
     const currentRequest = ++requestId.current;
     let current!: Promise<void>;
     current = getCurrentUser().then(
-      async (nextUser) => {
+      (nextUser) => {
         if (requestId.current !== currentRequest) return;
-        if (nextUser) {
-          await claimLocalCredential(nextUser.id);
-          if (requestId.current !== currentRequest) return;
-        }
         setUser(nextUser);
         setStatus("ready");
         setError(null);
-        if (!nextUser) localClaim.current = undefined;
       },
       (cause: unknown) => {
         if (requestId.current !== currentRequest) return;
@@ -109,7 +82,7 @@ export function AccountSessionProvider({ children }: { children: ReactNode }) {
     });
     refreshRequest.current = current;
     return current;
-  }, [claimLocalCredential]);
+  }, []);
 
   useEffect(() => {
     void refresh();
@@ -133,7 +106,6 @@ export function AccountSessionProvider({ children }: { children: ReactNode }) {
         : { method: "wallet_connect" });
       const nextUser = await getCurrentUser();
       if (!nextUser) throw new Error("The account session was not created.");
-      await claimLocalCredential(nextUser.id);
       requestId.current++;
       setUser(nextUser);
       setStatus("ready");
@@ -147,7 +119,7 @@ export function AccountSessionProvider({ children }: { children: ReactNode }) {
     } finally {
       setOperation(null);
     }
-  }, [accountProvider, claimLocalCredential, user]);
+  }, [accountProvider, user]);
 
   const register = useCallback(() => connect("register"), [connect]);
   const signIn = useCallback(() => connect("login"), [connect]);
@@ -157,7 +129,6 @@ export function AccountSessionProvider({ children }: { children: ReactNode }) {
     try {
       const nextUser = await getCurrentUser();
       if (!nextUser) throw new Error("The browser session was not created.");
-      await claimLocalCredential(nextUser.id);
       requestId.current++;
       setUser(nextUser);
       setStatus("ready");
@@ -166,24 +137,22 @@ export function AccountSessionProvider({ children }: { children: ReactNode }) {
     } finally {
       setOperation(null);
     }
-  }, [claimLocalCredential]);
+  }, []);
   const signOut = useCallback(async () => {
     setOperation("sign-out");
     setError(null);
     try {
       await accountProvider().request({ method: "wallet_disconnect" });
       const nextUser = await getCurrentUser();
-      if (nextUser) await claimLocalCredential(nextUser.id);
       requestId.current++;
       setUser(nextUser);
       setStatus("ready");
-      if (!nextUser) localClaim.current = undefined;
     } catch (cause) {
       setError(accountFailure(cause, "Couldn’t sign out. Try again."));
     } finally {
       setOperation(null);
     }
-  }, [accountProvider, claimLocalCredential]);
+  }, [accountProvider]);
 
   const value = useMemo<AccountSession>(() => ({
     account: user,
@@ -235,11 +204,6 @@ async function getCurrentUser(): Promise<AuthenticatedAccount | null> {
   return { id, persistent };
 }
 
-function notifyModelCredentialChanged(): void {
-  deploymentHealth.invalidate();
-  window.dispatchEvent(new Event("nanocodex:model-credential-changed"));
-}
-
 export async function responseFailure(response: Response, fallback: string): Promise<Error> {
   const body: unknown = await response.json().catch(() => undefined);
   const reason = isRecord(body) && typeof body.error === "string"
@@ -250,7 +214,7 @@ export async function responseFailure(response: Response, fallback: string): Pro
 
 function accountFailure(cause: unknown, fallback: string): string {
   if (cause instanceof DOMException && cause.name === "NotAllowedError") {
-    return "The passkey request was cancelled or timed out. Try again.";
+    return "No matching passkey was available, or the request was cancelled. Try another passkey or create a new account.";
   }
   return clientFailureMessage(cause, fallback);
 }

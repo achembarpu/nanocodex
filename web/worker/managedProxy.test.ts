@@ -35,6 +35,10 @@ test("projects only the managed product surface through one private binding", as
     "/v1/connectors/x/callback?code=code&state=state",
     "/v1/agents/agent-id/events?cursor=7",
     "/v1/rooms/room-id/ws?cursor=9",
+    "/v1/history/sessions/search",
+    "/v1/history/sessions/session-id/read",
+    "/v1/memory",
+    "/v1/organization",
   ]) {
     const request = new Request(`https://nanocodex.test${path}`, {
       headers: {

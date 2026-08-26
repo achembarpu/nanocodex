@@ -9,10 +9,15 @@ import { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
 
 import { readCodexSubscription } from "../../services/managed/scripts/codex-auth-file.mjs";
+import {
+  LOCAL_OAUTH_RELAY_ORIGIN,
+  localOAuthRelayChallengeProof,
+} from "../localOAuthRelayEnvelope.mjs";
 
 const scriptPath = fileURLToPath(import.meta.url);
 const webRoot = resolve(dirname(scriptPath), "..");
 const repositoryRoot = resolve(webRoot, "..");
+const bindingsRoot = resolve(repositoryRoot, "js/bindings");
 const reactRoot = resolve(repositoryRoot, "js/react");
 const terminalRoot = resolve(repositoryRoot, "js/terminal");
 const managedRoot = resolve(repositoryRoot, "services/managed");
@@ -20,6 +25,8 @@ const connectDialogRoot = resolve(webRoot, "connect-dialog");
 const connectPlaygroundRoot = resolve(webRoot, "connect-playground");
 const connectApiRoot = resolve(webRoot, "connect-api");
 const LOCAL_DEVELOPMENT_PUBLIC_ORIGIN = "http://nanocodex.localhost:5173";
+const localOAuthRelayScriptPath = resolve(webRoot, "scripts/local-oauth-relay.mjs");
+const DEVELOPMENT_OAUTH_RELAY_HMAC_KEY = "nanocodex-local-oauth-relay-hmac-v1-only";
 const runtimeEnvironmentNames = [
   "CI",
   "COLORTERM",
@@ -111,30 +118,45 @@ export function managedChildEnvironment(environment) {
 }
 
 export function localConnectorEnvironment(environment) {
-  return definedEnvironment({
-    NANOCODEX_LOCAL_GITHUB_OAUTH_CLIENT_ID:
-      environment.NANOCODEX_GITHUB_OAUTH_CLIENT_ID
-      ?? completeLegacyCredential(environment.GH_CLIENT_ID, environment.GH_CLIENT_SECRETS),
-    NANOCODEX_LOCAL_GITHUB_OAUTH_CLIENT_SECRET:
-      environment.NANOCODEX_GITHUB_OAUTH_CLIENT_SECRET
-      ?? completeLegacyCredential(environment.GH_CLIENT_SECRETS, environment.GH_CLIENT_ID),
-    NANOCODEX_LOCAL_GOOGLE_OAUTH_CLIENT_ID:
-      environment.NANOCODEX_GOOGLE_OAUTH_CLIENT_ID
-      ?? completeLegacyCredential(environment.GOOGLE_CLIENT_ID, environment.GOOGLE_CLIENT_SECRET),
-    NANOCODEX_LOCAL_GOOGLE_OAUTH_CLIENT_SECRET:
-      environment.NANOCODEX_GOOGLE_OAUTH_CLIENT_SECRET
-      ?? completeLegacyCredential(environment.GOOGLE_CLIENT_SECRET, environment.GOOGLE_CLIENT_ID),
-    NANOCODEX_LOCAL_X_OAUTH_CLIENT_ID:
-      environment.NANOCODEX_X_OAUTH_CLIENT_ID
-      ?? completeLegacyCredential(environment.X_CLIENT_ID, environment.X_CLIENT_SECRET),
-    NANOCODEX_LOCAL_X_OAUTH_CLIENT_SECRET:
-      environment.NANOCODEX_X_OAUTH_CLIENT_SECRET
-      ?? completeLegacyCredential(environment.X_CLIENT_SECRET, environment.X_CLIENT_ID),
-  });
+  return {
+    ...connectorEnvironmentPair(environment, {
+      explicitId: "NANOCODEX_GITHUB_OAUTH_CLIENT_ID",
+      explicitSecret: "NANOCODEX_GITHUB_OAUTH_CLIENT_SECRET",
+      fallbackId: "GH_CLIENT_ID",
+      fallbackSecret: "GH_CLIENT_SECRETS",
+      targetId: "NANOCODEX_LOCAL_GITHUB_OAUTH_CLIENT_ID",
+      targetSecret: "NANOCODEX_LOCAL_GITHUB_OAUTH_CLIENT_SECRET",
+    }),
+    ...connectorEnvironmentPair(environment, {
+      explicitId: "NANOCODEX_GOOGLE_OAUTH_CLIENT_ID",
+      explicitSecret: "NANOCODEX_GOOGLE_OAUTH_CLIENT_SECRET",
+      fallbackId: "GOOGLE_CLIENT_ID",
+      fallbackSecret: "GOOGLE_CLIENT_SECRET",
+      targetId: "NANOCODEX_LOCAL_GOOGLE_OAUTH_CLIENT_ID",
+      targetSecret: "NANOCODEX_LOCAL_GOOGLE_OAUTH_CLIENT_SECRET",
+    }),
+    ...connectorEnvironmentPair(environment, {
+      explicitId: "NANOCODEX_X_OAUTH_CLIENT_ID",
+      explicitSecret: "NANOCODEX_X_OAUTH_CLIENT_SECRET",
+      fallbackId: "X_CLIENT_ID",
+      fallbackSecret: "X_CLIENT_SECRET",
+      targetId: "NANOCODEX_LOCAL_X_OAUTH_CLIENT_ID",
+      targetSecret: "NANOCODEX_LOCAL_X_OAUTH_CLIENT_SECRET",
+    }),
+  };
 }
 
-function completeLegacyCredential(value, pair) {
-  return value?.trim() && pair?.trim() ? value.trim() : undefined;
+function connectorEnvironmentPair(environment, names) {
+  const explicit = definedEnvironment({
+    [names.targetId]: environment[names.explicitId],
+    [names.targetSecret]: environment[names.explicitSecret],
+  });
+  if (Object.keys(explicit).length > 0) return explicit;
+  const fallbackId = environment[names.fallbackId];
+  const fallbackSecret = environment[names.fallbackSecret];
+  return fallbackId && fallbackSecret
+    ? { [names.targetId]: fallbackId, [names.targetSecret]: fallbackSecret }
+    : {};
 }
 
 export async function mainWorktreeEnvironmentPath(repositoryPath = repositoryRoot) {
@@ -344,6 +366,8 @@ async function main() {
     developmentLease = await acquireLocalDevelopmentLease(statePath);
     await assertLocalDevelopmentPortAvailable(origin.hostname, origin.port);
     const toolEnvironment = buildChildEnvironment(environment);
+    const oauthRelayKey = localOAuthRelayKey(environment);
+    await ensureLocalOAuthRelay(environment, { relayKey: oauthRelayKey });
     await lifecycle.run(
       process.execPath,
       [resolve(webRoot, "scripts/check-dev-wasm.mjs")],
@@ -433,6 +457,7 @@ async function main() {
       NANOCODEX_LOCAL_CODEX_RELAY_URL: relayUrl,
       NANOCODEX_LOCAL_PUBLIC_ORIGIN: publicOrigin.origin,
       NANOCODEX_LOCAL_CONNECT_PLAYGROUND_HOST: playgroundOrigin.hostname,
+      NANOCODEX_LOCAL_OAUTH_RELAY_HMAC_KEY: oauthRelayKey,
       NANOCODEX_LOCAL_STATE_PATH: statePath,
       ...localConnectorEnvironment(environment),
     });
@@ -453,6 +478,11 @@ async function main() {
       new URL("/api/health", publicOrigin),
       [relayChild, website.child],
       (response) => verifyLocalHealthResponse(response),
+    );
+    await waitForHttp(
+      new URL("/api/connect/health", publicOrigin),
+      [relayChild, website.child],
+      verifyLocalConnectHealthResponse,
     );
 
     await lifecycle.run(process.execPath, [resolve(webRoot, "scripts/publish-repository.mjs")], {
@@ -478,7 +508,10 @@ async function main() {
     process.stderr.write(
       `Nanocodex local Workers are ready at ${publicOrigin.origin} (${instance.id}; ${head.slice(0, 7)}; `
       + "repository published; evals migrated; managed agents ready).\n"
-      + `Connect playground: ${playgroundOrigin.origin}\n`,
+      + `Account: ${new URL("/connect", publicOrigin).href}\n`
+      + `Connect playground: ${playgroundOrigin.origin}\n`
+      + `OAuth callback relay: ${LOCAL_OAUTH_RELAY_ORIGIN}\n`
+      + `CLI login: NANOCODEX_CONNECT_DEVICE_BASE_URL=${publicOrigin.origin}/v1/device nanocodex login\n`,
     );
 
     const exited = await Promise.race([relay.exit, website.exit]);
@@ -564,6 +597,84 @@ function localProcessIsAlive(pid) {
     if (error?.code === "EPERM") return true;
     throw error;
   }
+}
+
+export function localOAuthRelayKey(environment = process.env) {
+  const configured = environment.NANOCODEX_LOCAL_OAUTH_RELAY_HMAC_KEY?.trim();
+  if (configured && (configured.length < 32 || configured.length > 1_024)) {
+    throw new Error("NANOCODEX_LOCAL_OAUTH_RELAY_HMAC_KEY must contain 32 through 1024 characters");
+  }
+  return configured || DEVELOPMENT_OAUTH_RELAY_HMAC_KEY;
+}
+
+export function localOAuthRelayChildLaunch(environment, relayKey = localOAuthRelayKey(environment)) {
+  return {
+    command: process.execPath,
+    arguments: [localOAuthRelayScriptPath],
+    options: {
+      cwd: webRoot,
+      detached: true,
+      env: {
+        ...selectedEnvironment(environment, runtimeEnvironmentNames),
+        NANOCODEX_LOCAL_OAUTH_RELAY_HMAC_KEY: relayKey,
+      },
+      stdio: "ignore",
+    },
+  };
+}
+
+export async function ensureLocalOAuthRelay(
+  environment = process.env,
+  {
+    relayKey = localOAuthRelayKey(environment),
+    fetchRelay = fetch,
+    spawnRelay = spawn,
+    attempts = 100,
+  } = {},
+) {
+  const initial = await localOAuthRelayStatus(fetchRelay, relayKey);
+  if (initial === "ready") return { adopted: true, origin: LOCAL_OAUTH_RELAY_ORIGIN };
+  if (initial === "foreign") throw localOAuthRelayOccupiedError();
+  const launch = localOAuthRelayChildLaunch(environment, relayKey);
+  const child = spawnRelay(launch.command, launch.arguments, launch.options);
+  child.unref?.();
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 50));
+    const status = await localOAuthRelayStatus(fetchRelay, relayKey);
+    if (status === "ready") return { adopted: child.exitCode !== null, origin: LOCAL_OAUTH_RELAY_ORIGIN };
+    if (status === "foreign") throw localOAuthRelayOccupiedError();
+  }
+  throw new Error(`local OAuth callback relay did not become ready at ${LOCAL_OAUTH_RELAY_ORIGIN}`);
+}
+
+async function localOAuthRelayStatus(fetchRelay, relayKey) {
+  const challenge = randomBytes(32).toString("base64url");
+  const expectedProof = await localOAuthRelayChallengeProof(challenge, relayKey);
+  let response;
+  try {
+    response = await fetchRelay(
+      `${LOCAL_OAUTH_RELAY_ORIGIN}/api/oauth-callback-relay?challenge=${challenge}`,
+      {
+        signal: AbortSignal.timeout(500),
+      },
+    );
+  } catch {
+    return "absent";
+  }
+  const body = await response.json().catch(() => undefined);
+  return response.ok
+    && body?.service === "nanocodex-local-oauth-relay"
+    && body?.status === "ok"
+    && body?.version === 1
+    && body?.proof === expectedProof
+    ? "ready"
+    : "foreign";
+}
+
+function localOAuthRelayOccupiedError() {
+  return new Error(
+    `${LOCAL_OAUTH_RELAY_ORIGIN} is occupied by another service; stop that listener before starting Nanocodex`,
+  );
 }
 
 function selectedEnvironment(environment, names) {
@@ -843,6 +954,14 @@ export async function verifyLocalHealthResponse(response, authMode) {
   return true;
 }
 
+export async function verifyLocalConnectHealthResponse(response) {
+  if (!response.ok) return false;
+  const health = await response.json().catch(() => undefined);
+  return health?.mode === "live"
+    && health?.status === "ok"
+    && Object.keys(health).length === 2;
+}
+
 export async function verifyLocalModelPreconnect(
   origin,
   WebSocketImplementation,
@@ -941,6 +1060,10 @@ async function ensureLocalDependencies(environment, execute = run) {
 export function localDependencyRequirements() {
   return [
     {
+      root: bindingsRoot,
+      requiredFiles: ["node_modules/wata/package.json"],
+    },
+    {
       root: reactRoot,
       requiredFiles: ["node_modules/nanocodex/package.json"],
     },
@@ -968,7 +1091,10 @@ export function localDependencyRequirements() {
     },
     {
       root: connectApiRoot,
-      requiredFiles: ["node_modules/wrangler/bin/wrangler.js"],
+      requiredFiles: [
+        "node_modules/accounts/package.json",
+        "node_modules/wrangler/bin/wrangler.js",
+      ],
     },
     {
       root: resolve(managedRoot, "../egress"),

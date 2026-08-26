@@ -458,6 +458,7 @@ export class UserCredentialBroker extends DurableObject<BrokerEnv> {
     if (!local || this.#env.ALLOW_LOCAL_CREDENTIAL_CLAIM !== "true") {
       throw new BrokerFailure(404, "not_found");
     }
+    if (this.#credentials.chatgpt && !this.#credentials.chatgpt.deadReason) return;
     const raw = this.#env.LOCAL_CHATGPT_BOOTSTRAP?.trim();
     if (!raw) throw new BrokerFailure(503, "local_chatgpt_bootstrap_unavailable");
     let parsed: unknown;

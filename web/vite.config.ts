@@ -6,6 +6,7 @@ import { createHash } from "node:crypto";
 import { readFile, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { defineConfig, type Plugin } from "vite";
+import { rewriteConnectDialogDevModuleUrl } from "./vite/connectDialogDevModules.ts";
 import { rewriteDocsDevModuleUrl } from "./vite/docsDevModules.ts";
 import { localManagedAuxiliaryWorkers } from "./vite/localWorkerTopology.ts";
 import {
@@ -13,6 +14,7 @@ import {
   renderLinkPreviewDocument,
 } from "./worker/linkPreview.ts";
 import { isManagedRoutePath } from "./worker/managedProxy.ts";
+import { isConnectApiBrowserRoutePath } from "./worker/connectApiProxy.ts";
 
 const repositoryRoot = fileURLToPath(new URL("..", import.meta.url));
 const connectDialogIndex = new URL("./connect-dialog/index.html", import.meta.url);
@@ -139,6 +141,12 @@ function applicationRouteFallback(): Plugin {
     apply: "serve" as const,
     configureServer(vite) {
       vite.middlewares.use(async (request, response, next) => {
+        const connectDialogModuleUrl = rewriteConnectDialogDevModuleUrl(request.url);
+        if (connectDialogModuleUrl != null && (request.method === "GET" || request.method === "HEAD")) {
+          request.url = connectDialogModuleUrl;
+          next();
+          return;
+        }
         const docsModuleUrl = rewriteDocsDevModuleUrl(request.url);
         if (docsModuleUrl != null && (request.method === "GET" || request.method === "HEAD")) {
           request.url = docsModuleUrl;
@@ -151,7 +159,7 @@ function applicationRouteFallback(): Plugin {
           next();
           return;
         }
-        if (isManagedRoutePath(url.pathname)) {
+        if (isManagedRoutePath(url.pathname) || isConnectApiBrowserRoutePath(url.pathname)) {
           next();
           return;
         }
@@ -228,6 +236,7 @@ export default defineConfig({
     nanocodexTools(),
     react(),
     cloudflare({
+      inspectorPort: 0,
       auxiliaryWorkers: localManagedAuxiliaryWorkers(),
       persistState: process.env.NANOCODEX_LOCAL_STATE_PATH
         ? { path: process.env.NANOCODEX_LOCAL_STATE_PATH }
@@ -264,7 +273,14 @@ export default defineConfig({
     }),
   ],
   resolve: {
+    alias: {
+      "@nanocodex-connect": fileURLToPath(
+        new URL("./connect-dialog/src", import.meta.url),
+      ),
+    },
     dedupe: [
+      "@stripe/stripe-js",
+      "accounts",
       "react",
       "react-dom",
       "nanocodex",
@@ -278,6 +294,7 @@ export default defineConfig({
       "@tanstack/react-virtual",
       "shiki",
       "streamdown",
+      "viem",
     ],
   },
   // Local SDK packages stay live during development. Vite's persistent
@@ -296,16 +313,18 @@ export default defineConfig({
   server: {
     strictPort: true,
     allowedHosts: [".nanocodex.localhost"],
-    // The playground and application use sibling localhost hosts. Their API
-    // requests carry the account session, so Vite's preflight must opt into
-    // credentialed CORS before the request can reach the local Worker.
+    // The Connect playground calls the paired application origin with its
+    // account cookie, while the live artifact frame has an opaque `null`
+    // origin. Reflect only the local Nanocodex development authorities and
+    // explicitly permit credentials; a wildcard silently blocks the real
+    // connection POST after a successful preflight.
     cors: {
-      origin: true,
       credentials: true,
+      origin: [
+        /^http:\/\/(?:[a-z0-9-]+\.)?nanocodex\.localhost(?::\d+)?$/,
+        "null",
+      ],
     },
-    // The live artifact frame intentionally has an opaque sandbox origin. Its
-    // module graph therefore needs CORS even though it is served by this host.
-    headers: { "Access-Control-Allow-Origin": "*" },
     fs: {
       allow: [repositoryRoot],
     },

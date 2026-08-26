@@ -6,10 +6,11 @@
   "scripts": {
     "build": "tsc --noEmit && wrangler deploy --dry-run --config ./wrangler.jsonc --outdir dist",
     "deploy": "npm run build && wrangler deploy --config ./wrangler.jsonc",
-    "dev": "wrangler dev"
+    "dev": "wrangler dev",
+    "test": "node --test"
   },
   "dependencies": {
-    "accounts": "0.16.2",
+    "accounts": "0.17.0",
     "ox": "0.14.36",
     "viem": "2.55.19"
   },

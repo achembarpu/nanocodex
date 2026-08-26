@@ -8,6 +8,7 @@ import type { Env } from "../src/index";
 const testEnv = env as unknown as Env;
 const USER_ID = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
 const API_KEY = `ncx_live_${"d".repeat(12)}_${"h".repeat(43)}`;
+const ACCOUNT_SESSION = "t".repeat(43);
 const MESSAGE_TIMEOUT_MS = 20_000;
 const createdAgents = new Set<string>();
 
@@ -72,7 +73,6 @@ describe("managed Hosted Tools", () => {
     const agentId = await createAgent();
     const agent = Agent.open(agentId, {
       baseUrl: "https://example.test",
-      apiKey: API_KEY,
       toolsTransport: (target, options) => upgradeTarget(target, options),
     });
     const warmup = await authenticatedFetch(
@@ -141,7 +141,6 @@ describe("managed Hosted Tools", () => {
     const agentId = await createAgent();
     const agent = Agent.open(agentId, {
       baseUrl: "https://example.test",
-      apiKey: API_KEY,
       toolsTransport: (target, options) => upgradeTarget(target, options),
     });
     const definition = priorityCatalogEntry().definition;
@@ -275,7 +274,7 @@ function startTurn(
 }
 
 async function upgrade(endpoint: string): Promise<WebSocket> {
-  const response = await authenticatedFetch(endpoint, { headers: { upgrade: "websocket" } });
+  const response = await accountUpgrade(endpoint);
   expect(response.status).toBe(101);
   expect(response.webSocket).toBeTruthy();
   response.webSocket!.accept();
@@ -286,12 +285,10 @@ async function upgradeTarget(
   target: URL,
   options: Readonly<{ headers?: Readonly<Record<string, string>>; credentials?: "include" }>,
 ): Promise<WebSocket> {
-  expect(options).toEqual({ headers: { authorization: `Bearer ${API_KEY}` } });
+  expect(options).toEqual({ credentials: "include" });
   const endpoint = new URL(target);
   endpoint.protocol = endpoint.protocol === "wss:" ? "https:" : "http:";
-  const headers = new Headers(options.headers);
-  headers.set("upgrade", "websocket");
-  const response = await SELF.fetch(new Request(endpoint, { headers }));
+  const response = await accountUpgrade(endpoint);
   expect(response.status).toBe(101);
   expect(response.webSocket).toBeTruthy();
   response.webSocket!.accept();
@@ -360,6 +357,13 @@ async function seedApiKey(): Promise<void> {
     body: JSON.stringify({ id: USER_ID, persistent: true }),
   });
   expect(provisioned.ok).toBe(true);
+  const accountRecord = await provisioned.json<{ organizationId: string }>();
+  await seedPasskeySession();
+  const organization = await testEnv.NANOCODEX_ORGANIZATIONS.getByName(
+    accountRecord.organizationId,
+  ).fetch("https://organization.internal/metadata");
+  expect(organization.ok).toBe(true);
+  const metadata = await organization.json<{ rootTeam: { id: string } }>();
   const key = testEnv.NANOCODEX_API_KEYS.getByName(digest);
   await key.fetch("https://api-key.internal/record", { method: "DELETE" });
   const record = await key.fetch("https://api-key.internal/record", {
@@ -372,7 +376,57 @@ async function seedApiKey(): Promise<void> {
       createdAt: Date.now(),
       digest,
       userId: USER_ID,
+      organizationId: accountRecord.organizationId,
+      teamId: metadata.rootTeam.id,
+      role: "owner",
+      authorizationEpoch: 1,
+      capabilities: [
+        "agents:read",
+        "agents:write",
+        "api_keys:read",
+        "api_keys:write",
+        "history:read",
+        "memory:read",
+        "memory:write",
+        "tools:use",
+        "organization:read",
+        "organization:write",
+      ],
     }),
   });
   expect(record.status).toBe(201);
+}
+
+async function accountUpgrade(endpoint: string | URL): Promise<Response> {
+  return SELF.fetch(endpoint, {
+    headers: {
+      cookie: `nanocodex_account=${ACCOUNT_SESSION}`,
+      origin: "https://example.test",
+      upgrade: "websocket",
+    },
+  });
+}
+
+async function seedPasskeySession(): Promise<void> {
+  const encodedUserId = btoa(USER_ID).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
+  const now = Math.floor(Date.now() / 1_000);
+  const auth = testEnv.NANOCODEX_AUTH.getByName("webauthn");
+  const stored = await auth.fetch(
+    `https://do.invalid/set?key=${encodeURIComponent(`session:${ACCOUNT_SESSION}`)}`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        value: {
+          credentialId: "hosted-tools-test-credential",
+          publicKey: "0x01",
+          userId: encodedUserId,
+          issuedAt: now,
+          expiresAt: now + 60,
+        },
+        ttl: 60,
+      }),
+    },
+  );
+  expect(stored.ok).toBe(true);
 }

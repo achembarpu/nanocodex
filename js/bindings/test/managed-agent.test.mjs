@@ -7,6 +7,149 @@ const origin = "https://managed.example";
 const agentId = "0198d3f0-8844-7000-8000-000000000001";
 const apiKey = `ncx_live_${"a".repeat(12)}_${"b".repeat(43)}`;
 
+test("managed memory sends account-level operations with API-key auth and freezes typed results", async () => {
+  const key = { id: 7, version: 2 };
+  const record = {
+    key,
+    content: "Deploy on Tuesdays",
+    created_at_ms: 10,
+    updated_at_ms: 20,
+    last_scanned_at_ms: 21,
+    scan_count: 2,
+    last_used_at_ms: null,
+    use_count: 0,
+    probation_until_ms: 30,
+  };
+  const operations = [];
+  const fetch = async (input, init) => {
+    const request = new Request(input, init);
+    assert.equal(new URL(request.url).pathname, "/v1/memory");
+    assert.equal(request.method, "POST");
+    assert.equal(request.credentials, "omit");
+    assert.equal(request.headers.get("authorization"), `Bearer ${apiKey}`);
+    const operation = await request.json();
+    operations.push(operation);
+    if (operation.operation === "scan") {
+      return Response.json({
+        operation: "scan",
+        abstained: false,
+        candidates: [{ key, preview: "Deploy on Tuesdays", score: 1.25 }],
+      });
+    }
+    if (operation.operation === "read") {
+      return Response.json({ operation: "read", memories: [record] });
+    }
+    if (operation.operation === "put") {
+      return Response.json({ operation: "put", memory: record, replaced: true });
+    }
+    return Response.json({ operation: "delete", key });
+  };
+  const options = { baseUrl: origin, apiKey, fetch };
+
+  const scanned = await Agent.memory({ operation: "scan", query: "deploy", limit: 1 }, options);
+  const read = await Agent.memory({ operation: "read", keys: [key] }, options);
+  const put = await Agent.memory({
+    operation: "put",
+    content: "Deploy on Tuesdays",
+    replace: key,
+  }, options);
+  const deleted = await Agent.memory({ operation: "delete", key }, options);
+
+  assert.deepEqual(operations, [
+    { operation: "scan", query: "deploy", limit: 1 },
+    { operation: "read", keys: [key] },
+    { operation: "put", content: "Deploy on Tuesdays", replace: key },
+    { operation: "delete", key },
+  ]);
+  assert.equal(scanned.candidates[0].key.version, 2);
+  assert.equal(read.memories[0].content, "Deploy on Tuesdays");
+  assert.equal(put.replaced, true);
+  assert.deepEqual(deleted.key, key);
+  for (const value of [scanned, scanned.candidates, scanned.candidates[0], scanned.candidates[0].key,
+    read, read.memories, read.memories[0], read.memories[0].key, put, put.memory, deleted, deleted.key]) {
+    assert.equal(Object.isFrozen(value), true);
+  }
+});
+
+test("managed memory validates operations and rejects malformed server records", async () => {
+  const options = {
+    baseUrl: origin,
+    apiKey,
+    fetch: async () => Response.json({
+      operation: "read",
+      memories: [{ key: { id: 1, version: 1 }, content: "incomplete" }],
+    }),
+  };
+  await assert.rejects(
+    Agent.memory({ operation: "scan", query: " ", limit: 1 }, options),
+    /query must be 1-512 UTF-8 bytes/,
+  );
+  await assert.rejects(
+    Agent.memory({ operation: "delete", key: { id: 0, version: 1 } }, options),
+    /positive safe integers/,
+  );
+  await assert.rejects(
+    Agent.memory({ operation: "read", keys: [{ id: 1, version: 1 }] }, options),
+    (error) => error instanceof ManagedError && error.code === "invalid_response",
+  );
+});
+
+test("managed organization reads and updates frozen metadata without client-side auth policy", async () => {
+  const organizationId = "11111111-1111-4111-8111-111111111111";
+  const teamId = "22222222-2222-4222-8222-222222222222";
+  const requests = [];
+  const fetch = async (input, init) => {
+    const request = new Request(input, init);
+    requests.push(request);
+    const name = request.method === "PATCH" ? (await request.json()).name : null;
+    return Response.json({
+      id: organizationId,
+      name,
+      rootTeam: { id: teamId, name: null },
+      authorizationEpoch: 3,
+      createdAt: 10,
+      updatedAt: 20,
+    });
+  };
+  const browserOptions = { baseUrl: origin, fetch };
+  const current = await Agent.getOrganization(browserOptions);
+  const updated = await Agent.updateOrganization({ name: "Research" }, browserOptions);
+
+  assert.equal(current.name, null);
+  assert.equal(updated.name, "Research");
+  assert.equal(Object.isFrozen(current), true);
+  assert.equal(Object.isFrozen(current.rootTeam), true);
+  assert.deepEqual(requests.map((request) => [request.method, request.credentials]), [
+    ["GET", "include"],
+    ["PATCH", "include"],
+  ]);
+
+  let apiKeyRequest;
+  await assert.rejects(Agent.updateOrganization({ name: null }, {
+    baseUrl: origin,
+    apiKey,
+    fetch: async (input, init) => {
+      apiKeyRequest = new Request(input, init);
+      return Response.json({ error: "forbidden" }, { status: 403 });
+    },
+  }), (error) => error instanceof ManagedError && error.code === "forbidden" && error.status === 403);
+  assert.equal(apiKeyRequest.method, "PATCH");
+  assert.equal(apiKeyRequest.headers.get("authorization"), `Bearer ${apiKey}`);
+});
+
+test("managed organization validates updates and response shape", async () => {
+  const options = {
+    baseUrl: origin,
+    fetch: async () => Response.json({ id: "not-a-uuid" }),
+  };
+  await assert.rejects(Agent.updateOrganization({ name: "x".repeat(121) }, options), /at most 120/);
+  await assert.rejects(Agent.updateOrganization({ label: "Research" }, options), /does not accept label/);
+  await assert.rejects(
+    Agent.getOrganization(options),
+    (error) => error instanceof ManagedError && error.code === "invalid_response",
+  );
+});
+
 test("managed account clients expose findSessions and readSession over the same bearer", async () => {
   assert.equal("searchHistory" in Agent, false);
   assert.equal("findThreads" in Agent, false);
@@ -639,7 +782,7 @@ test("prompts and a watcher multiplex one active managed event request without s
     id: `turn-${number}`,
     final_message: `done ${number}`,
     usage: null,
-    citations: [],
+    ...(number === 1 ? {} : { citations: [] }),
   })).join(""));
 
   const completed = await Promise.all(results);

@@ -415,7 +415,7 @@ function PermissionBuilder({ disabled, onChange, request }: Readonly<{
           {connectors.map((item) => (
             <label key={item.id} title={item.required ? "Required to run this embedded agent" : item.label}>
               <input
-                checked={request.connectors[item.id]}
+                checked={request.connectors[item.id] === true}
                 disabled={disabled || item.required}
                 onChange={(event) => {
                   const connectors = { ...request.connectors };

@@ -9,9 +9,14 @@ import {
   type ConnectorBrokerEnv,
 } from "./connector-broker";
 import { canonicalConnectorPath } from "./connector-path";
+import {
+  McpConnectionDirectory,
+  validMcpConnectionMaterialization,
+} from "./mcp-connection-owner";
 
 export { AgentSubjectDirectory, UserCredentialBroker } from "./broker";
 export { UserConnectorBroker } from "./connector-broker";
+export { McpConnectionDirectory } from "./mcp-connection-owner";
 
 const SUBJECT_DIRECTORY_PREFIX = "agent-subject-v1:";
 const READINESS_SUBJECT_DIRECTORY_NAME = "agent-subject-readiness-v1";
@@ -27,6 +32,15 @@ const MAX_MODEL_BODY_BYTES = 32 * 1024 * 1024;
 const CODEX_ATTESTATION_UNAVAILABLE = '{"v":1,"s":1}';
 const REDIRECT_STATUS = new Set([301, 302, 303, 307, 308]);
 const CONNECTOR_METHODS = new Set(["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"]);
+const RELAY_CAPABILITY_PATH = /^\/v1\/[A-Za-z0-9_-]{43,}$/;
+const RELAY_HTTP_ROUTES: Readonly<Record<ModelOperation["id"], string | undefined>> = {
+  responses: undefined,
+  search: "codex-web-search",
+  "image-generation": "codex-image-generation",
+  "image-edit": "codex-image-edit",
+  "realtime-call": undefined,
+  "realtime-sideband": undefined,
+};
 
 type ConnectorOperation = Readonly<{
   id: "github" | "gmail" | "gdrive" | "x";
@@ -67,6 +81,7 @@ export interface EgressEnv extends BrokerEnv, ConnectorBrokerEnv {
   USER_CREDENTIALS: DurableObjectNamespace<UserCredentialBroker>;
   USER_CONNECTORS: DurableObjectNamespace<UserConnectorBroker>;
   AGENT_SUBJECTS: DurableObjectNamespace<AgentSubjectDirectory>;
+  MCP_CONNECTIONS: DurableObjectNamespace<McpConnectionDirectory>;
   CHATGPT_EGRESS?: DurableObjectNamespace;
   CODEX_RELAY_URL?: string;
   ALLOW_INSECURE_LOOPBACK_RELAY?: string;
@@ -157,6 +172,10 @@ export async function handleEgress(
   try { url = new URL(request.url); } catch { return jsonError(400, "invalid_url"); }
   if (url.username || url.password || url.hash) return jsonError(403, "destination_denied");
 
+  const mcpConnection = mcpConnectionId(url);
+  if (mcpConnection) {
+    return handleMcpEgress(request, url, mcpConnection, env, started);
+  }
   const connector = connectorOperation(url);
   if (connector) return handleConnectorEgress(request, url, connector, env, started);
   if (url.search) return jsonError(403, "destination_denied");
@@ -259,6 +278,67 @@ export async function handleEgress(
   }
 }
 
+async function handleMcpEgress(
+  request: Request,
+  url: URL,
+  connectionId: string,
+  env: EgressEnv,
+  started: number,
+): Promise<Response> {
+  if (!CONNECTOR_METHODS.has(request.method)) {
+    return auditedError(403, "method_denied", request, url, "mcp", started);
+  }
+  const subject = request.headers.get(SUBJECT_HEADER);
+  if (!subject || !SUBJECT.test(subject)) {
+    return auditedError(403, "agent_subject_required", request, url, "mcp", started);
+  }
+  if (request.headers.has("authorization") || request.headers.has("cookie")
+    || request.headers.has("proxy-authorization")) {
+    return auditedError(403, "caller_credential_forbidden", request, url, "mcp", started);
+  }
+  try {
+    const userId = await resolveSubject(env, subject);
+    const owner = await resolveMcpConnectionOwner(env, connectionId);
+    if (owner !== userId) {
+      return auditedError(403, "mcp_connection_owner_mismatch", request, url, "mcp", started);
+    }
+    const headers = new Headers();
+    for (const name of [
+      "accept",
+      "content-type",
+      "mcp-protocol-version",
+      "mcp-session-id",
+      "last-event-id",
+    ]) {
+      const value = request.headers.get(name);
+      if (value !== null) headers.set(name, value);
+    }
+    const response = await connectorBroker(env, userId).fetch(new Request(
+      `https://mcp-connections.internal/v1/connections/${connectionId}/proxy`,
+      {
+        method: request.method,
+        headers,
+        ...(request.method === "GET" || request.method === "HEAD" || request.body === null
+          ? {}
+          : { body: request.body }),
+      },
+    ));
+    audit(response.status >= 500 ? "error" : response.status >= 400 ? "deny" : "allow",
+      request, url, "mcp", started, { status: response.status });
+    return response;
+  } catch (error) {
+    const problem = egressFailure(error);
+    return auditedError(problem.status, problem.code, request, url, "mcp", started);
+  }
+}
+
+function mcpConnectionId(url: URL): string | undefined {
+  if (url.protocol !== "https:" || url.hostname !== "mcp.internal" || url.port || url.search) {
+    return undefined;
+  }
+  return url.pathname.match(/^\/v1\/connections\/([A-Za-z0-9_-]{43})$/)?.[1];
+}
+
 async function handleConnectorEgress(
   request: Request,
   url: URL,
@@ -332,6 +412,43 @@ async function handleControl(request: Request, url: URL, env: EgressEnv): Promis
         body: JSON.stringify({ subject: subjectMatch[1], user_id: userId }),
       },
     );
+  }
+
+  const mcpMatch = url.pathname.match(
+    /^\/users\/([A-Za-z0-9][A-Za-z0-9._:-]{0,127})\/mcp-connections(?:\/([A-Za-z0-9_-]{43})(?:\/(start|callback))?)?$/,
+  );
+  if (mcpMatch) {
+    const userId = mcpMatch[1]!;
+    const connectionId = mcpMatch[2];
+    const operation = mcpMatch[3];
+    const allowed = (!connectionId && !operation && request.method === "GET")
+      || (connectionId && !operation
+        && (request.method === "GET" || request.method === "PUT" || request.method === "DELETE"))
+      || (connectionId && (operation === "start" || operation === "callback")
+        && request.method === "POST");
+    if (!allowed) return jsonError(405, "method_not_allowed");
+    let forwardedBody: BodyInit | null = request.body;
+    if (connectionId && request.method === "PUT") {
+      const body = await readJson(request, MAX_CONTROL_BODY_BYTES);
+      if (!validMcpConnectionMaterialization(body)) return jsonError(400, "invalid_request");
+      const ownershipFailure = await bindMcpConnectionOwner(env, connectionId, userId);
+      if (ownershipFailure) return ownershipFailure;
+      forwardedBody = new TextEncoder().encode(JSON.stringify(body));
+    } else if (connectionId) {
+      const owner = await resolveMcpConnectionOwner(env, connectionId);
+      if (owner === undefined) return jsonError(404, "mcp_connection_not_found");
+      if (owner !== userId) return jsonError(403, "mcp_connection_owner_mismatch");
+    }
+    const target = connectionId
+      ? `https://mcp-connections.internal/v1/connections/${connectionId}${operation ? `/${operation}` : ""}`
+      : "https://mcp-connections.internal/v1/connections";
+    return connectorBroker(env, userId).fetch(target, {
+      method: request.method,
+      ...(forwardedBody === null ? {} : {
+        headers: { "content-type": request.headers.get("content-type") ?? "" },
+        body: forwardedBody,
+      }),
+    });
   }
 
   const connectorMatch = url.pathname.match(
@@ -440,8 +557,11 @@ async function hasRequestPayload(request: Request): Promise<boolean> {
   if (request.body === null) return false;
   const reader = request.body.getReader();
   try {
-    const { done } = await reader.read();
-    return !done;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) return false;
+      if (value.byteLength > 0) return true;
+    }
   } finally {
     await reader.cancel().catch(() => {});
     reader.releaseLock();
@@ -531,13 +651,20 @@ function upstreamUrl(
   const publicRelay = relay.protocol === "https:" && !relay.port;
   const localRelay = env.ALLOW_INSECURE_LOOPBACK_RELAY === "true"
     && relay.protocol === "http:" && relay.hostname === "127.0.0.1" && Boolean(relay.port);
-  if ((!publicRelay && !localRelay) || relay.username || relay.password || relay.pathname !== "/"
-    || relay.search || relay.hash) {
+  const capabilityRelay = RELAY_CAPABILITY_PATH.test(relay.pathname);
+  if ((!publicRelay && !localRelay) || relay.username || relay.password
+    || (relay.pathname !== "/" && !capabilityRelay) || relay.search || relay.hash) {
     throw new EgressFailure(503, "invalid_codex_relay_url");
   }
-  const target = new URL(operation.chatgpt);
-  relay.pathname = target.pathname;
-  relay.search = target.search;
+  if (!capabilityRelay) {
+    const target = new URL(operation.chatgpt);
+    relay.pathname = target.pathname;
+    relay.search = target.search;
+  } else if (!operation.websocket) {
+    const httpRoute = RELAY_HTTP_ROUTES[operation.id];
+    if (!httpRoute) throw new EgressFailure(503, "invalid_codex_relay_url");
+    relay.pathname = `${relay.pathname}/http/${httpRoute}`;
+  }
   return relay;
 }
 
@@ -586,6 +713,52 @@ async function resolveSubject(env: EgressEnv, subject: string): Promise<string> 
   if (!response.ok) {
     await readBoundedText(response, MAX_BROKER_RESPONSE_BYTES);
     throw new EgressFailure(response.status === 404 ? 403 : 503, "agent_subject_unavailable");
+  }
+  return subjectUser(response);
+}
+
+async function bindMcpConnectionOwner(
+  env: EgressEnv,
+  connectionId: string,
+  userId: string,
+): Promise<Response | undefined> {
+  const response = await env.MCP_CONNECTIONS.getByName(connectionId).fetch(
+    "https://mcp-directory.internal/v1/bind",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: connectionId, user_id: userId }),
+    },
+  );
+  if (response.ok) {
+    await cancelResponseBody(response);
+    return undefined;
+  }
+  await readBoundedText(response, MAX_BROKER_RESPONSE_BYTES);
+  return response.status === 409
+    ? jsonError(409, "mcp_connection_owner_mismatch")
+    : jsonError(503, "mcp_connection_directory_unavailable");
+}
+
+async function resolveMcpConnectionOwner(
+  env: EgressEnv,
+  connectionId: string,
+): Promise<string | undefined> {
+  const response = await env.MCP_CONNECTIONS.getByName(connectionId).fetch(
+    "https://mcp-directory.internal/v1/resolve",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: connectionId }),
+    },
+  );
+  if (response.status === 404) {
+    await cancelResponseBody(response);
+    return undefined;
+  }
+  if (!response.ok) {
+    await readBoundedText(response, MAX_BROKER_RESPONSE_BYTES);
+    throw new EgressFailure(503, "mcp_connection_directory_unavailable");
   }
   return subjectUser(response);
 }
@@ -736,7 +909,8 @@ function audit(
   started: number,
   detail: Record<string, unknown>,
 ): void {
-  const connector = rule === "github" || rule === "gmail" || rule === "gdrive";
+  const connector = rule === "github" || rule === "gmail" || rule === "gdrive"
+    || rule === "x" || rule === "mcp";
   console.log(JSON.stringify({
     type: "egress.request",
     action,

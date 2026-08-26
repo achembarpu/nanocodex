@@ -272,6 +272,169 @@ export default defineConfig({
               },
             });
           }
+          if (["mcp-fixture.nanocodex.dev", "mcp.linear.app", "mcp-standard.nanocodex.dev"].includes(url.hostname)
+            && request.method === "GET" && url.pathname === "/mcp") {
+            const authorization = request.headers.get("authorization");
+            if (!authorization) {
+              if (url.hostname === "mcp-standard.nanocodex.dev") {
+                return Response.json({ error: "method_not_allowed" }, { status: 405 });
+              }
+              return new Response(null, {
+                status: 401,
+                headers: {
+                  "www-authenticate": `Bearer resource_metadata="${url.origin}/.well-known/oauth-protected-resource/mcp"`,
+                },
+              });
+            }
+            if (authorization === "Bearer mcp-stale-access") {
+              return Response.json({ error: "expired" }, { status: 401 });
+            }
+            const lastEventId = request.headers.get("last-event-id");
+            if (lastEventId === "reflect-header") {
+              return new Response("blocked", {
+                headers: {
+                  "content-type": "text/event-stream",
+                  "mcp-session-id": "mcp-access-token",
+                },
+              });
+            }
+            if (lastEventId === "reflect-status") {
+              return new Response("safe", { status: 299, statusText: "mcp-access-token" });
+            }
+            if (lastEventId === "reflect-body") {
+              const encoder = new TextEncoder();
+              return new Response(new ReadableStream({
+                start(controller) {
+                  controller.enqueue(encoder.encode('{"secret":"mcp-'));
+                  controller.enqueue(encoder.encode('access-token"}'));
+                  controller.close();
+                },
+              }), { headers: { "content-type": "application/json" } });
+            }
+            return Response.json({
+              authorized: authorization === "Bearer mcp-refreshed-access"
+                ? "refreshed"
+                : "connected",
+              method: request.method,
+              accept: request.headers.get("accept"),
+              content_type: request.headers.get("content-type"),
+              protocol_version: request.headers.get("mcp-protocol-version"),
+              session_id: request.headers.get("mcp-session-id"),
+              last_event_id: lastEventId,
+              caller_header: request.headers.get("x-should-not-forward"),
+              body: request.body ? await request.text() : null,
+            }, {
+              headers: {
+                "mcp-session-id": "upstream-session",
+                "retry-after": "3",
+                "x-should-not-forward": "upstream-private",
+              },
+            });
+          }
+          if (["mcp-fixture.nanocodex.dev", "mcp.linear.app", "mcp-standard.nanocodex.dev"].includes(url.hostname)
+            && request.method === "POST" && url.pathname === "/mcp") {
+            const authorization = request.headers.get("authorization");
+            if (authorization === "Bearer mcp-stale-access") {
+              return Response.json({ error: "expired" }, { status: 401 });
+            }
+            if (request.headers.get("last-event-id") === "reflect-old-body") {
+              return Response.json({ reflected: "mcp-stale-access" });
+            }
+            return Response.json({
+              authorized: authorization === "Bearer mcp-refreshed-access"
+                ? "refreshed"
+                : "connected",
+              method: request.method,
+              accept: request.headers.get("accept"),
+              content_type: request.headers.get("content-type"),
+              protocol_version: request.headers.get("mcp-protocol-version"),
+              session_id: request.headers.get("mcp-session-id"),
+              last_event_id: request.headers.get("last-event-id"),
+              caller_header: request.headers.get("x-should-not-forward"),
+              body: request.body ? await request.text() : null,
+            }, {
+              headers: {
+                "mcp-session-id": "upstream-session",
+                "retry-after": "3",
+                "x-should-not-forward": "upstream-private",
+              },
+            });
+          }
+          if (["mcp-fixture.nanocodex.dev", "mcp.linear.app", "mcp-standard.nanocodex.dev"].includes(url.hostname)
+            && request.method === "DELETE" && url.pathname === "/mcp") {
+            return new Response(null, { status: 204, headers: { "mcp-session-id": "deleted" } });
+          }
+          if (["mcp-fixture.nanocodex.dev", "mcp.linear.app", "mcp-standard.nanocodex.dev"].includes(url.hostname)
+            && request.method === "GET"
+            && url.pathname === "/.well-known/oauth-protected-resource/mcp") {
+            return Response.json({
+              resource: `${url.origin}/mcp`,
+              authorization_servers: ["https://mcp-auth.nanocodex.dev"],
+              scopes_supported: ["read", "write"],
+            });
+          }
+          if (url.hostname === "mcp-auth.nanocodex.dev" && request.method === "GET"
+            && url.pathname === "/.well-known/oauth-authorization-server") {
+            return Response.json({
+              issuer: "https://mcp-auth.nanocodex.dev/",
+              authorization_endpoint: "https://mcp-auth.nanocodex.dev/authorize",
+              token_endpoint: "https://mcp-auth.nanocodex.dev/token",
+              registration_endpoint: "https://mcp-auth.nanocodex.dev/register",
+              revocation_endpoint: "https://mcp-auth.nanocodex.dev/revoke",
+              code_challenge_methods_supported: ["S256"],
+              scopes_supported: ["read", "write"],
+            });
+          }
+          if (url.hostname === "mcp-auth.nanocodex.dev" && request.method === "POST"
+            && url.pathname === "/register") {
+            const registration = await request.json() as Record<string, unknown>;
+            return registration.token_endpoint_auth_method === "none"
+              ? Response.json({
+                  client_id: "mcp-dynamic-client",
+                  client_secret: "mcp-dynamic-secret",
+                  token_endpoint_auth_method: "client_secret_post",
+                }, { status: 201 })
+              : Response.json({ error: "invalid_client_metadata" }, { status: 400 });
+          }
+          if (url.hostname === "mcp-auth.nanocodex.dev" && request.method === "POST"
+            && url.pathname === "/token") {
+            const body = await request.formData();
+            if (body.get("client_id") !== "mcp-dynamic-client"
+              || body.get("client_secret") !== "mcp-dynamic-secret"
+              || body.get("resource") === null) {
+              return Response.json({ error: "invalid_client" }, { status: 401 });
+            }
+            if (body.get("grant_type") === "refresh_token") {
+              return body.get("refresh_token") === "mcp-refresh-token"
+                ? Response.json({
+                    access_token: "mcp-refreshed-access",
+                    refresh_token: "mcp-refresh-rotated",
+                    token_type: "Bearer",
+                    expires_in: 3_600,
+                    scope: "read",
+                  })
+                : Response.json({ error: "invalid_grant" }, { status: 400 });
+            }
+            if (!body.get("code_verifier") || body.get("redirect_uri") === null) {
+              return Response.json({ error: "invalid_grant" }, { status: 400 });
+            }
+            return Response.json({
+              access_token: body.get("code") === "refresh-once"
+                ? "mcp-stale-access"
+                : "mcp-access-token",
+              refresh_token: "mcp-refresh-token",
+              token_type: "Bearer",
+              expires_in: 3_600,
+              scope: "read",
+            });
+          }
+          if (url.hostname === "mcp-auth.nanocodex.dev" && request.method === "POST"
+            && url.pathname === "/revoke") {
+            const body = await request.formData();
+            return body.get("token")
+              ? new Response(null, { status: 200 })
+              : Response.json({ error: "invalid_request" }, { status: 400 });
+          }
           if (request.method === "POST" && url.pathname.endsWith("/deviceauth/usercode")) {
             return Response.json({
               device_auth_id: "device-secret",

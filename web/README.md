@@ -67,15 +67,24 @@ while the existing surfaces are recomposed incrementally.
 
 ## Development
 
-Local development uses `http://nanocodex.localhost:<development-port>` in the
-primary checkout and a deterministic
-`http://<worktree>.nanocodex.localhost:<development-port>` origin in each linked
-worktree. The reserved `.localhost` domain is a browser secure context and
-requires no Docker gateway, DNS integration, certificate, or public tunnel.
-Every checkout validates its exact browser origin while using the shared
-`nanocodex.localhost` RP ID. A tamper-evident public credential record lets an
-isolated worktree Worker verify the same passkey without sharing or concurrently
-opening another Wrangler process's state files.
+Local development is ordinary loopback HTTP. It needs Node and the repository
+toolchain, not OrbStack, Docker, local TLS, or `.local` DNS. The primary checkout
+runs at `http://nanocodex.localhost:5173`; worktrees receive a deterministic
+single-label `.nanocodex.localhost` host and isolated port. Browsers treat the
+reserved `.localhost` domain as a secure context.
+
+All instances use WebAuthn RP ID `nanocodex.localhost`. A signed HttpOnly
+parent-domain record containing only public passkey metadata lets a fresh,
+isolated worktree verify the same credential without sharing mutable
+Wrangler/Miniflare state. Exact origin, challenge, credential, and signature
+checks remain local to each instance.
+
+Provider OAuth applications register the four fixed
+`http://127.0.0.1:47891/v1/connectors/<provider>/callback` URLs. A standalone
+stateless relay verifies a ten-minute HMAC-authenticated routing envelope and
+returns the browser to a fixed callback path on the initiating worktree. The
+OAuth relay HMAC key is separate from passkey portability. Original broker
+state, PKCE, code exchange, and provider credentials remain private.
 
 ```bash
 cd web
@@ -87,7 +96,8 @@ That one command owns the complete production-shaped local stack. It asks the
 canonical incremental Rust/WASM builder to validate its exact source/tool
 fingerprint and repairs missing, malformed, or stale bindings. On the first run
 it also prepares missing Worker dependencies, applies the local D1 migrations,
-starts the website Worker, and publishes the current committed Git `HEAD`
+starts the website, managed, egress, and Connect API Workers in one local
+Cloudflare session, and publishes the current committed Git `HEAD`
 through the real repository publisher into local R2 and the repository Durable
 Object. It reports ready only after a generation-pinned Source blob, commit
 metadata and page, patch, Evals, and the read-only `/git` advertisement all
@@ -102,6 +112,20 @@ Set `NANOCODEX_DEV_INSTANCE=<name>` to pin an explicit instance name, or
 `NANOCODEX_DEV_ORIGIN=http://127.0.0.1:<port>` to resolve a rare deterministic
 port collision. Startup prints both the app and Connect playground URLs for the
 instance. Ordinary shutdown retains that instance's state.
+
+The launcher verifies Connect through the exact `.localhost` authority and
+prints the Account page, playground, relay, and CLI command when ready:
+
+```bash
+NANOCODEX_CONNECT_DEVICE_BASE_URL=http://nanocodex.localhost:5173/v1/device nanocodex login
+NANOCODEX_CONNECT_DEVICE_BASE_URL=http://nanocodex.localhost:5173/v1/device nanocodex connect github
+```
+
+The printed browser URL is the supported exact device authority for
+host-managed browser verification. Its host remains under the shared
+`nanocodex.localhost` WebAuthn RP ID. Do not substitute `127.0.0.1`, another
+Wrangler port, or a standalone Connect dialog: those change the account and
+WebAuthn boundary being tested.
 
 The orchestrator loads the main worktree's root `.env` once before it selects
 auth or starts a child, including when an agent launches the stack from a linked
@@ -346,9 +370,9 @@ Run `npm run bench:dataset` in `js/bindings` for the deterministic 100,000-row
 Snappy Parquet/JSONL browser-path benchmark. It reports cold and repeated query
 latency, pulled bytes, range requests, scanned rows, and cache hits.
 
-Development runs on the stable `nanocodex.localhost` origin printed at startup.
-Provider credentials remain behind Worker Service Bindings and never enter that
-browser origin.
+Development runs on the isolated `.nanocodex.localhost` origin printed at
+startup. Provider credentials remain behind Worker Service Bindings and never
+enter that browser origin.
 
 Local development reads the optional ignored `.env` from the main Git worktree
 through the repository workflow. BYOK uses the `BYOK_SESSIONS` Durable Object

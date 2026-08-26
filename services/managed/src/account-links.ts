@@ -1,16 +1,25 @@
 import { Kv } from "accounts/server";
 
 import {
+  authenticate,
   authenticatePersistentAccount,
+  authenticatePersistentPasskeyAccount,
   isUserId,
+  requireSameOriginMutation,
   type AccountAuthEnv,
 } from "./account-auth";
 
 const CONNECT_DIALOG_ORIGIN = "https://nanocodex.gakonst.workers.dev";
 const CONNECT_APP_ID = "atlas-workspace";
+const HOSTED_CONNECT_APP_ID = "nanocodex-cli";
+const HOSTED_CONNECT_APP_ORIGIN = "https://cli.nanocodex.xyz";
+const HOSTED_MPP_RESOURCE = "urn:nanocodex:mpp:machusd:spend";
 const INTERNAL_ORIGIN = "https://nanocodex.internal";
 const NANOCODEX_ORIGIN = "https://nanocodex.gakonst.workers.dev";
 const AUTHORIZATION_TTL_SECONDS = 5 * 60;
+const MAX_HOSTED_AUTHORIZATION_BYTES = 20 * 1_024;
+const MAX_HOSTED_RESOURCES = 32;
+const MAX_HOSTED_RESOURCE_BYTES = 512;
 const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
 const OPAQUE_TOKEN = /^[A-Za-z0-9_-]{43}$/;
 
@@ -26,6 +35,14 @@ type AuthorizationCode = Readonly<{
   accountAddress: string;
   appId: string;
   state: string;
+  userId: string;
+}>;
+
+type HostedAuthorizationCode = Readonly<{
+  accountAddress: string;
+  appId: typeof HOSTED_CONNECT_APP_ID;
+  appOrigin: typeof HOSTED_CONNECT_APP_ORIGIN;
+  resources: readonly string[];
   userId: string;
 }>;
 
@@ -47,7 +64,15 @@ export async function routeAccountLinkRequest(
     if (url.pathname === "/connect/account-links/exchange") {
       return exchangeAuthorizationCode(request, env);
     }
+    if (url.pathname === "/connect/hosted-authorizations/exchange") {
+      return exchangeHostedAuthorizationCode(request, env);
+    }
     return undefined;
+  }
+
+  if (url.pathname === "/v1/connect/hosted-authorization/authorize") {
+    if (request.method === "POST") return authorizeHostedConnection(request, env, url);
+    return json({ error: "method_not_allowed" }, { status: 405 });
   }
 
   if (url.pathname === "/v1/connect/account-link") {
@@ -63,7 +88,7 @@ export async function routeAccountLinkRequest(
   const unlink = url.pathname.match(/^\/v1\/connect\/account-links\/(0x[0-9a-fA-F]{40})$/);
   if (!unlink) return undefined;
   if (request.method !== "DELETE") return json({ error: "method_not_allowed" }, { status: 405 });
-  const principal = await authenticatePersistentAccount(request, env, url);
+  const principal = await authenticateAccountLinkBrowser(request, env, url);
   if (!principal) return json({ error: "unauthorized" }, { status: 401 });
   const originFailure = requireNanocodexOrigin(request, url);
   if (originFailure) return originFailure;
@@ -81,7 +106,7 @@ async function accountLinkConfirmation(
 ): Promise<Response> {
   const parameters = authorizationParameters(url.searchParams, expectedConnectDialogOrigin(url));
   if (!parameters) return accountLinkPage({ kind: "error", message: "This link request is invalid." }, 400);
-  const principal = await authenticatePersistentAccount(request, env, url);
+  const principal = await authenticateAccountLinkBrowser(request, env, url);
   if (!principal) {
     return accountLinkPage({
       kind: "error",
@@ -108,7 +133,7 @@ async function authorizeAccountLink(
   env: AccountAuthEnv,
   url: URL,
 ): Promise<Response> {
-  const principal = await authenticatePersistentAccount(request, env, url);
+  const principal = await authenticateAccountLinkBrowser(request, env, url);
   if (!principal) return accountLinkPage({ kind: "error", message: "Your Nanocodex session expired." }, 401);
   const originFailure = requireNanocodexOrigin(request, url);
   if (originFailure) return originFailure;
@@ -146,7 +171,7 @@ async function authorizeAccountLinkDirect(
   env: AccountAuthEnv,
   url: URL,
 ): Promise<Response> {
-  const principal = await authenticatePersistentAccount(request, env, url);
+  const principal = await authenticateAccountLinkBrowser(request, env, url);
   if (!principal) return json({ error: "unauthorized" }, { status: 401 });
   const originFailure = requireNanocodexOrigin(request, url);
   if (originFailure) return originFailure;
@@ -156,6 +181,49 @@ async function authorizeAccountLinkDirect(
   return code
     ? json({ code, state: parameters.state })
     : json({ error: "authorization_unavailable" }, { status: 503 });
+}
+
+async function authorizeHostedConnection(
+  request: Request,
+  env: AccountAuthEnv,
+  url: URL,
+): Promise<Response> {
+  const account = await authenticatePersistentPasskeyAccount(request, env, url);
+  if (!account) return json({ error: "unauthorized" }, { status: 401 });
+  const originFailure = requireSameOriginMutation(request, url, account.principal);
+  if (originFailure) return originFailure;
+  const parsed = await readJsonObject(request, MAX_HOSTED_AUTHORIZATION_BYTES);
+  if (parsed instanceof Response) return parsed;
+  if (!hasExactKeys(parsed, ["account_address", "app_id", "app_origin", "resources"])) {
+    return json({ error: "invalid_hosted_authorization" }, { status: 400 });
+  }
+  const appId = parsed.app_id === HOSTED_CONNECT_APP_ID ? HOSTED_CONNECT_APP_ID : undefined;
+  const appOrigin = parsed.app_origin === HOSTED_CONNECT_APP_ORIGIN
+    ? HOSTED_CONNECT_APP_ORIGIN
+    : undefined;
+  const accountAddress = parseAddress(parsed.account_address);
+  const resources = parseHostedResources(parsed.resources);
+  if (!appId || !appOrigin || !accountAddress || !resources) {
+    return json({ error: "invalid_hosted_authorization" }, { status: 400 });
+  }
+  if (resources.includes(HOSTED_MPP_RESOURCE)) {
+    return json({ error: "hosted_mpp_forbidden" }, { status: 400 });
+  }
+  if (accountAddress !== account.accountAddress) {
+    return json({ error: "account_address_mismatch" }, { status: 403 });
+  }
+  const code = randomToken();
+  const store = accountLinkStore(env);
+  if (!store.create || !await store.create(`hosted-code:${await sha256(code)}`, {
+    accountAddress: account.accountAddress,
+    appId,
+    appOrigin,
+    resources,
+    userId: account.principal.userId,
+  } satisfies HostedAuthorizationCode, { ttl: AUTHORIZATION_TTL_SECONDS })) {
+    return json({ error: "authorization_unavailable" }, { status: 503 });
+  }
+  return json({ code });
 }
 
 async function issueAuthorizationCode(
@@ -171,6 +239,24 @@ async function issueAuthorizationCode(
     userId,
   } satisfies AuthorizationCode, { ttl: AUTHORIZATION_TTL_SECONDS })) return undefined;
   return code;
+}
+
+async function authenticateAccountLinkBrowser(
+  request: Request,
+  env: AccountAuthEnv,
+  url: URL,
+) {
+  const persistent = await authenticatePersistentAccount(request, env, url);
+  if (persistent || !isLoopbackOrigin(url.origin)) return persistent;
+  const local = await authenticate(request, env, url);
+  return local?.kind === "account_session" ? local : undefined;
+}
+
+function isLoopbackOrigin(origin: string): boolean {
+  const url = new URL(origin);
+  return url.origin === origin
+    && (url.protocol === "http:" || url.protocol === "https:")
+    && (url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "[::1]");
 }
 
 async function resolveAccountLink(
@@ -248,6 +334,66 @@ async function exchangeAuthorizationCode(
   return json({ linked: true, user_id: link.userId });
 }
 
+async function exchangeHostedAuthorizationCode(
+  request: Request,
+  env: AccountAuthEnv,
+): Promise<Response> {
+  if (request.method !== "POST") return json({ error: "method_not_allowed" }, { status: 405 });
+  const parsed = await readJsonObject(request, MAX_HOSTED_AUTHORIZATION_BYTES);
+  if (parsed instanceof Response) return parsed;
+  if (!hasExactKeys(parsed, ["account_address", "app_id", "app_origin", "code", "resources"])) {
+    return json({ error: "invalid_exchange" }, { status: 400 });
+  }
+  const code = typeof parsed.code === "string" && OPAQUE_TOKEN.test(parsed.code)
+    ? parsed.code
+    : undefined;
+  const appId = parsed.app_id === HOSTED_CONNECT_APP_ID ? HOSTED_CONNECT_APP_ID : undefined;
+  const appOrigin = parsed.app_origin === HOSTED_CONNECT_APP_ORIGIN
+    ? HOSTED_CONNECT_APP_ORIGIN
+    : undefined;
+  const accountAddress = parseAddress(parsed.account_address);
+  const resources = parseHostedResources(parsed.resources);
+  if (!code || !appId || !appOrigin || !accountAddress || !resources
+    || resources.includes(HOSTED_MPP_RESOURCE)) {
+    return json({ error: "invalid_exchange" }, { status: 400 });
+  }
+  const store = accountLinkStore(env);
+  if (!store.take) return json({ error: "one_time_exchange_unavailable" }, { status: 503 });
+  const authorization = await store.take<HostedAuthorizationCode>(
+    `hosted-code:${await sha256(code)}`,
+  );
+  if (!validHostedCode(authorization)
+    || authorization.accountAddress !== accountAddress
+    || authorization.appId !== appId
+    || authorization.appOrigin !== appOrigin
+    || !equalResources(authorization.resources, resources)) {
+    return json({ error: "invalid_authorization_code" }, { status: 403 });
+  }
+  const current = await store.get<AccountLink>(linkKey(accountAddress));
+  if (validLink(current) && current.userId !== authorization.userId) {
+    return json({ error: "account_already_linked" }, { status: 409 });
+  }
+  const link: AccountLink = {
+    accountAddress,
+    linkedAt: Date.now(),
+    userId: authorization.userId,
+  };
+  if (!validLink(current)) {
+    if (!store.create || !await store.create(linkKey(accountAddress), link)) {
+      const winner = await store.get<AccountLink>(linkKey(accountAddress));
+      if (!validLink(winner) || winner.userId !== link.userId) {
+        return json({ error: "account_already_linked" }, { status: 409 });
+      }
+    }
+  }
+  return json({
+    linked: true,
+    user_id: authorization.userId,
+    account_address: authorization.accountAddress,
+    resources: authorization.resources,
+  });
+}
+
 function authorizationParameters(
   parameters: URLSearchParams,
   expectedReturnOrigin: string,
@@ -291,6 +437,24 @@ function validCode(value: unknown): value is AuthorizationCode {
     && record.appId === CONNECT_APP_ID
     && typeof record.state === "string"
     && OPAQUE_TOKEN.test(record.state)
+    && isUserId(record.userId);
+}
+
+function validHostedCode(value: unknown): value is HostedAuthorizationCode {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const record = value as Partial<HostedAuthorizationCode>;
+  return hasExactKeys(record as Record<string, unknown>, [
+    "accountAddress",
+    "appId",
+    "appOrigin",
+    "resources",
+    "userId",
+  ])
+    && parseAddress(record.accountAddress) === record.accountAddress
+    && record.appId === HOSTED_CONNECT_APP_ID
+    && record.appOrigin === HOSTED_CONNECT_APP_ORIGIN
+    && parseHostedResources(record.resources) !== undefined
+    && !record.resources!.includes(HOSTED_MPP_RESOURCE)
     && isUserId(record.userId);
 }
 
@@ -364,6 +528,78 @@ function noStoreHeaders(): Record<string, string> {
     "cache-control": "no-store",
     "x-content-type-options": "nosniff",
   };
+}
+
+function parseHostedResources(value: unknown): string[] | undefined {
+  if (!Array.isArray(value) || value.length === 0 || value.length > MAX_HOSTED_RESOURCES) {
+    return undefined;
+  }
+  const resources: string[] = [];
+  const seen = new Set<string>();
+  for (const resource of value) {
+    if (typeof resource !== "string"
+      || resource.length === 0
+      || new TextEncoder().encode(resource).byteLength > MAX_HOSTED_RESOURCE_BYTES
+      || seen.has(resource)) return undefined;
+    seen.add(resource);
+    resources.push(resource);
+  }
+  return resources;
+}
+
+function equalResources(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((resource, index) => resource === right[index]);
+}
+
+function hasExactKeys(record: Record<string, unknown>, expected: readonly string[]): boolean {
+  const actual = Object.keys(record).sort();
+  const sortedExpected = [...expected].sort();
+  return actual.length === sortedExpected.length
+    && actual.every((key, index) => key === sortedExpected[index]);
+}
+
+async function readJsonObject(
+  request: Request,
+  maxBytes: number,
+): Promise<Record<string, unknown> | Response> {
+  if (request.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase()
+    !== "application/json") {
+    return json({ error: "unsupported_media_type" }, { status: 415 });
+  }
+  const contentLength = request.headers.get("content-length");
+  if (contentLength && (!/^\d+$/.test(contentLength) || Number(contentLength) > maxBytes)) {
+    return json({ error: "request_too_large" }, { status: 413 });
+  }
+  const reader = request.body?.getReader();
+  const chunks: Uint8Array[] = [];
+  let length = 0;
+  if (reader) {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      length += value.byteLength;
+      if (length > maxBytes) {
+        await reader.cancel();
+        return json({ error: "request_too_large" }, { status: 413 });
+      }
+      chunks.push(value);
+    }
+  }
+  const encoded = new Uint8Array(length);
+  let offset = 0;
+  for (const chunk of chunks) {
+    encoded.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  try {
+    const value = JSON.parse(
+      new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(encoded),
+    ) as unknown;
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error();
+    return value as Record<string, unknown>;
+  } catch {
+    return json({ error: "invalid_json" }, { status: 400 });
+  }
 }
 
 function requireNanocodexOrigin(request: Request, url: URL): Response | undefined {

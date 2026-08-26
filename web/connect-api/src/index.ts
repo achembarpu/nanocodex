@@ -2,6 +2,33 @@ import { Handler, Kv } from "accounts/server";
 import { custom } from "viem";
 import { KeyAuthorization } from "ox/tempo";
 
+import {
+  cliApp,
+  approvedCliAccessKeyMatches,
+  parseCliRegisterBody,
+  parseCliWalletRequest,
+  sanitizeCliWalletResult,
+  managedMemoryCapability,
+  deviceRegistrationClientKey,
+  requestedConnectorsSatisfied,
+} from "./devicePolicy.mjs";
+import {
+  connectAuthOrigin,
+  deviceVerificationUrl,
+  isLocalDevelopmentOrigin as isLocalDeviceOrigin,
+} from "./deviceRedirect.mjs";
+import {
+  localConnectorAuthorization,
+  localMcpAuthorization,
+  wrapLocalConnectorAuthorizationState,
+  wrapLocalMcpAuthorizationState,
+} from "../../localConnectorCallback";
+import {
+  canonicalRemoteMcpTarget,
+  isMcpConnectionId,
+  validateMcpResources,
+} from "./mcpPolicy.mjs";
+
 type WorkerWebSocket = WebSocket & { accept(): void };
 declare const WebSocketPair: {
   new(): { 0: WorkerWebSocket; 1: WorkerWebSocket };
@@ -36,6 +63,8 @@ export class ConnectNonceStorage extends Kv.NonceStorage {
 
 const PLAYGROUND_ORIGIN = "https://nanocodex-connect-playground.gakonst.workers.dev";
 const CHROME_EXTENSION_ORIGIN = "chrome-extension://jpkimkgbgbpcaldbnhlhbkbadmpeffle";
+const CLI_APP_ID = cliApp.id;
+const CLI_APP_ORIGIN = cliApp.origin;
 const DIALOG_ORIGIN = "https://nanocodex.gakonst.workers.dev";
 const API_ORIGIN = "https://nanocodex-connect-api.gakonst.workers.dev";
 const NANOCODEX_ORIGIN = "https://nanocodex.gakonst.workers.dev";
@@ -52,11 +81,6 @@ const MPP_PERIOD = 86_400;
 const MPP_MAX_PER_REQUEST = 250_000n;
 const CONNECTOR_IDS = ["github", "gmail", "gdrive", "x", "chatgpt"] as const;
 const OAUTH_CONNECTOR_IDS = ["github", "gmail", "gdrive", "x"] as const;
-const BASE_CAPABILITIES = [
-  "nanocodex.agent",
-  "mercator.boost",
-  "mpp.machusd",
-] as const;
 const BASE_APPROVAL_RESOURCES = [
   "urn:nanocodex:agent:run",
   "urn:nanocodex:capability:mercator:boost",
@@ -69,6 +93,10 @@ const AGENT_VISIBILITY_RESOURCES = {
   "urn:nanocodex:agent:trace:read": "agent.trace.read",
 } as const;
 const AGENT_VISIBILITY_RESOURCE_PREFIX = "urn:nanocodex:agent:visibility:";
+const HOSTED_HISTORY_RESOURCE = "urn:nanocodex:history:read";
+const HOSTED_MEMORY_READ_RESOURCE = "urn:nanocodex:memory:read";
+const HOSTED_MEMORY_WRITE_RESOURCE = "urn:nanocodex:memory:write";
+const HOSTED_AUTHORIZATION_RESOURCE = "urn:nanocodex:authorization:hosted";
 const APP_RESOURCE_PREFIX = "urn:nanocodex:app:";
 const APP_ORIGIN_RESOURCE_PREFIX = "urn:nanocodex:origin:";
 const AGENT_VISIBILITY_NAMES = {
@@ -80,6 +108,7 @@ const AGENT_VISIBILITY_NAMES = {
 const CONNECTORS_RESOURCE_PREFIX = "urn:nanocodex:connectors:";
 const PROVIDER_CREDENTIAL_PLACEHOLDER = "Bearer NANOCODEX_PROVIDER_CREDENTIAL";
 const CONNECTOR_STATE_TTL = 10 * 60;
+const MCP_INTENT_TTL = 10 * 60;
 const CONNECT_APPROVAL_TTL = 10 * 60;
 const MODEL_TICKET_TTL = 60;
 const REALTIME_TICKET_TTL = 60;
@@ -94,8 +123,12 @@ const MAX_CONNECTOR_RESPONSE_BODY_BYTES = 1024 * 1024;
 const MAX_AGENT_TOOL_BODY_BYTES = 20 * 1024 * 1024;
 const MAX_PUBLIC_EGRESS_BODY_BYTES = 256 * 1024;
 const MAX_PUBLIC_EGRESS_RESPONSE_BYTES = 1024 * 1024;
+const MAX_MANAGED_MEMORY_REQUEST_BYTES = 16 * 1024;
+const MAX_MANAGED_MEMORY_RESPONSE_BYTES = 1024 * 1024;
 const MAX_PINNED_RUNTIME_RESPONSE_BYTES = 32 * 1024 * 1024;
 const MAX_ACCOUNT_AUTHORIZATIONS = 64;
+const MAX_DEVICE_REGISTER_BYTES = 64 * 1024;
+const DEVICE_REGISTER_QUOTA_TTL = 30;
 const EGRESS_SUBJECT = /^[A-Za-z0-9_-]{43,128}$/;
 const CONNECTOR_METHODS = new Set(["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"]);
 const CONNECTOR_REQUEST_HEADERS = new Set([
@@ -147,9 +180,37 @@ type ConnectorState = Readonly<{
   brokerUserId: string;
   dialogOrigin: string;
   provider: OAuthConnectorId;
+  returnTo?: string;
+}>;
+type McpConnectionStatus = "authorization_required" | "connected" | "reauthorization_required" | "disabled" | "revoked";
+type McpConnection = Readonly<{
+  id: string;
+  name: string;
+  status: McpConnectionStatus;
+}>;
+type McpIntent = Readonly<{
+  appId: string;
+  appOrigin: string;
+  endpoint: string;
+  endpointHash: string;
+  expiresAt: number;
+  id: string;
+  name: string;
+}>;
+type McpConnectionState = Readonly<{
+  accountAddress: `0x${string}`;
+  brokerUserId: string;
+  connectionId: string;
+  dialogOrigin: string;
+  returnTo?: string;
 }>;
 type AccountLinkState = Readonly<{
   accountAddress: `0x${string}`;
+}>;
+type PendingMcpAccountLink = Readonly<{
+  appId: string;
+  appOrigin: string;
+  resources: readonly string[];
 }>;
 type AuthRequestContext = Readonly<{
   keyAuthorization?: `0x${string}`;
@@ -161,10 +222,12 @@ type ConnectApproval = Readonly<{
   appOrigin: string;
   brokerUserId?: string;
   connectedConnectors?: readonly ConnectorId[];
+  mcpConnections?: readonly McpConnection[];
   durableAgentId?: string;
   keyAuthorization?: `0x${string}`;
   profileLinked?: boolean;
   resources: readonly string[];
+  authorization: "signed" | "hosted";
 }>;
 type Fetcher = Readonly<{
   fetch(request: Request): Promise<Response>;
@@ -179,6 +242,7 @@ type Env = Readonly<{
   CONNECT_STATE: Kv.durableObject.Namespace;
   EGRESS: Fetcher;
   NANOCODEX: Fetcher;
+  NANOCODEX_LOCAL_OAUTH_RELAY_HMAC_KEY?: string;
 }>;
 
 type GrantRecord = Readonly<{
@@ -192,12 +256,17 @@ type GrantRecord = Readonly<{
   status: "active" | "revoked";
   expiresAt: number;
   capabilities: readonly string[];
-  accessKey: Record<string, unknown>;
+  mcpConnections?: readonly Readonly<{ id: string; name: string }>[];
+  accessKey?: Record<string, unknown>;
   balanceAtomics?: string;
   spentAtomics: string;
   egressSubject: string;
   settlementBalanceAtomics?: string;
   sharedEgressSubject?: boolean;
+}>;
+type HostedBrowserSession = Readonly<{
+  accountAddress: `0x${string}`;
+  expiresAt: number;
 }>;
 type GrantPrincipal = Readonly<{
   accountAddress: `0x${string}`;
@@ -239,11 +308,45 @@ export default {
     try {
       const url = new URL(request.url);
       const store = Kv.durableObject(env.CONNECT_STATE);
-      const auth = createAuth(env, store, request, await authRequestContext(request, url));
+
+      if (url.pathname.startsWith("/v1/device/")) {
+        if (request.method === "POST" && url.pathname === "/v1/device/register") {
+          try {
+            parseCliRegisterBody(await boundedJson(
+              request.clone(),
+              MAX_DEVICE_REGISTER_BYTES,
+              "device registration",
+            ));
+          } catch (cause) {
+            if (cause instanceof ApiFailure) throw cause;
+            throw new ApiFailure(400, "invalid_device_request", errorText(cause));
+          }
+          if (!isLocalDeviceOrigin(new URL(request.url).origin)) {
+            await reserveDeviceRegistration(store, request);
+          }
+        }
+        if (request.method === "POST" && url.pathname === "/v1/device/verify") {
+          requireDialogOrigin(request);
+        }
+        return cors(mutableResponse(await createDeviceCode(env, store).fetch(request)), request);
+      }
 
       if (url.pathname.startsWith("/v1/connect/auth")) {
         requireDialogOrigin(request);
+        const auth = createAuth(
+          env,
+          store,
+          request,
+          await authRequestContext(request, url),
+        );
         return cors(await auth.fetch(request), request);
+      }
+      if (request.method === "POST" && url.pathname === "/v1/hosted-authorizations") {
+        requireDialogOrigin(request);
+        return cors(await createHostedAuthorization(request, env, store), request);
+      }
+      if (request.method === "POST" && url.pathname === "/v1/mcp-intents") {
+        return cors(await createMcpIntent(request, store), request);
       }
       if (request.method === "GET" && url.pathname === "/healthz") {
         return cors(Response.json({ status: "ok", mode: "live" }), request);
@@ -356,6 +459,14 @@ export default {
         ), request);
       }
 
+      const mcpCallback = url.pathname.match(/^\/v1\/mcp-connections\/([A-Za-z0-9_-]{43})\/callback$/);
+      if (mcpCallback) {
+        if (request.method !== "GET") {
+          return error(request, 405, "method_not_allowed", "MCP callbacks require GET.");
+        }
+        return cors(await completeMcpConnectionCallback(env, store, url, mcpCallback[1]!), request);
+      }
+
       const accessKeyStatus = url.pathname.match(/^\/v1\/access-keys\/(0x[0-9a-fA-F]{40})\/(0x[0-9a-fA-F]{40})$/);
       if (request.method === "GET" && accessKeyStatus) {
         const app = requireCallerApp(request, url.searchParams.get("app_id"));
@@ -374,6 +485,9 @@ export default {
         return cors(await createConnection(request, env, store, context), request);
       }
 
+      const managedMemoryResponse = await handleManagedMemoryRoute(request, env, url);
+      if (managedMemoryResponse) return cors(managedMemoryResponse, request);
+
       const grantResponse = await handleGrantRoute(request, env, store, url);
       if (grantResponse) return cors(grantResponse, request);
 
@@ -381,9 +495,15 @@ export default {
       if (agentToolResponse) return cors(agentToolResponse, request);
 
       requireDialogOrigin(request);
-      const session = await auth.getSession(request);
-      if (!session) return error(request, 401, "not_authenticated", "Connect with a passkey first.");
-      const accountAddress = address(session.address);
+      const hostedSession = await readHostedBrowserSession(store, request);
+      let accountAddress: `0x${string}`;
+      if (hostedSession) {
+        accountAddress = hostedSession.accountAddress;
+      } else {
+        const session = await createAuth(env, store, request).getSession(request);
+        if (!session) return error(request, 401, "not_authenticated", "Connect with a passkey first.");
+        accountAddress = address(session.address);
+      }
 
       if (url.pathname === "/v1/account-link") {
         if (request.method === "GET") {
@@ -407,6 +527,32 @@ export default {
         }), request);
       }
 
+      if (request.method === "GET" && url.pathname === "/v1/mcp-connections") {
+        const identity = await brokerIdentity(env, accountAddress);
+        return cors(Response.json({ mcp_connections: await mcpConnectionStatuses(env, identity.userId) }), request);
+      }
+
+      const mcpConnectionRoute = url.pathname.match(/^\/v1\/mcp-connections\/([A-Za-z0-9_-]{43})$/);
+      if (mcpConnectionRoute) {
+        const identity = await brokerIdentity(env, accountAddress);
+        const connectionId = mcpConnectionRoute[1]!;
+        if (request.method === "POST") {
+          return cors(await startMcpConnection(
+            env,
+            store,
+            request,
+            accountAddress,
+            identity.userId,
+            connectionId,
+          ), request);
+        }
+        if (request.method === "DELETE") {
+          await disconnectMcpConnection(env, identity.userId, connectionId);
+          return cors(new Response(null, { status: 204 }), request);
+        }
+        return error(request, 405, "method_not_allowed", "Unsupported MCP connection operation.");
+      }
+
       const connectorRoute = url.pathname.match(/^\/v1\/connectors\/(github|gmail|gdrive|x|chatgpt)$/);
       if (connectorRoute) {
         const connector = connectorRoute[1] as ConnectorId;
@@ -426,6 +572,9 @@ export default {
 
       return error(request, 404, "not_found", "Route not found.");
     } catch (cause) {
+      if (!(cause instanceof ApiFailure)) {
+        console.error("Unexpected Connect API failure", cause);
+      }
       const failure = cause instanceof ApiFailure
         ? cause
         : new ApiFailure(500, "internal_error", "Unexpected Connect API failure.");
@@ -433,6 +582,100 @@ export default {
     }
   },
 };
+
+async function reserveDeviceRegistration(store: Kv.Kv, request: Request): Promise<void> {
+  if (!store.create) {
+    throw new ApiFailure(503, "device_registration_unavailable", "Device registration quota is unavailable.");
+  }
+  const clientKey = deviceRegistrationClientKey(request);
+  const key = `device-register-quota:${await digestHex(clientKey)}`;
+  if (!await store.create(key, true, { ttl: DEVICE_REGISTER_QUOTA_TTL })) {
+    throw new ApiFailure(429, "device_registration_rate_limited", "A device registration was recently started from this client. Retry shortly.");
+  }
+}
+
+async function handleManagedMemoryRoute(
+  request: Request,
+  env: Env,
+  url: URL,
+): Promise<Response | undefined> {
+  const isSearchPath = url.pathname === "/v1/history/sessions/search";
+  const readMatch = url.pathname.match(/^\/v1\/history\/sessions\/([^/]+)\/read$/);
+  const isMemoryPath = url.pathname === "/v1/memory";
+  if (!isSearchPath && !readMatch && !isMemoryPath) return undefined;
+  if (request.method !== "POST") {
+    throw new ApiFailure(405, "method_not_allowed", "Hosted history and memory requests require POST.");
+  }
+  const isSearch = isSearchPath;
+  const isMemory = isMemoryPath;
+  if (url.search) {
+    throw new ApiFailure(400, "invalid_managed_request", "Hosted history and memory requests do not accept query parameters.");
+  }
+
+  const app = requireCallerApp(request);
+  if (app.appId !== CLI_APP_ID || app.origin !== CLI_APP_ORIGIN) {
+    throw new ApiFailure(403, "app_identity_mismatch", "Hosted history and memory are available only to the Nanocodex CLI.");
+  }
+  const { grant } = await authenticatedGrant(request, env.CONNECT_STATE);
+  if (grant.appId !== CLI_APP_ID || grant.appOrigin !== CLI_APP_ORIGIN) {
+    throw new ApiFailure(403, "app_identity_mismatch", "The Connect grant is not bound to the Nanocodex CLI.");
+  }
+  if (grant.status !== "active") {
+    throw new ApiFailure(403, "grant_inactive", "The Connect grant is not active.");
+  }
+  remainingGrantTtl(grant);
+  const body = await boundedJson(request, MAX_MANAGED_MEMORY_REQUEST_BYTES, "hosted history or memory");
+  const requiredCapability = managedMemoryCapability(url.pathname, body.operation);
+  if (!requiredCapability) {
+    throw new ApiFailure(400, "invalid_memory_operation", "The hosted history or memory operation is invalid.");
+  }
+  if (!grant.capabilities.includes(requiredCapability)) {
+    const code = requiredCapability === "history:read"
+      ? "history_read_not_granted"
+      : requiredCapability === "memory:write"
+        ? "memory_write_not_granted"
+        : "memory_read_not_granted";
+    throw new ApiFailure(403, code, `This Connect grant does not include ${requiredCapability} access.`);
+  }
+  if (isMemory) {
+    const operation = body.operation;
+    if (operation !== "scan" && operation !== "read" && operation !== "put" && operation !== "delete") {
+      throw new ApiFailure(400, "invalid_memory_operation", "The hosted memory operation is invalid.");
+    }
+  }
+
+  const target = new URL(url.pathname, "https://nanocodex.internal");
+  const upstream = await env.ACCOUNTS.fetch(new Request(target, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-nanocodex-connect-user": grant.brokerUserId,
+    },
+    body: JSON.stringify(body),
+    redirect: "manual",
+    signal: request.signal,
+  }));
+  return safeManagedJsonResponse(upstream);
+}
+
+async function safeManagedJsonResponse(upstream: Response): Promise<Response> {
+  if (upstream.status >= 300 && upstream.status < 400) {
+    await upstream.body?.cancel();
+    throw new ApiFailure(502, "managed_upstream_redirect", "The hosted service returned an unexpected redirect.");
+  }
+  if (!(upstream.headers.get("content-type") ?? "").includes("application/json")) {
+    await upstream.body?.cancel();
+    throw new ApiFailure(502, "managed_response_invalid", "The hosted service returned a non-JSON response.");
+  }
+  const bytes = new Uint8Array(await boundedResponseBytes(upstream, MAX_MANAGED_MEMORY_RESPONSE_BYTES));
+  let value: unknown;
+  try {
+    value = JSON.parse(new TextDecoder().decode(bytes));
+  } catch {
+    throw new ApiFailure(502, "managed_response_invalid", "The hosted service returned invalid JSON.");
+  }
+  return Response.json(value, { status: upstream.status });
+}
 
 class ApiFailure extends Error {
   constructor(
@@ -442,6 +685,247 @@ class ApiFailure extends Error {
   ) {
     super(message);
   }
+}
+
+async function createMcpIntent(request: Request, store: Kv.Kv): Promise<Response> {
+  const app = requireCallerApp(request);
+  if (app.appId !== CLI_APP_ID || app.origin !== CLI_APP_ORIGIN) {
+    throw new ApiFailure(403, "mcp_intent_denied", "Remote MCP preflight is reserved for the Nanocodex CLI.");
+  }
+  const body = await boundedJson(request, 4 * 1024, "remote MCP intent");
+  let target: Readonly<{ endpoint: string; name: string }>;
+  try {
+    target = canonicalRemoteMcpTarget(body.target);
+  } catch (cause) {
+    throw new ApiFailure(400, "invalid_mcp_target", errorText(cause));
+  }
+  if (!store.create) {
+    throw new ApiFailure(503, "mcp_intent_unavailable", "Atomic remote MCP preflight is unavailable.");
+  }
+  const now = Math.floor(Date.now() / 1_000);
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const id = randomSubject();
+    const intent: McpIntent = {
+      appId: app.appId,
+      appOrigin: app.origin,
+      endpoint: target.endpoint,
+      endpointHash: await digestHex(target.endpoint),
+      expiresAt: now + MCP_INTENT_TTL,
+      id,
+      name: target.name,
+    };
+    if (await store.create(`mcp-intent:${id}`, intent, { ttl: MCP_INTENT_TTL })) {
+      return Response.json({ id, name: target.name }, { status: 201 });
+    }
+  }
+  throw new ApiFailure(503, "mcp_intent_unavailable", "The remote MCP intent could not be reserved.");
+}
+
+async function materializeApprovedMcpConnections(
+  env: Env,
+  store: Kv.Kv,
+  app: CallerApp,
+  brokerUserId: string,
+  resources: readonly string[],
+): Promise<McpConnection[]> {
+  let ids: readonly string[];
+  try {
+    ids = validateMcpResources(resources).requested;
+  } catch (cause) {
+    throw new ApiFailure(403, "invalid_mcp_resources", errorText(cause));
+  }
+  if (ids.length === 0) return [];
+  if (ids.length > 16 || !store.create) {
+    throw new ApiFailure(403, "invalid_mcp_resources", "A Connect approval may contain at most 16 remote MCP connections.");
+  }
+  for (const id of ids) {
+    const intent = await store.get<McpIntent>(`mcp-intent:${id}`);
+    let canonicalIntentEndpoint: string | undefined;
+    try { canonicalIntentEndpoint = canonicalRemoteMcpTarget(intent?.endpoint).endpoint; } catch { /* fail below */ }
+    if (!isMcpIntent(intent)
+      || intent.appId !== app.appId
+      || intent.appOrigin !== app.origin
+      || intent.expiresAt <= Math.floor(Date.now() / 1_000)
+      || canonicalIntentEndpoint !== intent.endpoint
+      || intent.endpointHash !== await digestHex(intent.endpoint)) {
+      throw new ApiFailure(403, "mcp_intent_unavailable", "A signed remote MCP intent is unavailable or expired.");
+    }
+    const ownerKey = `mcp-intent-owner:${id}`;
+    if (!await store.create(ownerKey, brokerUserId, { ttl: MCP_INTENT_TTL })) {
+      const owner = await store.get<unknown>(ownerKey);
+      if (owner !== brokerUserId) {
+        throw new ApiFailure(403, "mcp_intent_claimed", "A remote MCP intent is already bound to another account.");
+      }
+    }
+    const response = await brokerFetch(env, `/users/${encodeURIComponent(brokerUserId)}/mcp-connections/${id}`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ endpoint: intent.endpoint, name: intent.name }),
+    });
+    if (!response.ok) {
+      await response.body?.cancel();
+      throw new ApiFailure(502, "mcp_broker_failed", "The remote MCP broker could not materialize this connection.");
+    }
+    await response.body?.cancel();
+  }
+  const statuses = await mcpConnectionStatuses(env, brokerUserId);
+  const byId = new Map(statuses.map((connection) => [connection.id, connection]));
+  return ids.map((id) => {
+    const connection = byId.get(id);
+    if (!connection) {
+      throw new ApiFailure(502, "mcp_broker_invalid", "The remote MCP broker omitted a materialized connection.");
+    }
+    return connection;
+  });
+}
+
+function isMcpIntent(value: unknown): value is McpIntent {
+  return isRecord(value)
+    && validAppId(value.appId)
+    && isPublicAppOrigin(value.appOrigin)
+    && isMcpConnectionId(value.id)
+    && typeof value.name === "string" && value.name.length > 0 && value.name.length <= 256
+    && typeof value.endpoint === "string" && value.endpoint.length <= 2_048
+    && /^0x[0-9a-fA-F]{64}$/.test(String(value.endpointHash))
+    && Number.isSafeInteger(value.expiresAt);
+}
+
+async function createHostedAuthorization(
+  request: Request,
+  env: Env,
+  store: Kv.Kv,
+): Promise<Response> {
+  const body = await boundedJson(request, 16 * 1024, "hosted authorization");
+  const code = opaqueToken(body.code, "code");
+  const accountAddress = address(body.account_address);
+  const appId = requiredString(body.app_id, "app_id");
+  const appOrigin = requiredString(body.app_origin, "app_origin");
+  const resources = stringResources(body.resources);
+  const app = approvedAppContext(resources);
+  if (app.appId !== CLI_APP_ID || app.origin !== CLI_APP_ORIGIN
+    || appId !== app.appId || appOrigin !== app.origin) {
+    throw new ApiFailure(403, "app_identity_mismatch", "Hosted authorization is reserved for the Nanocodex CLI.");
+  }
+  if (!resources.includes(HOSTED_AUTHORIZATION_RESOURCE)
+    || resources.includes("urn:nanocodex:mpp:machusd:spend")) {
+    throw new ApiFailure(403, "hosted_authorization_denied", "Hosted authorization cannot request MPP or spending access.");
+  }
+  const approvedConnectorSet = approvedConnectors(resources);
+  const connectors = CONNECTOR_IDS.filter((connector) => approvedConnectorSet.has(connector));
+  const approvedMcpIds = approvedMcpConnectionIds(resources);
+  requireApprovedCapabilities(resources, app.appId, connectors, approvedMcpIds);
+
+  let exchanged: Response;
+  try {
+    exchanged = await env.ACCOUNTS.fetch(new Request(
+      "https://nanocodex.internal/connect/hosted-authorizations/exchange",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          account_address: accountAddress,
+          app_id: app.appId,
+          app_origin: app.origin,
+          code,
+          resources,
+        }),
+      },
+    ));
+  } catch {
+    throw new ApiFailure(502, "hosted_authorization_unavailable", "The Nanocodex account service is unavailable.");
+  }
+  if (!exchanged.ok) {
+    await exchanged.body?.cancel();
+    throw new ApiFailure(403, "hosted_authorization_rejected", "The hosted account authorization was rejected.");
+  }
+  const identity = await exchanged.json() as unknown;
+  if (!isHostedAuthorizationIdentity(identity)
+    || identity.account_address.toLowerCase() !== accountAddress.toLowerCase()
+    || !sameResources(identity.resources, resources)) {
+    throw new ApiFailure(502, "hosted_authorization_invalid", "The Nanocodex account service returned an invalid authorization.");
+  }
+
+  const appScope = await scopedAppId(app);
+  const [status, mcpConnections, durableAgentId] = await Promise.all([
+    connectorStatuses(env, identity.user_id),
+    materializeApprovedMcpConnections(env, store, app, identity.user_id, resources),
+    connectManagedAgent(env, store, identity.user_id, appScope),
+  ]);
+  const approvalId = randomSubject();
+  const token = randomSubject();
+  const expiresAt = Math.floor(Date.now() / 1000) + CONNECT_APPROVAL_TTL;
+  const connectedConnectors = CONNECTOR_IDS.filter((connector) => status.connectors[connector].connected);
+  if (!store.create) {
+    throw new ApiFailure(503, "hosted_authorization_unavailable", "Atomic hosted authorization is unavailable.");
+  }
+  await store.set(`connect-approval:${approvalId}`, {
+    accountAddress,
+    appId: app.appId,
+    appOrigin: app.origin,
+    authorization: "hosted",
+    brokerUserId: identity.user_id,
+    connectedConnectors,
+    mcpConnections,
+    durableAgentId,
+    profileLinked: true,
+    resources,
+  } satisfies ConnectApproval, { ttl: CONNECT_APPROVAL_TTL });
+  if (!await store.create(`hosted-browser-session:${token}`, {
+    accountAddress,
+    expiresAt,
+  } satisfies HostedBrowserSession, { ttl: CONNECT_APPROVAL_TTL })) {
+    await store.delete(`connect-approval:${approvalId}`);
+    throw new ApiFailure(503, "hosted_authorization_unavailable", "The hosted browser session could not be reserved.");
+  }
+  return Response.json({
+    account_address: accountAddress,
+    approval_id: approvalId,
+    connectors: status.connectors,
+    mcp_connections: mcpConnections,
+    profile: { linked: true },
+    token,
+  });
+}
+
+async function readHostedBrowserSession(
+  store: Kv.Kv,
+  request: Request,
+): Promise<HostedBrowserSession | undefined> {
+  const token = request.headers.get("authorization")?.match(/^Bearer ([A-Za-z0-9_-]{43})$/i)?.[1];
+  if (!token) return undefined;
+  const session = await store.get<HostedBrowserSession>(`hosted-browser-session:${token}`);
+  return isHostedBrowserSession(session) && session.expiresAt > Math.floor(Date.now() / 1000)
+    ? session
+    : undefined;
+}
+
+function isHostedBrowserSession(value: unknown): value is HostedBrowserSession {
+  return isRecord(value)
+    && /^0x[0-9a-fA-F]{40}$/.test(String(value.accountAddress))
+    && Number.isSafeInteger(value.expiresAt);
+}
+
+function isHostedAuthorizationIdentity(value: unknown): value is {
+  linked: true;
+  user_id: string;
+  account_address: `0x${string}`;
+  resources: readonly string[];
+} {
+  return isRecord(value)
+    && value.linked === true
+    && isBrokerUserId(value.user_id)
+    && /^0x[0-9a-fA-F]{40}$/.test(String(value.account_address))
+    && Array.isArray(value.resources)
+    && value.resources.every((resource) => typeof resource === "string");
+}
+
+function stringResources(value: unknown): string[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 64
+    || value.some((resource) => typeof resource !== "string" || resource.length === 0 || resource.length > 512)
+    || new Set(value).size !== value.length) {
+    throw new ApiFailure(400, "invalid_resources", "Hosted authorization resources are invalid.");
+  }
+  return [...value] as string[];
 }
 
 async function startAccountLink(
@@ -458,11 +942,11 @@ async function startAccountLink(
   } satisfies AccountLinkState, { ttl: ACCOUNT_LINK_TTL })) {
     throw new ApiFailure(503, "account_link_conflict", "The account-link request could not be reserved.");
   }
-  const localOrigin = localDevelopmentPublicOrigin(request);
-  const authorize = new URL("/v1/connect/account-link", localOrigin ?? NANOCODEX_ORIGIN);
+  const dialogOrigin = localDevelopmentPublicOrigin(request) ?? connectDialogOrigin(request);
+  const authorize = new URL("/v1/connect/account-link", dialogOrigin);
   authorize.searchParams.set("account_address", accountAddress);
   authorize.searchParams.set("app_id", REGISTERED_APP_ID);
-  authorize.searchParams.set("return_origin", localOrigin ?? DIALOG_ORIGIN);
+  authorize.searchParams.set("return_origin", dialogOrigin);
   authorize.searchParams.set("state", state);
   return Response.json({ authorization_url: authorize.href, state });
 }
@@ -510,10 +994,35 @@ async function completeAccountLink(
   if (!isBrokerIdentityResponse(linked)) {
     throw new ApiFailure(502, "account_link_invalid", "The Nanocodex account service returned an invalid identity.");
   }
+  const pendingMcp = await store.get<PendingMcpAccountLink>(
+    `pending-mcp-account-link:${accountAddress.toLowerCase()}`,
+  );
+  const mcpConnections = isPendingMcpAccountLink(pendingMcp)
+    ? await materializeApprovedMcpConnections(
+        env,
+        store,
+        validateCallerApp(pendingMcp.appId, pendingMcp.appOrigin),
+        linked.user_id,
+        pendingMcp.resources,
+      )
+    : [];
+  if (isPendingMcpAccountLink(pendingMcp)) {
+    await store.delete(`pending-mcp-account-link:${accountAddress.toLowerCase()}`);
+  }
   return Response.json({
     linked: true,
     ...(await connectorStatuses(env, linked.user_id)),
+    mcp_connections: mcpConnections,
   });
+}
+
+function isPendingMcpAccountLink(value: unknown): value is PendingMcpAccountLink {
+  return isRecord(value)
+    && validAppId(value.appId)
+    && isPublicAppOrigin(value.appOrigin)
+    && Array.isArray(value.resources)
+    && value.resources.length <= 64
+    && value.resources.every((resource) => typeof resource === "string" && resource.length <= 512);
 }
 
 async function brokerIdentity(
@@ -580,28 +1089,15 @@ async function createConnection(
     throw new ApiFailure(403, "permission_not_supported", "This app may request only the agent.run permission.");
   }
   const requested = requestedConnectors(body.requested_connectors);
-  const approval = await takeConnectApproval(store, approvalId, accountAddress);
+  const requestedMcpIds = requestedMcpConnections(body.requested_mcp_connections);
+  const approval = await readConnectApproval(store, approvalId, accountAddress);
   mark("approval");
   if (approval.appId !== app.appId || approval.appOrigin !== app.origin) {
     throw new ApiFailure(403, "app_not_approved", "The signed approval is not bound to this app origin.");
   }
-  requireApprovedCapabilities(approval.resources, appId, requested);
+  requireApprovedCapabilities(approval.resources, appId, requested, requestedMcpIds);
   const agentCapabilities = approvedAgentCapabilities(approval.resources);
 
-  const { accessKey, persist } = await connectionAccessKey(
-    store,
-    body,
-    approval,
-    app,
-    accountAddress,
-  );
-  mark("access-key");
-  const expiresAt = safeInteger(accessKey.expiry, "access_key.expiry");
-  const now = Math.floor(Date.now() / 1000);
-  const grantTtl = expiresAt - now;
-  if (grantTtl <= 0) {
-    throw new ApiFailure(403, "access_key_expired", "The delegated access key has expired.");
-  }
   const retainedIdentity = approval.profileLinked === true && isBrokerUserId(approval.brokerUserId)
     ? { linked: true, userId: approval.brokerUserId }
     : undefined;
@@ -610,13 +1106,32 @@ async function createConnection(
   if (!identity.linked) {
     throw new ApiFailure(403, "account_link_required", "Link this Tempo account to your Nanocodex profile before authorizing a durable agent.");
   }
-  const retainedConnectors = new Set(approval.connectedConnectors ?? []);
-  const connectorsReady = requested.every((connector) => retainedConnectors.has(connector));
+  // Refresh connector state immediately before provisioning anything durable.
+  // A stale approval snapshot must never mint a grant for a disconnected
+  // provider or leave behind a partially capable grant.
+  const connectors = await connectedRequestedConnectors(env, identity.userId, requested);
+  requireRequestedConnectors(connectors, requested);
+  const mcpConnections = await connectedRequestedMcpConnections(env, identity.userId, requestedMcpIds);
+  const credential = await connectionCredential(
+    store,
+    body,
+    approval,
+    app,
+    accountAddress,
+  );
+  mark("access-key");
+  const { accessKey, expiresAt, persist } = credential;
+  const now = Math.floor(Date.now() / 1000);
+  const grantTtl = expiresAt - now;
+  if (grantTtl <= 0) {
+    throw new ApiFailure(403, "access_key_expired", "The delegated access key has expired.");
+  }
+  const consumedApproval = await takeConnectApproval(store, approvalId, accountAddress);
+  if (JSON.stringify(consumedApproval) !== JSON.stringify(approval)) {
+    throw new ApiFailure(403, "approval_unavailable", "The signed Connect approval changed before it was consumed.");
+  }
   const appScope = await scopedAppId(app);
-  const [connectors, durableAgentId, egressSubject] = await Promise.all([
-    connectorsReady
-      ? Promise.resolve([...requested])
-      : connectedRequestedConnectors(env, identity.userId, requested),
+  const [durableAgentId, egressSubject] = await Promise.all([
     appId === CHROME_EXTENSION_APP_ID
       ? agentId(accountAddress)
       : isConnectAgentId(approval.durableAgentId)
@@ -637,8 +1152,15 @@ async function createConnection(
     permission,
     status: "active",
     expiresAt,
-    capabilities: [...BASE_CAPABILITIES, ...agentCapabilities, ...connectors],
-    accessKey,
+    capabilities: [
+      "nanocodex.agent",
+      ...approvedHostedCapabilities(approval.resources),
+      ...agentCapabilities,
+      ...connectors,
+      ...mcpConnections.map((connection) => `mcp:${connection.id}`),
+    ],
+    mcpConnections: mcpConnections.map(({ id, name }) => ({ id, name })),
+    ...(accessKey ? { accessKey } : {}),
     spentAtomics: "0",
     egressSubject,
     sharedEgressSubject: true,
@@ -659,7 +1181,7 @@ async function createConnection(
         appOrigin: app.origin,
         grantId: grant.id,
       } satisfies GrantPrincipal, { ttl: grantTtl }),
-      ...(persist ? [store.set(accessKeyStorageKey(accountAddress, accessKey.key_id), {
+      ...(persist && accessKey ? [store.set(accessKeyStorageKey(accountAddress, accessKey.key_id), {
         accountAddress,
         appId,
         appOrigin: app.origin,
@@ -687,10 +1209,42 @@ async function createConnection(
     if (grant.sharedEgressSubject !== true) {
       cleanup.push(unbindSubject(env, grant.egressSubject, grant.brokerUserId));
     }
-    if (persist) cleanup.push(store.delete(accessKeyStorageKey(accountAddress, accessKey.key_id)));
+    if (persist && accessKey) cleanup.push(store.delete(accessKeyStorageKey(accountAddress, accessKey.key_id)));
     await Promise.allSettled(cleanup);
     throw cause;
   }
+}
+
+async function connectionCredential(
+  store: Kv.Kv,
+  body: Record<string, unknown>,
+  approval: ConnectApproval,
+  app: CallerApp,
+  accountAddress: `0x${string}`,
+): Promise<{ accessKey?: Record<string, unknown>; expiresAt: number; persist: boolean }> {
+  if (approval.authorization === "hosted") {
+    if (body.authorization_mode !== "hosted"
+      || body.key_authorization !== undefined
+      || body.signed_key_authorization !== undefined
+      || body.reuse_access_key !== undefined
+      || approval.keyAuthorization !== undefined
+      || !approval.resources.includes(HOSTED_AUTHORIZATION_RESOURCE)
+      || approval.resources.includes("urn:nanocodex:mpp:machusd:spend")) {
+      throw new ApiFailure(403, "hosted_authorization_denied", "This hosted grant cannot carry an access key or MPP authority.");
+    }
+    return {
+      expiresAt: Math.floor(Date.now() / 1000) + 30 * 24 * 60 * 60,
+      persist: false,
+    };
+  }
+  if (body.authorization_mode !== undefined && body.authorization_mode !== "access_key") {
+    throw new ApiFailure(400, "invalid_authorization_mode", "The connection authorization mode is invalid.");
+  }
+  const result = await connectionAccessKey(store, body, approval, app, accountAddress);
+  return {
+    ...result,
+    expiresAt: safeInteger(result.accessKey.expiry, "access_key.expiry"),
+  };
 }
 
 function serverTiming(startedAt: number, marks: readonly (readonly [string, number])[]): string {
@@ -724,8 +1278,8 @@ async function connectionAccessKey(
       || approval.keyAuthorization.toLowerCase() !== serialized.toLowerCase()) {
       throw new ApiFailure(403, "access_key_not_approved", "The access key does not match the signed Connect approval.");
     }
-    const accessKey = accessKeyWire(body.key_authorization, serialized);
-    validateGrantAccessKey(accessKey, app.appId);
+    const accessKey = accessKeyWire(body.key_authorization, serialized, accountAddress);
+    validateGrantAccessKey(accessKey, app.appId, approval.resources);
     return { accessKey, persist: true };
   }
 
@@ -752,12 +1306,17 @@ async function connectionAccessKey(
   const normalized = accessKeyWire(
     stored.accessKey,
     hex(stored.accessKey.authorization, "stored access_key.authorization"),
+    accountAddress,
   );
-  validateGrantAccessKey(normalized, app.appId);
+  validateGrantAccessKey(normalized, app.appId, approval.resources);
   return { accessKey: normalized, persist: false };
 }
 
-function validateGrantAccessKey(accessKey: Record<string, unknown>, appId: string): void {
+function validateGrantAccessKey(
+  accessKey: Record<string, unknown>,
+  appId: string,
+  resources: readonly string[],
+): void {
   if (accessKey.chain_id !== "4217") {
     throw new ApiFailure(403, "invalid_access_key_chain", "The access key must be authorized for Tempo chain 4217.");
   }
@@ -772,6 +1331,13 @@ function validateGrantAccessKey(accessKey: Record<string, unknown>, appId: strin
   if (appId === CHROME_EXTENSION_APP_ID) {
     if (accessKey.limits.length !== 0 || accessKey.scopes.length !== 0) {
       throw new ApiFailure(403, "invalid_access_key_policy", "The Chrome extension access key cannot spend funds or call contracts.");
+    }
+    return;
+  }
+  if (appId === CLI_APP_ID && !resources.includes("urn:nanocodex:mpp:machusd:spend")) {
+    if (accessKey.scopes.length !== 0
+      || !hasZeroSpendPolicy(accessKey.limits)) {
+      throw new ApiFailure(403, "invalid_access_key_policy", "A CLI key without MPP cannot spend funds or call contracts.");
     }
     return;
   }
@@ -814,6 +1380,17 @@ function matchesLimit(value: { limit: string; period?: number } | undefined): bo
   return value?.limit === MPP_LIMIT.toString() && value.period === MPP_PERIOD;
 }
 
+function hasZeroSpendPolicy(values: unknown[]): boolean {
+  if (values.length !== 2) return false;
+  const tokens = new Set(values.map((value) => {
+    if (!isRecord(value) || value.limit !== "0" || value.period !== 0) return "";
+    return address(value.token).toLowerCase();
+  }));
+  return tokens.size === 2
+    && tokens.has(MACHINE_USD.toLowerCase())
+    && tokens.has(USDC_E.toLowerCase());
+}
+
 function scopeKey(value: unknown): string {
   if (!isRecord(value) || typeof value.selector !== "string" || !/^0x[0-9a-fA-F]{8}$/.test(value.selector)) {
     throw new ApiFailure(403, "invalid_access_key_policy", "An access key call scope is invalid.");
@@ -850,7 +1427,14 @@ async function handleGrantRoute(
   if (action === undefined && request.method === "GET") {
     return Response.json(connectionWire(grant, token));
   }
+  const mcpAction = action?.match(/^mcp\/([A-Za-z0-9_-]{43})$/);
+  if (mcpAction) {
+    return grantMcpRequest(request, env, grant, mcpAction[1]!);
+  }
   if (action === "mpp/balance" && request.method === "GET") {
+    if (!grant.capabilities.includes("mpp.machusd") || !grant.accessKey) {
+      throw new ApiFailure(403, "mpp_not_granted", "This connection has no MPP authority.");
+    }
     const refreshed = await withGrantMutationLock(store, grant.id, async () => {
       const current = await authenticatedGrant(request, env.CONNECT_STATE, grantId);
       const [balance, settlementBalance] = await connectionBalances(current.grant.accountAddress);
@@ -1305,8 +1889,8 @@ async function accountAuthorizations(store: Kv.Kv, current: GrantRecord) {
 function grantAuthorization(grant: GrantRecord) {
   const now = Math.floor(Date.now() / 1000);
   const accessKey = grant.accessKey;
-  const limits = Array.isArray(accessKey.limits) ? accessKey.limits : [];
-  const scopes = Array.isArray(accessKey.scopes) ? accessKey.scopes : [];
+  const limits = accessKey && Array.isArray(accessKey.limits) ? accessKey.limits : [];
+  const scopes = accessKey && Array.isArray(accessKey.scopes) ? accessKey.scopes : [];
   return {
     appId: grant.appId,
     permission: grant.permission,
@@ -1314,7 +1898,7 @@ function grantAuthorization(grant: GrantRecord) {
     expiresAt: grant.expiresAt,
     capabilities: [...grant.capabilities],
     connectors: CONNECTOR_IDS.filter((connector) => grant.capabilities.includes(connector)),
-    accessKey: {
+    ...(accessKey ? { accessKey: {
       id: address(accessKey.key_id),
       expiry: safeInteger(accessKey.expiry, "access_key.expiry"),
       limits: limits.map((limit) => {
@@ -1341,15 +1925,14 @@ function grantAuthorization(grant: GrantRecord) {
             : {}),
         };
       }),
-    },
-    spend: {
+    }, spend: {
       token: MACHINE_USD,
       symbol: "MACHUSD",
       spent: grant.spentAtomics,
       limit: MPP_LIMIT.toString(),
       period: MPP_PERIOD,
       maxPerRequest: MPP_MAX_PER_REQUEST.toString(),
-    },
+    } } : { authority: "hosted" }),
   };
 }
 
@@ -1624,14 +2207,45 @@ async function boundedJson(
   limit: number,
   label: string,
 ): Promise<Record<string, unknown>> {
-  const encoded = await request.text();
-  if (new TextEncoder().encode(encoded).byteLength > limit) {
-    throw new ApiFailure(413, "request_too_large", `${label} request is too large.`);
-  }
+  const encoded = await boundedRequestText(request, limit, label);
   try { return object(JSON.parse(encoded), `${label} request`); } catch (error) {
     if (error instanceof ApiFailure) throw error;
     throw new ApiFailure(400, "invalid_json", `${label} request must be JSON.`);
   }
+}
+
+async function boundedRequestText(request: Request, limit: number, label: string): Promise<string> {
+  const declared = Number(request.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > limit) {
+    await request.body?.cancel();
+    throw new ApiFailure(413, "request_too_large", `${label} request is too large.`);
+  }
+  if (!request.body) return "";
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > limit) {
+      await reader.cancel();
+      throw new ApiFailure(413, "request_too_large", `${label} request is too large.`);
+    }
+    chunks.push(value);
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(bytes);
+}
+
+async function boundedRequestBytes(request: Request, limit: number): Promise<ArrayBuffer> {
+  const text = await boundedRequestText(request, limit, "remote MCP");
+  return new TextEncoder().encode(text).buffer;
 }
 
 function tokenSymbol(token: `0x${string}`): string {
@@ -2057,7 +2671,15 @@ function isGrantRecord(value: unknown): value is GrantRecord {
     && Number.isSafeInteger(value.expiresAt)
     && Array.isArray(value.capabilities)
     && value.capabilities.every((capability) => typeof capability === "string")
-    && isRecord(value.accessKey)
+    && (value.mcpConnections === undefined
+      || (Array.isArray(value.mcpConnections)
+        && value.mcpConnections.length <= 16
+        && value.mcpConnections.every((connection) => isRecord(connection)
+          && isMcpConnectionId(connection.id)
+          && typeof connection.name === "string"
+          && connection.name.length > 0
+          && connection.name.length <= 256)))
+    && (value.accessKey === undefined || isRecord(value.accessKey))
     && (value.balanceAtomics === undefined || /^\d+$/.test(String(value.balanceAtomics)))
     && typeof value.spentAtomics === "string"
     && typeof value.egressSubject === "string"
@@ -2097,6 +2719,9 @@ async function chargeGrant(
   body: Record<string, unknown>,
 ) {
   if (grant.status !== "active") throw new ApiFailure(409, "grant_inactive", "The grant is not active.");
+  if (!grant.capabilities.includes("mpp.machusd") || !grant.accessKey) {
+    throw new ApiFailure(403, "mpp_not_granted", "This connection has no MPP authority.");
+  }
   const ttl = remainingGrantTtl(grant);
   if (typeof body.amount_atomics !== "string" || !/^[1-9][0-9]*$/.test(body.amount_atomics)) {
     throw new ApiFailure(400, "invalid_mpp_amount", "MPP amount_atomics must be a positive integer string.");
@@ -2153,6 +2778,54 @@ async function connectorStatuses(
   };
 }
 
+async function mcpConnectionStatuses(env: Env, brokerUserId: string): Promise<McpConnection[]> {
+  const value = await brokerJson(env, `/users/${encodeURIComponent(brokerUserId)}/mcp-connections`);
+  if (!Array.isArray(value.mcp_connections)) {
+    throw new ApiFailure(502, "mcp_broker_invalid", "The remote MCP broker returned an invalid connection list.");
+  }
+  if (value.mcp_connections.length > 64) {
+    throw new ApiFailure(502, "mcp_broker_invalid", "The remote MCP broker returned too many connections.");
+  }
+  return value.mcp_connections.map(publicMcpConnection);
+}
+
+function publicMcpConnection(value: unknown): McpConnection {
+  if (!isRecord(value)
+    || !isMcpConnectionId(value.id)
+    || typeof value.name !== "string" || value.name.length < 1 || value.name.length > 256
+    || !["authorization_required", "connected", "reauthorization_required", "disabled", "revoked"].includes(String(value.status))) {
+    throw new ApiFailure(502, "mcp_broker_invalid", "The remote MCP broker returned invalid connection metadata.");
+  }
+  return {
+    id: value.id,
+    name: value.name,
+    status: value.status as McpConnectionStatus,
+  };
+}
+
+function isMcpConnection(value: unknown): value is McpConnection {
+  return isRecord(value)
+    && isMcpConnectionId(value.id)
+    && typeof value.name === "string" && value.name.length > 0 && value.name.length <= 256
+    && ["authorization_required", "connected", "reauthorization_required", "disabled", "revoked"].includes(String(value.status));
+}
+
+async function connectedRequestedMcpConnections(
+  env: Env,
+  brokerUserId: string,
+  requested: readonly string[],
+): Promise<McpConnection[]> {
+  if (requested.length === 0) return [];
+  const byId = new Map((await mcpConnectionStatuses(env, brokerUserId)).map((connection) => [connection.id, connection]));
+  return requested.map((id) => {
+    const connection = byId.get(id);
+    if (!connection || connection.status !== "connected") {
+      throw new ApiFailure(403, "mcp_not_connected", "Every requested remote MCP must be connected before creating a grant.");
+    }
+    return connection;
+  });
+}
+
 function connectorStatus(value: unknown): ConnectorStatus {
   if (!isRecord(value) || value.connected !== true) return { connected: false };
   const label = boundedOptionalString(value.label, 256);
@@ -2173,18 +2846,23 @@ async function startConnector(
   connector: ConnectorId,
 ): Promise<Response> {
   if (connector === "chatgpt") {
-    return Response.json(publicChatGptLogin(await brokerJson(
-      env,
-      `/users/${encodeURIComponent(brokerUserId)}/credentials/chatgpt/login`,
-      { method: "POST" },
-    )));
+    return startChatGptConnector(env, brokerUserId);
   }
 
+  const requestOrigin = connectApiRequestOrigin(request);
+  const dialogOrigin = requiredDialogOrigin(request);
+  const local = localConnectorAuthorization(requestOrigin, connector, "connect");
+  const requestBody = request.headers.get("x-nanocodex-connect-client") === "device"
+    ? await boundedJson(request, 4 * 1024, "connector authorization")
+    : undefined;
+  const deviceReturn = requestBody
+    ? deviceMcpReturn(requestBody.return_to, dialogOrigin)
+    : undefined;
   const started = await brokerJson(env, `/users/${encodeURIComponent(brokerUserId)}/connectors/${connector}`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
-      redirect_uri: `${API_ORIGIN}/v1/connectors/${connector}/callback`,
+      redirect_uri: local?.redirectUri ?? `${requestOrigin}/v1/connectors/${connector}/callback`,
       return_to: "/",
     }),
   });
@@ -2193,19 +2871,160 @@ async function startConnector(
   if (!state || state.length > 512) {
     throw new ApiFailure(502, "connector_broker_invalid", "The connector broker returned an invalid authorization state.");
   }
+  if (local) {
+    try {
+      await wrapLocalConnectorAuthorizationState(
+        authorizationUrl,
+        local,
+        env.NANOCODEX_LOCAL_OAUTH_RELAY_HMAC_KEY ?? "",
+      );
+    } catch {
+      throw new ApiFailure(502, "connector_broker_invalid", "The connector broker returned an invalid authorization state.");
+    }
+  }
   if (!store.create) {
     throw new ApiFailure(500, "connector_state_unavailable", "Atomic connector state storage is unavailable.");
   }
   const created = await store.create(`connector-state:${state}`, {
     accountAddress,
     brokerUserId,
-    dialogOrigin: requiredDialogOrigin(request),
+    dialogOrigin,
     provider: connector,
+    ...(deviceReturn ? { returnTo: deviceReturn } : {}),
   } satisfies ConnectorState, { ttl: CONNECTOR_STATE_TTL });
   if (!created) {
     throw new ApiFailure(502, "connector_state_conflict", "The connector authorization state could not be reserved.");
   }
   return Response.json({ authorization_url: authorizationUrl.href });
+}
+
+async function startMcpConnection(
+  env: Env,
+  store: Kv.Kv,
+  request: Request,
+  accountAddress: `0x${string}`,
+  brokerUserId: string,
+  connectionId: string,
+): Promise<Response> {
+  const existing = (await mcpConnectionStatuses(env, brokerUserId))
+    .find((connection) => connection.id === connectionId);
+  if (!existing || existing.status === "revoked") {
+    throw new ApiFailure(404, "mcp_connection_not_found", "The remote MCP connection is unavailable.");
+  }
+  if (existing.status === "connected") {
+    return Response.json({ mcp_connection: existing });
+  }
+  const requestOrigin = connectApiRequestOrigin(request);
+  const dialogOrigin = requiredDialogOrigin(request);
+  const requestBody = await boundedJson(request, 4 * 1024, "remote MCP authorization");
+  const deviceReturn = request.headers.get("x-nanocodex-connect-client") === "device"
+    ? deviceMcpReturn(requestBody.return_to, dialogOrigin)
+    : undefined;
+  const local = localMcpAuthorization(requestOrigin, connectionId, "connect");
+  const started = await brokerJson(
+    env,
+    `/users/${encodeURIComponent(brokerUserId)}/mcp-connections/${connectionId}/start`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        redirect_uri: local?.redirectUri ?? `${requestOrigin}/v1/mcp-connections/${connectionId}/callback`,
+        return_to: "/",
+      }),
+    },
+  );
+  const authorizationUrl = remoteMcpAuthorizationUrl(started.authorization_url);
+  const state = authorizationUrl.searchParams.get("state");
+  if (!state || state.length > 512 || !store.create) {
+    throw new ApiFailure(502, "mcp_broker_invalid", "The remote MCP broker returned invalid authorization state.");
+  }
+  if (local) {
+    try {
+      await wrapLocalMcpAuthorizationState(
+        authorizationUrl,
+        local,
+        env.NANOCODEX_LOCAL_OAUTH_RELAY_HMAC_KEY ?? "",
+      );
+    } catch {
+      throw new ApiFailure(502, "mcp_broker_invalid", "The remote MCP broker returned invalid authorization state.");
+    }
+  }
+  if (!await store.create(`mcp-connection-state:${state}`, {
+    accountAddress,
+    brokerUserId,
+    connectionId,
+    dialogOrigin,
+    ...(deviceReturn ? { returnTo: deviceReturn } : {}),
+  } satisfies McpConnectionState, { ttl: CONNECTOR_STATE_TTL })) {
+    throw new ApiFailure(502, "mcp_state_conflict", "The remote MCP authorization state could not be reserved.");
+  }
+  return Response.json({
+    authorization_url: authorizationUrl.href,
+    mcp_connection: existing,
+  });
+}
+
+async function disconnectMcpConnection(env: Env, brokerUserId: string, connectionId: string): Promise<void> {
+  const response = await brokerFetch(
+    env,
+    `/users/${encodeURIComponent(brokerUserId)}/mcp-connections/${connectionId}`,
+    { method: "DELETE" },
+  );
+  if (!response.ok) {
+    await response.body?.cancel();
+    throw new ApiFailure(502, "mcp_broker_failed", "The remote MCP broker could not revoke the connection.");
+  }
+  await response.body?.cancel();
+}
+
+function remoteMcpAuthorizationUrl(value: unknown): URL {
+  if (typeof value !== "string" || value.length > 8_192) {
+    throw new ApiFailure(502, "mcp_broker_invalid", "The remote MCP broker returned an invalid authorization URL.");
+  }
+  let url: URL;
+  try { url = new URL(value); } catch {
+    throw new ApiFailure(502, "mcp_broker_invalid", "The remote MCP broker returned an invalid authorization URL.");
+  }
+  if (url.protocol !== "https:" || url.username || url.password || url.hash) {
+    throw new ApiFailure(502, "mcp_broker_invalid", "The remote MCP broker returned an unsafe authorization URL.");
+  }
+  return url;
+}
+
+async function startChatGptConnector(env: Env, brokerUserId: string): Promise<Response> {
+  const user = encodeURIComponent(brokerUserId);
+  const claim = await brokerFetch(env, `/users/${user}/credentials/chatgpt/local-claim`, {
+    method: "POST",
+  });
+  if (claim.status !== 404) {
+    const text = await boundedResponseText(claim, MAX_BROKER_BODY_BYTES);
+    if (!claim.ok) {
+      throw new ApiFailure(
+        claim.status === 503 ? 503 : 502,
+        "local_chatgpt_claim_failed",
+        "No usable local ChatGPT login was found. Sign in locally, restart the development stack, and try again.",
+      );
+    }
+    let value: Record<string, unknown>;
+    try { value = object(JSON.parse(text), "local ChatGPT claim response"); } catch {
+      throw new ApiFailure(502, "connector_broker_invalid", "The connector broker returned an invalid response.");
+    }
+    const chatGpt = connectorStatus(value.chatgpt);
+    if (!chatGpt.connected) {
+      throw new ApiFailure(502, "connector_broker_invalid", "The connector broker did not retain the local ChatGPT login.");
+    }
+    return Response.json({
+      state: "authenticated",
+      connected: true,
+      ...(chatGpt.account_id ? { account_id: chatGpt.account_id } : {}),
+    });
+  }
+  await claim.body?.cancel();
+  return Response.json(publicChatGptLogin(await brokerJson(
+    env,
+    `/users/${user}/credentials/chatgpt/login`,
+    { method: "POST" },
+  )));
 }
 
 function connectorAuthorizationUrl(value: unknown, connector: OAuthConnectorId): URL {
@@ -2285,18 +3104,21 @@ async function completeConnectorCallback(
   provider: OAuthConnectorId,
 ): Promise<Response> {
   const state = url.searchParams.get("state");
-  if (!state || state.length > 512) return connectorCompletionPage(provider, 400, DIALOG_ORIGIN, "invalid_state");
-  if (!store.take) return connectorCompletionPage(provider, 500, DIALOG_ORIGIN, "state_unavailable");
+  const fallbackOrigin = connectDialogOrigin(url);
+  if (!state || state.length > 512) return connectorCompletionPage(provider, 400, fallbackOrigin, "invalid_state");
+  if (!store.take) return connectorCompletionPage(provider, 500, fallbackOrigin, "state_unavailable");
   const correlation = await store.take<ConnectorState>(`connector-state:${state}`);
   if (!isConnectorState(correlation) || correlation.provider !== provider) {
-    return connectorCompletionPage(provider, 400, DIALOG_ORIGIN, "invalid_state");
+    return connectorCompletionPage(provider, 400, fallbackOrigin, "invalid_state");
   }
 
   const callback: Record<string, string | null> = {};
   for (const name of ["code", "state", "error", "error_description"] as const) {
     const value = url.searchParams.get(name);
     if (value !== null && value.length > 4_096) {
-      return connectorCompletionPage(provider, 400, correlation.dialogOrigin, "invalid_callback");
+      return correlation.returnTo
+        ? connectorCompletionRedirect(provider, correlation.returnTo, "failed", "invalid_callback")
+        : connectorCompletionPage(provider, 400, correlation.dialogOrigin, "invalid_callback");
     }
     callback[name] = value;
   }
@@ -2312,16 +3134,169 @@ async function completeConnectorCallback(
       },
     );
   } catch {
-    return connectorCompletionPage(provider, 502, correlation.dialogOrigin, "connector_broker_unavailable");
+    return correlation.returnTo
+      ? connectorCompletionRedirect(provider, correlation.returnTo, "failed", "connector_broker_unavailable")
+      : connectorCompletionPage(provider, 502, correlation.dialogOrigin, "connector_broker_unavailable");
   }
-  const status = response.ok ? 200 : 502;
-  await response.body?.cancel();
+  let text: string;
+  try {
+    text = await boundedResponseText(response, MAX_BROKER_BODY_BYTES);
+  } catch {
+    return correlation.returnTo
+      ? connectorCompletionRedirect(provider, correlation.returnTo, "failed", "connector_broker_invalid")
+      : connectorCompletionPage(provider, 502, correlation.dialogOrigin, "connector_broker_invalid");
+  }
+  let result: "connected" | "cancelled" | "failed" = "failed";
+  if (response.ok) {
+    try {
+      const completed = object(JSON.parse(text), "connector callback response");
+      result = completed.connected === true
+        ? "connected"
+        : completed.connected === false ? "cancelled" : "failed";
+    } catch {
+      result = "failed";
+    }
+  }
+  if (correlation.returnTo) {
+    return connectorCompletionRedirect(
+      provider,
+      correlation.returnTo,
+      result,
+      result === "failed" ? "connector_broker_failed" : undefined,
+    );
+  }
   return connectorCompletionPage(
     provider,
-    status,
+    result === "failed" ? 502 : 200,
     correlation.dialogOrigin,
-    response.ok ? undefined : "connector_broker_failed",
+    result === "connected" ? undefined : result === "cancelled" ? "connector_cancelled" : "connector_broker_failed",
   );
+}
+
+async function completeMcpConnectionCallback(
+  env: Env,
+  store: Kv.Kv,
+  url: URL,
+  connectionId: string,
+): Promise<Response> {
+  const state = url.searchParams.get("state");
+  const fallbackOrigin = connectDialogOrigin(url);
+  if (!state || state.length > 512 || !store.take) {
+    return mcpCompletionPage(connectionId, 400, fallbackOrigin, "invalid_state");
+  }
+  const correlation = await store.take<McpConnectionState>(`mcp-connection-state:${state}`);
+  if (!isMcpConnectionState(correlation) || correlation.connectionId !== connectionId) {
+    return mcpCompletionPage(connectionId, 400, fallbackOrigin, "invalid_state");
+  }
+  const callback: Record<string, string | null> = {};
+  for (const name of ["code", "state", "error", "error_description"] as const) {
+    const value = url.searchParams.get(name);
+    if (value !== null && value.length > 4_096) {
+      return mcpCompletionResult(correlation, "failed", "invalid_callback");
+    }
+    callback[name] = value;
+  }
+  let result: "connected" | "cancelled" | "failed" = "failed";
+  try {
+    const response = await brokerFetch(
+      env,
+      `/users/${encodeURIComponent(correlation.brokerUserId)}/mcp-connections/${connectionId}/callback`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(callback),
+      },
+    );
+    const text = await boundedResponseText(response, MAX_BROKER_BODY_BYTES);
+    if (response.ok) {
+      const completed = object(JSON.parse(text), "remote MCP callback response");
+      const listed = Array.isArray(completed.mcp_connections) && completed.mcp_connections.length === 1
+        ? completed.mcp_connections[0]
+        : undefined;
+      const connection = publicMcpConnection(completed.mcp_connection ?? completed.connection ?? listed);
+      if (connection.id !== connectionId) {
+        throw new Error("The remote MCP broker returned another connection.");
+      }
+      result = connection.status === "connected" ? "connected" : "failed";
+    } else if (response.status === 400 && callback.error) {
+      result = "cancelled";
+    }
+  } catch {
+    result = "failed";
+  }
+  return mcpCompletionResult(
+    correlation,
+    result,
+    result === "failed" ? "mcp_broker_failed" : undefined,
+  );
+}
+
+function mcpCompletionResult(
+  correlation: McpConnectionState,
+  result: "connected" | "cancelled" | "failed",
+  failure?: string,
+): Response {
+  if (correlation.returnTo) {
+    const destination = new URL(correlation.returnTo);
+    destination.searchParams.set("mcp_connection", correlation.connectionId);
+    destination.searchParams.set("mcp_result", result);
+    if (failure) destination.searchParams.set("error", failure);
+    return new Response(null, {
+      status: 303,
+      headers: {
+        "cache-control": "no-store",
+        location: destination.href,
+        "referrer-policy": "no-referrer",
+        "x-content-type-options": "nosniff",
+      },
+    });
+  }
+  return mcpCompletionPage(
+    correlation.connectionId,
+    result === "failed" ? 502 : 200,
+    correlation.dialogOrigin,
+    result === "connected" ? undefined : failure ?? "mcp_authorization_cancelled",
+  );
+}
+
+function mcpCompletionPage(connectionId: string, status: number, targetOrigin: string, failure?: string): Response {
+  const completion = JSON.stringify({
+    type: "nanocodex:mcp-connection-complete",
+    connection_id: connectionId,
+    result: failure ? "error" : "success",
+    ...(failure ? { error: failure, message: "The remote MCP authorization did not complete." } : {}),
+  });
+  const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Nanocodex MCP connection</title></head><body><p>Connection flow complete. You can close this window.</p><script>window.opener?.postMessage(${completion},${JSON.stringify(targetOrigin)});window.close();</script></body></html>`;
+  return new Response(html, {
+    status,
+    headers: {
+      "content-security-policy": "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+      "content-type": "text/html; charset=utf-8",
+      "referrer-policy": "no-referrer",
+      "x-content-type-options": "nosniff",
+    },
+  });
+}
+
+function connectorCompletionRedirect(
+  provider: OAuthConnectorId,
+  returnTo: string,
+  result: "connected" | "cancelled" | "failed",
+  failure?: string,
+): Response {
+  const destination = new URL(returnTo);
+  destination.searchParams.set("connector", provider);
+  destination.searchParams.set("connector_result", result);
+  if (failure) destination.searchParams.set("error", failure);
+  return new Response(null, {
+    status: 303,
+    headers: {
+      "cache-control": "no-store",
+      location: destination.href,
+      "referrer-policy": "no-referrer",
+      "x-content-type-options": "nosniff",
+    },
+  });
 }
 
 function connectorCompletionPage(
@@ -2355,7 +3330,52 @@ function isConnectorState(value: unknown): value is ConnectorState {
     && typeof value.dialogOrigin === "string"
     && isAllowedDialogOrigin(value.dialogOrigin)
     && typeof value.provider === "string"
-    && OAUTH_CONNECTOR_IDS.includes(value.provider as OAuthConnectorId);
+    && OAUTH_CONNECTOR_IDS.includes(value.provider as OAuthConnectorId)
+    && (value.returnTo === undefined
+      || isDeviceMcpReturn(value.returnTo, value.dialogOrigin));
+}
+
+function isMcpConnectionState(value: unknown): value is McpConnectionState {
+  return isRecord(value)
+    && /^0x[0-9a-fA-F]{40}$/.test(String(value.accountAddress))
+    && isBrokerUserId(value.brokerUserId)
+    && isMcpConnectionId(value.connectionId)
+    && typeof value.dialogOrigin === "string"
+    && isAllowedDialogOrigin(value.dialogOrigin)
+    && (value.returnTo === undefined
+      || isDeviceMcpReturn(value.returnTo, value.dialogOrigin));
+}
+
+function deviceMcpReturn(value: unknown, dialogOrigin: string): string {
+  if (typeof value !== "string" || value.length > 2_048) {
+    throw new ApiFailure(400, "invalid_mcp_return", "The device return URL is invalid.");
+  }
+  let url: URL;
+  try { url = new URL(value, dialogOrigin); } catch {
+    throw new ApiFailure(400, "invalid_mcp_return", "The device return URL is invalid.");
+  }
+  const keys = [...url.searchParams.keys()];
+  const userCodes = url.searchParams.getAll("user_code");
+  const apiOrigins = url.searchParams.getAll("api_origin");
+  if (url.origin !== dialogOrigin || url.pathname !== "/connect" || url.hash
+    || keys.some((key) => key !== "user_code" && key !== "api_origin")
+    || userCodes.length !== 1 || !/^[A-Z0-9]{8}$/.test(userCodes[0]!)
+    || apiOrigins.length > 1
+    || (apiOrigins[0] !== undefined
+      && apiOrigins[0] !== API_ORIGIN
+      && !isLocalDevelopmentOrigin(apiOrigins[0]))) {
+    throw new ApiFailure(400, "invalid_mcp_return", "The device return URL is invalid.");
+  }
+  return url.href;
+}
+
+function isDeviceMcpReturn(value: unknown, dialogOrigin: string): value is string {
+  if (typeof value !== "string") return false;
+  try {
+    return deviceMcpReturn(value, dialogOrigin) === value;
+  } catch {
+    return false;
+  }
 }
 
 function requestedConnectors(value: unknown): ConnectorId[] {
@@ -2371,6 +3391,33 @@ function requestedConnectors(value: unknown): ConnectorId[] {
     requested.add(item as ConnectorId);
   }
   return [...requested];
+}
+
+function requestedMcpConnections(value: unknown): string[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > 16) {
+    throw new ApiFailure(400, "invalid_requested_mcp_connections", "requested_mcp_connections must be a bounded connection ID array.");
+  }
+  const requested = new Set<string>();
+  for (const item of value) {
+    if (!isMcpConnectionId(item)) {
+      throw new ApiFailure(400, "invalid_requested_mcp_connections", "requested_mcp_connections contains an invalid connection ID.");
+    }
+    requested.add(item);
+  }
+  if (requested.size !== value.length) {
+    throw new ApiFailure(400, "invalid_requested_mcp_connections", "requested_mcp_connections cannot contain duplicates.");
+  }
+  return [...requested];
+}
+
+function requireRequestedConnectors(
+  connected: readonly ConnectorId[],
+  requested: readonly ConnectorId[],
+): void {
+  if (!requestedConnectorsSatisfied(connected, requested)) {
+    throw new ApiFailure(403, "connector_not_connected", "Every requested connector must be connected before creating a grant.");
+  }
 }
 
 async function connectedRequestedConnectors(
@@ -2475,6 +3522,55 @@ async function grantConnectorRequest(
     }
   }
   return { status: response.status, headers: responseHeaders, body: responseBody };
+}
+
+async function grantMcpRequest(
+  request: Request,
+  env: Env,
+  grant: GrantRecord,
+  connectionId: string,
+): Promise<Response> {
+  if (grant.status !== "active" || grant.expiresAt <= Math.floor(Date.now() / 1_000)) {
+    throw new ApiFailure(409, "grant_inactive", "The grant is inactive or expired.");
+  }
+  if (!grant.mcpConnections?.some((connection) => connection.id === connectionId)
+    || !grant.capabilities.includes(`mcp:${connectionId}`)) {
+    throw new ApiFailure(403, "mcp_not_granted", "This remote MCP connection is outside the grant.");
+  }
+  if (!EGRESS_SUBJECT.test(grant.egressSubject)) {
+    throw new ApiFailure(409, "mcp_subject_unavailable", "Reconnect to authorize remote MCP execution.");
+  }
+  if (!CONNECTOR_METHODS.has(request.method)) {
+    throw new ApiFailure(405, "method_not_allowed", "The remote MCP request method is unsupported.");
+  }
+  const headers = new Headers({ "x-nanocodex-subject": grant.egressSubject });
+  for (const name of ["accept", "content-type", "last-event-id", "mcp-protocol-version", "mcp-session-id"] as const) {
+    const value = request.headers.get(name);
+    if (value && value.length <= 4_096) headers.set(name, value);
+  }
+  let body: ArrayBuffer | undefined;
+  if (request.method !== "GET" && request.method !== "HEAD" && request.body) {
+    body = await boundedRequestBytes(request, MAX_CONNECTOR_REQUEST_BODY_BYTES);
+  }
+  const upstream = await env.EGRESS.fetch(new Request(
+    `https://mcp.internal/v1/connections/${connectionId}`,
+    {
+      method: request.method,
+      headers,
+      ...(body ? { body } : {}),
+      redirect: "manual",
+      signal: request.signal,
+    },
+  ));
+  const responseHeaders = new Headers({ "cache-control": "no-store" });
+  for (const name of ["content-type", "mcp-session-id", "retry-after"] as const) {
+    const value = upstream.headers.get(name);
+    if (value && value.length <= 4_096) responseHeaders.set(name, value);
+  }
+  return new Response(upstream.body, {
+    status: upstream.status,
+    headers: responseHeaders,
+  });
 }
 
 function connectorTarget(connector: OAuthConnectorId, value: unknown): URL {
@@ -2590,6 +3686,168 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
+function createDeviceCode(env: Env, store: Kv.Kv) {
+  return Handler.deviceCode({
+    baseUrl(request) {
+      const origin = new URL(request.url).origin;
+      if (
+        origin === API_ORIGIN
+        || isLocalDevelopmentOrigin(origin)
+      ) return origin;
+      throw new Error("The device-code host origin is not allowed.");
+    },
+    path: "/v1/device",
+    pollingInterval: 1_000,
+    store,
+    html: {
+      async render({ record, request, userCode }) {
+        const normalized = normalizeDeviceUserCode(userCode);
+        if (acceptsHtml(request)) {
+          const apiOrigin = new URL(request.url).origin;
+          const verification = localDeviceVerificationUrl(apiOrigin, normalized)
+            ?? deviceVerificationUrl(apiOrigin, normalized);
+          return new Response(null, { status: 302, headers: { location: verification.href } });
+        }
+        if (!request.headers.get("accept")?.includes("application/json")) {
+          return Response.json({ error: "not_acceptable" }, { status: 406 });
+        }
+        if (!normalized || !record || record.status !== "pending") {
+          return Response.json({
+            error: "unknown_code",
+            error_description: "Unknown or expired device code.",
+          }, { status: 404 });
+        }
+        try {
+          if (record.message.type !== "rpc-requests" || record.message.payload.length !== 1) {
+            throw new Error("Device authorization requires one RPC request.");
+          }
+          const pending = parseCliWalletRequest(record.message.payload[0]);
+          const mcpResources = validateMcpResources(pending.resources);
+          const requestedMcpConnections = await pendingMcpConnections(env, store, mcpResources.requested);
+          return Response.json({
+            user_code: normalized,
+            app: cliApp,
+            request: {
+              jsonrpc: "2.0",
+              id: pending.id,
+              method: pending.method,
+              params: pending.params,
+            },
+            requested_mcp_connections: requestedMcpConnections,
+            ...(mcpResources.focus ? { focus_mcp_connection: mcpResources.focus } : {}),
+          });
+        } catch (cause) {
+          return Response.json({
+            error: "invalid_request",
+            error_description: errorText(cause),
+          }, { status: 400 });
+        }
+      },
+    },
+    async validate({ request, result }) {
+      try {
+        const pending = parseCliWalletRequest(request);
+        const sanitized = sanitizeCliWalletResult(result);
+        if (JSON.stringify(sanitized) !== JSON.stringify(result)) {
+          throw new Error("The approved result contains fields outside the CLI grant contract.");
+        }
+        const account = sanitized.accounts[0]!;
+        const approvalId = account.capabilities.auth.approval_id;
+        const approval = await store.get<ConnectApproval>(`connect-approval:${approvalId}`);
+        if (!isConnectApproval(approval)
+          || approval.accountAddress.toLowerCase() !== account.address.toLowerCase()
+          || approval.appId !== CLI_APP_ID
+          || approval.appOrigin !== CLI_APP_ORIGIN
+          || !sameResources(approval.resources, pending.resources)) {
+          throw new Error("The CLI approval is not bound to this authenticated request.");
+        }
+        if ("mode" in account.capabilities.auth && account.capabilities.auth.mode === "hosted") {
+          if (approval.authorization !== "hosted"
+            || approval.keyAuthorization !== undefined
+            || !pending.resources.includes(HOSTED_AUTHORIZATION_RESOURCE)
+            || pending.resources.includes("urn:nanocodex:mpp:machusd:spend")) {
+            throw new Error("The hosted CLI approval is not permitted for this request.");
+          }
+          return undefined;
+        }
+        if (!("personalSign" in account.capabilities)
+          || !("keyAuthorization" in account.capabilities)) {
+          throw new Error("The signed CLI approval is incomplete.");
+        }
+        const serialized = account.capabilities.personalSign.keyAuthorization;
+        if (approval.authorization !== "signed"
+          || approval.keyAuthorization?.toLowerCase() !== serialized.toLowerCase()) {
+          throw new Error("The signed CLI approval does not match this request.");
+        }
+        const accessKey = accessKeyWire(
+          account.capabilities.keyAuthorization,
+          serialized,
+          account.address,
+        );
+        if (!approvedCliAccessKeyMatches(pending, accessKey)) {
+          throw new Error("The signed CLI access key does not match the retained request.");
+        }
+        return undefined;
+      } catch (cause) {
+        return Response.json({
+          error: "invalid_approval",
+          error_description: errorText(cause),
+        }, { status: 403 });
+      }
+    },
+  });
+}
+
+async function pendingMcpConnections(env: Env, store: Kv.Kv, ids: readonly string[]): Promise<McpConnection[]> {
+  if (ids.length === 0) return [];
+  const owners = await Promise.all(ids.map((id) => store.get<unknown>(`mcp-intent-owner:${id}`)));
+  const owner = owners[0];
+  if (typeof owner === "string" && owners.every((candidate) => candidate === owner) && isBrokerUserId(owner)) {
+    const byId = new Map((await mcpConnectionStatuses(env, owner)).map((connection) => [connection.id, connection]));
+    return ids.map((id) => byId.get(id) ?? (() => { throw new Error("A requested remote MCP connection is unavailable."); })());
+  }
+  return Promise.all(ids.map(async (id) => {
+    const intent = await store.get<McpIntent>(`mcp-intent:${id}`);
+    if (!isMcpIntent(intent) || intent.expiresAt <= Math.floor(Date.now() / 1_000)) {
+      throw new Error("A requested remote MCP intent is unavailable or expired.");
+    }
+    return { id, name: intent.name, status: "authorization_required" as const };
+  }));
+}
+
+function normalizeDeviceUserCode(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  const normalized = value.replace(/[\s-]/g, "").toUpperCase();
+  return /^[A-Z]{8}$/.test(normalized) ? normalized : undefined;
+}
+
+function acceptsHtml(request: Request): boolean {
+  return request.headers.get("accept")?.split(",").some((value) => (
+    value.trim().split(";", 1)[0] === "text/html"
+  )) === true;
+}
+
+function localDeviceVerificationUrl(
+  apiOrigin: string,
+  userCode: string | undefined,
+): URL | undefined {
+  if (!isLocalDevelopmentOrigin(apiOrigin)) return undefined;
+  const verification = new URL("/connect", apiOrigin);
+  verification.searchParams.set("api_origin", apiOrigin);
+  if (userCode) verification.searchParams.set("user_code", userCode);
+  return verification;
+}
+
+function sameResources(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((resource) => right.includes(resource));
+}
+
+function errorText(cause: unknown): string {
+  return cause instanceof Error && cause.message
+    ? cause.message
+    : "Invalid device authorization request.";
+}
+
 function createAuth(
   env: Env,
   store: Kv.Kv,
@@ -2629,8 +3887,11 @@ function createAuth(
       const identity = await connectBrokerIdentity(env, store, accountAddress);
       mark("identity");
       const resourcesStartedAt = performance.now();
-      const [status, durableAgentId] = await Promise.all([
+      const [status, mcpConnections, durableAgentId] = await Promise.all([
         measured(connectorStatuses(env, identity.userId), (duration) => { connectorsDuration = duration; }),
+        identity.linked
+          ? materializeApprovedMcpConnections(env, store, app, identity.userId, resources)
+          : pendingMcpConnections(env, store, approvedMcpConnectionIds(resources)),
         identity.linked && !chromeExtension
           ? measured(
               connectManagedAgent(env, store, identity.userId, appScope),
@@ -2644,18 +3905,28 @@ function createAuth(
         accountAddress,
         appId: app.appId,
         appOrigin: app.origin,
+        authorization: "signed",
         brokerUserId: identity.userId,
         connectedConnectors,
+        mcpConnections,
         ...(durableAgentId ? { durableAgentId } : {}),
         ...(context.keyAuthorization ? { keyAuthorization: context.keyAuthorization } : {}),
         profileLinked: identity.linked,
         resources,
       } satisfies ConnectApproval, { ttl: CONNECT_APPROVAL_TTL });
+      if (!identity.linked && mcpConnections.length > 0) {
+        await store.set(`pending-mcp-account-link:${accountAddress.toLowerCase()}`, {
+          appId: app.appId,
+          appOrigin: app.origin,
+          resources,
+        } satisfies PendingMcpAccountLink, { ttl: CONNECT_APPROVAL_TTL });
+      }
       mark("approval");
       return Response.json({
         agent_id: await agentId(accountAddress),
         approval_id: approvalId,
         connectors: status.connectors,
+        mcp_connections: mcpConnections,
         profile: { linked: identity.linked },
       }, { headers: { "server-timing": [
         `identity;dur=${(resourcesStartedAt - startedAt).toFixed(1)}`,
@@ -2708,6 +3979,22 @@ async function takeConnectApproval(
   return approval;
 }
 
+async function readConnectApproval(
+  store: Kv.Kv,
+  approvalId: string,
+  accountAddress: `0x${string}`,
+): Promise<ConnectApproval> {
+  if (!/^[A-Za-z0-9_-]{43}$/.test(approvalId)) {
+    throw new ApiFailure(403, "approval_unavailable", "The signed Connect approval is unavailable.");
+  }
+  const approval = await store.get<ConnectApproval>(`connect-approval:${approvalId}`);
+  if (!isConnectApproval(approval)
+    || approval.accountAddress.toLowerCase() !== accountAddress.toLowerCase()) {
+    throw new ApiFailure(403, "approval_unavailable", "The signed Connect approval is unavailable.");
+  }
+  return approval;
+}
+
 function isConnectApproval(value: unknown): value is ConnectApproval {
   return isRecord(value)
     && /^0x[0-9a-fA-F]{40}$/.test(String(value.accountAddress))
@@ -2717,9 +4004,14 @@ function isConnectApproval(value: unknown): value is ConnectApproval {
     && (value.connectedConnectors === undefined
       || (Array.isArray(value.connectedConnectors)
         && value.connectedConnectors.every((connector) => CONNECTOR_IDS.includes(connector as ConnectorId))))
+    && (value.mcpConnections === undefined
+      || (Array.isArray(value.mcpConnections)
+        && value.mcpConnections.length <= 16
+        && value.mcpConnections.every(isMcpConnection)))
     && (value.durableAgentId === undefined || isConnectAgentId(value.durableAgentId))
     && Array.isArray(value.resources)
     && value.resources.every((resource) => typeof resource === "string")
+    && (value.authorization === "signed" || value.authorization === "hosted")
     && (value.profileLinked === undefined || typeof value.profileLinked === "boolean")
     && (value.keyAuthorization === undefined
       || (typeof value.keyAuthorization === "string" && /^0x[0-9a-fA-F]+$/.test(value.keyAuthorization)));
@@ -2729,10 +4021,11 @@ function requireApprovedCapabilities(
   resources: readonly string[],
   appId: string,
   requested: readonly ConnectorId[],
+  requestedMcpIds: readonly string[],
 ) {
   const approvedResources = new Set(resources);
   const required = [
-    ...(appId === CHROME_EXTENSION_APP_ID
+    ...(appId === CHROME_EXTENSION_APP_ID || appId === CLI_APP_ID
       ? ["urn:nanocodex:agent:run"]
       : BASE_APPROVAL_RESOURCES),
     `urn:nanocodex:app:${encodeURIComponent(appId)}`,
@@ -2743,6 +4036,19 @@ function requireApprovedCapabilities(
   const approved = approvedConnectors(resources);
   if (requested.some((connector) => !approved.has(connector))) {
     throw new ApiFailure(403, "connector_not_approved", "A requested connector was not present in the signed SIWE approval.");
+  }
+  if (appId === CLI_APP_ID
+    && (approved.size !== requested.length || requested.some((connector) => !approved.has(connector)))) {
+    throw new ApiFailure(403, "connector_mismatch", "The CLI grant must exchange exactly its signed connector set.");
+  }
+  const approvedMcpIds = approvedMcpConnectionIds(resources);
+  if (requestedMcpIds.some((id) => !approvedMcpIds.includes(id))) {
+    throw new ApiFailure(403, "mcp_not_approved", "A requested remote MCP was not present in the signed approval.");
+  }
+  if (appId === CLI_APP_ID
+    && (approvedMcpIds.length !== requestedMcpIds.length
+      || requestedMcpIds.some((id) => !approvedMcpIds.includes(id)))) {
+    throw new ApiFailure(403, "mcp_mismatch", "The CLI grant must exchange exactly its signed remote MCP set.");
   }
 }
 
@@ -2783,6 +4089,17 @@ function approvedAgentCapabilities(resources: readonly string[]): string[] {
   return [...new Set([...legacy, ...combined])];
 }
 
+function approvedHostedCapabilities(resources: readonly string[]): string[] {
+  const approved = new Set(resources);
+  return [
+    ...(approved.has("urn:nanocodex:capability:mercator:boost") ? ["mercator.boost"] : []),
+    ...(approved.has("urn:nanocodex:mpp:machusd:spend") ? ["mpp.machusd"] : []),
+    ...(approved.has(HOSTED_HISTORY_RESOURCE) ? ["history:read"] : []),
+    ...(approved.has(HOSTED_MEMORY_READ_RESOURCE) ? ["memory:read"] : []),
+    ...(approved.has(HOSTED_MEMORY_WRITE_RESOURCE) ? ["memory:write"] : []),
+  ];
+}
+
 function approvedConnectors(resources: readonly string[]): Set<string> {
   return new Set(resources.flatMap((resource) => {
     if (resource.startsWith("urn:nanocodex:connector:")) {
@@ -2793,6 +4110,14 @@ function approvedConnectors(resources: readonly string[]): Set<string> {
     }
     return [];
   }).filter((connector) => (CONNECTOR_IDS as readonly string[]).includes(connector)));
+}
+
+function approvedMcpConnectionIds(resources: readonly string[]): string[] {
+  try {
+    return [...validateMcpResources(resources).requested];
+  } catch {
+    throw new ApiFailure(403, "invalid_mcp_resources", "The signed remote MCP resources are invalid.");
+  }
 }
 
 function siweResources(message: string): string[] {
@@ -2820,10 +4145,13 @@ function connectionWire(grant: GrantRecord, grantToken: string) {
     && grant.settlementBalanceAtomics !== undefined;
   return {
     grant_token: grantToken,
+    account_id: grant.brokerUserId,
     account_address: grant.accountAddress,
     agent_id: grant.agentId,
     grant: grantWire(grant),
-    access_key: grant.accessKey,
+    mcp_connections: grant.mcpConnections ?? [],
+    authorization_mode: grant.accessKey ? "access_key" : "hosted",
+    ...(grant.accessKey ? { access_key: grant.accessKey } : {}),
     mpp: {
       token: MACHINE_USD,
       symbol: "MACHUSD",
@@ -2847,10 +4175,15 @@ function grantWire(grant: GrantRecord) {
     status: grant.status,
     expires_at: grant.expiresAt,
     capabilities: grant.capabilities,
+    mcp_connections: grant.mcpConnections ?? [],
   };
 }
 
-function accessKeyWire(value: Record<string, unknown>, serialized: `0x${string}`) {
+function accessKeyWire(
+  value: Record<string, unknown>,
+  serialized: `0x${string}`,
+  expectedAccount?: `0x${string}`,
+) {
   const authorization = KeyAuthorization.deserialize(serialized);
   if (("isAdmin" in authorization && authorization.isAdmin === true)) {
     throw new ApiFailure(403, "invalid_access_key_policy", "Administrative access keys cannot back a Nanocodex grant.");
@@ -2861,17 +4194,25 @@ function accessKeyWire(value: Record<string, unknown>, serialized: `0x${string}`
     throw new Error("The access-key identifier does not match the signed authorization.");
   }
   if (!authorization.signature) throw new Error("The access-key authorization is not signed.");
+  if (authorization.account !== undefined
+    && expectedAccount !== undefined
+    && authorization.account.toLowerCase() !== expectedAccount.toLowerCase()) {
+    throw new ApiFailure(403, "invalid_access_key_policy", "The access key is bound to another account.");
+  }
   const witness = hex(authorization.witness, "key_authorization.witness");
   if (witness.length !== 66) throw new Error("key_authorization.witness must be 32 bytes.");
   const expiry = authorization.expiry;
   if (typeof expiry !== "number" || !Number.isSafeInteger(expiry)) {
     throw new Error("The access-key authorization must have an expiry.");
   }
-  const limits = authorization.limits?.map(({ limit, period, token }) => ({
+  if (authorization.limits === undefined) {
+    throw new ApiFailure(403, "invalid_access_key_policy", "The access key must explicitly constrain spending.");
+  }
+  const limits = authorization.limits.map(({ limit, period, token }) => ({
     token: address(token),
     limit: limit.toString(),
-    ...(Number.isSafeInteger(period) ? { period } : {}),
-  })) ?? [];
+    period: Number.isSafeInteger(period) ? period : 0,
+  }));
   const scopes = authorization.scopes?.map(({ address: target, recipients, selector }) => ({
     address: address(target),
     ...(selector ? { selector: hex(selector, "key_authorization.scope.selector") } : {}),
@@ -2975,18 +4316,26 @@ function cors(response: Response, request: Request) {
     }
     response.headers.set(
       "access-control-allow-headers",
-      "accept-payment, authorization, content-type, git-protocol, idempotency-key, payment-session, payment-session-snapshot, payment-signature, x-nanocodex-app-id",
+      "accept-payment, authorization, content-type, git-protocol, idempotency-key, last-event-id, mcp-protocol-version, mcp-session-id, payment-session, payment-session-snapshot, payment-signature, x-nanocodex-app-id, x-nanocodex-connect-client",
     );
     response.headers.set("access-control-allow-methods", "GET, POST, PUT, DELETE, OPTIONS");
     response.headers.set("access-control-max-age", "86400");
     response.headers.set(
       "access-control-expose-headers",
-      "payment-receipt, payment-response, payment-session, payment-session-snapshot, www-authenticate, x-nanocodex-realtime-location",
+      "mcp-session-id, payment-receipt, payment-response, payment-session, payment-session-snapshot, retry-after, www-authenticate, x-nanocodex-realtime-location",
     );
     response.headers.set("vary", "Origin");
   }
   response.headers.set("cache-control", "no-store");
   return response;
+}
+
+function mutableResponse(response: Response): Response {
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: response.headers,
+  });
 }
 
 async function proxyThreadGit(request: Request, env: Env, url: URL): Promise<Response> {
@@ -3078,7 +4427,7 @@ function requireOnrampOrigin(request: Request): void {
 
 function requirePlaygroundOrigin(request: Request): void {
   const origin = request.headers.get("origin");
-  if (origin !== PLAYGROUND_ORIGIN && !developmentLoopbackOrigin(request, origin)) {
+  if (origin !== PLAYGROUND_ORIGIN && !developmentDialogOrigin(request, origin)) {
     throw new ApiFailure(403, "origin_denied", "This operation is available only to the registered Nanocodex app.");
   }
 }
@@ -3108,6 +4457,9 @@ function validateCallerApp(appId: unknown, origin: unknown): CallerApp {
   if (origin === CHROME_EXTENSION_ORIGIN && appId !== CHROME_EXTENSION_APP_ID) {
     throw new ApiFailure(403, "app_identity_mismatch", "The registered app id does not match this origin.");
   }
+  if (origin === CLI_APP_ORIGIN && appId !== CLI_APP_ID) {
+    throw new ApiFailure(403, "app_identity_mismatch", "The registered app id does not match this origin.");
+  }
   if (appId === REGISTERED_APP_ID
     && origin !== PLAYGROUND_ORIGIN
     && !isLoopbackOrigin(origin)) {
@@ -3115,6 +4467,9 @@ function validateCallerApp(appId: unknown, origin: unknown): CallerApp {
   }
   if (appId === CHROME_EXTENSION_APP_ID && !isChromeExtensionOrigin(origin)) {
     throw new ApiFailure(403, "app_identity_mismatch", "This app id is reserved for Chrome extensions.");
+  }
+  if (appId === CLI_APP_ID && origin !== CLI_APP_ORIGIN) {
+    throw new ApiFailure(403, "app_identity_mismatch", "This app id is reserved for the Nanocodex CLI.");
   }
   return Object.freeze({ appId, origin });
 }
@@ -3148,24 +4503,45 @@ function requireDialogOrigin(request: Request): void {
 
 function requiredDialogOrigin(request: Request): string {
   const origin = request.headers.get("origin");
-  if (!origin || (origin !== DIALOG_ORIGIN && !developmentLoopbackOrigin(request, origin))) {
+  if (!origin || (origin !== DIALOG_ORIGIN && !developmentDialogOrigin(request, origin))) {
     throw new ApiFailure(403, "origin_denied", "This account operation is available only inside Nanocodex Connect.");
   }
   return origin;
 }
 
 function isAllowedDialogOrigin(origin: string): boolean {
-  return origin === DIALOG_ORIGIN || isLoopbackOrigin(origin);
+  return origin === DIALOG_ORIGIN || isLocalDeviceOrigin(origin);
 }
 
 function isLoopbackOrigin(origin: string | null): boolean {
-  return /^http:\/\/(?:localhost|127\.0\.0\.1|(?:[a-z0-9-]+\.)*nanocodex\.localhost):\d+$/.test(
-    origin ?? "",
-  );
+  if (!origin) return false;
+  let url: URL;
+  try { url = new URL(origin); } catch { return false; }
+  if (url.origin !== origin || (url.protocol !== "http:" && url.protocol !== "https:")) {
+    return false;
+  }
+  const hostname = url.hostname.toLowerCase();
+  const localNanocodex = hostname === "nanocodex.localhost"
+    || /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.nanocodex\.localhost$/.test(hostname);
+  return hostname === "localhost"
+    || hostname === "127.0.0.1"
+    || hostname === "[::1]"
+    || (url.protocol === "http:"
+      && Boolean(url.port)
+      && localNanocodex);
+}
+
+function isLocalDevelopmentOrigin(origin: string | null): boolean {
+  return isLoopbackOrigin(origin);
 }
 
 function authenticationOrigin(request: Request): string {
-  return localDevelopmentPublicOrigin(request) ?? API_ORIGIN;
+  const publicOrigin = localDevelopmentPublicOrigin(request);
+  if (publicOrigin) return publicOrigin;
+  const requestOrigin = new URL(request.url).origin;
+  return isLocalDevelopmentOrigin(requestOrigin)
+    ? requestOrigin
+    : connectAuthOrigin(requestOrigin);
 }
 
 function localDevelopmentPublicOrigin(request: Request): string | undefined {
@@ -3175,14 +4551,52 @@ function localDevelopmentPublicOrigin(request: Request): string | undefined {
     : undefined;
 }
 
-function developmentLoopbackOrigin(request: Request, origin: string | null): boolean {
-  return new URL(request.url).origin !== API_ORIGIN && isLoopbackOrigin(origin);
+function developmentDialogOrigin(request: Request, origin: string | null): boolean {
+  const requestOrigin = new URL(request.url).origin;
+  const publicOrigin = localDevelopmentPublicOrigin(request);
+  return requestOrigin !== API_ORIGIN
+    && (isLoopbackOrigin(origin)
+      || (isLocalDevelopmentOrigin(requestOrigin) && origin === requestOrigin)
+      || (publicOrigin !== undefined
+        && (origin === publicOrigin || origin === localPlaygroundOrigin(publicOrigin))));
+}
+
+function localPlaygroundOrigin(publicOrigin: string): string | undefined {
+  if (!isLocalDevelopmentOrigin(publicOrigin)) return undefined;
+  const url = new URL(publicOrigin);
+  if (url.hostname === "nanocodex.localhost") {
+    url.hostname = "playground.nanocodex.localhost";
+  } else if (url.hostname.endsWith(".nanocodex.localhost")) {
+    url.hostname = `playground-${url.hostname.slice(0, -".nanocodex.localhost".length)}.nanocodex.localhost`;
+  } else {
+    return undefined;
+  }
+  return url.origin;
 }
 
 function allowedOrigin(request: Request, origin: string): boolean {
   return origin === DIALOG_ORIGIN
     || isPublicAppOrigin(origin)
-    || developmentLoopbackOrigin(request, origin);
+    || developmentDialogOrigin(request, origin);
+}
+
+function connectApiRequestOrigin(request: Request): string {
+  const publicOrigin = localDevelopmentPublicOrigin(request);
+  if (publicOrigin) return publicOrigin;
+  const origin = new URL(request.url).origin;
+  if (origin === API_ORIGIN || isLocalDevelopmentOrigin(origin)) {
+    return origin;
+  }
+  throw new ApiFailure(403, "origin_denied", "The Connect API origin is not allowed.");
+}
+
+function connectDialogOrigin(request: Request | URL): string {
+  if (request instanceof Request) {
+    const publicOrigin = localDevelopmentPublicOrigin(request);
+    if (publicOrigin) return publicOrigin;
+  }
+  const origin = request instanceof URL ? request.origin : new URL(request.url).origin;
+  return isLocalDevelopmentOrigin(origin) ? origin : DIALOG_ORIGIN;
 }
 
 function error(request: Request, status: number, code: string, message: string) {

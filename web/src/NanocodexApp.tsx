@@ -24,8 +24,8 @@ import {
 } from "react";
 import { flushSync } from "react-dom";
 import { useLocation, useNavigate } from "react-router";
+import { DeviceConnect } from "./DeviceConnect";
 import { AgentExperience } from "./AgentExperience";
-import { AccountMenu } from "./AccountMenu";
 import { Changelog, preloadChangelog } from "./Changelog";
 import { CodeBrowser } from "./CodeBrowser";
 import { CommitCodeStream } from "./CommitCodeStream";
@@ -50,6 +50,7 @@ import {
 } from "./commitRouteState";
 import { fuzzyScore } from "./fuzzy";
 import {
+  accountNavigation,
   connectDemoUrl,
   demoNavigation,
   gitNavigation,
@@ -693,7 +694,11 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
     if (surface === "docs") return;
     document.title = surface === "home"
       ? "Nanocodex · headless Rust agents SDK"
-      : `${surface === "code" ? "Source" : `${surface[0].toUpperCase()}${surface.slice(1)}`} · Nanocodex`;
+      : `${surface === "code"
+        ? "Source"
+        : surface === "connect"
+          ? "Account"
+          : `${surface[0].toUpperCase()}${surface.slice(1)}`} · Nanocodex`;
   }, [surface]);
 
   useLayoutEffect(() => {
@@ -1160,6 +1165,7 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
               >
                 <span className="surface-label">Home</span>
               </a>
+              {surfaceNavigationLink(accountNavigation, "desktop")}
               <span
                 className={`surface-navigation-group${demoNavigationActive ? " is-active" : ""}`}
               >
@@ -1223,7 +1229,6 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
             >
               <Menu aria-hidden="true" />
             </button>
-            <AccountMenu />
             <div className="header-install">
               <button
                 className="header-install-trigger"
@@ -1290,6 +1295,9 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
               >
                 <span>Home</span><small>Overview</small>
               </a>
+              <div className="mobile-navigation-grid mobile-navigation-account">
+                {surfaceNavigationLink(accountNavigation, "mobile")}
+              </div>
               <section className="mobile-navigation-group" aria-labelledby="mobile-demos-title">
                 <h2 id="mobile-demos-title">Demos</h2>
                 <div className="mobile-navigation-grid">
@@ -1375,7 +1383,9 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
             }
             surface={surface}
           >
-          {surface === "multiplayer" ? (
+          {surface === "connect" ? (
+            <DeviceConnect />
+          ) : surface === "multiplayer" ? (
             <Multiplayer />
           ) : surface === "world" ? (
             <MonsterWorld />

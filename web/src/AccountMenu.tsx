@@ -8,7 +8,9 @@ import {
 } from "react";
 import { isRecord, responseFailure, useAccountSession } from "./AccountSession";
 import { clientFailureMessage } from "./clientFailure";
+import { ConnectionLogo } from "./ConnectionLogo";
 import { deploymentHealth } from "./deploymentHealth";
+import { localDevelopmentCredential } from "./localDevelopmentCredential";
 import { ProfileConnectors } from "./ProfileConnectors";
 
 type ApiKeyMetadata = Readonly<{
@@ -46,11 +48,12 @@ type AccountDataRequest = Readonly<{
 
 const API_KEY_ID = /^[A-Za-z0-9_-]{12}$/;
 
-export function AccountMenu() {
+export function AccountMenu({ inline = false }: Readonly<{ inline?: boolean }>) {
   const session = useAccountSession();
   const refreshSession = session.refresh;
   const accountId = session.account?.id;
-  const [open, setOpen] = useState(() => new URL(window.location.href).searchParams.has("connector_result"));
+  const accountPersistent = session.account?.persistent === true;
+  const [open, setOpen] = useState(() => inline || new URL(window.location.href).searchParams.has("connector_result"));
   const [keys, setKeys] = useState<ApiKeyMetadata[] | null>(null);
   const [keyError, setKeyError] = useState<string | null>(null);
   const [keyOperation, setKeyOperation] = useState<string | null>(null);
@@ -61,6 +64,7 @@ export function AccountMenu() {
   const [credentialError, setCredentialError] = useState<string | null>(null);
   const [providerOperation, setProviderOperation] = useState<string | null>(null);
   const [openAiKey, setOpenAiKey] = useState("");
+  const [openAiExpanded, setOpenAiExpanded] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
   const cachedAccountId = useRef<string | undefined>(undefined);
   const keyRequest = useRef<AccountDataRequest | undefined>(undefined);
@@ -170,25 +174,25 @@ export function AccountMenu() {
       setCredentials(null);
       setCredentialError(null);
     }
-    if (!open) return;
+    if (!inline && !open) return;
     const missing: Promise<void>[] = [];
     if (accountChanged || keys === null) missing.push(loadKeys());
     if (accountChanged || credentials === null) missing.push(loadCredentials());
     void Promise.all(missing);
-  }, [accountId, credentials, keys, loadCredentials, loadKeys, open]);
+  }, [accountId, credentials, inline, keys, loadCredentials, loadKeys, open]);
 
   useEffect(() => {
     const login = credentials?.chatgpt.login;
-    if (!open || !login) return;
+    if ((!inline && !open) || !login) return;
     const timer = window.setTimeout(
       () => void pollChatGpt(),
       Math.max(1_000, login.pollAfterMs),
     );
     return () => window.clearTimeout(timer);
-  }, [credentials?.chatgpt.login, open, pollChatGpt]);
+  }, [credentials?.chatgpt.login, inline, open, pollChatGpt]);
 
   useEffect(() => {
-    if (!open) return;
+    if (inline || !open) return;
     const onPointerDown = (event: PointerEvent) => {
       if (!menuRef.current?.contains(event.target as Node)) close();
     };
@@ -201,7 +205,7 @@ export function AccountMenu() {
       window.removeEventListener("pointerdown", onPointerDown);
       window.removeEventListener("keydown", onKeyDown);
     };
-  }, [close, open]);
+  }, [close, inline, open]);
 
   const createKey = async (event: FormEvent) => {
     event.preventDefault();
@@ -283,6 +287,7 @@ export function AccountMenu() {
       });
       if (!response.ok) throw await responseFailure(response, "Couldn’t connect the OpenAI key.");
       setOpenAiKey("");
+      setOpenAiExpanded(false);
       await loadCredentials();
       notifyModelCredentialChanged();
     } catch (cause) {
@@ -294,6 +299,21 @@ export function AccountMenu() {
 
   const startChatGpt = async () => {
     if (providerOperation) return;
+    if (localDevelopmentCredential.enabled) {
+      setProviderOperation("chatgpt");
+      setCredentialError(null);
+      try {
+        if (!accountId) throw new Error("Account session unavailable.");
+        await localDevelopmentCredential.refresh(accountId);
+        await loadCredentials();
+        notifyModelCredentialChanged();
+      } catch (cause) {
+        setCredentialError(failureMessage(cause, "Couldn’t reconnect ChatGPT."));
+      } finally {
+        setProviderOperation(null);
+      }
+      return;
+    }
     const popup = window.open("about:blank", "nanocodex-chatgpt-login");
     if (popup) popup.opener = null;
     setProviderOperation("chatgpt");
@@ -333,24 +353,26 @@ export function AccountMenu() {
     }
   };
 
-  const accountLabel = session.account?.persistent ? shortIdentity(session.account.id) : "account";
+  const accountLabel = accountPersistent && accountId ? shortIdentity(accountId) : "account";
 
   return (
-    <div className="account-menu" ref={menuRef}>
-      <button
-        className="account-menu-trigger"
-        type="button"
-        aria-label={accountLabel}
-        aria-expanded={open}
-        aria-haspopup="dialog"
-        onClick={() => open ? close() : setOpen(true)}
-      >
-        <CircleUserRound aria-hidden="true" />
-        <span>{accountLabel}</span>
-      </button>
-      {open && session.status !== "checking" ? (
-        <section className="account-panel" aria-label="Nanocodex profile">
-          <header className="account-panel-header">
+    <div className={inline ? "account-inline" : "account-menu"} ref={menuRef}>
+      {!inline ? (
+        <button
+          className="account-menu-trigger"
+          type="button"
+          aria-label={accountLabel}
+          aria-expanded={open}
+          aria-haspopup="dialog"
+          onClick={() => open ? close() : setOpen(true)}
+        >
+          <CircleUserRound aria-hidden="true" />
+          <span>{accountLabel}</span>
+        </button>
+      ) : null}
+      {(inline || open) && session.status !== "checking" ? (
+        <section className={inline ? "account-inline-panel" : "account-panel"} aria-label="Nanocodex profile">
+          {!inline ? <header className="account-panel-header">
             <div>
               <span>Profile</span>
               {session.account ? <strong>{session.account.persistent
@@ -360,7 +382,7 @@ export function AccountMenu() {
             <button type="button" aria-label="Close account panel" onClick={close}>
               <X aria-hidden="true" />
             </button>
-          </header>
+          </header> : null}
 
           {session.error ? (
             <div className="account-failure" role="alert">
@@ -385,24 +407,26 @@ export function AccountMenu() {
                 ) : null}
               </div>
 
-              {!session.account.persistent ? (
+              {!accountPersistent ? (
                 <div className="account-auth-actions">
-                  <p>Connect ChatGPT now, or add a passkey to keep this identity across devices.</p>
-                  <button
-                    className="account-primary-action"
-                    type="button"
-                    disabled={session.operation !== null}
-                    onClick={() => void session.register()}
-                  >
-                    Add passkey
-                  </button>
-                  <button
-                    type="button"
-                    disabled={session.operation !== null}
-                    onClick={() => void session.signIn()}
-                  >
-                    Use existing passkey
-                  </button>
+                  <p>Add a passkey or use an existing one to connect services and create API keys.</p>
+                  <div className="account-auth-buttons">
+                    <button
+                      className="account-primary-action"
+                      type="button"
+                      disabled={session.operation !== null}
+                      onClick={() => void session.register()}
+                    >
+                      Add a passkey
+                    </button>
+                    <button
+                      type="button"
+                      disabled={session.operation !== null}
+                      onClick={() => void session.signIn()}
+                    >
+                      Use existing passkey
+                    </button>
+                  </div>
                 </div>
               ) : null}
 
@@ -410,7 +434,9 @@ export function AccountMenu() {
                 <div className="api-key-heading">
                   <div>
                     <h2 id="connections-heading">Connections</h2>
-                    <p>Services your agents can use through the private broker.</p>
+                    <p>{accountPersistent
+                      ? "Choose a service to connect it through your private broker. Connected services can be removed from the same tile."
+                      : "Add or use a passkey above to enable connections and API keys."}</p>
                   </div>
                 </div>
 
@@ -424,24 +450,30 @@ export function AccountMenu() {
                 <ProfileConnectors
                   accountId={session.account.id}
                   key={session.account.id}
-                  requiresLogin={!session.account.persistent}
+                  requiresLogin={!accountPersistent}
                   refreshSession={refreshSession}
                 >
                   {credentials ? (
                     <>
-                      <div className="account-provider-row">
-                        <div>
+                      <button
+                        className={`connection-card${credentials.chatgpt.connected ? " is-connected" : ""}${accountPersistent ? "" : " is-locked"}`}
+                        disabled={!accountPersistent || providerOperation !== null}
+                        onClick={() => void (credentials.chatgpt.connected
+                          ? disconnectProvider("chatgpt")
+                          : startChatGpt())}
+                        type="button"
+                      >
+                        <ConnectionLogo id="chatgpt" />
+                        <span className="connection-card-copy">
                           <strong>ChatGPT</strong>
                           <span>{credentials.chatgpt.connected
-                            ? `Connected${credentials.active === "chatgpt" ? " · active" : ""}`
-                            : "Not connected"}</span>
-                        </div>
-                        {credentials.chatgpt.connected ? (
-                          <button type="button" onClick={() => void disconnectProvider("chatgpt")}>Disconnect</button>
-                        ) : (
-                          <button type="button" onClick={() => void startChatGpt()}>Connect ChatGPT</button>
-                        )}
-                      </div>
+                            ? credentials.chatgpt.accountId ?? "Connected to your ChatGPT account"
+                            : "Use your ChatGPT subscription for model access"}</span>
+                        </span>
+                        <span className="connection-card-action">
+                          {credentials.chatgpt.connected ? "Disconnect" : "Connect"}
+                        </span>
+                      </button>
                       {credentials.chatgpt.login ? (
                         <div className="new-api-key" role="status">
                           <strong>Finish ChatGPT sign-in</strong>
@@ -450,49 +482,52 @@ export function AccountMenu() {
                           <a href={credentials.chatgpt.login.verificationUrl} target="_blank" rel="noreferrer">Open sign-in page</a>
                         </div>
                       ) : null}
-                    </>
-                  ) : null}
-                </ProfileConnectors>
-
-                <div className="account-api-keys" aria-labelledby="api-key-heading">
-                  <div className="api-key-heading">
-                    <div>
-                      <h2 id="api-key-heading">API keys</h2>
-                      <p>Bring an OpenAI key or create one for the Nanocodex managed API.</p>
-                    </div>
-                  </div>
-
-                  {credentials ? (
-                    <>
-                      <div className="account-provider-row">
-                        <div>
-                          <strong>OpenAI</strong>
+                      <button
+                        className={`connection-card${credentials.openai.connected ? " is-connected" : ""}${accountPersistent ? "" : " is-locked"}`}
+                        disabled={!accountPersistent || providerOperation !== null}
+                        onClick={() => void (credentials.openai.connected
+                          ? disconnectProvider("openai")
+                          : setOpenAiExpanded((current) => !current))}
+                        type="button"
+                      >
+                        <ConnectionLogo id="openai" />
+                        <span className="connection-card-copy">
+                          <strong>OpenAI API key</strong>
                           <span>{credentials.openai.connected
-                            ? `Connected${credentials.active === "openai" ? " · active" : ""}`
-                            : "Not connected"}</span>
-                        </div>
-                        {credentials.openai.connected ? (
-                          <button type="button" onClick={() => void disconnectProvider("openai")}>Disconnect</button>
-                        ) : null}
-                      </div>
-                      {!credentials.openai.connected ? (
-                        <form className="api-key-create" onSubmit={(event) => void connectOpenAi(event)}>
+                            ? `Hosted${credentials.active === "openai" ? " · active" : ""}`
+                            : "Host a raw key for model access"}</span>
+                        </span>
+                        <span className="connection-card-action">
+                          {credentials.openai.connected ? "Disconnect" : openAiExpanded ? "Close" : "Add key"}
+                        </span>
+                      </button>
+                      {!credentials.openai.connected && openAiExpanded ? (
+                        <form className="connection-setup api-key-create" onSubmit={(event) => void connectOpenAi(event)}>
                           <label htmlFor="openai-key">OpenAI API key</label>
                           <div>
                             <input
-                              id="openai-key"
-                              type="password"
                               autoComplete="off"
-                              value={openAiKey}
-                              placeholder="sk-…"
+                              id="openai-key"
                               onChange={(event) => setOpenAiKey(event.target.value)}
+                              placeholder="sk-…"
+                              type="password"
+                              value={openAiKey}
                             />
-                            <button type="submit" disabled={!openAiKey.trim() || providerOperation !== null}>Connect</button>
+                            <button type="submit" disabled={!openAiKey.trim() || providerOperation !== null}>Host key</button>
                           </div>
                         </form>
                       ) : null}
                     </>
                   ) : null}
+                </ProfileConnectors>
+
+                <section className={`account-api-keys${accountPersistent ? "" : " is-locked"}`} aria-labelledby="api-key-heading">
+                  <div className="api-key-heading">
+                    <div>
+                      <h2 id="api-key-heading">API keys</h2>
+                      <p>Create Nanocodex API keys for the CLI, CI, and other clients.</p>
+                    </div>
+                  </div>
 
                   {keyError ? (
                     <div className="account-failure" role="alert">
@@ -522,12 +557,13 @@ export function AccountMenu() {
                       <div>
                         <input
                           id="api-key-label"
+                          disabled={!accountPersistent}
                           value={label}
                           maxLength={120}
                           placeholder="CLI, CI, or laptop"
                           onChange={(event) => setLabel(event.target.value)}
                         />
-                        <button type="submit" disabled={keyOperation !== null}>Create</button>
+                        <button type="submit" disabled={!accountPersistent || keyOperation !== null}>Create</button>
                       </div>
                     </form>
                   ) : null}
@@ -545,7 +581,7 @@ export function AccountMenu() {
                           </div>
                           <button
                             type="button"
-                            disabled={keyOperation !== null}
+                            disabled={!accountPersistent || keyOperation !== null}
                             onClick={() => void revokeKey(key)}
                           >
                             Revoke
@@ -556,27 +592,29 @@ export function AccountMenu() {
                   ) : keys ? (
                     <p className="api-key-empty">No API keys.</p>
                   ) : null}
-                </div>
+                </section>
               </section>
             </>
           ) : (
             <div className="account-auth-actions">
               <p>Sign in with your passkey, or explicitly start a separate account.</p>
-              <button
-                className="account-primary-action"
-                type="button"
-                disabled={session.operation !== null}
-                onClick={() => void session.signIn()}
-              >
-                Sign in with passkey
-              </button>
-              <button
-                type="button"
-                disabled={session.operation !== null}
-                onClick={() => void session.startNewAccount()}
-              >
-                Start new account
-              </button>
+              <div className="account-auth-buttons">
+                <button
+                  className="account-primary-action"
+                  type="button"
+                  disabled={session.operation !== null}
+                  onClick={() => void session.signIn()}
+                >
+                  Sign in with passkey
+                </button>
+                <button
+                  type="button"
+                  disabled={session.operation !== null}
+                  onClick={() => void session.startNewAccount()}
+                >
+                  Start new account
+                </button>
+              </div>
             </div>
           )}
         </section>
