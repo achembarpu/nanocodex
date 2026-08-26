@@ -6,12 +6,10 @@ import { routeLocalConnectApi } from "./localConnectApi.ts";
 
 test("local Connect API routes retain the exact browser request", async () => {
   const requests: Request[] = [];
-  const binding = {
-    fetch(request: Request) {
-      requests.push(request);
-      return Promise.resolve(Response.json({ ok: true }));
-    },
-  };
+  const binding = fetcher((request) => {
+    requests.push(request);
+    return Promise.resolve(Response.json({ ok: true }));
+  });
   const request = new Request("http://passkey-a.nanocodex.localhost:5273/v1/connect/auth/challenge", {
     method: "POST",
     headers: {
@@ -44,12 +42,10 @@ test("local Connect API routing replaces an untrusted public-origin header", asy
     method: "POST",
   });
   await routeLocalConnectApi(request, {
-    NANOCODEX_CONNECT_API: {
-      fetch(forwarded: Request) {
-        requests.push(forwarded);
-        return Promise.resolve(new Response());
-      },
-    },
+    NANOCODEX_CONNECT_API: fetcher((forwarded) => {
+      requests.push(forwarded);
+      return Promise.resolve(new Response());
+    }),
   }, new URL(request.url));
   assert.equal(
     requests[0]?.headers.get("x-nanocodex-local-origin"),
@@ -64,7 +60,7 @@ test("local Connect API routing falls through without its exact path and binding
   assert.equal(routeLocalConnectApi(connect, {}, new URL(connect.url)), undefined);
   const managedAccountLink = new Request("http://localhost/v1/connect/account-link/authorize");
   assert.equal(routeLocalConnectApi(managedAccountLink, {
-    NANOCODEX_CONNECT_API: { fetch: () => Promise.resolve(new Response()) },
+    NANOCODEX_CONNECT_API: fetcher(() => Promise.resolve(new Response())),
   }, new URL(managedAccountLink.url)), undefined);
 });
 
@@ -80,13 +76,15 @@ test("local Connect API routing owns the complete dialog protocol", async () => 
   for (const path of paths) {
     const request = new Request(`http://passkey-a.nanocodex.localhost:5273${path}`);
     await routeLocalConnectApi(request, {
-      NANOCODEX_CONNECT_API: {
-        fetch(forwarded: Request) {
-          seen.push(new URL(forwarded.url).pathname);
-          return Promise.resolve(new Response());
-        },
-      },
+      NANOCODEX_CONNECT_API: fetcher((forwarded) => {
+        seen.push(new URL(forwarded.url).pathname);
+        return Promise.resolve(new Response());
+      }),
     }, new URL(request.url));
   }
   assert.deepEqual(seen, paths);
 });
+
+function fetcher(fetch: (request: Request) => Promise<Response>): Fetcher {
+  return { fetch } as Fetcher;
+}
