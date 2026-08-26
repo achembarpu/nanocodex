@@ -368,9 +368,11 @@ async function searchSnapshot(input, context, entries, searches) {
   const query = requiredQuery(input?.query);
   const limit = normalizeLimit(input?.limit);
   const admittedNames = new Set(entries.map((entry) => entry.definition.name));
+  const searchedSources = new Set(searches.map(({ source }) => source));
   const words = tokenize(query);
   const generic = entries
-    .filter((entry) => entry.source.kind === "attached" || entry.definition.defer_loading === true)
+    .filter((entry) => !searchedSources.has(entry.source)
+      && (entry.source.kind === "attached" || entry.definition.defer_loading === true))
     .map((entry) => ({ entry, score: score(entry, words) }))
     .filter(({ score }) => score > 0)
     .sort((a, b) => b.score - a.score || a.entry.definition.name.localeCompare(b.entry.definition.name));
@@ -403,10 +405,14 @@ async function searchSnapshot(input, context, entries, searches) {
     .filter((tool) => admittedNames.has(tool.name))
     .map((tool) => [tool.name, tool])).values()].slice(0, limit);
   const selectedNames = new Set(deduplicated.map((tool) => tool.name));
-  const structured = providerResults
-    .map((value) => admittedStructuredResult(value, selectedNames))
-    .filter(Boolean);
-  const representedNames = new Set(structured.flatMap(structuredToolNames));
+  const structured = [];
+  const representedNames = new Set();
+  for (const value of providerResults) {
+    const admitted = admittedStructuredResult(value, selectedNames, representedNames);
+    if (!admitted) continue;
+    structured.push(admitted);
+    for (const name of structuredToolNames(admitted)) representedNames.add(name);
+  }
   structured.push(...generic
     .map(({ entry }) => entry)
     .filter((entry) => selectedNames.has(entry.definition.name)
@@ -430,17 +436,20 @@ async function searchSnapshot(input, context, entries, searches) {
   });
 }
 
-function admittedStructuredResult(value, admittedNames) {
+function admittedStructuredResult(value, admittedNames, representedNames) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   if (value.type === "function" || value.type === "custom") {
-    return admittedNames.has(value.name) ? providerToolDefinition(value) : undefined;
+    return admittedNames.has(value.name) && !representedNames.has(value.name)
+      ? providerToolDefinition(value)
+      : undefined;
   }
   if (value.type !== "namespace" || typeof value.name !== "string" || !Array.isArray(value.tools)) {
     return undefined;
   }
   const tools = value.tools
     .filter((tool) => typeof tool?.name === "string"
-      && admittedNames.has(`${value.name}${tool.name}`))
+      && admittedNames.has(`${value.name}${tool.name}`)
+      && !representedNames.has(`${value.name}${tool.name}`))
     .map(providerToolDefinition);
   return tools.length ? deepFreeze({
     type: "namespace",

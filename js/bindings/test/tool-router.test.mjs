@@ -383,6 +383,42 @@ test("tool_search returns only provider-loadable definitions", async () => {
   assert.deepEqual(empty.structuredResult, []);
 });
 
+test("search providers own namespaced ranking and duplicate loading", async () => {
+  const exact = contract("mcp__fixture__exact", { defer_loading: true });
+  const ranked = contract("mcp__fixture__ranked", { defer_loading: true });
+  const namespace = {
+    type: "namespace",
+    name: "mcp__fixture__",
+    description: "Fixture tools.",
+    tools: [contract("ranked", { output_schema: undefined })],
+  };
+  const router = new ToolRouter([source("mcp", [
+    { definition: { type: "tool_search", execution: "client", description: "Search MCP.", parameters: {} } },
+    { definition: exact },
+    { definition: ranked },
+  ], {
+    kind: "mcp",
+    search: () => ({
+      [Symbol.for("nanocodex.toolResult")]: true,
+      output: { tools: [{ name: "mcp__fixture__ranked" }] },
+      structuredResult: [namespace, namespace],
+    }),
+  })]);
+  const found = await router.execute("tool_search", { query: "exact", limit: 1 }, {
+    signal: new AbortController().signal,
+  });
+  assert.deepEqual(found.output.tools.map(({ name }) => name), ["mcp__fixture__ranked"]);
+  assert.deepEqual(found.structuredResult.map(({ type, name, tools }) => ({
+    type,
+    name,
+    tools: tools.map((tool) => tool.name),
+  })), [{
+    type: "namespace",
+    name: "mcp__fixture__",
+    tools: ["ranked"],
+  }]);
+});
+
 test("createCodeRuntime adopts a branded createTools router and carries the pinned model context", async () => {
   let disposals = 0;
   const tools = await createTools({ tools: { echo: {
