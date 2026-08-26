@@ -158,6 +158,18 @@ pub(crate) struct RemoteCapability {
 }
 
 impl RemoteFrame {
+    pub(crate) const fn kind(&self) -> &'static str {
+        match self {
+            Self::Lease { .. } => "lease",
+            Self::CatalogAck { .. } => "catalog_ack",
+            Self::Call { .. } => "call",
+            Self::Cancel { .. } => "cancel",
+            Self::ResultAck { .. } => "result_ack",
+            Self::Pong { .. } => "pong",
+            Self::Fenced { .. } => "fenced",
+        }
+    }
+
     pub(crate) fn parse(text: &str) -> Result<Self, &'static str> {
         if text.len() > MAX_FRAME_BYTES {
             return Err("frame exceeds 256 KiB");

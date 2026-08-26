@@ -722,6 +722,48 @@ async fn mismatched_catalog_ack_fences_before_connect_returns() {
 }
 
 #[tokio::test]
+async fn catalog_rejection_preserves_the_remote_fence_reason() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("ws://{}/attach", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut socket = accept_async(stream).await.unwrap();
+        let _ = recv_json(&mut socket).await;
+        let lease_id = uuid::Uuid::new_v4().to_string();
+        send_json(
+            &mut socket,
+            json!({
+                "type":"lease","protocol_version":1,"capability":"tools",
+                "lease_id":lease_id,"generation":1,"expires_at":now_ms()+60_000,
+                "capabilities":[{"name":"tools","version":1}]
+            }),
+        )
+        .await;
+        let _ = recv_json(&mut socket).await;
+        send_json(
+            &mut socket,
+            json!({
+                "type":"fenced","protocol_version":1,"capability":"tools",
+                "lease_id":lease_id,"generation":1,
+                "reason":"catalog_contract_mismatch: exec_command"
+            }),
+        )
+        .await;
+        let _ = socket.next().await;
+    });
+    let tools = Tools::builder().without_defaults().build().unwrap();
+    let error = tools
+        .attach(AttachmentTarget::new(endpoint, "bearer").unwrap())
+        .connect()
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, AttachmentError::Fenced(reason) if reason.as_ref() == "catalog_contract_mismatch: exec_command")
+    );
+    server.await.unwrap();
+}
+
+#[tokio::test]
 async fn initial_lease_handshake_is_bounded() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("ws://{}/attach", listener.local_addr().unwrap());

@@ -473,10 +473,34 @@ where
             && ack_generation == generation
             && catalog_revision == *revision
             && catalog_digest == config.catalog_digest.as_ref() => {}
-        Ok(_) => {
+        Ok(RemoteFrame::CatalogAck {
+            lease_id: ack_lease,
+            generation: ack_generation,
+            catalog_revision,
+            catalog_digest,
+            ..
+        }) => {
+            policy_close(&mut socket).await;
+            return ConnectionEnd::Fenced(format!(
+                "catalog acknowledgement did not match publication (lease={}, generation={}, revision={}, digest={})",
+                ack_lease == lease_id,
+                ack_generation == generation,
+                catalog_revision == *revision,
+                catalog_digest == config.catalog_digest.as_ref(),
+            ).into());
+        }
+        Ok(RemoteFrame::Fenced { reason, .. }) => {
+            policy_close(&mut socket).await;
+            return ConnectionEnd::Fenced(reason.into());
+        }
+        Ok(frame) => {
             policy_close(&mut socket).await;
             return ConnectionEnd::Fenced(
-                "catalog acknowledgement did not match publication".into(),
+                format!(
+                    "expected catalog acknowledgement after publication, received {}",
+                    frame.kind()
+                )
+                .into(),
             );
         }
         Err(ConnectionEnd::Fenced(reason)) => {
