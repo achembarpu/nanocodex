@@ -17,6 +17,7 @@ const binary = resolve(
   process.env.NANOCODEX2_BIN ?? join(managedRoot, "../../target/release/nanocodex2"),
 );
 const timeoutMs = positiveInteger("NANOCODEX2_SMOKE_TIMEOUT_MS", 180_000);
+const cloudCommand = "test ! -e workspace-origin.txt && printf 'cloud-detached\\n' > cloud-after-detach.txt && cat cloud-after-detach.txt";
 const root = await mkdtemp(join(tmpdir(), "nanocodex2-local-smoke-"));
 const alpha = join(root, "alpha");
 const beta = join(root, "beta");
@@ -70,6 +71,7 @@ try {
     `nanocodex2-beta-${randomUUID()}`,
   ], beta, environment, "nanocodex2 beta workspace");
   await assertTurn(second, beta, "beta");
+  await assertAbsent(join(beta, "cloud-after-detach.txt"));
   assert(!second.includes("literal-local-workspace-alpha"), "the beta turn reused the alpha workspace");
   assert(!first.includes(apiKey) && !second.includes(apiKey), "nanocodex2 output exposed its account key");
 
@@ -149,7 +151,7 @@ async function runDetachedCloudTurn(id, key) {
       id: turnId,
       input: [
         "Use exec_command exactly once.",
-        "Run: test ! -e workspace-origin.txt && printf 'cloud-detached\\n' > cloud-after-detach.txt && cat cloud-after-detach.txt",
+        `Run: ${cloudCommand}`,
         "Reply with exactly the output line and nothing else.",
       ].join(" "),
     }),
@@ -178,22 +180,44 @@ async function runDetachedCloudTurn(id, key) {
   }
   assert(completed, "detached cloud turn did not complete");
 
-  const historyResponse = await managedAccountFetch(
-    key,
-    new URL(`/v1/agents/${id}/events/history?limit=256`, baseUrl),
-  );
-  assert(historyResponse.ok, `detached cloud history returned HTTP ${historyResponse.status}`);
-  const history = await historyResponse.json();
-  const call = history.data?.find((message) =>
+  const history = await turnHistory(id, key, turnId);
+  const call = history.find((message) =>
     message.turn_id === turnId
       && message.event?.type === "tool.call"
       && message.event.payload?.tool === "exec_command");
   assert(call, "detached cloud turn did not call exec_command");
-  const result = history.data?.find((message) =>
+  assert(
+    call.event.payload?.arguments?.cmd === cloudCommand,
+    "detached cloud turn did not run the exact workspace proof",
+  );
+  const result = history.find((message) =>
     message.turn_id === turnId
       && message.event?.type === "tool.result"
       && message.event.payload?.call_id === call.event.payload.call_id);
   assert(result?.event.payload?.status === "completed", "detached cloud exec_command did not complete");
+  assert(
+    result.event.payload?.structured_result?.exit_code === 0
+      && result.event.payload?.structured_result?.output === "cloud-detached\n",
+    "detached cloud exec_command did not prove a successful isolated cloud write",
+  );
+}
+
+async function turnHistory(id, key, turnId) {
+  const messages = [];
+  let before;
+  for (;;) {
+    const url = new URL(`/v1/agents/${id}/events/history`, baseUrl);
+    url.searchParams.set("limit", "256");
+    if (before) url.searchParams.set("before", before);
+    const response = await managedAccountFetch(key, url);
+    assert(response.ok, `detached cloud history returned HTTP ${response.status}`);
+    const page = await response.json();
+    messages.push(...(page.data ?? []));
+    if (messages.some((message) =>
+      message.turn_id === turnId && message.event?.type === "turn.accepted")) return messages;
+    if (!page.has_more || page.data?.length === 0) return messages;
+    before = page.data[0].cursor;
+  }
 }
 
 async function assertAbsent(path) {

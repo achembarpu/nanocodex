@@ -49,7 +49,7 @@ test("managed agents have no provider-credential or direct transport path", asyn
     environment,
     /OPENAI_API_KEY|CODEX_OAUTH|ACCESS_TOKEN|REFRESH_TOKEN|CHATGPT_ACCOUNT_ID/,
   );
-  assert.match(source, /CloudflareAgent\.create\(this, \{/);
+  assert.match(source, /agent = await CloudflareAgent\.create\(this, agentOptions\)/);
   assert.doesNotMatch(source, /Transport\.(?:openAi|chatGpt|mpp)\(/);
   assert.match(egressSource, /Bearer NANOCODEX_PROVIDER_CREDENTIAL/);
   assert.match(egressSource, /https:\/\/nanocodex\.internal\/v1/);
