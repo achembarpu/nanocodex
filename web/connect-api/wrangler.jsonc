@@ -16,7 +16,13 @@
     ]
   },
   "migrations": [
-    { "tag": "v1", "new_sqlite_classes": ["ConnectNonceStorage"] }
+    { "tag": "v1", "new_sqlite_classes": ["NonceStorage"] },
+    {
+      "tag": "v2",
+      "renamed_classes": [
+        { "from": "NonceStorage", "to": "ConnectNonceStorage" }
+      ]
+    }
   ],
   "observability": { "enabled": true }
 }
