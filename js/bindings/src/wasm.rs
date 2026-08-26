@@ -46,7 +46,7 @@ use nanocodex_subagents::{
     AgentDirectoryEntry, AgentId as SubagentId, AgentStatus as SubagentStatus, AgentSummary,
     AgentTask, AgentUpdate as SubagentUpdate, MessageId as SubagentMessageId, MessagePriority,
     MessagePurpose, Registry as SubagentRegistry, ScopedAgentUpdate, SubagentControl,
-    start_agent_with, start_agents,
+    start_agent_with, start_agents_observed,
 };
 use nanocodex_voice_protocol::{
     BrowserVoiceEffects, BrowserVoiceProtocol, REALTIME_END_INSTRUCTIONS,
@@ -969,6 +969,45 @@ struct WasmSubagents {
     event_forwarders: Rc<Cell<usize>>,
 }
 
+struct WasmBatchParentCleanup {
+    parents: Arc<Mutex<HashMap<String, AgentHandle>>>,
+    sessions: Arc<Mutex<Vec<String>>>,
+    committed: bool,
+}
+
+impl WasmBatchParentCleanup {
+    fn new(parents: Arc<Mutex<HashMap<String, AgentHandle>>>) -> Self {
+        Self {
+            parents,
+            sessions: Arc::new(Mutex::new(Vec::new())),
+            committed: false,
+        }
+    }
+
+    fn commit(mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for WasmBatchParentCleanup {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        let sessions = match self.sessions.lock() {
+            Ok(mut sessions) => std::mem::take(&mut *sessions),
+            Err(poisoned) => std::mem::take(&mut *poisoned.into_inner()),
+        };
+        let mut parents = match self.parents.lock() {
+            Ok(parents) => parents,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        for session_id in sessions {
+            parents.remove(&session_id);
+        }
+    }
+}
+
 impl WasmSubagents {
     fn new(
         registry: Arc<SubagentRegistry>,
@@ -1459,14 +1498,24 @@ impl WasmNanocodex {
             .cloned()
             .ok_or_else(|| js_error("subagent parent is not ready"))?;
         drop(parents);
-        let reports = start_agents(
+        let cleanup = WasmBatchParentCleanup::new(Arc::clone(&subagents.parents));
+        let observed_sessions = Arc::clone(&cleanup.sessions);
+        let reports = start_agents_observed(
             &parent,
             &subagents.registry,
             &self.inner.session_id().to_string(),
             tasks,
+            move |session| {
+                let mut observed = match observed_sessions.lock() {
+                    Ok(observed) => observed,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                observed.push(session.to_owned());
+            },
         )
         .await
         .map_err(js_error)?;
+        cleanup.commit();
         serde_json::to_string(&reports).map_err(js_error)
     }
     /// Changes the reasoning effort for subsequently accepted turns.

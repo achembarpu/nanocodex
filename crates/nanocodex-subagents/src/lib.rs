@@ -19,7 +19,7 @@ pub use runtime::{
 };
 pub use tools::{
     AgentStartReport, AgentTask, AgentToolResult, install_tools, start_agent, start_agent_with,
-    start_agents,
+    start_agents, start_agents_observed,
 };
 
 /// Default maximum number of active turns in one task tree.

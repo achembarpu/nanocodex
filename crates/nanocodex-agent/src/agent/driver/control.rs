@@ -308,7 +308,11 @@ pub(super) fn handle_idle_command<S>(
                 spawner.spawn_clean(workspace, session_id, model, thinking, defaults.fast_mode);
             drop(result.send(outcome));
         }
-        Command::SpawnBatch { count, result } => {
+        Command::SpawnBatch {
+            count,
+            observer,
+            result,
+        } => {
             let outcome = spawner.spawn_clean_many(
                 workspace,
                 session_id,
@@ -316,6 +320,7 @@ pub(super) fn handle_idle_command<S>(
                 defaults.thinking,
                 defaults.fast_mode,
                 count,
+                observer.as_deref(),
             );
             drop(result.send(outcome));
         }

@@ -294,7 +294,7 @@ async function check() {
     task: "Return any JSON value.",
     outputSchema: true,
   });
-  const batch = await Subagents.spawnMany(agent, [
+  const subagentBatch = await Subagents.spawnMany(agent, [
     {
       role: "planner",
       task: "Plan the work.",
@@ -306,7 +306,7 @@ async function check() {
       outputSchema: true,
     },
   ]);
-  const batchChildId: number = batch[0]!.agent_id;
+  const batchChildId: number = subagentBatch[0]!.agent_id;
   void batchChildId;
   const localLifecycle: AgentLifecycle = agent;
   void localLifecycle;

@@ -186,14 +186,29 @@ async fn clean_batch_spawn_preserves_requested_order() -> Result<()> {
         .await
         .ok_or_else(|| eyre!("root tool factory did not receive an agent handle"))?;
 
-    let children = root_handle.spawn_many(3).await?;
+    let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let observed_sessions = Arc::clone(&observed);
+    let children = root_handle
+        .spawn_many_observed(3, move |session_id| {
+            observed_sessions
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(session_id.to_owned());
+        })
+        .await?;
     let child_session_ids = children
         .iter()
-        .map(|(child, _)| child.session_id())
+        .map(|(child, _)| child.session_id().to_owned())
         .collect::<Vec<_>>();
     assert_eq!(child_session_ids.len(), 3);
     assert_ne!(child_session_ids[0], child_session_ids[1]);
     assert_ne!(child_session_ids[1], child_session_ids[2]);
+    assert_eq!(
+        *observed
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        child_session_ids
+    );
     for _ in 0..3 {
         received_handles
             .recv()

@@ -130,17 +130,22 @@ where
         thinking: Thinking,
         fast_mode: bool,
         count: usize,
+        observer: Option<&(dyn Fn(&str) + Send + Sync)>,
     ) -> Result<Vec<(Nanocodex, AgentEvents)>> {
-        (0..count)
-            .map(|_| {
-                self.spawn_clean(
-                    workspace.clone(),
-                    parent_session_id,
-                    model,
-                    thinking,
-                    fast_mode,
-                )
-            })
-            .collect()
+        let mut children = Vec::with_capacity(count);
+        for _ in 0..count {
+            let child = self.spawn_clean(
+                workspace.clone(),
+                parent_session_id,
+                model,
+                thinking,
+                fast_mode,
+            )?;
+            if let Some(observer) = observer {
+                observer(child.0.session_id());
+            }
+            children.push(child);
+        }
+        Ok(children)
     }
 }

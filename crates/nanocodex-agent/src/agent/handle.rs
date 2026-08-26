@@ -92,7 +92,23 @@ impl AgentHandle {
     /// Returns an error after the containing driver has stopped.
     pub async fn spawn_many(&self, count: usize) -> Result<Vec<(Nanocodex, AgentEvents)>> {
         let commands = self.commands()?;
-        request_spawn_many(&commands, &self.shutdown, count).await
+        request_spawn_many(&commands, &self.shutdown, count, None).await
+    }
+
+    /// Starts several clean agents and synchronously observes each child as it
+    /// is materialized by the parent driver.
+    ///
+    /// This low-level seam lets embeddings pair tool-runtime registration with
+    /// rollback even when the batch request is cancelled before its result is
+    /// delivered.
+    #[doc(hidden)]
+    pub async fn spawn_many_observed(
+        &self,
+        count: usize,
+        observer: impl Fn(&str) + Send + Sync + 'static,
+    ) -> Result<Vec<(Nanocodex, AgentEvents)>> {
+        let commands = self.commands()?;
+        request_spawn_many(&commands, &self.shutdown, count, Some(Arc::new(observer))).await
     }
 
     /// Forks the containing agent's latest safe model boundary.
@@ -456,9 +472,11 @@ async fn request_spawn_many(
     commands: &mpsc::Sender<Command>,
     shutdown: &DriverShutdown,
     count: usize,
+    observer: Option<Arc<dyn Fn(&str) + Send + Sync>>,
 ) -> Result<Vec<(Nanocodex, AgentEvents)>> {
     request_command(commands, shutdown, |result| Command::SpawnBatch {
         count,
+        observer,
         result,
     })
     .await

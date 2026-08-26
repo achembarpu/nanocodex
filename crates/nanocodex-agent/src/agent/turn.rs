@@ -395,6 +395,7 @@ pub(super) enum Command {
     },
     SpawnBatch {
         count: usize,
+        observer: Option<Arc<dyn Fn(&str) + Send + Sync>>,
         result: oneshot::Sender<Result<Vec<(Nanocodex, AgentEvents)>>>,
     },
     SetThinking {

@@ -162,11 +162,26 @@ pub async fn start_agents(
     session_id: &str,
     tasks: Vec<AgentTask>,
 ) -> AgentToolResult<Vec<AgentStartReport>> {
+    start_agents_observed(parent, registry, session_id, tasks, |_| {}).await
+}
+
+/// Equivalent to [`start_agents`], with one synchronous observation of every
+/// child session created for cancellation-safe embedding cleanup.
+#[doc(hidden)]
+pub async fn start_agents_observed(
+    parent: &AgentHandle,
+    registry: &Arc<Registry>,
+    session_id: &str,
+    tasks: Vec<AgentTask>,
+    observe_session: impl Fn(&str) + Send + Sync + 'static,
+) -> AgentToolResult<Vec<AgentStartReport>> {
     let prepared = prepare_batch(tasks)?;
     let mut startup = registry.batch_startup();
     let capacities = registry.reserve_turns(prepared.len())?;
     let reservations = registry.reserve_many(session_id, prepared.len()).await?;
-    let children = parent.spawn_many(prepared.len()).await?;
+    let children = parent
+        .spawn_many_observed(prepared.len(), observe_session)
+        .await?;
 
     let mut reports = Vec::with_capacity(prepared.len());
     let mut launches = Vec::with_capacity(prepared.len());
