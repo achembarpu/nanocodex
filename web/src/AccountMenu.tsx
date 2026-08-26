@@ -6,6 +6,7 @@ import {
   useState,
   type FormEvent,
 } from "react";
+import { AccountChooser } from "@nanocodex-connect/AccountChooser";
 import { isRecord, responseFailure, useAccountSession } from "./AccountSession";
 import { clientFailureMessage } from "./clientFailure";
 import { ConnectionLogo } from "./ConnectionLogo";
@@ -355,6 +356,21 @@ export function AccountMenu({ inline = false }: Readonly<{ inline?: boolean }>) 
 
   const accountLabel = accountPersistent && accountId ? shortIdentity(accountId) : "account";
 
+  if (inline && session.status !== "checking" && !accountPersistent) {
+    return (
+      <AccountChooser
+        description={session.reauthenticationRequired
+          ? "Your session expired. Continue with the saved passkey to restore this account’s memory and connections."
+          : "Continue with a saved passkey, or create a new Nanocodex account."}
+        disabled={session.operation !== null}
+        failure={session.error}
+        newAccountDetail="Create one passkey to keep your agents, memory, and connections."
+        onChooseAccount={(selection) => void session.chooseAccount(selection)}
+        storedPasskeys={session.savedPasskeys}
+      />
+    );
+  }
+
   return (
     <div className={inline ? "account-inline" : "account-menu"} ref={menuRef}>
       {!inline ? (
@@ -612,9 +628,9 @@ export function AccountMenu({ inline = false }: Readonly<{ inline?: boolean }>) 
                 <button
                   type="button"
                   disabled={session.operation !== null}
-                  onClick={() => void session.startNewAccount()}
+                  onClick={() => void session.register()}
                 >
-                  Start new account
+                  Create new account
                 </button>
               </div>
             </div>

@@ -4,6 +4,12 @@ import type { Stripe, StripeElements } from "@stripe/stripe-js";
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { Dialog } from "nanocodex/connect";
 
+import {
+  AccountChooser,
+  type AccountSelection,
+  type StoredPasskey,
+} from "./AccountChooser";
+
 import { classifyMachineUsdOrder } from "./machineUsdOrder.mjs";
 import {
   accountLoginCapabilities,
@@ -87,18 +93,7 @@ type ProviderStoreAccount = Readonly<{
   credential?: Readonly<{ id: string }> | undefined;
   label?: string | undefined;
 }>;
-type StoredPasskey = Readonly<{
-  address: `0x${string}`;
-  credentialId: string;
-  label?: string | undefined;
-}>;
-type WizardAccountSelection = Readonly<{
-  mode: "login" | "register";
-  label: string;
-  address?: `0x${string}` | undefined;
-  credentialId?: string | undefined;
-  discoverCredential?: boolean | undefined;
-}>;
+type WizardAccountSelection = AccountSelection;
 
 export type { ConnectRequest } from "./connectTypes";
 
@@ -1443,7 +1438,6 @@ function ConnectionWizard({
   selectedAccount?: WizardAccountSelection | undefined;
   storedPasskeys: readonly StoredPasskey[];
 }>) {
-  const [creatingAccount, setCreatingAccount] = useState(false);
   const focused = request.focusConnector ? connectorDefinition(request.focusConnector) : undefined;
   const focusedMcp = request.focusMcpConnection
     ? request.mcpConnections.find(({ id }) => id === request.focusMcpConnection)
@@ -1452,109 +1446,13 @@ function ConnectionWizard({
     && mcpConnectionAction === focusedMcp.id;
   if ((!selectedAccount && !connectorStatuses && !accountAddress) || redirectingFocusedMcp) {
     return (
-      <div className="wizard-page wizard-account-page">
-        <header className="wizard-intro">
-          <div className="wizard-app">
-            <h1>Choose an account</h1>
-            <p>Continue to Nanocodex CLI with a saved passkey, or create a new account.</p>
-          </div>
-          {confirmationCode ? (
-            <div className="wizard-terminal-code" role="status">
-              <span>Terminal code</span>
-              <strong>{confirmationCode.slice(0, 4)}-{confirmationCode.slice(4)}</strong>
-            </div>
-          ) : null}
-        </header>
-
-        <div className="wizard-account-chooser" role="group" aria-label="Choose a Nanocodex account">
-          {storedPasskeys.map((account) => (
-            <button
-              className="wizard-account-choice"
-              disabled={disabled}
-              key={account.credentialId}
-              onClick={() => onChooseAccount({
-                mode: "login",
-                label: account.label || shortAddress(account.address),
-                address: account.address,
-                credentialId: account.credentialId,
-              })}
-              type="button"
-            >
-              <span className="wizard-account-avatar" aria-hidden="true">
-                {(account.label?.trim().slice(0, 1) || "N").toUpperCase()}
-              </span>
-              <span className="wizard-account-copy">
-                <strong>{account.label || shortAddress(account.address)}</strong>
-                <small>{account.label ? shortAddress(account.address) : "Saved passkey"}</small>
-              </span>
-              <span className="wizard-account-arrow" aria-hidden="true">→</span>
-            </button>
-          ))}
-          <button
-            className="wizard-account-choice"
-            disabled={disabled}
-            onClick={() => onChooseAccount({
-              mode: "login",
-              label: "Another passkey",
-              discoverCredential: true,
-            })}
-            type="button"
-          >
-            <span className="wizard-account-avatar wizard-passkey-avatar" aria-hidden="true">◇</span>
-            <span className="wizard-account-copy">
-              <strong>{storedPasskeys.length ? "Use another passkey" : "Continue with passkey"}</strong>
-              <small>Choose a passkey available on this device.</small>
-            </span>
-            <span className="wizard-account-arrow" aria-hidden="true">→</span>
-          </button>
-          {creatingAccount ? (
-            <form
-              className="wizard-account-choice wizard-account-create-form"
-              onSubmit={(event) => {
-                event.preventDefault();
-                const name = String(new FormData(event.currentTarget).get("account-name") ?? "").trim();
-                if (!name) return;
-                onChooseAccount({ mode: "register", label: name.slice(0, 80) });
-              }}
-            >
-              <span className="wizard-account-avatar" aria-hidden="true">+</span>
-              <label className="wizard-account-copy" htmlFor="wizard-account-name">
-                <strong>Name this account</strong>
-                <input
-                  autoFocus
-                  id="wizard-account-name"
-                  maxLength={80}
-                  name="account-name"
-                  placeholder="Work, personal, laptop…"
-                  required
-                />
-              </label>
-              <button
-                aria-label="Cancel new account"
-                disabled={disabled}
-                onClick={() => setCreatingAccount(false)}
-                type="button"
-              >×</button>
-              <button disabled={disabled} type="submit">Continue</button>
-            </form>
-          ) : (
-            <button
-              className="wizard-account-choice wizard-new-account"
-              disabled={disabled}
-              onClick={() => setCreatingAccount(true)}
-              type="button"
-            >
-              <span className="wizard-account-avatar" aria-hidden="true">+</span>
-              <span className="wizard-account-copy">
-                <strong>Create a new account</strong>
-                <small>Create one passkey to sign in and authorize this hosted CLI connection.</small>
-              </span>
-              <span className="wizard-account-arrow" aria-hidden="true">→</span>
-            </button>
-          )}
-        </div>
-        <button className="wizard-cancel" disabled={disabled} onClick={onCancel} type="button">Cancel</button>
-      </div>
+      <AccountChooser
+        confirmationCode={confirmationCode}
+        disabled={disabled}
+        onCancel={onCancel}
+        onChooseAccount={onChooseAccount}
+        storedPasskeys={storedPasskeys}
+      />
     );
   }
 

@@ -6,9 +6,14 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
   type ReactNode,
 } from "react";
 import { Provider, Storage, webAuthn } from "accounts";
+import type {
+  AccountSelection,
+  StoredPasskey,
+} from "@nanocodex-connect/AccountChooser";
 import {
   getCurrentUser,
   isRecord,
@@ -22,15 +27,16 @@ export { isRecord, responseFailure } from "./accountSessionRequest";
 export type { AuthenticatedAccount } from "./accountSessionRequest";
 
 type SessionStatus = "checking" | "ready" | "error";
-type AccountOperation = "new-account" | "register" | "sign-in" | "sign-out";
+type AccountOperation = "register" | "sign-in" | "sign-out";
 
 type AccountSession = Readonly<{
   status: SessionStatus;
   account: AuthenticatedAccount | null;
   error: string | null;
   operation: AccountOperation | null;
+  savedPasskeys: readonly StoredPasskey[];
+  chooseAccount: (selection: AccountSelection) => Promise<void>;
   refresh: () => Promise<void>;
-  startNewAccount: () => Promise<void>;
   register: () => Promise<void>;
   signIn: () => Promise<void>;
   signOut: () => Promise<void>;
@@ -58,6 +64,29 @@ export function AccountSessionProvider({ children }: { children: ReactNode }) {
     providerRef.current ??= createAccountProvider();
     return providerRef.current;
   }, []);
+  const provider = accountProvider();
+  const providerStore = (provider as unknown as {
+    store: {
+      getState(): { accounts: readonly Readonly<{
+        address: `0x${string}`;
+        credential?: Readonly<{ id: string }> | undefined;
+        label?: string | undefined;
+      }>[] };
+      subscribe(listener: () => void): () => void;
+    };
+  }).store;
+  const providerAccounts = useSyncExternalStore(
+    providerStore.subscribe,
+    () => providerStore.getState().accounts,
+    () => providerStore.getState().accounts,
+  );
+  const savedPasskeys = useMemo(() => providerAccounts.flatMap((account) => account.credential?.id
+    ? [{
+        address: account.address,
+        credentialId: account.credential.id,
+        label: account.label,
+      } satisfies StoredPasskey]
+    : []), [providerAccounts]);
 
   const [status, setStatus] = useState<SessionStatus>("checking");
   const [user, setUser] = useState<AuthenticatedAccount | null>(null);
@@ -102,22 +131,34 @@ export function AccountSessionProvider({ children }: { children: ReactNode }) {
     void refresh();
   }, [refresh]);
 
-  const connect = useCallback(async (method: "login" | "register") => {
-    const nextOperation = method === "register" ? "register" : "sign-in";
+  const chooseAccount = useCallback(async (selection: AccountSelection) => {
+    const nextOperation = selection.mode === "register" ? "register" : "sign-in";
     setOperation(nextOperation);
     setError(null);
     try {
-      if (method === "register" && !user) throw new Error("The browser identity is not ready.");
-      await accountProvider().request(method === "register"
-        ? {
-            method: "wallet_connect",
-            params: [{ capabilities: {
-              method,
-              name: `Nanocodex ${user!.id}`,
-              userId: user!.id,
+      let registrationUser = user;
+      if (selection.mode === "register" && (!registrationUser || registrationUser.persistent)) {
+        await provider.request({ method: "wallet_disconnect" });
+        registrationUser = await getCurrentUser();
+      }
+      if (selection.mode === "register" && !registrationUser) {
+        throw new Error("The browser identity is not ready.");
+      }
+      await provider.request({
+        method: "wallet_connect",
+        params: [{ capabilities: selection.mode === "register"
+          ? {
+              method: "register",
+              name: selection.label,
+              userId: registrationUser!.id,
+            }
+          : {
+              method: "login",
+              ...(selection.credentialId
+                ? { credentialId: selection.credentialId }
+                : { selectAccount: true }),
             } }],
-          }
-        : { method: "wallet_connect" });
+      });
       const nextUser = await getCurrentUser();
       if (!nextUser) throw new Error("The account session was not created.");
       requestId.current++;
@@ -127,39 +168,29 @@ export function AccountSessionProvider({ children }: { children: ReactNode }) {
     } catch (cause) {
       setError(accountFailure(
         cause,
-        method === "register"
+        selection.mode === "register"
           ? "Couldn’t register this passkey. Try again."
           : "Couldn’t sign in with a passkey. Try again.",
       ));
     } finally {
       setOperation(null);
     }
-  }, [accountProvider, user]);
+  }, [provider, user]);
 
-  const register = useCallback(() => connect("register"), [connect]);
-  const signIn = useCallback(() => connect("login"), [connect]);
-  const startNewAccount = useCallback(async () => {
-    setOperation("new-account");
-    setError(null);
-    try {
-      await accountProvider().request({ method: "wallet_disconnect" });
-      const nextUser = await getCurrentUser();
-      if (!nextUser) throw new Error("The browser session was not created.");
-      requestId.current++;
-      setUser(nextUser);
-      setStatus("ready");
-      setReauthenticationRequired(false);
-    } catch (cause) {
-      setError(accountFailure(cause, "Couldn’t start a new account. Try again."));
-    } finally {
-      setOperation(null);
-    }
-  }, [accountProvider]);
+  const register = useCallback(() => chooseAccount({
+    mode: "register",
+    label: user ? `Nanocodex ${user.id}` : "Nanocodex account",
+  }), [chooseAccount, user]);
+  const signIn = useCallback(() => chooseAccount({
+    mode: "login",
+    label: "Another passkey",
+    discoverCredential: true,
+  }), [chooseAccount]);
   const signOut = useCallback(async () => {
     setOperation("sign-out");
     setError(null);
     try {
-      await accountProvider().request({ method: "wallet_disconnect" });
+      await provider.request({ method: "wallet_disconnect" });
       const nextUser = await getCurrentUser();
       requestId.current++;
       setUser(nextUser);
@@ -170,20 +201,21 @@ export function AccountSessionProvider({ children }: { children: ReactNode }) {
     } finally {
       setOperation(null);
     }
-  }, [accountProvider]);
+  }, [provider]);
 
   const value = useMemo<AccountSession>(() => ({
     account: user,
     status,
     error,
     operation,
+    savedPasskeys,
+    chooseAccount,
     refresh,
-    startNewAccount,
     register,
     signIn,
     signOut,
     reauthenticationRequired,
-  }), [error, operation, reauthenticationRequired, refresh, register, signIn, signOut, startNewAccount, status, user]);
+  }), [chooseAccount, error, operation, reauthenticationRequired, refresh, register, savedPasskeys, signIn, signOut, status, user]);
 
   return (
     <AccountSessionContext.Provider value={value}>
