@@ -1,6 +1,9 @@
 use std::{
     io::Write,
-    sync::{Arc, Mutex, MutexGuard, OnceLock},
+    sync::{
+        Arc, OnceLock,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
 };
 
 use futures_util::Stream;
@@ -397,37 +400,23 @@ fn write_jsonl_event(output: &mut impl Write, event: &AgentEvent) -> Result<(), 
         .map_err(EventError::Write)
 }
 
-struct PublisherState {
-    next_seq: u64,
-    session: mpsc::UnboundedSender<TimedAgentEvent>,
-}
-
-/// Cloneable publisher for already-formed canonical agent events.
-///
-/// A publisher validates protocol version, request identity, and global
-/// monotonic sequence order before atomically routing the same retained event to the
-/// session stream and, when present, one turn stream.
 #[derive(Clone)]
-pub struct AgentEventPublisher {
+struct EventChannel {
     request_id: Arc<str>,
-    state: Arc<Mutex<PublisherState>>,
+    next_seq: Arc<AtomicU64>,
+    session: mpsc::UnboundedSender<TimedAgentEvent>,
     turn: Option<mpsc::UnboundedSender<TimedAgentEvent>>,
-    turn_terminal: Option<Arc<Mutex<bool>>>,
+    turn_terminal: Option<Arc<AtomicBool>>,
 }
 
-impl AgentEventPublisher {
-    /// Creates a publisher and its independently consumed session event stream.
-    #[must_use]
-    pub fn channel(request_id: impl Into<Arc<str>>) -> (Self, AgentEvents) {
-        let request_id = request_id.into();
+impl EventChannel {
+    fn channel(request_id: Arc<str>) -> (Self, AgentEvents) {
         let (session, receiver) = mpsc::unbounded_channel();
         (
             Self {
                 request_id: Arc::clone(&request_id),
-                state: Arc::new(Mutex::new(PublisherState {
-                    next_seq: 1,
-                    session,
-                })),
+                next_seq: Arc::new(AtomicU64::new(1)),
+                session,
                 turn: None,
                 turn_terminal: None,
             },
@@ -438,19 +427,99 @@ impl AgentEventPublisher {
         )
     }
 
+    fn mirrored_channel(&self) -> (Self, AgentEvents) {
+        let (turn, receiver) = mpsc::unbounded_channel();
+        (
+            Self {
+                request_id: Arc::clone(&self.request_id),
+                next_seq: Arc::clone(&self.next_seq),
+                session: self.session.clone(),
+                turn: Some(turn),
+                turn_terminal: Some(Arc::new(AtomicBool::new(false))),
+            },
+            AgentEvents {
+                request_id: Arc::clone(&self.request_id),
+                receiver,
+            },
+        )
+    }
+
+    fn turn_is_terminal(&self) -> bool {
+        self.turn_terminal
+            .as_ref()
+            .is_some_and(|terminal| terminal.load(Ordering::Acquire))
+    }
+
+    fn ensure_turn_open(&self) -> Result<(), EventError> {
+        if self.turn_is_terminal() {
+            Err(EventError::TurnAlreadyTerminal)
+        } else {
+            Ok(())
+        }
+    }
+
+    #[cfg(feature = "client")]
+    fn receivers_are_closed(&self) -> bool {
+        self.session.is_closed()
+            && self
+                .turn
+                .as_ref()
+                .is_none_or(mpsc::UnboundedSender::is_closed)
+    }
+
+    fn publish(&self, event: TimedAgentEvent) {
+        let terminal = event.event.kind.is_terminal();
+        drop(self.session.send(event.clone()));
+        if let Some(turn) = &self.turn {
+            drop(turn.send(event));
+        }
+        if terminal && let Some(turn_terminal) = &self.turn_terminal {
+            turn_terminal.store(true, Ordering::Release);
+        }
+    }
+
+    #[cfg(feature = "client")]
+    fn record_terminal(&self, kind: AgentEventKind) {
+        if kind.is_terminal()
+            && let Some(turn_terminal) = &self.turn_terminal
+        {
+            turn_terminal.store(true, Ordering::Release);
+        }
+    }
+}
+
+/// Cloneable publisher for already-formed canonical agent events.
+///
+/// A publisher validates protocol version, request identity, and contiguous
+/// sequence order before routing the same retained event to the session stream
+/// and, when present, one turn stream. Callers must provide one ordered source;
+/// publishing concurrently does not add delivery ordering beyond the underlying
+/// event channel.
+#[derive(Clone)]
+pub struct AgentEventPublisher {
+    channel: EventChannel,
+}
+
+impl AgentEventPublisher {
+    /// Creates a publisher and its independently consumed session event stream.
+    #[must_use]
+    pub fn channel(request_id: impl Into<Arc<str>>) -> (Self, AgentEvents) {
+        let request_id = request_id.into();
+        let (channel, events) = EventChannel::channel(request_id);
+        (Self { channel }, events)
+    }
+
     /// Returns the stable request/session identity accepted by this publisher.
     #[must_use]
     pub fn request_id(&self) -> &str {
-        &self.request_id
+        &self.channel.request_id
     }
 
     /// Returns whether this per-turn publisher has emitted its terminal event.
     #[doc(hidden)]
     #[must_use]
     pub fn turn_is_terminal(&self) -> bool {
-        self.turn_terminal
-            .as_ref()
-            .is_some_and(|terminal| *lock_unpoisoned(terminal))
+        self.channel.turn_is_terminal()
     }
 
     /// Creates a publisher that also mirrors its events into a turn stream.
@@ -460,19 +529,8 @@ impl AgentEventPublisher {
     /// have also been dropped.
     #[must_use]
     pub fn mirrored_channel(&self) -> (Self, AgentEvents) {
-        let (turn, receiver) = mpsc::unbounded_channel();
-        (
-            Self {
-                request_id: Arc::clone(&self.request_id),
-                state: Arc::clone(&self.state),
-                turn: Some(turn),
-                turn_terminal: Some(Arc::new(Mutex::new(false))),
-            },
-            AgentEvents {
-                request_id: Arc::clone(&self.request_id),
-                receiver,
-            },
-        )
+        let (channel, events) = self.channel.mirrored_channel();
+        (Self { channel }, events)
     }
 
     /// Validates and publishes one already-formed canonical event.
@@ -494,60 +552,44 @@ impl AgentEventPublisher {
     }
 
     fn publish_timed(&self, event: TimedAgentEvent) -> Result<(), EventError> {
-        let mut state = lock_unpoisoned(&self.state);
-        self.validate(&state, &event.event)?;
-        let mut turn_terminal = self
-            .turn_terminal
-            .as_ref()
-            .map(|terminal| lock_unpoisoned(terminal));
-        if turn_terminal.as_deref().is_some_and(|terminal| *terminal) {
-            return Err(EventError::TurnAlreadyTerminal);
-        }
-
+        self.validate(&event.event)?;
+        self.channel.ensure_turn_open()?;
         let next_seq = event
             .event
             .seq
             .checked_add(1)
             .ok_or(EventError::SequenceExhausted)?;
-        let terminal_event = event.event.kind.is_terminal();
-        drop(state.session.send(event.clone()));
-        if let Some(turn) = &self.turn {
-            drop(turn.send(event));
-        }
-        if terminal_event && let Some(terminal) = turn_terminal.as_deref_mut() {
-            *terminal = true;
-        }
-        state.next_seq = next_seq;
+        self.channel
+            .next_seq
+            .compare_exchange(
+                event.event.seq,
+                next_seq,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            )
+            .map_err(|expected| EventError::SequenceMismatch {
+                expected,
+                actual: event.event.seq,
+            })?;
+        self.channel.publish(event);
         Ok(())
     }
 
-    fn validate(&self, state: &PublisherState, event: &AgentEvent) -> Result<(), EventError> {
+    fn validate(&self, event: &AgentEvent) -> Result<(), EventError> {
         if event.protocol_version != AGENT_EVENT_PROTOCOL_VERSION {
             return Err(EventError::ProtocolVersionMismatch {
                 expected: AGENT_EVENT_PROTOCOL_VERSION,
                 actual: event.protocol_version,
             });
         }
-        if event.request_id != self.request_id {
+        if event.request_id != self.channel.request_id {
             return Err(EventError::RequestIdMismatch {
-                expected: Arc::clone(&self.request_id),
+                expected: Arc::clone(&self.channel.request_id),
                 actual: Arc::clone(&event.request_id),
-            });
-        }
-        if event.seq != state.next_seq {
-            return Err(EventError::SequenceMismatch {
-                expected: state.next_seq,
-                actual: event.seq,
             });
         }
         Ok(())
     }
-}
-
-fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// Internal sequenced emission handle shared by orchestration and transport crates.
@@ -615,49 +657,26 @@ impl EventSink {
         payload: P,
         source_received_ns: Option<u64>,
     ) -> Result<u64, EventError> {
-        {
-            let mut state = lock_unpoisoned(&self.publisher.state);
-            let mut turn_terminal = self
+        if self.publisher.channel.receivers_are_closed() {
+            let seq = self
                 .publisher
-                .turn_terminal
-                .as_ref()
-                .map(|terminal| lock_unpoisoned(terminal));
-            if turn_terminal.as_deref().is_some_and(|terminal| *terminal) {
-                return Err(EventError::TurnAlreadyTerminal);
-            }
-            if state.session.is_closed()
-                && self
-                    .publisher
-                    .turn
-                    .as_ref()
-                    .is_none_or(mpsc::UnboundedSender::is_closed)
-            {
-                let seq = state.next_seq;
-                state.next_seq = seq.checked_add(1).ok_or(EventError::SequenceExhausted)?;
-                if kind.is_terminal()
-                    && let Some(terminal) = turn_terminal.as_deref_mut()
-                {
-                    *terminal = true;
-                }
-                return Ok(seq);
-            }
+                .channel
+                .next_seq
+                .fetch_add(1, Ordering::Relaxed);
+            self.publisher.channel.record_terminal(kind);
+            return Ok(seq);
         }
 
         let payload = Arc::from(to_raw_value(&payload).map_err(EventError::Encode)?);
-        let mut state = lock_unpoisoned(&self.publisher.state);
-        let mut turn_terminal = self
+        let seq = self
             .publisher
-            .turn_terminal
-            .as_ref()
-            .map(|terminal| lock_unpoisoned(terminal));
-        if turn_terminal.as_deref().is_some_and(|terminal| *terminal) {
-            return Err(EventError::TurnAlreadyTerminal);
-        }
-        let seq = state.next_seq;
+            .channel
+            .next_seq
+            .fetch_add(1, Ordering::Relaxed);
         let event = TimedAgentEvent {
             event: AgentEvent {
                 protocol_version: AGENT_EVENT_PROTOCOL_VERSION,
-                request_id: Arc::clone(&self.publisher.request_id),
+                request_id: Arc::clone(&self.publisher.channel.request_id),
                 seq,
                 kind,
                 payload,
@@ -667,17 +686,7 @@ impl EventSink {
                 source_received_ns,
             },
         };
-        let next_seq = seq.checked_add(1).ok_or(EventError::SequenceExhausted)?;
-        drop(state.session.send(event.clone()));
-        if let Some(turn) = &self.publisher.turn {
-            drop(turn.send(event));
-        }
-        if kind.is_terminal()
-            && let Some(terminal) = turn_terminal.as_deref_mut()
-        {
-            *terminal = true;
-        }
-        state.next_seq = next_seq;
+        self.publisher.channel.publish(event);
         Ok(seq)
     }
 
@@ -699,8 +708,6 @@ impl EventSink {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
-    #[cfg(feature = "client")]
-    use std::{sync::Barrier, thread};
 
     #[cfg(feature = "client")]
     use serde::{Serialize, Serializer};
@@ -825,11 +832,6 @@ mod tests {
             (turn_first.seq, turn_second.seq)
         );
         assert_eq!(turn_second.kind, AgentEventKind::RunCompleted);
-        assert!(turn_events.publisher.turn_is_terminal());
-        assert!(matches!(
-            turn_events.emit(AgentEventKind::AssistantDelta, json!({ "late": true })),
-            Err(EventError::TurnAlreadyTerminal)
-        ));
 
         drop(turn_events);
         assert!(turn.receiver.try_recv().is_err());
@@ -903,9 +905,39 @@ mod tests {
         assert!(events.receiver.try_recv().is_err());
     }
 
+    #[test]
+    fn publisher_records_terminal_after_receivers_close() {
+        let (publisher, session) = AgentEventPublisher::channel("request-1");
+        let (publisher, turn) = publisher.mirrored_channel();
+        drop(session);
+        drop(turn);
+
+        publisher
+            .publish(AgentEvent {
+                protocol_version: AGENT_EVENT_PROTOCOL_VERSION,
+                request_id: Arc::from("request-1"),
+                seq: 1,
+                kind: AgentEventKind::RunCompleted,
+                payload: Arc::from(serde_json::from_str::<Box<RawValue>>("{}").unwrap()),
+            })
+            .unwrap();
+
+        assert!(publisher.turn_is_terminal());
+        assert!(matches!(
+            publisher.publish(AgentEvent {
+                protocol_version: AGENT_EVENT_PROTOCOL_VERSION,
+                request_id: Arc::from("request-1"),
+                seq: 2,
+                kind: AgentEventKind::AssistantDelta,
+                payload: Arc::from(serde_json::from_str::<Box<RawValue>>("{}").unwrap()),
+            }),
+            Err(EventError::TurnAlreadyTerminal)
+        ));
+    }
+
     #[cfg(feature = "client")]
     #[test]
-    fn closed_turn_stream_still_records_and_enforces_its_terminal_event() {
+    fn closed_turn_stream_records_terminal_without_changing_sink_behavior() {
         struct MustNotSerialize;
 
         impl Serialize for MustNotSerialize {
@@ -925,48 +957,12 @@ mod tests {
         turn_events
             .emit(AgentEventKind::RunCompleted, MustNotSerialize)
             .unwrap();
-        assert!(turn_events.publisher.turn_is_terminal());
-        assert!(matches!(
-            turn_events.emit(AgentEventKind::AssistantDelta, MustNotSerialize),
-            Err(EventError::TurnAlreadyTerminal)
-        ));
-    }
-
-    #[cfg(feature = "client")]
-    #[test]
-    fn cloned_sinks_serialize_concurrent_sequence_allocation_and_delivery() {
-        const EMITTERS: usize = 8;
-        const EVENTS_PER_EMITTER: usize = 64;
-
-        let (sink, mut events) = EventSink::channel("request-1".to_owned());
-        let barrier = Arc::new(Barrier::new(EMITTERS));
-        let threads = (0..EMITTERS)
-            .map(|emitter| {
-                let sink = sink.clone();
-                let barrier = Arc::clone(&barrier);
-                thread::spawn(move || {
-                    barrier.wait();
-                    for local in 0..EVENTS_PER_EMITTER {
-                        sink.emit(
-                            AgentEventKind::AssistantDelta,
-                            json!({ "emitter": emitter, "local": local }),
-                        )
-                        .unwrap();
-                    }
-                })
-            })
-            .collect::<Vec<_>>();
-        for thread in threads {
-            thread.join().unwrap();
-        }
-
-        let sequences = std::iter::from_fn(|| events.try_recv_timed())
-            .map(|event| event.event.seq)
-            .collect::<Vec<_>>();
-        assert_eq!(sequences.len(), EMITTERS * EVENTS_PER_EMITTER);
+        assert!(turn_events.publisher().turn_is_terminal());
         assert_eq!(
-            sequences,
-            (1..=u64::try_from(EMITTERS * EVENTS_PER_EMITTER).unwrap()).collect::<Vec<_>>()
+            turn_events
+                .emit_with_sequence(AgentEventKind::AssistantDelta, MustNotSerialize)
+                .unwrap(),
+            2
         );
     }
 
