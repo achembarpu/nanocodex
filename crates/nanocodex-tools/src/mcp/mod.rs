@@ -55,6 +55,11 @@ pub struct Mcp {
     started: AtomicBool,
 }
 
+pub(crate) struct PreparedMcpTool {
+    entry: Arc<ToolEntry>,
+    timeout: Duration,
+}
+
 struct NamedServer {
     name: String,
     config: McpServer,
@@ -168,6 +173,48 @@ impl Mcp {
             oauth_store: self.oauth_store.clone(),
             oauth_metadata: Arc::clone(&self.oauth_metadata),
         }
+    }
+
+    pub(crate) async fn prepared_snapshot(
+        &self,
+        max_timeout: Duration,
+    ) -> Result<Vec<PreparedMcpTool>, String> {
+        DynamicToolProvider::start(self);
+        self.state.prepared_entries().await.map(|entries| {
+            entries
+                .into_iter()
+                .map(|entry| PreparedMcpTool {
+                    timeout: entry.timeout.min(max_timeout),
+                    entry,
+                })
+                .collect()
+        })
+    }
+}
+
+impl PreparedMcpTool {
+    pub(crate) fn provider(&self) -> &str {
+        self.entry.attached_provider()
+    }
+
+    pub(crate) fn remote_name(&self) -> &str {
+        &self.entry.remote_name
+    }
+
+    pub(crate) fn definition(&self) -> &ToolDefinition {
+        &self.entry.definition
+    }
+
+    pub(crate) fn supports_parallel_tool_calls(&self) -> bool {
+        self.entry.supports_parallel_tool_calls
+    }
+
+    pub(crate) const fn timeout(&self) -> Duration {
+        self.timeout
+    }
+
+    pub(crate) async fn execute(&self, input: Value) -> ToolOutput {
+        execute_mcp_entry(&self.entry, input, self.timeout).await
     }
 }
 
@@ -543,84 +590,86 @@ impl DynamicToolProvider for Mcp {
         if !entry.tool_exposure.is_callable() {
             return None;
         }
-        let Value::Object(arguments) = input else {
-            return Some(ToolOutput::error(format!(
-                "MCP tool {name} requires an object argument"
-            )));
-        };
-        let argument_bytes = serde_json::to_vec(&arguments).map_or(0, |encoded| encoded.len());
-        let argument_keys = arguments
-            .keys()
-            .map(String::as_str)
-            .collect::<Vec<_>>()
-            .join(",");
-        let argument_count = arguments.len();
-        let params =
-            CallToolRequestParams::new(entry.remote_name.clone()).with_arguments(arguments);
-        let span = info_span!(
-            target: "nanocodex_tools",
-            "mcp.tool_call",
-            otel.kind = "client",
-            otel.status_code = tracing::field::Empty,
-            mcp.server = %entry.server_name,
-            mcp.tool = %entry.remote_name,
-            mcp.arguments.bytes = argument_bytes,
-            mcp.arguments.keys = argument_keys,
-            mcp.arguments.count = argument_count,
-            status = tracing::field::Empty,
-        );
-        if let Err(error) = entry.client.refresh_oauth().await {
+        Some(execute_mcp_entry(&entry, input, entry.timeout).await)
+    }
+}
+
+async fn execute_mcp_entry(entry: &ToolEntry, input: Value, timeout: Duration) -> ToolOutput {
+    let Value::Object(arguments) = input else {
+        return ToolOutput::error(format!(
+            "MCP tool {} requires an object argument",
+            entry.canonical_name
+        ));
+    };
+    let argument_bytes = serde_json::to_vec(&arguments).map_or(0, |encoded| encoded.len());
+    let argument_keys = arguments
+        .keys()
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(",");
+    let argument_count = arguments.len();
+    let params = CallToolRequestParams::new(entry.remote_name.clone()).with_arguments(arguments);
+    let span = info_span!(
+        target: "nanocodex_tools",
+        "mcp.tool_call",
+        otel.kind = "client",
+        otel.status_code = tracing::field::Empty,
+        mcp.server = %entry.server_name,
+        mcp.tool = %entry.remote_name,
+        mcp.arguments.bytes = argument_bytes,
+        mcp.arguments.keys = argument_keys,
+        mcp.arguments.count = argument_count,
+        status = tracing::field::Empty,
+    );
+    if let Err(error) = entry.client.refresh_oauth().await {
+        span.record("status", "failed");
+        span.record("otel.status_code", "ERROR");
+        return ToolOutput::error(format!(
+            "MCP tool {}/{} could not refresh OAuth credentials: {error}",
+            entry.server_name, entry.remote_name
+        ));
+    }
+    let result = match tokio::time::timeout(
+        timeout,
+        entry.client.call_tool(params).instrument(span.clone()),
+    )
+    .await
+    {
+        Ok(Ok(result)) => result,
+        Ok(Err(error)) => {
             span.record("status", "failed");
             span.record("otel.status_code", "ERROR");
-            return Some(ToolOutput::error(format!(
-                "MCP tool {}/{} could not refresh OAuth credentials: {error}",
+            return ToolOutput::error(format!(
+                "MCP tool {}/{} failed: {error}",
                 entry.server_name, entry.remote_name
-            )));
+            ));
         }
-        let result = match tokio::time::timeout(
-            entry.timeout,
-            entry.client.call_tool(params).instrument(span.clone()),
-        )
-        .await
-        {
-            Ok(Ok(result)) => result,
-            Ok(Err(error)) => {
-                span.record("status", "failed");
-                span.record("otel.status_code", "ERROR");
-                return Some(ToolOutput::error(format!(
-                    "MCP tool {}/{} failed: {error}",
-                    entry.server_name, entry.remote_name
-                )));
-            }
-            Err(_) => {
-                span.record("status", "timeout");
-                span.record("otel.status_code", "ERROR");
-                return Some(ToolOutput::error(format!(
-                    "MCP tool {}/{} exceeded {:.1} seconds",
-                    entry.server_name,
-                    entry.remote_name,
-                    entry.timeout.as_secs_f64()
-                )));
-            }
-        };
-        let success = !result.is_error.unwrap_or(false);
-        span.record("status", if success { "completed" } else { "failed" });
-        span.record("otel.status_code", if success { "OK" } else { "ERROR" });
-        let value = match serde_json::to_value(result) {
-            Ok(value) => value,
-            Err(error) => {
-                span.record("status", "failed");
-                span.record("otel.status_code", "ERROR");
-                return Some(ToolOutput::error(format!(
-                    "failed to encode MCP tool result: {error}"
-                )));
-            }
-        };
-        Some(ToolOutput::from_json(value, success).with_metadata(json!({
-            "mcp_server": entry.server_name,
-            "mcp_tool": entry.remote_name,
-        })))
-    }
+        Err(_) => {
+            span.record("status", "timeout");
+            span.record("otel.status_code", "ERROR");
+            return ToolOutput::error(format!(
+                "MCP tool {}/{} exceeded {:.1} seconds",
+                entry.server_name,
+                entry.remote_name,
+                timeout.as_secs_f64()
+            ));
+        }
+    };
+    let success = !result.is_error.unwrap_or(false);
+    span.record("status", if success { "completed" } else { "failed" });
+    span.record("otel.status_code", if success { "OK" } else { "ERROR" });
+    let value = match serde_json::to_value(result) {
+        Ok(value) => value,
+        Err(error) => {
+            span.record("status", "failed");
+            span.record("otel.status_code", "ERROR");
+            return ToolOutput::error(format!("failed to encode MCP tool result: {error}"));
+        }
+    };
+    ToolOutput::from_json(value, success).with_metadata(json!({
+        "mcp_server": entry.server_name,
+        "mcp_tool": entry.remote_name,
+    }))
 }
 
 struct McpSearch {
@@ -977,7 +1026,7 @@ mod tests {
 
         let tools = Tools::builder()
             .without_defaults()
-            .provider(mcp)
+            .add(mcp)
             .build()
             .unwrap();
         let runtime = ToolRuntime::new_with_tools(".", None, None, &tools);
@@ -1408,6 +1457,11 @@ mod tests {
         assert!(mcp.contains("mcp__deferred__echo"));
         assert!(mcp.contains("mcp__nested__echo"));
         assert!(!mcp.contains("mcp__hidden__echo"));
+
+        let Err(attachment_error) = mcp.prepared_snapshot(Duration::from_secs(1)).await else {
+            panic!("attachment unexpectedly flattened MCP exposure policy");
+        };
+        assert!(attachment_error.contains("attachment cannot preserve"));
     }
 
     #[cfg(unix)]

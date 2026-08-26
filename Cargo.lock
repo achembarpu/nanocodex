@@ -5591,16 +5591,22 @@ dependencies = [
  "reqwest",
  "rmcp",
  "rquickjs",
+ "rustls",
+ "ryu-js",
  "schemars 0.8.22",
  "serde",
  "serde_json",
  "sha1 0.11.0",
+ "sha2 0.11.0",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-tungstenite 0.30.0",
  "tokio-util",
  "tracing",
  "tracing-subscriber",
+ "url",
+ "uuid",
 ]
 
 [[package]]

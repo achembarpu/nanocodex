@@ -14,6 +14,9 @@
 #[cfg(feature = "workspace-runtime")]
 #[doc(hidden)]
 pub mod apply_patch;
+#[cfg(all(not(target_family = "wasm"), feature = "attachment"))]
+#[cfg_attr(docsrs, doc(cfg(not(target_family = "wasm"))))]
+pub mod attachment;
 #[cfg(all(not(target_family = "wasm"), feature = "native"))]
 #[cfg_attr(docsrs, doc(cfg(not(target_family = "wasm"))))]
 pub mod code_mode;
@@ -34,12 +37,17 @@ mod image_generation;
 pub mod mcp;
 #[cfg(all(not(target_family = "wasm"), feature = "native"))]
 mod plan;
+#[cfg(all(not(target_family = "wasm"), feature = "attachment"))]
+mod prepared;
 #[cfg(all(not(target_family = "wasm"), feature = "native"))]
 #[cfg_attr(docsrs, doc(cfg(not(target_family = "wasm"))))]
 pub mod runtime;
 #[cfg(feature = "native")]
 mod runtime_config;
-#[cfg(all(target_family = "wasm", feature = "native"))]
+#[cfg(any(
+    feature = "native",
+    all(not(target_family = "wasm"), feature = "attachment")
+))]
 #[path = "runtime/selection.rs"]
 mod selection;
 #[cfg(all(not(target_family = "wasm"), feature = "workspace-runtime"))]
@@ -59,7 +67,10 @@ pub use workspace_runtime::WorkspaceTools;
 
 /// Model-visible tool definitions, inputs, outputs, and execution contracts.
 pub mod contract {
-    #[cfg(all(not(target_family = "wasm"), feature = "workspace-runtime"))]
+    #[cfg(all(
+        not(target_family = "wasm"),
+        any(feature = "attachment", feature = "workspace-runtime")
+    ))]
     #[cfg_attr(docsrs, doc(cfg(not(target_family = "wasm"))))]
     pub use async_trait::async_trait;
     pub use nanocodex_oai_api::tools::{
@@ -97,7 +108,10 @@ pub mod runtime {
     };
 }
 
-#[cfg(all(not(target_family = "wasm"), feature = "native"))]
+#[cfg(all(
+    not(target_family = "wasm"),
+    any(feature = "native", all(test, feature = "workspace-runtime"))
+))]
 pub(crate) use contract::ToolOutputBody;
 #[cfg(all(not(target_family = "wasm"), feature = "workspace-runtime"))]
 pub(crate) use contract::ToolOutputContent;
@@ -108,17 +122,22 @@ pub(crate) use nanocodex_oai_api::ImageDetail;
 #[cfg_attr(docsrs, doc(cfg(not(target_family = "wasm"))))]
 pub use nanocodex_tools_macros::tool;
 #[cfg(all(not(target_family = "wasm"), feature = "native"))]
-#[cfg_attr(docsrs, doc(cfg(not(target_family = "wasm"))))]
-pub use runtime::ToolExposure;
-#[cfg(feature = "native")]
-pub use runtime::Tools;
-#[cfg(all(not(target_family = "wasm"), feature = "native"))]
 pub(crate) use runtime::{DynamicToolProvider, ImageGenerationConfig, WebSearchConfig};
-#[cfg(all(not(target_family = "wasm"), feature = "native"))]
-#[cfg_attr(docsrs, doc(cfg(not(target_family = "wasm"))))]
-pub use runtime::{ToolSource, ToolsBuildError, ToolsBuilder};
-#[cfg(all(target_family = "wasm", feature = "native"))]
-pub use selection::{ToolExposure, ToolSource, ToolsBuildError, ToolsBuilder};
+#[cfg(any(
+    feature = "native",
+    all(not(target_family = "wasm"), feature = "attachment")
+))]
+pub use selection::ToolExposure;
+#[cfg(any(
+    feature = "native",
+    all(not(target_family = "wasm"), feature = "attachment")
+))]
+pub use selection::Tools;
+#[cfg(any(
+    feature = "native",
+    all(not(target_family = "wasm"), feature = "attachment")
+))]
+pub use selection::{ToolSource, ToolsBuildError, ToolsBuilder};
 #[cfg(all(not(target_family = "wasm"), feature = "native"))]
 #[cfg_attr(docsrs, doc(cfg(all(not(target_family = "wasm"), feature = "native"))))]
 pub use shell::ambient_sensitive_environment;

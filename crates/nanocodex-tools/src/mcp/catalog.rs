@@ -302,6 +302,50 @@ impl ProviderState {
         self.entry(name)
     }
 
+    pub(crate) async fn prepared_entries(&self) -> Result<Vec<Arc<ToolEntry>>, String> {
+        self.wait_for_startup().await;
+        let catalog = self.catalog();
+        if !catalog.pending_servers.is_empty() {
+            return Err(format!(
+                "MCP discovery timed out with pending servers: {}",
+                catalog
+                    .pending_servers
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        if !catalog.failures.is_empty() {
+            return Err(format!(
+                "MCP discovery failed: {}",
+                catalog
+                    .failures
+                    .iter()
+                    .map(|(server, error)| format!("{server}: {error}"))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ));
+        }
+        if let Some(entry) = catalog.entries.values().find(|entry| {
+            matches!(
+                entry.tool_exposure,
+                McpToolExposure::DeferredOnly | McpToolExposure::CodeModeOnly
+            )
+        }) {
+            return Err(format!(
+                "MCP tool `{}` uses {:?}, which attachment cannot preserve; use DeferredAndCodeMode or Hidden",
+                entry.canonical_name, entry.tool_exposure
+            ));
+        }
+        Ok(catalog
+            .entries
+            .values()
+            .filter(|entry| entry.tool_exposure == McpToolExposure::DeferredAndCodeMode)
+            .cloned()
+            .collect())
+    }
+
     pub(crate) async fn client(&self, server_name: &str) -> Result<Client, String> {
         self.wait_for_startup().await;
         let catalog = self.catalog();
@@ -411,6 +455,10 @@ fn push_search_token(tokens: &mut Vec<String>, token: &mut String) {
 }
 
 impl ToolEntry {
+    pub(crate) fn attached_provider(&self) -> &str {
+        &self.namespace
+    }
+
     pub(crate) fn new(
         server_name: &str,
         tool: &RmcpTool,

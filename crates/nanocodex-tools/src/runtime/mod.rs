@@ -3,23 +3,21 @@
 mod execution;
 mod registry;
 mod schema;
-mod selection;
 
 #[cfg(test)]
 mod tests;
 
+pub use crate::selection::{
+    DynamicToolProvider, ToolExposure, ToolSource, Tools, ToolsBuildError, ToolsBuilder,
+};
 pub use execution::{ToolRuntime, ToolRuntimeControl};
 pub(crate) use registry::ToolRegistry;
 pub use schema::schema_for;
-pub use selection::{
-    DynamicToolProvider, ToolExposure, ToolSource, Tools, ToolsBuildError, ToolsBuilder,
-};
 
 use std::{
     any::Any,
     collections::{HashMap, HashSet},
     ffi::OsString,
-    fmt,
     panic::AssertUnwindSafe,
     path::PathBuf,
     sync::{
@@ -28,7 +26,6 @@ use std::{
     },
 };
 
-use async_trait::async_trait;
 use futures_util::FutureExt;
 use nanocodex_oai_api::tools::{Tool, ToolContext, ToolDefinition, ToolInput, ToolOutput};
 use schemars::{JsonSchema, r#gen::SchemaSettings};
@@ -45,8 +42,6 @@ use crate::{
     view_image,
 };
 use crate::{image_generation, web_search};
-
-const CODEX_THREAD_ID_ENV_VAR: &str = "CODEX_THREAD_ID";
 
 fn host_owned_name(name: &str) -> bool {
     matches!(name, "exec" | "wait")

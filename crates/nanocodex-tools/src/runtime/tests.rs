@@ -722,16 +722,16 @@ fn registered_public_tool_names_match_the_wire_grammar() {
 #[test]
 fn published_catalog_names_reject_invalid_and_normalized_collisions() {
     assert!(matches!(
-        super::selection::validate_public_tool_catalog_names(["invalid name"]),
-        Err(super::selection::PublicToolCatalogError::InvalidName(name))
+        crate::selection::validate_public_tool_catalog_names(["invalid name"]),
+        Err(crate::selection::PublicToolCatalogError::InvalidName(name))
             if name.as_ref() == "invalid name"
     ));
     assert!(matches!(
-        super::selection::validate_public_tool_catalog_names([
+        crate::selection::validate_public_tool_catalog_names([
             "mcp__docs__read-file",
             "mcp__docs__read_file",
         ]),
-        Err(super::selection::PublicToolCatalogError::NormalizedNameCollision {
+        Err(crate::selection::PublicToolCatalogError::NormalizedNameCollision {
             first,
             second,
             normalized,

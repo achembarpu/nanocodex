@@ -1,20 +1,21 @@
 use std::{
     collections::{HashMap, HashSet},
+    fmt,
     sync::Arc,
 };
-
-#[cfg(all(not(target_family = "wasm"), feature = "native"))]
-use super::{CODEX_THREAD_ID_ENV_VAR, async_trait, fmt};
-#[cfg(all(not(target_family = "wasm"), feature = "native"))]
-use serde_json::Value;
-#[cfg(all(not(target_family = "wasm"), feature = "native"))]
-use std::ffi::OsString;
-#[cfg(target_family = "wasm")]
-use std::fmt;
 
 use crate::{Tool, ToolDefinition};
 #[cfg(all(not(target_family = "wasm"), feature = "native"))]
 use crate::{ToolContext, ToolOutput};
+#[cfg(all(not(target_family = "wasm"), feature = "native"))]
+use async_trait::async_trait;
+#[cfg(all(not(target_family = "wasm"), feature = "native"))]
+use serde_json::Value;
+#[cfg(all(not(target_family = "wasm"), feature = "native"))]
+use std::ffi::OsString;
+
+#[cfg(all(not(target_family = "wasm"), feature = "native"))]
+pub(crate) const CODEX_THREAD_ID_ENV_VAR: &str = "CODEX_THREAD_ID";
 
 /// Nanocodex's model-visible tool exposure policy.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -121,12 +122,15 @@ mod source_sealed {
 
     #[cfg(all(not(target_family = "wasm"), feature = "workspace-runtime"))]
     impl Sealed for crate::WorkspaceTools {}
+
+    #[cfg(all(not(target_family = "wasm"), feature = "native"))]
+    impl Sealed for crate::mcp::Mcp {}
 }
 
 /// One capability source accepted by [`ToolsBuilder::add`].
 ///
-/// The sealed implementations cover fixed [`Tool`] values and canonical
-/// [`crate::WorkspaceTools`] recipes when workspace tools are enabled.
+/// The sealed implementations cover fixed [`Tool`] values, workspace tools,
+/// and native MCP families when those features are enabled.
 pub trait ToolSource: source_sealed::Sealed + Sized {
     #[doc(hidden)]
     fn install(self, builder: ToolsBuilder) -> ToolsBuilder;
@@ -146,6 +150,20 @@ impl ToolSource for crate::WorkspaceTools {
         }
         builder.tools.workspace = true;
         builder.tools.workspace_tools = Some(self);
+        builder
+    }
+}
+
+#[cfg(all(not(target_family = "wasm"), feature = "native"))]
+impl ToolSource for crate::mcp::Mcp {
+    fn install(self, mut builder: ToolsBuilder) -> ToolsBuilder {
+        let provider = Arc::new(self);
+        builder
+            .tools
+            .providers
+            .push(Arc::clone(&provider) as Arc<dyn DynamicToolProvider>);
+        builder.tools.attachment_mcps.push(provider);
+        builder.refresh_provider_direct();
         builder
     }
 }
@@ -170,6 +188,8 @@ pub struct Tools {
     pub(super) provider_direct: Vec<Arc<dyn Tool>>,
     #[cfg(all(not(target_family = "wasm"), feature = "native"))]
     pub(super) providers: Vec<Arc<dyn DynamicToolProvider>>,
+    #[cfg(all(not(target_family = "wasm"), feature = "native"))]
+    pub(crate) attachment_mcps: Vec<Arc<crate::mcp::Mcp>>,
     #[cfg(all(not(target_family = "wasm"), feature = "workspace-runtime"))]
     pub(crate) workspace_tools: Option<crate::WorkspaceTools>,
     #[cfg(all(not(target_family = "wasm"), feature = "native"))]
@@ -200,6 +220,8 @@ impl Default for Tools {
             provider_direct: Vec::new(),
             #[cfg(all(not(target_family = "wasm"), feature = "native"))]
             providers: Vec::new(),
+            #[cfg(all(not(target_family = "wasm"), feature = "native"))]
+            attachment_mcps: Vec::new(),
             #[cfg(all(not(target_family = "wasm"), feature = "workspace-runtime"))]
             workspace_tools: None,
             #[cfg(all(not(target_family = "wasm"), feature = "native"))]
@@ -246,6 +268,7 @@ impl fmt::Debug for Tools {
                     .collect::<Vec<_>>(),
             )
             .field("provider_count", &self.providers.len())
+            .field("attachment_mcp_count", &self.attachment_mcps.len())
             .field(
                 "workspace_tools_configured",
                 &self.workspace_tools.is_some(),
@@ -364,6 +387,16 @@ impl Tools {
     /// Starts all dynamic providers without waiting for their handshakes.
     #[cfg(all(feature = "native", target_family = "wasm"))]
     pub const fn start_providers(&self) {}
+
+    #[cfg(all(not(target_family = "wasm"), feature = "native"))]
+    pub(crate) fn has_unattachable_provider(&self) -> bool {
+        self.providers.len() != self.attachment_mcps.len()
+    }
+
+    #[cfg(not(feature = "native"))]
+    pub(crate) const fn has_unattachable_provider(&self) -> bool {
+        false
+    }
 }
 
 /// Builder for the built-in tool selection.
@@ -425,7 +458,7 @@ pub enum ToolsBuildError {
 impl ToolsBuilder {
     /// Adds one capability source to this recipe.
     ///
-    /// Fixed tools and workspace tools use this same composition path;
+    /// Fixed tools, workspace tools, and MCP use this same composition path;
     /// execution placement is selected only after the recipe is built.
     #[must_use]
     #[allow(
@@ -714,10 +747,6 @@ impl ToolsBuilder {
 }
 
 #[cfg(not(target_family = "wasm"))]
-#[allow(
-    dead_code,
-    reason = "the next catalog source consumes this validation seam"
-)]
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum PublicToolCatalogError {
     #[error("invalid public tool name `{0}`")]
@@ -733,10 +762,6 @@ pub(crate) enum PublicToolCatalogError {
 }
 
 #[cfg(not(target_family = "wasm"))]
-#[allow(
-    dead_code,
-    reason = "the next catalog source consumes this validation seam"
-)]
 pub(crate) fn validate_public_tool_catalog_names<'a>(
     names: impl IntoIterator<Item = &'a str>,
 ) -> Result<(), PublicToolCatalogError> {
@@ -771,10 +796,6 @@ fn validate_registered_tool_name(
 }
 
 #[cfg(not(target_family = "wasm"))]
-#[allow(
-    dead_code,
-    reason = "the next catalog source consumes this validation seam"
-)]
 fn valid_public_tool_name(name: &str) -> bool {
     valid_public_tool_name_grammar(name) && !matches!(name, "exec" | "tool_search" | "wait")
 }
