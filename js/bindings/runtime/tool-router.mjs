@@ -434,6 +434,7 @@ function selectCollision(left, right) {
 function overlayTool(attached, cloud) {
   return Object.freeze({
     ...attached,
+    parallelSafe: attached.parallelSafe === true && cloud.parallelSafe === true,
     async handler(input, context) {
       const result = await attached.handler(input, context);
       return result?.[preDispatchUnavailable] === true

@@ -183,6 +183,35 @@ test("overlay keeps cloud fallback but only uses the typed pre-dispatch sentinel
   assert.equal(cloudCalls, 1);
 });
 
+test("overlay schedules for the least parallel-safe possible placement", async () => {
+  let active = 0;
+  let maxActive = 0;
+  const router = new ToolRouter([
+    source("cloud", [{
+      definition: contract("echo"),
+      parallelSafe: false,
+      async handler() {
+        active++;
+        maxActive = Math.max(maxActive, active);
+        await new Promise((resolve) => setImmediate(resolve));
+        active--;
+        return "cloud";
+      },
+    }], { kind: "cloud" }),
+  ]);
+  await router.attachSource(source("attached", [{
+    definition: contract("echo", { defer_loading: true }),
+    parallelSafe: true,
+    handler: () => ({ [preDispatchUnavailable]: true }),
+  }], { kind: "attached" }));
+  assert.equal(router.resolve("echo").parallelSafe, false);
+  await Promise.all([
+    router.execute("echo", {}, { signal: new AbortController().signal }),
+    router.execute("echo", {}, { signal: new AbortController().signal }),
+  ]);
+  assert.equal(maxActive, 1);
+});
+
 test("admitted snapshots pin attach/detach and definitions", async () => {
   const router = new ToolRouter([source("cloud", [{ definition: contract("echo"), handler: () => "cloud" }], { kind: "cloud" })]);
   const admission = await router.admit();
