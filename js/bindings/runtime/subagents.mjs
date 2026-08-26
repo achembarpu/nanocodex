@@ -1,4 +1,12 @@
 import {
+  closeSubagent,
+  interruptSubagent,
+  listSubagents,
+  sendSubagentMessage,
+  spawnSubagent,
+  waitSubagents,
+} from "../internal.mjs";
+import {
   defaultSubagentMaxConcurrency,
   subagentsBrand,
 } from "./tool-configuration.mjs";
@@ -14,4 +22,28 @@ export function create(options = {}) {
   return Object.freeze([Object.freeze({
     [subagentsBrand]: Object.freeze({ maxConcurrency }),
   })]);
+}
+
+export function spawn(agent, options) {
+  return spawnSubagent(agent, options);
+}
+
+export function wait(agent, options) {
+  return waitSubagents(agent, options);
+}
+
+export function list(agent, options) {
+  return listSubagents(agent, options);
+}
+
+export function send(agent, options) {
+  return sendSubagentMessage(agent, options);
+}
+
+export function interrupt(agent, agentId) {
+  return interruptSubagent(agent, agentId);
+}
+
+export function close(agent, agentId) {
+  return closeSubagent(agent, agentId);
 }

@@ -14,7 +14,9 @@ pub use model::{
     AgentUpdate, MessageDeliveryState, MessageDisposition, MessageId, MessagePriority,
     MessagePurpose, MessageSender, ScopedAgentUpdate, SubagentRuntimeId, ThreadId,
 };
-pub use runtime::{AgentSummary, Registry, SubagentControl, channel};
+pub use runtime::{
+    AgentDirectoryEntry, AgentSummary, MessageReceipt, Registry, SubagentControl, channel,
+};
 pub use tools::{
     AgentStartReport, AgentTask, AgentToolResult, install_tools, start_agent, start_agent_with,
 };

@@ -530,6 +530,51 @@ test("Node host invokes canonical subagent handlers without a root model turn", 
       state: "completed",
       output: { answer: "thread-memory" },
     });
+    const directory = await Subagents.list(agent, { includeCompleted: true });
+    assert.deepEqual(directory.agents, [{
+      agent_id: started.agent_id,
+      role: "memory-search",
+      task: "Use find_threads and return its thread ID.",
+      parent_agent_id: null,
+      status: { state: "completed", output: { answer: "thread-memory" } },
+      can_message: true,
+      can_manage: true,
+    }]);
+
+    const sendPromise = Subagents.send(agent, {
+      agentId: started.agent_id,
+      message: "Confirm that result one more time.",
+      purpose: "question",
+    });
+    const messageTurn = await bounded(childReader.next(), "direct message turn");
+    assert.match(JSON.stringify(messageTurn), /Confirm that result one more time/);
+    assert.deepEqual(await bounded(sendPromise, "direct send"), {
+      message_id: 1,
+      thread_id: 1,
+      from: { kind: "root" },
+      to_agent_id: started.agent_id,
+      disposition: "started",
+    });
+    sendCompleted(childSocket, "direct-message-submit", [{
+      type: "function_call",
+      call_id: "direct-message-submit-call",
+      name: "submit_result",
+      arguments: JSON.stringify({
+        turn_token: 2,
+        output: { answer: "thread-memory-confirmed" },
+      }),
+    }]);
+    const messageSubmitted = await bounded(childReader.next(), "message submit_result output");
+    assert.deepEqual(JSON.parse(messageSubmitted.input[0].output), { accepted: true });
+    sendFinal(childSocket, "direct-message-final", "submitted");
+    const messageWait = await bounded(Subagents.wait(agent, {
+      agentIds: [started.agent_id],
+      timeoutMs: 5_000,
+    }), "direct message wait");
+    assert.deepEqual(messageWait.agents[0].status, {
+      state: "completed",
+      output: { answer: "thread-memory-confirmed" },
+    });
     await Subagents.close(agent, started.agent_id);
     await assert.rejects(
       Subagents.wait(agent, { agentIds: [started.agent_id], timeoutMs: 0 }),

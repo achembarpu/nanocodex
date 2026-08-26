@@ -25,7 +25,9 @@ test("Responses transports own authentication and connection setup", () => {
 });
 
 test("subagents are installed by default and expose branded lifecycle helpers", () => {
-  assert.deepEqual(Object.keys(Subagents), ["close", "create", "interrupt", "spawn", "wait"]);
+  assert.deepEqual(Object.keys(Subagents), [
+    "close", "create", "interrupt", "list", "send", "spawn", "wait",
+  ]);
   assert.deepEqual(resolveTools(undefined), {
     tools: {},
     subagents: { max_concurrency: 32 },

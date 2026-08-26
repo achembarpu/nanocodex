@@ -121,23 +121,23 @@ pub struct AgentSummary {
 }
 
 #[derive(Serialize)]
-pub(super) struct AgentDirectoryEntry {
-    pub(super) agent_id: AgentId,
-    pub(super) role: String,
-    pub(super) task: String,
-    pub(super) parent_agent_id: Option<AgentId>,
-    pub(super) status: AgentStatus,
-    pub(super) can_message: bool,
-    pub(super) can_manage: bool,
+pub struct AgentDirectoryEntry {
+    pub agent_id: AgentId,
+    pub role: String,
+    pub task: String,
+    pub parent_agent_id: Option<AgentId>,
+    pub status: AgentStatus,
+    pub can_message: bool,
+    pub can_manage: bool,
 }
 
 #[derive(Debug, Serialize)]
-pub(super) struct MessageReceipt {
-    pub(super) message_id: MessageId,
-    pub(super) thread_id: ThreadId,
-    pub(super) from: MessageSender,
-    pub(super) to_agent_id: AgentId,
-    pub(super) disposition: MessageDisposition,
+pub struct MessageReceipt {
+    pub message_id: MessageId,
+    pub thread_id: ThreadId,
+    pub from: MessageSender,
+    pub to_agent_id: AgentId,
+    pub disposition: MessageDisposition,
 }
 
 struct PreparedMessage {
@@ -1008,7 +1008,7 @@ impl Registry {
         let _ = send_update(&self.updates, root_session_id, update);
     }
 
-    pub(super) async fn directory(
+    pub async fn directory(
         &self,
         session_id: &str,
         include_completed: bool,
@@ -1020,7 +1020,7 @@ impl Registry {
             .directory(session_id, include_completed, include_self)
     }
 
-    pub(super) async fn send_message(
+    pub async fn send_message(
         &self,
         session_id: &str,
         to: AgentId,
@@ -1202,7 +1202,7 @@ impl Registry {
         }
     }
 
-    pub(super) async fn interrupt(
+    pub async fn interrupt(
         &self,
         session_id: &str,
         id: AgentId,

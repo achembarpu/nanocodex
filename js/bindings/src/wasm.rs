@@ -3,6 +3,8 @@ use std::{
     collections::{HashMap, VecDeque},
     path::PathBuf,
     rc::Rc,
+    sync::{Arc, OnceLock},
+    time::Duration,
 };
 
 use js_sys::Promise;
@@ -11,7 +13,7 @@ use nanocodex::{
     NanocodexError, OpenAi, PromptRoute, ReasoningMode, Thinking, Tools, Turn, TurnControl,
     TurnResult,
     agent::{
-        ExecutionEnvironment, PromptRequest,
+        AgentHandle, ExecutionEnvironment, PromptRequest, SpawnOptions,
         durability::{
             JournalStore, OwnedJournal, OwnerId, OwnerToken, StoreError, StoreFuture, StoredBatch,
             StoredJournal,
@@ -41,8 +43,10 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::{JsFuture, spawn_local};
 
 use nanocodex_subagents::{
-    AgentId as SubagentId, AgentStatus as SubagentStatus, AgentUpdate as SubagentUpdate,
-    ScopedAgentUpdate, SubagentControl,
+    AgentDirectoryEntry, AgentId as SubagentId, AgentStatus as SubagentStatus, AgentSummary,
+    AgentTask, AgentUpdate as SubagentUpdate, MessageId as SubagentMessageId, MessagePriority,
+    MessagePurpose, Registry as SubagentRegistry, ScopedAgentUpdate, SubagentControl,
+    start_agent_with,
 };
 use nanocodex_voice_protocol::{
     BrowserVoiceEffects, BrowserVoiceProtocol, REALTIME_END_INSTRUCTIONS,
@@ -772,6 +776,70 @@ struct WasmSubagentsConfig {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct WasmSubagentTask {
+    role: String,
+    task: String,
+    #[serde(default)]
+    model: Option<Model>,
+    #[serde(default)]
+    thinking: Option<Thinking>,
+    output_schema: serde_json::Value,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct WasmSubagentWait {
+    agent_ids: Vec<SubagentId>,
+    #[serde(default)]
+    timeout_ms: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct WasmSubagentTarget {
+    agent_id: SubagentId,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct WasmSubagentDirectory {
+    #[serde(default)]
+    include_completed: bool,
+    #[serde(default)]
+    include_self: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct WasmSubagentMessage {
+    agent_id: SubagentId,
+    message: String,
+    #[serde(default)]
+    priority: MessagePriority,
+    #[serde(default)]
+    purpose: MessagePurpose,
+    #[serde(default)]
+    in_reply_to: Option<SubagentMessageId>,
+}
+
+#[derive(Serialize)]
+struct WasmSubagentDirectoryReport {
+    agents: Vec<AgentDirectoryEntry>,
+}
+
+#[derive(Serialize)]
+struct WasmSubagentWaitReport {
+    agents: Vec<AgentSummary>,
+    timed_out: bool,
+}
+
+#[derive(Serialize)]
+struct WasmSubagentLifecycleReport {
+    agents: Vec<AgentSummary>,
+}
+
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct WasmExecutionEnvironment {
     current_date: String,
@@ -894,23 +962,49 @@ pub struct WasmNanocodex {
 
 #[derive(Clone)]
 struct WasmSubagents {
+    registry: Arc<SubagentRegistry>,
     control: SubagentControl,
+    parent: Arc<OnceLock<AgentHandle>>,
+    root_session_id: Arc<OnceLock<String>>,
     sessions: Rc<RefCell<HashMap<(String, SubagentId), String>>>,
     event_forwarders: Rc<Cell<usize>>,
 }
 
 impl WasmSubagents {
     fn new(
+        registry: Arc<SubagentRegistry>,
         control: SubagentControl,
         updates: tokio::sync::mpsc::UnboundedReceiver<ScopedAgentUpdate>,
+        parent: Arc<OnceLock<AgentHandle>>,
     ) -> Self {
         let sessions = Rc::new(RefCell::new(HashMap::new()));
         let event_forwarders = Rc::new(Cell::new(0));
         forward_subagent_updates(updates, Rc::clone(&sessions), Rc::clone(&event_forwarders));
         Self {
+            registry,
             control,
+            parent,
+            root_session_id: Arc::new(OnceLock::new()),
             sessions,
             event_forwarders,
+        }
+    }
+
+    fn bind_root(&self, session_id: String) {
+        let _ = self.root_session_id.set(session_id);
+    }
+
+    fn require_root(&self, session_id: &str) -> Result<(), JsValue> {
+        if self
+            .root_session_id
+            .get()
+            .is_some_and(|root| root == session_id)
+        {
+            Ok(())
+        } else {
+            Err(js_error(
+                "direct subagent lifecycle methods require the owning root agent",
+            ))
         }
     }
 
@@ -995,11 +1089,15 @@ impl WasmNanocodex {
         let (mut builder, subagents) = if let Some(subagents) = config.subagents {
             let (registry, control, updates) =
                 nanocodex_subagents::channel(subagents.max_concurrency);
+            let parent = Arc::new(OnceLock::new());
+            let tool_registry = Arc::clone(&registry);
+            let tool_parent = Arc::clone(&parent);
             (
                 RustNanocodex::builder(openai).tools_factory(move |agent| {
-                    nanocodex_subagents::install_tools(tools.clone(), agent, registry.clone())
+                    let _ = tool_parent.set(agent.clone());
+                    nanocodex_subagents::install_tools(tools.clone(), agent, tool_registry.clone())
                 }),
-                Some(WasmSubagents::new(control, updates)),
+                Some(WasmSubagents::new(registry, control, updates, parent)),
             )
         } else {
             (RustNanocodex::builder(openai).tools(tools), None)
@@ -1045,7 +1143,17 @@ impl WasmNanocodex {
             builder = builder.durability(journal).await.map_err(js_error)?;
         }
         let (inner, events) = builder.build().map_err(js_error)?;
+        if let Some(subagents) = &subagents {
+            subagents.bind_root(inner.session_id().to_string());
+        }
         Ok(Self::from_parts(inner, events, subagents))
+    }
+
+    /// Returns the stable Agent identity.
+    #[wasm_bindgen(getter, js_name = agentId)]
+    #[must_use]
+    pub fn agent_id(&self) -> String {
+        self.inner.agent_id().to_owned()
     }
 
     /// Returns the stable `UUIDv7` session identity.
@@ -1063,6 +1171,154 @@ impl WasmNanocodex {
         {
             subagents.set_event_forwarding(enabled);
         }
+    }
+
+    /// Starts one canonical Rust task-tree child and returns its descriptor.
+    #[wasm_bindgen(js_name = spawnSubagent)]
+    pub async fn spawn_subagent(&self, task: &str) -> Result<String, JsValue> {
+        let task = serde_json::from_str::<WasmSubagentTask>(task)
+            .map_err(|error| js_error(format!("invalid subagent task: {error}")))?;
+        let subagents = self
+            .subagents
+            .as_ref()
+            .ok_or_else(|| js_error("this agent was not created with the subagent extension"))?;
+        subagents.require_root(&self.inner.session_id().to_string())?;
+        let parent = subagents
+            .parent
+            .get()
+            .ok_or_else(|| js_error("the root subagent handle is unavailable"))?;
+        let mut options = SpawnOptions::new();
+        if let Some(model) = task.model {
+            options = options.model(model);
+        }
+        if let Some(thinking) = task.thinking {
+            options = options.thinking(thinking);
+        }
+        let report = start_agent_with(
+            parent,
+            &subagents.registry,
+            &self.inner.session_id().to_string(),
+            AgentTask {
+                role: task.role,
+                task: task.task,
+                output_schema: task.output_schema,
+            },
+            options,
+        )
+        .await
+        .map_err(js_error)?;
+        serde_json::to_string(&report).map_err(js_error)
+    }
+
+    /// Waits for any selected canonical task-tree child to become terminal.
+    #[wasm_bindgen(js_name = waitSubagents)]
+    pub async fn wait_subagents(&self, task: &str) -> Result<String, JsValue> {
+        let task = serde_json::from_str::<WasmSubagentWait>(task)
+            .map_err(|error| js_error(format!("invalid subagent wait: {error}")))?;
+        let subagents = self
+            .subagents
+            .as_ref()
+            .ok_or_else(|| js_error("this agent was not created with the subagent extension"))?;
+        subagents.require_root(&self.inner.session_id().to_string())?;
+        let timeout_ms = task.timeout_ms.unwrap_or(30_000);
+        if timeout_ms == 0 {
+            return Err(js_error(
+                "subagent wait timeoutMs must be greater than zero",
+            ));
+        }
+        let duration = Duration::from_millis(timeout_ms.min(300_000));
+        let (agents, timed_out) = subagents
+            .registry
+            .wait(
+                &self.inner.session_id().to_string(),
+                &task.agent_ids,
+                duration,
+            )
+            .await
+            .map_err(js_error)?;
+        serde_json::to_string(&WasmSubagentWaitReport { agents, timed_out }).map_err(js_error)
+    }
+
+    /// Lists the canonical task-tree directory visible to the owning root.
+    #[wasm_bindgen(js_name = listSubagents)]
+    pub async fn list_subagents(&self, task: &str) -> Result<String, JsValue> {
+        let task = serde_json::from_str::<WasmSubagentDirectory>(task)
+            .map_err(|error| js_error(format!("invalid subagent directory options: {error}")))?;
+        let subagents = self
+            .subagents
+            .as_ref()
+            .ok_or_else(|| js_error("this agent was not created with the subagent extension"))?;
+        subagents.require_root(&self.inner.session_id().to_string())?;
+        let agents = subagents
+            .registry
+            .directory(
+                &self.inner.session_id().to_string(),
+                task.include_completed,
+                task.include_self,
+            )
+            .await;
+        serde_json::to_string(&WasmSubagentDirectoryReport { agents }).map_err(js_error)
+    }
+
+    /// Sends one canonical directed task-tree message from the owning root.
+    #[wasm_bindgen(js_name = sendSubagentMessage)]
+    pub async fn send_subagent_message(&self, task: &str) -> Result<String, JsValue> {
+        let task = serde_json::from_str::<WasmSubagentMessage>(task)
+            .map_err(|error| js_error(format!("invalid subagent message: {error}")))?;
+        let subagents = self
+            .subagents
+            .as_ref()
+            .ok_or_else(|| js_error("this agent was not created with the subagent extension"))?;
+        subagents.require_root(&self.inner.session_id().to_string())?;
+        let receipt = subagents
+            .registry
+            .send_message(
+                &self.inner.session_id().to_string(),
+                task.agent_id,
+                task.priority,
+                task.purpose,
+                task.in_reply_to,
+                task.message,
+            )
+            .await
+            .map_err(js_error)?;
+        serde_json::to_string(&receipt).map_err(js_error)
+    }
+
+    /// Interrupts one canonical task-tree child while keeping it reusable.
+    #[wasm_bindgen(js_name = interruptSubagent)]
+    pub async fn interrupt_subagent(&self, task: &str) -> Result<String, JsValue> {
+        let task = serde_json::from_str::<WasmSubagentTarget>(task)
+            .map_err(|error| js_error(format!("invalid subagent target: {error}")))?;
+        let subagents = self
+            .subagents
+            .as_ref()
+            .ok_or_else(|| js_error("this agent was not created with the subagent extension"))?;
+        subagents.require_root(&self.inner.session_id().to_string())?;
+        let agents = subagents
+            .registry
+            .interrupt(&self.inner.session_id().to_string(), task.agent_id)
+            .await
+            .map_err(js_error)?;
+        serde_json::to_string(&WasmSubagentLifecycleReport { agents }).map_err(js_error)
+    }
+
+    /// Closes one canonical task-tree child and its descendants.
+    #[wasm_bindgen(js_name = closeSubagent)]
+    pub async fn close_subagent(&self, task: &str) -> Result<String, JsValue> {
+        let task = serde_json::from_str::<WasmSubagentTarget>(task)
+            .map_err(|error| js_error(format!("invalid subagent target: {error}")))?;
+        let subagents = self
+            .subagents
+            .as_ref()
+            .ok_or_else(|| js_error("this agent was not created with the subagent extension"))?;
+        subagents.require_root(&self.inner.session_id().to_string())?;
+        let agents = subagents
+            .registry
+            .close(&self.inner.session_id().to_string(), task.agent_id)
+            .await
+            .map_err(js_error)?;
+        serde_json::to_string(&WasmSubagentLifecycleReport { agents }).map_err(js_error)
     }
 
     /// Accepts a text prompt and returns its independently awaitable turn.

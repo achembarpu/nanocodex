@@ -290,6 +290,14 @@ async function check() {
     timeoutMs: 30_000,
   });
   childWait.agents[0]?.status.state;
+  const directory = await Subagents.list(agent, { includeCompleted: true });
+  directory.agents[0]?.can_message;
+  const receipt = await Subagents.send(agent, {
+    agentId: child.agent_id,
+    message: "Please include the source.",
+    purpose: "question",
+  });
+  receipt.disposition;
   await Subagents.interrupt(agent, child.agent_id);
   await Subagents.close(agent, child.agent_id);
   await agent.session.compact();
