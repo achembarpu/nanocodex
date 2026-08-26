@@ -300,8 +300,7 @@ test("heartbeat uses exact ping and pong nonce frames", async () => {
   await waitFor(() => socket.frames().some(({ type }) => type === "catalog"));
   socket.receive({ type: "ready" });
   const client = await connecting;
-  await new Promise((resolve) => setTimeout(resolve, 10));
-  await waitFor(() => socket.frames().some(({ type }) => type === "ping"));
+  await waitForTimer(() => socket.frames().some(({ type }) => type === "ping"));
   const ping = lastFrame(socket, "ping");
   assert.deepEqual(Object.keys(ping), ["type", "nonce"]);
   socket.receive({ type: "pong", nonce: ping.nonce });

@@ -1031,6 +1031,11 @@ async fn events(State(state): State<TestState>, headers: HeaderMap) -> impl Into
     }
     sse_response(async move {
         if state.disconnect_after_ready {
+            // The reconnect may finish before the CLI submits its prompt. Do
+            // not publish events for the fixture's turn until that turn
+            // exists; otherwise the driver correctly treats them as retained
+            // session events instead of routing them to the pending turn.
+            state.completed.notified().await;
             state.tool_completed.notified().await;
             while state.tool_host_attempts.load(Ordering::SeqCst) < 2 {
                 tokio::task::yield_now().await;
