@@ -196,6 +196,15 @@ bounded, best-effort observer: lag may drop events but can never delay tool
 execution or protocol progress. `Attachment::status` and `closed` are the
 authoritative lifecycle APIs.
 
+### Deferred: workspace replication
+
+Attachment chooses where a tool call executes; it does not move or merge
+workspace data. An attached local workspace and the detached cloud
+`/workspace` may therefore diverge. Automatic replication and reconciliation
+are intentionally deferred to a separate capability with explicit direction,
+conflict, and recovery policy. Until that capability exists, attach and detach
+must never imply synchronization.
+
 ## Companion workspace runtimes
 
 The default `native` feature remains the complete tools crate: registry, Code
