@@ -49,6 +49,12 @@ export type Agent<extended extends object = {}> =
 /** Removes the package-owned durable history for one Cloudflare Agent. */
 export function destroy(owner: DurableObjectOwner): void;
 
+/** Compacts retained durable history before constructing the full Agent runtime. */
+export function compactDurability(
+  owner: DurableObjectOwner,
+  options?: Readonly<{ terminalReceiptRetention?: number | undefined }>,
+): Promise<void>;
+
 /** Atomically steers an active Cloudflare Agent turn or starts a new turn. */
 export function route(
   agent: Agent,

@@ -213,6 +213,10 @@ enum Command {
         checkpoint: Option<EncodedPayload>,
         result: oneshot::Sender<Result<()>>,
     },
+    Compact {
+        caller: Caller,
+        result: oneshot::Sender<Result<()>>,
+    },
     CommitCheckpoint {
         caller: Caller,
         checkpoint: EncodedPayload,
@@ -531,6 +535,13 @@ impl Driver {
                             }
                             outcome
                         }
+                        Err(error) => Err(error),
+                    };
+                    drop(result.send(outcome));
+                }
+                Command::Compact { caller, result } => {
+                    let outcome = match self.authorize(&caller) {
+                        Ok(()) => self.compact_retained(true).await,
                         Err(error) => Err(error),
                     };
                     drop(result.send(outcome));
@@ -1048,6 +1059,16 @@ impl Driver {
         if self.retained_batches < COMPACTION_BATCH_THRESHOLD {
             return Ok(());
         }
+        match self.compact_retained(false).await {
+            Err(Error::Store(StoreError::NotCommitted(_))) => Ok(()),
+            outcome => outcome,
+        }
+    }
+
+    async fn compact_retained(&mut self, explicit: bool) -> Result<()> {
+        if self.retained_batches == 0 || (!explicit && self.retained_batches == 1) {
+            return Ok(());
+        }
         let revision = self.state.revision();
         let payload = self.state.checkpoint_payload(self.terminal_receipt_limit)?;
         match self
@@ -1068,7 +1089,7 @@ impl Driver {
                     "store compacted revision {compacted_revision} while retaining revision {revision}"
                 )))
             }
-            Err(StoreError::NotCommitted(_)) => Ok(()),
+            Err(error @ StoreError::NotCommitted(_)) => Err(error.into()),
             Err(error) => {
                 self.poisoned = true;
                 Err(error.into())
@@ -1176,12 +1197,21 @@ impl DurableSession {
     where
         S: JournalStore + 'static,
     {
-        if limit == 0 {
-            return Err(Error::InvalidJournal(
-                "terminal receipt retention limit must be positive".to_owned(),
-            ));
-        }
         Self::open_inner(store, journal_id.into(), Some(limit)).await
+    }
+
+    /// Compacts the retained journal into one current-state checkpoint.
+    ///
+    /// This lets an embedding host reduce a large recovered journal before it
+    /// allocates the model and tool runtime that will consume the checkpoint.
+    pub async fn compact(&self) -> Result<()> {
+        let (result, receiver) = oneshot::channel();
+        self.send(Command::Compact {
+            caller: Caller::Direct(self.caller_id.clone()),
+            result,
+        })
+        .await?;
+        receive(receiver).await
     }
 
     async fn open_inner<S>(
@@ -1992,6 +2022,51 @@ mod tests {
     use super::*;
     use crate::MemoryStore;
 
+    #[derive(Clone)]
+    struct FailCompactionOnce {
+        inner: MemoryStore,
+        failed: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl JournalStore for FailCompactionOnce {
+        fn acquire_owner<'a>(
+            &'a mut self,
+            journal_id: &'a str,
+            owner_id: OwnerId,
+        ) -> crate::StoreFuture<'a, std::result::Result<crate::OwnedJournal, StoreError>> {
+            self.inner.acquire_owner(journal_id, owner_id)
+        }
+
+        fn append<'a>(
+            &'a mut self,
+            journal_id: &'a str,
+            owner: &'a OwnerToken,
+            expected_revision: u64,
+            payload: &'a str,
+        ) -> crate::StoreFuture<'a, std::result::Result<u64, StoreError>> {
+            self.inner
+                .append(journal_id, owner, expected_revision, payload)
+        }
+
+        fn compact<'a>(
+            &'a mut self,
+            journal_id: &'a str,
+            owner: &'a OwnerToken,
+            expected_revision: u64,
+            payload: &'a str,
+        ) -> crate::StoreFuture<'a, std::result::Result<u64, StoreError>> {
+            if !self.failed.swap(true, Ordering::SeqCst) {
+                return Box::pin(async {
+                    Err(StoreError::NotCommitted(
+                        "injected explicit compaction response loss".to_owned(),
+                    ))
+                });
+            }
+            self.inner
+                .compact(journal_id, owner, expected_revision, payload)
+        }
+    }
+
     #[cfg(not(target_family = "wasm"))]
     #[test]
     fn owner_drop_releases_without_a_runtime_or_bounded_command_capacity() {
@@ -2340,6 +2415,92 @@ mod tests {
             state.latest_checkpoint().unwrap().decode::<u32>().unwrap(),
             21
         );
+    }
+
+    #[tokio::test]
+    async fn explicit_zero_retention_compaction_propagates_not_committed_then_retries() {
+        let inner = MemoryStore::new().unwrap();
+        let store = FailCompactionOnce {
+            inner: inner.clone(),
+            failed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
+        let session =
+            DurableSession::open_with_terminal_receipt_limit(store, "explicit-zero-retention", 0)
+                .await
+                .unwrap();
+        assert!(matches!(
+            session.admit("turn-1", &"prompt").await,
+            Ok(Admission::Accepted)
+        ));
+        session.begin_attempt("turn-1").await.unwrap();
+        session.complete("turn-1", &1_u32, &"done").await.unwrap();
+
+        assert!(matches!(
+            session.compact().await,
+            Err(Error::Store(StoreError::NotCommitted(message)))
+                if message == "injected explicit compaction response loss"
+        ));
+        assert!(session.state().await.unwrap().operation("turn-1").is_some());
+
+        session.compact().await.unwrap();
+        assert!(session.state().await.unwrap().operation("turn-1").is_none());
+        let mut inspector = inner;
+        let compacted = inspector
+            .acquire_owner("explicit-zero-retention", OwnerId::new())
+            .await
+            .unwrap();
+        assert_eq!(compacted.journal.revision, 3);
+        assert_eq!(compacted.journal.batches.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn explicit_compaction_rewrites_one_checkpoint_for_a_lower_receipt_limit() {
+        let store = MemoryStore::new().unwrap();
+        let session = DurableSession::open(store.clone(), "rewrite-one-checkpoint")
+            .await
+            .unwrap();
+        assert!(matches!(
+            session.admit("turn-1", &"prompt").await,
+            Ok(Admission::Accepted)
+        ));
+        session.begin_attempt("turn-1").await.unwrap();
+        session.complete("turn-1", &1_u32, &"done").await.unwrap();
+        session.compact().await.unwrap();
+        drop(session);
+
+        let reopened = DurableSession::open_with_terminal_receipt_limit(
+            store.clone(),
+            "rewrite-one-checkpoint",
+            0,
+        )
+        .await
+        .unwrap();
+        assert!(
+            reopened
+                .state()
+                .await
+                .unwrap()
+                .operation("turn-1")
+                .is_some()
+        );
+        reopened.compact().await.unwrap();
+        assert!(
+            reopened
+                .state()
+                .await
+                .unwrap()
+                .operation("turn-1")
+                .is_none()
+        );
+        drop(reopened);
+
+        let mut inspector = store;
+        let retained = inspector
+            .acquire_owner("rewrite-one-checkpoint", OwnerId::new())
+            .await
+            .unwrap();
+        assert_eq!(retained.journal.revision, 3);
+        assert_eq!(retained.journal.batches.len(), 1);
     }
 
     #[tokio::test]

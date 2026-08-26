@@ -142,6 +142,8 @@ function managedEventWatcher(
   let historyRetryDelay = MANAGED_HISTORY_RETRY_INITIAL_MS;
   let historyRetryTimer: ReturnType<typeof setTimeout> | undefined;
   let latestLiveCursor: string | undefined;
+  let olderBeforeCursor: string | undefined;
+  let historySnapshot: readonly AgentEvent[] = Object.freeze([]);
   const emit = (event: AgentEvent) => {
     for (const listener of listeners) listener(event);
   };
@@ -152,15 +154,15 @@ function managedEventWatcher(
   );
   const emitHistory = () => {
     const events = projectedHistory();
+    historySnapshot = events;
     sequence = Math.max(sequence, events.length);
     for (const listener of historyListeners) listener(events);
   };
-  const retain = (envelope: ManagedEvent, source: "initial" | "live" | "older") => {
+  const retain = (envelope: ManagedEvent) => {
     if (seen.has(envelope.cursor)) return false;
     seen.add(envelope.cursor);
     envelopes.push(envelope);
-    compactManagedEnvelopeRetention(envelopes, seen);
-    return seen.has(envelope.cursor);
+    return true;
   };
   const requestHistoryPage = (
     options: Omit<Parameters<typeof managed.events.page>[0], "signal">,
@@ -186,13 +188,24 @@ function managedEventWatcher(
       retrying: true,
     });
   };
+  const stopOlderPagination = (before: string | undefined, reason: string) => {
+    hasOlder = false;
+    olderBeforeCursor = undefined;
+    console.warn("nanocodex:managed.history_pagination_stalled", {
+      agentId: managed.id,
+      before,
+      reason,
+    });
+  };
   const scheduleHistoryRetry = () => {
-    if (controller.signal.aborted || historyLoaded || historyRetryTimer !== undefined) return;
+    if (controller.signal.aborted
+      || (historyLoaded && !hasOlder)
+      || historyRetryTimer !== undefined) return;
     const delay = historyRetryDelay;
     historyRetryDelay = Math.min(historyRetryDelay * 2, MANAGED_HISTORY_RETRY_MAX_MS);
     historyRetryTimer = setTimeout(() => {
       historyRetryTimer = undefined;
-      void loadInitial();
+      void (historyLoaded ? loadRemainingHistory() : loadInitial());
     }, delay);
   };
   const startTail = (cursor: string) => {
@@ -210,7 +223,7 @@ function managedEventWatcher(
           latestLiveCursor = envelope.cursor;
           const turnId = managedEnvelopeTurnId(envelope);
           if (!historyEnabled && !submitted?.has(turnId ?? "")) continue;
-          if (!retain(envelope, "live")) continue;
+          if (!retain(envelope)) continue;
           const projected = managedEnvelopeEvents(
             envelope,
             rawAssistantMessageTurns(envelopes),
@@ -219,8 +232,14 @@ function managedEventWatcher(
             sequence + 1,
           );
           sequence += projected.length;
+          if (historyEnabled && projected.length > 0) {
+            historySnapshot = Object.freeze([...historySnapshot, ...projected]);
+          }
           for (const event of projected) emit(event);
           if (turnId && managedOuterTerminal(envelope)) submitted?.delete(turnId);
+          if (historyLoaded && !hasOlder) {
+            compactManagedEnvelopeRetention(envelopes, seen);
+          }
         }
       } catch (error) {
         if (controller.signal.aborted) return;
@@ -270,9 +289,13 @@ function managedEventWatcher(
         scheduleHistoryRetry();
         return false;
       }
-      for (const envelope of initial.data) retain(envelope, "initial");
+      for (const envelope of initial.data) retain(envelope);
       envelopes.sort((left, right) => compareManagedCursor(left.cursor, right.cursor));
-      hasOlder = initial.hasMore && envelopes.length < MAX_MANAGED_RETAINED_ENVELOPES;
+      hasOlder = initial.hasMore;
+      olderBeforeCursor = oldestManagedCursor(initial.data);
+      if (hasOlder && olderBeforeCursor === undefined) {
+        stopOlderPagination(undefined, "the newest page was empty while hasMore was true");
+      }
       historyLoaded = true;
       latestLiveCursor = initial.latestCursor;
       outageReported = false;
@@ -281,15 +304,75 @@ function managedEventWatcher(
       historyRetryTimer = undefined;
       emitHistory();
       startTail(initial.latestCursor);
+      if (hasOlder) void loadRemainingHistory();
+      else compactManagedEnvelopeRetention(envelopes, seen);
       return true;
     })().finally(() => { loadingInitial = undefined; });
     return loadingInitial;
   };
   const retryWhenOnline = () => {
-    if (controller.signal.aborted || historyLoaded) return;
+    if (controller.signal.aborted || (historyLoaded && !hasOlder)) return;
     if (historyRetryTimer !== undefined) clearTimeout(historyRetryTimer);
     historyRetryTimer = undefined;
-    void loadInitial();
+    void (historyLoaded ? loadRemainingHistory() : loadInitial());
+  };
+  const loadOlderPage = (): Promise<boolean> => {
+    if (!historyEnabled || !historyLoaded || !hasOlder || controller.signal.aborted) {
+      return Promise.resolve(false);
+    }
+    if (loadingOlder) return loadingOlder;
+    const before = olderBeforeCursor;
+    if (before === undefined) {
+      stopOlderPagination(undefined, "no decreasing before cursor was available");
+      compactManagedEnvelopeRetention(envelopes, seen);
+      return Promise.resolve(false);
+    }
+    loadingOlder = requestHistoryPage({ before, limit: MANAGED_HISTORY_PAGE_SIZE }).then((page) => {
+      outageReported = false;
+      historyRetryDelay = MANAGED_HISTORY_RETRY_INITIAL_MS;
+      const nextBefore = oldestManagedCursor(page.data);
+      const hasNewEnvelope = page.data.some((envelope) => !seen.has(envelope.cursor));
+      if (page.hasMore && page.data.length === 0) {
+        stopOlderPagination(before, "an empty page reported hasMore");
+        compactManagedEnvelopeRetention(envelopes, seen);
+        return false;
+      }
+      if (page.hasMore && !hasNewEnvelope) {
+        stopOlderPagination(before, "a duplicate-only page reported hasMore");
+        compactManagedEnvelopeRetention(envelopes, seen);
+        return false;
+      }
+      if (page.hasMore && (
+        nextBefore === undefined || compareManagedCursor(nextBefore, before) >= 0
+      )) {
+        stopOlderPagination(before, "the next before cursor did not strictly decrease");
+        compactManagedEnvelopeRetention(envelopes, seen);
+        return false;
+      }
+
+      let added = false;
+      for (const envelope of page.data) added = retain(envelope) || added;
+      if (added) envelopes.sort((left, right) => compareManagedCursor(left.cursor, right.cursor));
+      hasOlder = page.hasMore;
+      olderBeforeCursor = page.hasMore ? nextBefore : undefined;
+      if (added) emitHistory();
+      if (!hasOlder) compactManagedEnvelopeRetention(envelopes, seen);
+      return added;
+    }).finally(() => { loadingOlder = undefined; });
+    return loadingOlder;
+  };
+  const loadRemainingHistory = async () => {
+    try {
+      while (hasOlder && !controller.signal.aborted) {
+        const added = await loadOlderPage();
+        if (!added) break;
+      }
+    } catch (error) {
+      reportHistoryOutage(error);
+      scheduleHistoryRetry();
+    } finally {
+      if (!hasOlder) compactManagedEnvelopeRetention(envelopes, seen);
+    }
   };
   if (historyEnabled) {
     globalThis.addEventListener?.("online", retryWhenOnline);
@@ -305,25 +388,13 @@ function managedEventWatcher(
     },
     onHistory(listener: (events: readonly AgentEvent[]) => void) {
       historyListeners.add(listener);
-      if (historyLoaded) listener(projectedHistory());
+      if (historyLoaded) listener(historySnapshot);
       return () => historyListeners.delete(listener);
     },
     loadOlder() {
       if (!historyEnabled) return Promise.resolve(false);
       if (!historyLoaded) return loadInitial();
-      if (!hasOlder || controller.signal.aborted) return Promise.resolve(false);
-      if (loadingOlder) return loadingOlder;
-      const before = envelopes[0]?.cursor;
-      if (!before) return Promise.resolve(false);
-      loadingOlder = requestHistoryPage({ before, limit: MANAGED_HISTORY_PAGE_SIZE }).then((page) => {
-        let added = false;
-        for (const envelope of page.data) added = retain(envelope, "older") || added;
-        if (added) envelopes.sort((left, right) => compareManagedCursor(left.cursor, right.cursor));
-        hasOlder = page.hasMore && envelopes.length < MAX_MANAGED_RETAINED_ENVELOPES;
-        if (added) emitHistory();
-        return added;
-      }).finally(() => { loadingOlder = undefined; });
-      return loadingOlder;
+      return loadOlderPage();
     },
     off() {
       controller.abort();
@@ -467,6 +538,16 @@ function managedEnvelopeTurnId(envelope: ManagedEvent): string | undefined {
 function compareManagedCursor(left: string, right: string): number {
   if (left.length !== right.length) return left.length - right.length;
   return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function oldestManagedCursor(envelopes: readonly ManagedEvent[]): string | undefined {
+  let oldest: string | undefined;
+  for (const envelope of envelopes) {
+    if (oldest === undefined || compareManagedCursor(envelope.cursor, oldest) < 0) {
+      oldest = envelope.cursor;
+    }
+  }
+  return oldest;
 }
 
 export function terminalEvent(

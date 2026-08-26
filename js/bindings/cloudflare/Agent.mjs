@@ -1,6 +1,13 @@
 import * as HostAgent from "../host/Agent.mjs";
-import { observeAgentRelease, routePrompt } from "../internal.mjs";
+import {
+  installHostBridge,
+  loadDurabilityRuntime,
+  observeAgentRelease,
+  routePrompt,
+} from "../internal.mjs";
+import { compactDurableSession } from "../pkg-web/nanocodex.js";
 import * as Transport from "../browser/Transport.mjs";
+import { initializeBrowserEngine } from "../browser/engine.mjs";
 import { createCloudflareDurabilityStore } from "../runtime/cloudflare-durability-store.mjs";
 import { durabilityRevision } from "../runtime/durability-store.mjs";
 import { cloudflareEgress } from "./egress.mjs";
@@ -34,6 +41,7 @@ const lifecycles = new WeakMap();
 /** @internal Binds the package-owned module to the public Cloudflare namespace. */
 export function bindAgent(module, hostAgent = HostAgent) {
   return Object.freeze({
+    compactDurability: (owner, options) => compactDurability(module, owner, options),
     create: (owner, options) => create(module, owner, options, hostAgent),
     createEphemeral: (owner, options) => createEphemeral(module, owner, options),
     destroy,
@@ -78,6 +86,10 @@ export function destroy(owner) {
         fence,
       );
       storage.sql.exec(
+        "DELETE FROM nanocodex_journal_batch_chunks WHERE journal_id = ?",
+        journalId,
+      );
+      storage.sql.exec(
         "DELETE FROM nanocodex_journal_batches WHERE journal_id = ?",
         journalId,
       );
@@ -88,6 +100,51 @@ export function destroy(owner) {
     }
     clearCloudflareEventSocket(context);
   });
+}
+
+/** Compacts retained durable history before constructing the full Agent runtime. */
+export async function compactDurability(module, owner, options = {}) {
+  if (!options || typeof options !== "object" || Array.isArray(options)) {
+    throw new TypeError("Cloudflare durability compaction options must be an object");
+  }
+  const terminalReceiptRetention = options.terminalReceiptRetention ?? 512;
+  if (!Number.isSafeInteger(terminalReceiptRetention)
+    || terminalReceiptRetention < 0
+    || terminalReceiptRetention > 4_096) {
+    throw new TypeError("terminalReceiptRetention must be an integer from 0 through 4096");
+  }
+  const context = resolveContext(owner);
+  const lifecycle = lifecycleFor(context);
+  if (lifecycle.creating) {
+    throw new Error("Cloudflare Agent lifecycle operation is already in progress");
+  }
+  if (lifecycle.active !== undefined) {
+    throw new Error("Cloudflare Agent shutdown must complete before compacting durability");
+  }
+  lifecycle.creating = true;
+  try {
+    const storage = context.storage;
+    const durability = createCloudflareDurabilityStore(storage);
+    initializeAgentStorage(storage);
+    const sessionId = storedSessionId(storage);
+    if (sessionId === undefined) return;
+    const journalId = `cloudflare:${sessionId}`;
+    const routeHost = {};
+    const route = (await loadDurabilityRuntime()).own(
+      routeHost,
+      durability,
+      journalId,
+    );
+    try {
+      installHostBridge();
+      await initializeBrowserEngine({ module });
+      await compactDurableSession(route.id, journalId, terminalReceiptRetention);
+    } finally {
+      route.abandon();
+    }
+  } finally {
+    lifecycle.creating = false;
+  }
 }
 
 /** @internal Creates one Agent with an explicitly supplied package module. */
@@ -324,10 +381,10 @@ function applicationOptions(options) {
   }
   if (options.terminalReceiptRetention !== undefined
     && (!Number.isSafeInteger(options.terminalReceiptRetention)
-      || options.terminalReceiptRetention < 1
+      || options.terminalReceiptRetention < 0
       || options.terminalReceiptRetention > 4_096)) {
     throw new TypeError(
-      "Cloudflare Agent.create terminalReceiptRetention must be an integer from 1 through 4096",
+      "Cloudflare Agent.create terminalReceiptRetention must be an integer from 0 through 4096",
     );
   }
   return options;

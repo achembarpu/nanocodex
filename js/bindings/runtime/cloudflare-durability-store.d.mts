@@ -9,7 +9,10 @@ export type CloudflareDurableObjectStorage = Readonly<{
     exec<Row extends DurabilitySqliteRow>(
       sql: string,
       ...bindings: readonly DurabilitySqliteValue[]
-    ): Readonly<{ toArray(): readonly Row[] }>;
+    ): Readonly<{
+      toArray(): readonly Row[];
+      [Symbol.iterator](): IterableIterator<Row>;
+    }>;
   }>;
   transactionSync<Result>(callback: () => Result): Result;
 }>;

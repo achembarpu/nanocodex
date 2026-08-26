@@ -8,6 +8,7 @@ import {
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { NanocodexSession, UserAccount, type Env } from "../src/index";
+import { DurableEventLog } from "../src/durable-events";
 import { ManagedEventArchive } from "../src/managed-event-archive";
 
 const testEnv = env as unknown as Env;
@@ -31,6 +32,54 @@ afterEach(async () => {
 });
 
 describe("managed agents REST and resumable SSE", () => {
+  it("chunks and exactly replays an oversized managed event", async () => {
+    const agent = await createAgent();
+    const session = testEnv.NANOCODEX_SESSIONS.getByName(agent.agent_id);
+    const payload = `${"a".repeat(255_999)}😀${"b".repeat(2 * 1024 * 1024)}`;
+    const inserted = await runInDurableObject(session, (_instance, state) => {
+      const log = new DurableEventLog<{ payload: string; type: string }>(state.storage);
+      const before = log.totalBytes();
+      const event = log.record({ type: "api.event", payload });
+      const chunks = state.storage.sql.exec<{ count: number }>(
+        "SELECT COUNT(*) AS count FROM managed_event_chunks WHERE cursor = CAST(? AS INTEGER)",
+        event.cursor,
+      ).one().count;
+      const delta = log.totalBytes() - before;
+      const history = log.history(undefined, 1).data[0]!.message.payload;
+      const page = log.page((BigInt(event.cursor) - 1n).toString(), 1)[0]!.message.payload;
+      log.record({ type: "stream_failed", payload: "archive-tail" });
+      return {
+        chunks,
+        cursor: event.cursor,
+        delta,
+        history,
+        page,
+        totalBytes: log.totalBytes(),
+      };
+    });
+    expect(inserted).toMatchObject({ chunks: expect.any(Number), history: payload, page: payload });
+    expect(inserted.chunks).toBeGreaterThan(1);
+    expect(inserted.delta).toBe(new TextEncoder().encode(JSON.stringify({
+      type: "api.event",
+      payload,
+    })).byteLength);
+    const capacity = await (await session.fetch("https://session.internal/capacity")).json<{
+      managed_events: { bytes: number; rows: number };
+    }>();
+    expect(capacity.managed_events).toEqual({ bytes: inserted.totalBytes, rows: 3 });
+
+    const history = await managedHistory(agent);
+    expect(history.data.find(({ cursor }) => cursor === inserted.cursor)).toMatchObject({ payload });
+    const sealed = await session.fetch("https://session.internal/events/archive", { method: "POST" });
+    expect(await sealed.json()).toMatchObject({ sealed: true });
+    expect(await runInDurableObject(session, (_instance, state) => state.storage.sql.exec<{
+      count: number;
+    }>("SELECT COUNT(*) AS count FROM managed_event_chunks").one().count)).toBe(0);
+    expect((await managedHistory(agent)).data.find(
+      ({ cursor }) => cursor === inserted.cursor,
+    )).toMatchObject({ payload });
+  }, 30_000);
+
   it("attributes the private runtime session to its public managed turn", async () => {
     const agent = await createAgent();
     const turnId = "turn-runtime-attribution";
@@ -436,6 +485,28 @@ describe("managed agents REST and resumable SSE", () => {
     expect(BigInt(after.journal.revision)).toBeGreaterThan(BigInt(before.journal.revision));
     expect(BigInt(after.journal.rows)).toBeLessThan(BigInt(after.journal.revision));
     expect(after.turns.terminal_rows).toBe(23);
+  }, 30_000);
+
+  it("compacts multiple retained journal batches before cold Agent construction", async () => {
+    const agent = await createAgent();
+    await submit(agent, "turn-before-cold-preconstruction", "BEFORE_COLD_PRECONSTRUCTION");
+    await waitForTurnState(agent, "turn-before-cold-preconstruction", "completed");
+
+    const session = testEnv.NANOCODEX_SESSIONS.getByName(agent.agent_id);
+    const before = await (await session.fetch("https://session.internal/capacity")).json<{
+      journal: { revision: string; rows: number };
+    }>();
+    expect(before.journal.rows).toBeGreaterThan(1);
+    await evictDurableObject(session);
+
+    await submit(agent, "turn-after-cold-preconstruction", "AFTER_COLD_PRECONSTRUCTION");
+    await waitForTurnState(agent, "turn-after-cold-preconstruction", "completed");
+    const after = await (await session.fetch("https://session.internal/capacity")).json<{
+      journal: { revision: string; rows: number };
+    }>();
+    const appended = Number(BigInt(after.journal.revision) - BigInt(before.journal.revision));
+    expect(appended).toBeGreaterThan(0);
+    expect(after.journal.rows).toBe(1 + appended);
   }, 30_000);
 
   it("keeps connector OAuth state and credentials behind a persistent account", async () => {

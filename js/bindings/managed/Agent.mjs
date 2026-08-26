@@ -17,7 +17,9 @@ const TERMINAL_CACHE_CAPACITY = 256;
 const TERMINAL_CACHE_BYTES = 8 * 1024 * 1024;
 const SUBSCRIBER_QUEUE_CAPACITY = 4_096;
 const SUBSCRIBER_QUEUE_BYTES = 32 * 1024 * 1024;
-const EVENT_STREAM_FRAME_BYTES = 2 * 1024 * 1024;
+// Managed logical events are bounded to 14 MiB; retain envelope allowance for
+// cursor, turn, SSE, and JSON framing on the client boundary.
+const EVENT_STREAM_FRAME_BYTES = 16 * 1024 * 1024;
 const EVENT_STREAM_INACTIVITY_TIMEOUT_MS = 45_000;
 const TURN_SUBMISSION_TIMEOUT_MS = 10_000;
 const TURN_STATE_POLL_INITIAL_MS = 1_000;
@@ -956,7 +958,6 @@ async function* readEvents(client, agentId, initialCursor, signal, onControlCurs
         }
         if (chunk.done) break;
         buffer += chunk.value.replaceAll("\r\n", "\n").replaceAll("\r", "\n");
-        assertEventFrameSize(buffer);
         while (true) {
           const boundary = buffer.indexOf("\n\n");
           if (boundary < 0) break;
@@ -977,6 +978,10 @@ async function* readEvents(client, agentId, initialCursor, signal, onControlCurs
           cursor = eventCursor;
           yield managedEvent(data, eventCursor, parsed.event);
         }
+        // Only the incomplete trailing frame remains here. Complete frames are
+        // bounded independently above because one network read may coalesce
+        // several valid SSE frames.
+        assertEventFrameSize(buffer);
       }
     } finally {
       void reader.cancel().catch(() => {});

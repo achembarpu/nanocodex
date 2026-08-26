@@ -151,6 +151,9 @@ const DEFAULT_OWNERSHIP_IO_TIMEOUT_MS = 10_000;
 const DEFAULT_MULTIPLAYER_IO_TIMEOUT_MS = 10_000;
 const MAX_CLEANUP_RETRY_MS = 60_000;
 const SESSION_OWNER_ASSERTION = "x-nanocodex-owner-id";
+// Exact completed-turn receipts are retained by ManagedTurnArchive, so the
+// runtime journal does not need to duplicate them in each compacted checkpoint.
+const MANAGED_TERMINAL_RECEIPT_RETENTION = 0;
 
 export interface Env extends AccountAuthEnv {
   NANOCODEX_SESSIONS: DurableObjectNamespace<NanocodexSession>;
@@ -3292,6 +3295,17 @@ export class NanocodexSession extends DurableComputerSession {
     const constructionStartedAt = performance.now();
     const session = this.#session();
     if (!session) throw new Error("session is not initialized");
+    let retainedJournalBatches = 0;
+    try {
+      retainedJournalBatches = this.ctx.storage.sql.exec<{ batches: number }>(
+        "SELECT COUNT(*) AS batches FROM nanocodex_journal_batches",
+      ).one().batches;
+    } catch { /* The first construction has not initialized the journal yet. */ }
+    if (retainedJournalBatches > 1) {
+      await CloudflareAgent.compactDurability(this, {
+        terminalReceiptRetention: MANAGED_TERMINAL_RECEIPT_RETENTION,
+      });
+    }
     const multiplayer = session.runtime_profile === "multiplayer";
     if (!multiplayer) await this.#ensureCredentialBinding(session);
     const workspace = await getWorkspace(this);
@@ -3386,7 +3400,7 @@ export class NanocodexSession extends DurableComputerSession {
         : await createDefaultManagedTools(cloudTools);
       const agentOptions: NonNullable<Parameters<typeof CloudflareAgent.create>[1]> = {
         eventPersistence: "caller",
-        terminalReceiptRetention: 512,
+        terminalReceiptRetention: MANAGED_TERMINAL_RECEIPT_RETENTION,
         instructions: multiplayer
           ? [
             "You are the shared Nanocodex participant in a short-lived Multiplayer chat room.",

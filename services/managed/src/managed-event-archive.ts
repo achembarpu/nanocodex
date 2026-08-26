@@ -1,7 +1,10 @@
-import type {
-  DurableEvent,
-  DurableEventHistory,
-  DurableEventLog,
+import {
+  hydrateManagedEventRows,
+  MAX_EVENT_BYTES,
+  type DurableEvent,
+  type DurableEventHistory,
+  type DurableEventLog,
+  type ManagedEventRow,
 } from "./durable-events";
 
 const VERSION = 1;
@@ -14,14 +17,13 @@ const MAX_ARCHIVE_OBJECT_BYTES = 16 * 1024 * 1024;
 // Reserve a bounded envelope allowance for 4,096 cursors, timestamps, turn
 // identities, JSON structure, and R2 metadata. The final encoded size remains
 // authoritative below.
-const MAX_SEGMENT_PAYLOAD_BYTES = MAX_ARCHIVE_OBJECT_BYTES - 2 * 1024 * 1024;
+const MAX_SEGMENT_PAYLOAD_BYTES = MAX_EVENT_BYTES;
 const encoder = new TextEncoder();
 
-type EventRow = {
-  cursor: string;
-  created_at: number;
-  message_json: string;
-  turn_id: string | null;
+type EventRow = ManagedEventRow;
+
+type EventIndexRow = Omit<EventRow, "message_json"> & {
+  message_bytes: number;
 };
 
 type ArchiveStateRow = {
@@ -184,23 +186,46 @@ export class ManagedEventArchive<Message extends { type: string }> {
     const availableRows = Math.max(0, local.rows - retainedRows);
     if (availableRows === 0) return emptySeal(state.archived_through);
 
-    const rows = this.#storage.sql.exec<EventRow>(
-      `SELECT CAST(cursor AS TEXT) AS cursor, turn_id, message_json, created_at
-       FROM managed_events
-       ORDER BY managed_events.cursor
+    const candidates = this.#storage.sql.exec<EventIndexRow>(
+      `SELECT CAST(events.cursor AS TEXT) AS cursor,
+              events.turn_id,
+              events.created_at,
+              LENGTH(CAST(events.message_json AS BLOB))
+                + COALESCE((
+                  SELECT SUM(LENGTH(CAST(chunks.message_json AS BLOB)))
+                  FROM managed_event_chunks chunks
+                  WHERE chunks.cursor = events.cursor
+                ), 0) AS message_bytes
+       FROM managed_events events
+       ORDER BY events.cursor
        LIMIT ?`,
       Math.min(MAX_SEAL_ROWS, availableRows),
     ).toArray();
-    const selected: EventRow[] = [];
+    const selectedCandidates: EventIndexRow[] = [];
     let selectedBytes = 0;
-    for (const row of rows) {
-      const bytes = encoder.encode(row.message_json).byteLength;
-      if (selected.length > 0 && selectedBytes + bytes > this.#segmentTargetBytes) break;
-      selected.push(row);
-      selectedBytes += bytes;
+    for (const candidate of candidates) {
+      if (selectedCandidates.length > 0
+        && selectedBytes + candidate.message_bytes > this.#segmentTargetBytes) break;
+      selectedCandidates.push(candidate);
+      selectedBytes += candidate.message_bytes;
       if (selectedBytes >= this.#segmentTargetBytes) break;
     }
-    if (selected.length === 0) return emptySeal(state.archived_through);
+    if (selectedCandidates.length === 0) return emptySeal(state.archived_through);
+    const selectedHeads = this.#storage.sql.exec<EventRow>(
+      `SELECT CAST(cursor AS TEXT) AS cursor, turn_id, message_json, created_at
+       FROM managed_events
+       WHERE cursor >= CAST(? AS INTEGER) AND cursor <= CAST(? AS INTEGER)
+       ORDER BY managed_events.cursor`,
+      selectedCandidates[0]!.cursor,
+      selectedCandidates.at(-1)!.cursor,
+    ).toArray();
+    const selected = hydrateManagedEventRows(this.#storage, selectedHeads);
+    if (selected.length !== selectedCandidates.length
+      || selected.some((row, index) => (
+        encoder.encode(row.message_json).byteLength !== selectedCandidates[index]!.message_bytes
+      ))) {
+      throw new Error("managed event archive source changed during selection");
+    }
     if (BigInt(selected[0]!.cursor) <= BigInt(state.archived_through)) {
       throw new Error("managed event archive source is not newer than its ownership fence");
     }
@@ -266,7 +291,7 @@ export class ManagedEventArchive<Message extends { type: string }> {
         || retained.recent_json !== state.recent_json) {
         throw new Error("managed event archive seal lost its SQLite ownership fence");
       }
-      const retainedRows = this.#storage.sql.exec<EventRow>(
+      const retainedHeads = this.#storage.sql.exec<EventRow>(
         `SELECT CAST(cursor AS TEXT) AS cursor, turn_id, message_json, created_at
          FROM managed_events
          WHERE cursor >= CAST(? AS INTEGER) AND cursor <= CAST(? AS INTEGER)
@@ -274,6 +299,7 @@ export class ManagedEventArchive<Message extends { type: string }> {
         descriptor.start_cursor,
         descriptor.end_cursor,
       ).toArray();
+      const retainedRows = hydrateManagedEventRows(this.#storage, retainedHeads);
       const sourceUnchanged = retainedRows.length === selected.length
         && retainedRows.every((row, index) => {
           const source = selected[index]!;
@@ -303,6 +329,10 @@ export class ManagedEventArchive<Message extends { type: string }> {
         indexCreated ? 1 : 0,
         nextRoot,
         JSON.stringify(nextRecent),
+      );
+      this.#storage.sql.exec(
+        "DELETE FROM managed_event_chunks WHERE cursor <= CAST(? AS INTEGER)",
+        descriptor.end_cursor,
       );
       this.#storage.sql.exec(
         "DELETE FROM managed_events WHERE cursor <= CAST(? AS INTEGER)",
@@ -606,7 +636,9 @@ export class ManagedEventArchive<Message extends { type: string }> {
   #localAggregate(): { bytes: number; rows: number } {
     return this.#storage.sql.exec<{ bytes: number; rows: number }>(
       `SELECT COUNT(*) AS rows,
-              COALESCE(SUM(LENGTH(CAST(message_json AS BLOB))), 0) AS bytes
+              COALESCE(SUM(LENGTH(CAST(message_json AS BLOB))), 0)
+                + (SELECT COALESCE(SUM(LENGTH(CAST(message_json AS BLOB))), 0)
+                   FROM managed_event_chunks) AS bytes
        FROM managed_events`,
     ).toArray()[0] ?? { bytes: 0, rows: 0 };
   }

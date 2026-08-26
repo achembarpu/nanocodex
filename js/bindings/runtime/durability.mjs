@@ -1,5 +1,6 @@
 const hosts = new Map();
 let nextRouteId = 1n;
+const ACQUIRE_PAGE_ROWS = 8;
 
 export function own(host, store, journalId) {
   if ((store === undefined) !== (journalId === undefined)) {
@@ -59,6 +60,57 @@ export async function acquire(routeId, journalId, ownerId) {
       revision: revision(batch?.revision, "durability batch revision"),
       payload: requiredString(batch?.payload, "durability batch payload"),
     })),
+  });
+}
+
+export async function acquirePage(routeId, journalId, ownerId, afterRevision) {
+  const route = requiredRoute(routeId, journalId);
+  const store = route.store;
+  let stored;
+  if (typeof store.acquirePage === "function") {
+    stored = await store.acquirePage(journalId, {
+      ownerId,
+      ...(afterRevision === "" ? {} : { afterRevision }),
+      limit: ACQUIRE_PAGE_ROWS,
+    });
+  } else {
+    if (afterRevision === "") {
+      route.acquisition = await store.acquire(journalId, { ownerId });
+    }
+    const acquired = route.acquisition;
+    if (!acquired || acquired.ownerId !== ownerId) {
+      throw new Error("durability acquisition page has no retained owner");
+    }
+    const start = afterRevision === ""
+      ? 0
+      : acquired.batches.findIndex((batch) => batch.revision === afterRevision) + 1;
+    if (start <= 0 && afterRevision !== "") {
+      throw new Error("durability acquisition cursor is not retained");
+    }
+    const batches = acquired.batches.slice(start, start + ACQUIRE_PAGE_ROWS);
+    const hasMore = start + batches.length < acquired.batches.length;
+    stored = { ...acquired, batches, hasMore };
+    if (!hasMore) route.acquisition = undefined;
+  }
+  if (!stored || typeof stored !== "object" || !Array.isArray(stored.batches)) {
+    throw new TypeError("durability.acquirePage() must return an acquired journal page");
+  }
+  const acquiredOwnerId = requiredString(stored.ownerId, "durability owner ID");
+  if (acquiredOwnerId !== ownerId) {
+    throw new TypeError("durability.acquirePage() must return the requested owner ID");
+  }
+  if (typeof stored.hasMore !== "boolean") {
+    throw new TypeError("durability.acquirePage() must return hasMore");
+  }
+  return JSON.stringify({
+    owner_id: acquiredOwnerId,
+    fence: revision(stored.fence, "durability owner fence"),
+    revision: revision(stored.revision, "durability load revision"),
+    batches: stored.batches.map((batch) => ({
+      revision: revision(batch?.revision, "durability batch revision"),
+      payload: requiredString(batch?.payload, "durability batch payload"),
+    })),
+    has_more: stored.hasMore,
   });
 }
 

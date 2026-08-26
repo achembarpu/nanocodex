@@ -205,6 +205,9 @@ async function check() {
   extendedCloudflareAgent.events.connect(new Request("https://agent.internal/events"));
   const cloudflareApplication: true = extendedCloudflareAgent.application;
   void cloudflareApplication;
+  await CloudflareAgent.compactDurability(cloudflareOwner, {
+    terminalReceiptRetention: 0,
+  });
   CloudflareAgent.destroy(cloudflareOwner);
   const ephemeralCloudflareAgent: DefaultAgent = await CloudflareAgent.createEphemeral(
     cloudflareOwner,

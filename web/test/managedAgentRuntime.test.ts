@@ -327,12 +327,205 @@ test("managed history attaches strictly after a delayed page snapshot and prepen
   releaseLive();
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(live, ["live"]);
-  assert.equal(await watcher.loadOlder?.(), true);
+  assert.equal(await watcher.loadOlder?.(), false, "the background drain already reached the oldest page");
   assert.deepEqual(pageCalls, [{ limit: 128 }, { before: "2", limit: 128 }]);
   assert.deepEqual(histories.at(-1)?.map((event) => event.payload.text), [
+    "one", "two", "three",
+  ]);
+  let lateHistory: readonly import("nanocodex").AgentEvent[] | undefined;
+  watcher.onHistory?.((events) => { lateHistory = events; });
+  assert.deepEqual(lateHistory?.map((event) => event.payload.text), [
     "one", "two", "three", "live",
   ]);
   watcher.off();
+});
+
+test("managed history drains split-turn server pages into one complete immutable snapshot", async () => {
+  const envelopes = Array.from({ length: 128 }, (_, index) => {
+    const turn = index + 1;
+    const turnId = `turn-${turn}`;
+    const firstCursor = index * 3 + 1;
+    return [
+      managedOuterEnvelope(String(firstCursor), turnId, {
+        type: "turn_accepted", id: turnId, input: `prompt ${turn}`, replayed: false,
+      }),
+      managedRawEnvelope(String(firstCursor + 1), turnId, "assistant.message", {
+        text: `answer ${turn}`,
+      }),
+      managedOuterEnvelope(String(firstCursor + 2), turnId, {
+        type: "turn_completed", id: turnId, final_message: `answer ${turn}`, usage: null,
+      }),
+    ];
+  }).flat();
+  const pageCalls: Array<{ before?: string; limit?: number }> = [];
+  const tailCursors: string[] = [];
+  const managed = {
+    id: "fully-paged-agent",
+    events: {
+      async page(options: { before?: string; limit?: number }) {
+        pageCalls.push({
+          ...(options.before === undefined ? {} : { before: options.before }),
+          limit: options.limit,
+        });
+        if (options.before === undefined) {
+          return { data: envelopes.slice(256), hasMore: true, latestCursor: "384" };
+        }
+        if (options.before === "257") {
+          return { data: envelopes.slice(128, 256), hasMore: true, latestCursor: "384" };
+        }
+        if (options.before === "129") {
+          return { data: envelopes.slice(0, 128), hasMore: false, latestCursor: "384" };
+        }
+        throw new Error(`unexpected before cursor: ${options.before}`);
+      },
+      async *watch(options: { cursor: string; signal: AbortSignal }) {
+        tailCursors.push(options.cursor);
+        await new Promise<void>((resolve) => options.signal.addEventListener("abort", () => resolve()));
+      },
+    },
+    turn: { prompt() { throw new Error("unused"); } },
+  };
+  const watcher = managedTerminalAgent(managed as never).events.watch();
+  const histories: Array<readonly import("nanocodex").AgentEvent[]> = [];
+  watcher.onHistory?.((history) => histories.push(history));
+  await waitForCondition(() => histories.at(-1)?.length === 384);
+
+  assert.deepEqual(pageCalls, [
+    { limit: 128 },
+    { before: "257", limit: 128 },
+    { before: "129", limit: 128 },
+  ]);
+  assert.deepEqual(tailCursors, ["384"]);
+  const snapshot = histories.at(-1)!;
+  assert.deepEqual(snapshot.map(({ seq }) => seq), Array.from({ length: 384 }, (_, index) => index + 1));
+  for (let index = 0; index < 128; index += 1) {
+    const turn = index + 1;
+    const triplet = snapshot.slice(index * 3, index * 3 + 3);
+    assert.deepEqual(triplet.map(({ type }) => type), [
+      "managed.prompt", "assistant.message", "run.completed",
+    ]);
+    assert.deepEqual(triplet.map(({ payload }) => payload.turn_id), [
+      `turn-${turn}`, `turn-${turn}`, `turn-${turn}`,
+    ]);
+    assert.equal(triplet[0]?.payload.text, `prompt ${turn}`);
+    assert.equal(triplet[1]?.payload.text, `answer ${turn}`);
+  }
+  assert.equal(new Set(snapshot.map(({ type, payload }) => `${payload.turn_id}:${type}`)).size, 384);
+
+  let lateSnapshot: readonly import("nanocodex").AgentEvent[] | undefined;
+  watcher.onHistory?.((history) => { lateSnapshot = history; });
+  assert.equal(lateSnapshot, snapshot);
+  assert.equal(await watcher.loadOlder?.(), false);
+  assert.equal(Object.isFrozen(snapshot), true);
+  watcher.off();
+});
+
+test("managed history resumes an interrupted older-page drain when the browser returns online", async () => {
+  const online = new EventTarget();
+  const addDescriptor = Object.getOwnPropertyDescriptor(globalThis, "addEventListener");
+  const removeDescriptor = Object.getOwnPropertyDescriptor(globalThis, "removeEventListener");
+  Object.defineProperty(globalThis, "addEventListener", {
+    configurable: true,
+    value: online.addEventListener.bind(online),
+  });
+  Object.defineProperty(globalThis, "removeEventListener", {
+    configurable: true,
+    value: online.removeEventListener.bind(online),
+  });
+  try {
+    const pageCalls: Array<{ before?: string; limit?: number }> = [];
+    let olderAttempts = 0;
+    const managed = {
+      id: "interrupted-older-history-agent",
+      events: {
+        async page(options: { before?: string; limit?: number }) {
+          pageCalls.push({
+            ...(options.before === undefined ? {} : { before: options.before }),
+            limit: options.limit,
+          });
+          if (options.before === undefined) {
+            return {
+              data: [managedEnvelope("2", "newest")],
+              hasMore: true,
+              latestCursor: "2",
+            };
+          }
+          olderAttempts += 1;
+          if (olderAttempts === 1) throw new Error("temporary older-page outage");
+          return {
+            data: [managedEnvelope("1", "oldest")],
+            hasMore: false,
+            latestCursor: "2",
+          };
+        },
+        async *watch(options: { signal: AbortSignal }) {
+          await new Promise<void>((resolve) => options.signal.addEventListener("abort", () => resolve()));
+        },
+      },
+      turn: { prompt() { throw new Error("unused"); } },
+    };
+    const watcher = managedTerminalAgent(managed as never).events.watch();
+    const histories: string[][] = [];
+    watcher.onHistory?.((events) => {
+      histories.push(events.map((event) => String(event.payload.text)));
+    });
+    await waitForCondition(() => olderAttempts === 1);
+
+    online.dispatchEvent(new Event("online"));
+    await waitForCondition(() => histories.at(-1)?.length === 2);
+
+    assert.deepEqual(pageCalls, [
+      { limit: 128 },
+      { before: "2", limit: 128 },
+      { before: "2", limit: 128 },
+    ]);
+    assert.deepEqual(histories.at(-1), ["oldest", "newest"]);
+    watcher.off();
+  } finally {
+    if (addDescriptor) Object.defineProperty(globalThis, "addEventListener", addDescriptor);
+    else Reflect.deleteProperty(globalThis, "addEventListener");
+    if (removeDescriptor) Object.defineProperty(globalThis, "removeEventListener", removeDescriptor);
+    else Reflect.deleteProperty(globalThis, "removeEventListener");
+  }
+});
+
+test("managed history stops a no-progress hasMore page without requesting it again", async () => {
+  const pageCalls: Array<{ before?: string; limit?: number }> = [];
+  const warnings: unknown[][] = [];
+  const originalWarn = console.warn;
+  console.warn = (...values: unknown[]) => { warnings.push(values); };
+  const duplicate = managedEnvelope("2", "newest");
+  const managed = {
+    id: "stalled-history-agent",
+    events: {
+      async page(options: { before?: string; limit?: number }) {
+        pageCalls.push({
+          ...(options.before === undefined ? {} : { before: options.before }),
+          limit: options.limit,
+        });
+        return { data: [duplicate], hasMore: true, latestCursor: "2" };
+      },
+      async *watch(options: { signal: AbortSignal }) {
+        await new Promise<void>((resolve) => options.signal.addEventListener("abort", () => resolve()));
+      },
+    },
+    turn: { prompt() { throw new Error("unused"); } },
+  };
+  const watcher = managedTerminalAgent(managed as never).events.watch();
+  try {
+    await waitForCondition(() => pageCalls.length === 2);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.deepEqual(pageCalls, [{ limit: 128 }, { before: "2", limit: 128 }]);
+    assert.equal(await watcher.loadOlder?.(), false);
+    assert.equal(pageCalls.length, 2);
+    assert.equal(warnings.some(([message]) => (
+      message === "nanocodex:managed.history_pagination_stalled"
+    )), true);
+  } finally {
+    watcher.off();
+    console.warn = originalWarn;
+  }
 });
 
 test("managed history retries the initial page and tails only from its concrete cursor", async () => {
@@ -549,7 +742,7 @@ test("a timed out managed history attempt returns at its boundary even when its 
   await ignoredAbort;
 });
 
-test("managed live retention stays bounded and preserves the newest complete terminal turn", async () => {
+test("managed live history stays complete after raw envelope retention compacts", async () => {
   const totalTurns = 2_000;
   let liveFinished!: () => void;
   const finished = new Promise<void>((resolve) => { liveFinished = resolve; });
@@ -584,7 +777,14 @@ test("managed live retention stays bounded and preserves the newest complete ter
   const retained = await new Promise<readonly import("nanocodex").AgentEvent[]>((resolve) => {
     watcher.onHistory?.(resolve);
   });
-  assert.ok(retained.length <= MAX_MANAGED_RETAINED_ENVELOPES);
+  assert.equal(retained.length, totalTurns * 3);
+  assert.deepEqual(retained.map(({ seq }) => seq), Array.from(
+    { length: totalTurns * 3 },
+    (_, index) => index + 1,
+  ));
+  assert.deepEqual(retained.slice(0, 3).map(({ payload }) => payload.turn_id), [
+    "turn-1", "turn-1", "turn-1",
+  ]);
   const latest = retained.filter(({ payload }) => payload.turn_id === `turn-${totalTurns}`);
   assert.deepEqual(latest.map(({ type }) => type), [
     "managed.prompt", "assistant.message", "run.completed",
@@ -593,7 +793,7 @@ test("managed live retention stays bounded and preserves the newest complete ter
   watcher.off();
 });
 
-test("an over-cap single managed turn compacts to its mandatory prompt and terminal", async () => {
+test("an over-cap single managed turn keeps its complete projected history", async () => {
   let liveFinished!: () => void;
   const finished = new Promise<void>((resolve) => { liveFinished = resolve; });
   const managed = {
@@ -624,7 +824,9 @@ test("an over-cap single managed turn compacts to its mandatory prompt and termi
   const retained = await new Promise<readonly import("nanocodex").AgentEvent[]>((resolve) => {
     watcher.onHistory?.(resolve);
   });
-  assert.ok(retained.length <= MAX_MANAGED_RETAINED_ENVELOPES);
+  assert.equal(retained.length, MAX_MANAGED_RETAINED_ENVELOPES + 43);
+  assert.equal(retained.filter(({ type }) => type === "tool.call").length,
+    MAX_MANAGED_RETAINED_ENVELOPES + 40);
   assert.equal(retained.some(({ type, payload }) =>
     type === "managed.prompt" && payload.turn_id === "long-turn" && payload.text === "keep this prompt"
   ), true);

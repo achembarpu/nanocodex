@@ -1177,12 +1177,67 @@ test("managed SSE rejects an unterminated decoded frame beyond its byte budget",
   const events = agent.events.watch({ cursor: "0" });
   const next = events.next();
   await waitFor(() => connections.length === 1);
-  connections[0].send(`data: ${"x".repeat(2 * 1024 * 1024)}`);
+  connections[0].send(`data: ${"x".repeat(16 * 1024 * 1024)}`);
   await assert.rejects(next, (error) => {
     assert(error instanceof ManagedError);
     assert.equal(error.code, "event_frame_too_large");
     return true;
   });
+});
+
+test("managed SSE accepts one frame just above the old 2 MiB ceiling", async () => {
+  const payload = "x".repeat(2 * 1024 * 1024 + 128 * 1024);
+  const agent = Agent.open(agentId, {
+    baseUrl: origin,
+    fetch: async (input, init) => {
+      const request = new Request(input, init);
+      const connection = controlledEventStream(request.signal, () => {});
+      queueMicrotask(() => connection.send(sse("1", "api.event", {
+        cursor: "1",
+        created_at: 1,
+        turn_id: null,
+        type: "api.event",
+        payload,
+      })));
+      return connection.response;
+    },
+  });
+  const events = agent.events.watch({ cursor: "0" });
+  const event = await events.next();
+  assert.equal(event.value.data.payload, payload);
+  await events.return();
+});
+
+test("managed SSE bounds coalesced complete frames independently", async () => {
+  const payload = "x".repeat(9 * 1024 * 1024);
+  const agent = Agent.open(agentId, {
+    baseUrl: origin,
+    fetch: async (input, init) => {
+      const request = new Request(input, init);
+      const connection = controlledEventStream(request.signal, () => {});
+      queueMicrotask(() => connection.send(
+        sse("1", "api.event", {
+          cursor: "1",
+          created_at: 1,
+          turn_id: null,
+          type: "api.event",
+          payload,
+        })
+        + sse("2", "api.event", {
+          cursor: "2",
+          created_at: 2,
+          turn_id: null,
+          type: "api.event",
+          payload,
+        }),
+      ));
+      return connection.response;
+    },
+  });
+  const events = agent.events.watch({ cursor: "0" });
+  assert.equal((await events.next()).value.cursor, "1");
+  assert.equal((await events.next()).value.cursor, "2");
+  await events.return();
 });
 
 test("managed terminal retention is bounded by encoded bytes as well as turn count", async () => {

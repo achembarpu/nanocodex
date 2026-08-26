@@ -67,7 +67,7 @@ export function managedCapacitySnapshot(
   archivedRealtime: ManagedRealtimeArchiveCapacity,
 ): ManagedCapacitySnapshot {
   const journal = journalCapacity(storage, cloudflareJournalId(storage, sessionId));
-  const managedEvents = eventCapacity(storage, "managed_events", "message_json");
+  const managedEvents = managedEventCapacity(storage);
   const rawEvents = eventCapacity(
     storage,
     "nanocodex_cloudflare_events",
@@ -119,6 +119,28 @@ function journalCapacity(
   if (!tableExists(storage, "nanocodex_journal_batches")) {
     return { ...EMPTY_AGGREGATE, max_batch_bytes: 0, revision: "0" };
   }
+  if (tableExists(storage, "nanocodex_journal_batch_chunks")) {
+    return storage.sql.exec<JournalRow>(
+      `WITH batch_bytes AS (
+         SELECT b.revision,
+                LENGTH(CAST(b.payload AS BLOB))
+                  + COALESCE(SUM(LENGTH(CAST(c.payload AS BLOB))), 0) AS bytes
+         FROM nanocodex_journal_batches b
+         LEFT JOIN nanocodex_journal_batch_chunks c
+           ON c.journal_id = b.journal_id AND c.revision = b.revision
+         WHERE b.journal_id = ?
+         GROUP BY b.revision, b.payload
+       )
+       SELECT COUNT(*) AS rows,
+              COALESCE(SUM(bytes), 0) AS bytes,
+              COALESCE(MAX(bytes), 0) AS max_batch_bytes,
+              COALESCE((SELECT revision FROM nanocodex_journals WHERE journal_id = ?), '0')
+                AS revision
+       FROM batch_bytes`,
+      journalId,
+      journalId,
+    ).toArray()[0] ?? { ...EMPTY_AGGREGATE, max_batch_bytes: 0, revision: "0" };
+  }
   return storage.sql.exec<JournalRow>(
     `SELECT COUNT(*) AS rows,
             COALESCE(SUM(LENGTH(CAST(payload AS BLOB))), 0) AS bytes,
@@ -141,6 +163,20 @@ function eventCapacity(
     `SELECT COUNT(*) AS rows,
             COALESCE(SUM(LENGTH(CAST(${column} AS BLOB))), 0) AS bytes
      FROM ${table}`,
+  ).toArray()[0] ?? EMPTY_AGGREGATE;
+}
+
+function managedEventCapacity(storage: DurableObjectStorage): CountAndBytes {
+  if (!tableExists(storage, "managed_events")) return EMPTY_AGGREGATE;
+  if (!tableExists(storage, "managed_event_chunks")) {
+    return eventCapacity(storage, "managed_events", "message_json");
+  }
+  return storage.sql.exec<AggregateRow>(
+    `SELECT COUNT(*) AS rows,
+            COALESCE(SUM(LENGTH(CAST(message_json AS BLOB))), 0)
+              + (SELECT COALESCE(SUM(LENGTH(CAST(message_json AS BLOB))), 0)
+                 FROM managed_event_chunks) AS bytes
+     FROM managed_events`,
   ).toArray()[0] ?? EMPTY_AGGREGATE;
 }
 

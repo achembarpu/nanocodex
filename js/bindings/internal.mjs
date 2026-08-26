@@ -519,6 +519,14 @@ const hostBridge = Object.freeze({
   async durabilityAcquire(routeId, journalId, ownerId) {
     return (await loadDurabilityRuntime()).acquire(routeId, journalId, ownerId);
   },
+  async durabilityAcquirePage(routeId, journalId, ownerId, afterRevision) {
+    return (await loadDurabilityRuntime()).acquirePage(
+      routeId,
+      journalId,
+      ownerId,
+      afterRevision,
+    );
+  },
   async durabilityAppend(
     routeId,
     journalId,

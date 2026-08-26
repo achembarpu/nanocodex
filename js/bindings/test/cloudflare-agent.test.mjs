@@ -2,7 +2,13 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { test } from "node:test";
 
-import { bindAgent, create, createEphemeral, destroy } from "../cloudflare/Agent.mjs";
+import {
+  bindAgent,
+  compactDurability,
+  create,
+  createEphemeral,
+  destroy,
+} from "../cloudflare/Agent.mjs";
 import * as HostAgent from "../host/Agent.mjs";
 import { createCloudflareDurabilityStore } from "../runtime/cloudflare-durability-store.mjs";
 import * as Subagents from "../runtime/subagents.mjs";
@@ -13,6 +19,7 @@ const SECOND_OBJECT_ID = "b".repeat(64);
 class MemoryStorage {
   constructor() {
     this.batches = [];
+    this.chunks = [];
     this.events = [];
     this.journals = new Map();
     this.owners = new Map();
@@ -67,10 +74,35 @@ class MemoryStorage {
       rows = this.batches
         .filter((batch) => batch.journalId === args[0])
         .map(({ revision, payload }) => ({ revision, payload }));
+      if (statement.includes("length(revision) > length(?)")) {
+        rows = rows.filter((batch) => BigInt(batch.revision) > BigInt(args[1]));
+      }
+      rows.sort((left, right) => Number(BigInt(left.revision) - BigInt(right.revision)));
+      if (statement.endsWith("LIMIT 9")) rows = rows.slice(0, 9);
+    } else if (statement.startsWith(
+      "SELECT revision, chunk_index, payload FROM nanocodex_journal_batch_chunks",
+    )) {
+      const selected = new Set(args.slice(1));
+      rows = this.chunks
+        .filter((chunk) => chunk.journalId === args[0] && selected.has(chunk.revision))
+        .map((chunk) => ({
+          revision: chunk.revision,
+          chunk_index: chunk.chunkIndex,
+          payload: chunk.payload,
+        }));
     } else if (statement.startsWith("INSERT INTO nanocodex_journals")) {
       this.journals.set(args[0], args[1]);
     } else if (statement.startsWith("INSERT INTO nanocodex_journal_batches")) {
       this.batches.push({ journalId: args[0], revision: args[1], payload: args[2] });
+    } else if (statement.startsWith("INSERT INTO nanocodex_journal_batch_chunks")) {
+      this.chunks.push({
+        journalId: args[0],
+        revision: args[1],
+        chunkIndex: args[2],
+        payload: args[3],
+      });
+    } else if (statement.startsWith("DELETE FROM nanocodex_journal_batch_chunks")) {
+      this.chunks = this.chunks.filter((chunk) => chunk.journalId !== args[0]);
     } else if (statement.startsWith("DELETE FROM nanocodex_journal_batches")) {
       this.batches = this.batches.filter((batch) => batch.journalId !== args[0]);
     } else if (statement.startsWith("DELETE FROM nanocodex_journals")) {
@@ -151,8 +183,8 @@ test("Cloudflare Agent owns credentials, transport, and durability options", asy
     /eventPersistence must be durable or caller/,
   );
   await assert.rejects(
-    create(module, durableOwner(new MemoryStorage()), { terminalReceiptRetention: 0 }),
-    /terminalReceiptRetention must be an integer from 1 through 4096/,
+    create(module, durableOwner(new MemoryStorage()), { terminalReceiptRetention: -1 }),
+    /terminalReceiptRetention must be an integer from 0 through 4096/,
   );
   await assert.rejects(
     create(module, { ctx: durableContext(new MemoryStorage()), env: {} }),
@@ -261,6 +293,76 @@ test("Cloudflare Agent disposal releases lifecycle authority without bypassing j
 
   const reopened = await create(module, owner);
   await reopened.session.shutdown();
+});
+
+test("Cloudflare Agent compacts retained durability before runtime construction", async () => {
+  const module = await readFile(new URL("../pkg-web/nanocodex_bg.wasm", import.meta.url));
+  const storage = new MemoryStorage();
+  storage.sessionId = "018f1f9a-7b3c-7a17-8000-000000000097";
+  const journalId = `cloudflare:${storage.sessionId}`;
+  for (let index = 0; index < 10; index += 1) {
+    const operationId = `turn-compacted-${index}`;
+    storage.batches.push(
+      {
+        journalId,
+        revision: String(index * 2 + 1),
+        payload: JSON.stringify({
+          operation_accepted: { operation_id: operationId, input: "prompt" },
+        }),
+      },
+      {
+        journalId,
+        revision: String(index * 2 + 2),
+        payload: JSON.stringify({
+          operation_cancelled: { operation_id: operationId },
+        }),
+      },
+    );
+  }
+  storage.journals.set(journalId, "20");
+
+  const owner = durableOwner(storage);
+  await compactDurability(module, owner, {
+    terminalReceiptRetention: 512,
+  });
+
+  assert.equal(storage.journals.get(journalId), "20");
+  assert.equal(storage.batches.length, 1);
+  assert.equal(storage.batches[0].revision, "20");
+  let checkpoint = JSON.parse(storage.batches[0].payload).nanocodex_journal_state;
+  assert.equal(Object.keys(checkpoint.operations).length, 10);
+
+  await compactDurability(module, owner, {
+    terminalReceiptRetention: 0,
+  });
+
+  assert.equal(storage.batches.length, 1);
+  assert.equal(storage.batches[0].revision, "20");
+  checkpoint = JSON.parse(storage.batches[0].payload).nanocodex_journal_state;
+  assert.deepEqual(checkpoint.operations, {});
+});
+
+test("Cloudflare Agent compaction reserves lifecycle authority against create", async () => {
+  const module = await readFile(new URL("../pkg-web/nanocodex_bg.wasm", import.meta.url));
+  const storage = new MemoryStorage();
+  storage.sessionId = "018f1f9a-7b3c-7a17-8000-000000000098";
+  const journalId = `cloudflare:${storage.sessionId}`;
+  storage.batches.push({
+    journalId,
+    revision: "1",
+    payload: JSON.stringify({
+      operation_accepted: { operation_id: "turn-compaction-race", input: "prompt" },
+    }),
+  });
+  storage.journals.set(journalId, "1");
+  const owner = durableOwner(storage);
+
+  const compaction = compactDurability(module, owner);
+  await assert.rejects(
+    create(module, owner),
+    /creation is already in progress/,
+  );
+  await compaction;
 });
 
 test("Cloudflare Agent releases its journal when event projection setup fails", async () => {
@@ -383,6 +485,7 @@ test("Cloudflare Agent destroy owns idempotent adapter cleanup", async () => {
   const journalId = `cloudflare:${agent.sessionId}`;
   const staleOwner = { ...storage.owners.get(journalId) };
   assert.equal(staleOwner.fence, "2");
+  storage.chunks.push({ journalId, revision: "1", chunkIndex: 0, payload: "retained" });
   destroy(owner);
   const destroyedOwner = storage.owners.get(journalId);
   assert.equal(destroyedOwner.fence, "3");
@@ -398,6 +501,7 @@ test("Cloudflare Agent destroy owns idempotent adapter cleanup", async () => {
   destroy(owner);
 
   assert.equal(storage.batches.length, 0);
+  assert.equal(storage.chunks.length, 0);
   assert.equal(storage.journals.size, 0);
   assert.equal(storage.events.length, 0);
 });
