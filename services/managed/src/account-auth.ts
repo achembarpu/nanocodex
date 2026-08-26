@@ -18,6 +18,11 @@ const BASE64_URL = /^[A-Za-z0-9_-]+$/;
 const DEFAULT_OWNERSHIP_IO_TIMEOUT_MS = 10_000;
 const CONNECT_SERVICE_ORIGIN = "https://nanocodex.internal";
 const CONNECT_USER_HEADER = "x-nanocodex-connect-user";
+const SESSION_OWNER_ASSERTION = "x-nanocodex-owner-id";
+const SESSION_ORGANIZATION_ASSERTION = "x-nanocodex-session-organization-id";
+const SESSION_TEAM_ASSERTION = "x-nanocodex-session-team-id";
+const SESSION_AUTHORIZATION_EPOCH_ASSERTION = "x-nanocodex-authorization-epoch";
+const SESSION_CAPABILITIES_ASSERTION = "x-nanocodex-capabilities";
 const accountSessionKey = (token: string) => `session:${token}`;
 
 export function isUserId(value: unknown): value is string {
@@ -72,6 +77,14 @@ export type Principal = Readonly<{
   authorizationEpoch: number;
   capabilities: readonly OrganizationCapability[];
 }>;
+
+export function forwardPrincipalAssertions(headers: Headers, principal: Principal): void {
+  headers.set(SESSION_OWNER_ASSERTION, principal.userId);
+  headers.set(SESSION_ORGANIZATION_ASSERTION, principal.organizationId);
+  headers.set(SESSION_TEAM_ASSERTION, principal.teamId);
+  headers.set(SESSION_AUTHORIZATION_EPOCH_ASSERTION, String(principal.authorizationEpoch));
+  headers.set(SESSION_CAPABILITIES_ASSERTION, JSON.stringify(principal.capabilities));
+}
 
 type UserRecord = Readonly<{
   id: string;

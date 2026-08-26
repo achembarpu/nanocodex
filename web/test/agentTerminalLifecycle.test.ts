@@ -10,6 +10,7 @@ const terminal = [
 const experience = source("../src/AgentExperience.tsx");
 const session = source("../src/modelSession.tsx");
 const accountSession = source("../src/AccountSession.tsx");
+const accountMenu = source("../src/AccountMenu.tsx");
 const health = source("../src/deploymentHealth.ts");
 const localCredential = source("../src/localDevelopmentCredential.ts");
 const terminalCss = [
@@ -30,11 +31,10 @@ test("account authentication naturally selects the private broker", () => {
   assert.match(session, /nanocodex:model-credential-changed/);
 });
 
-test("AccountSession solely owns localhost credential import and invalidation", () => {
-  assert.match(accountSession, /localDevelopmentCredential\.ensure\(userId\)/);
-  assert.match(accountSession, /if \(localClaim\.current\?\.userId === userId\) return localClaim\.current\.promise/);
-  assert.match(accountSession, /await claimLocalCredential\(nextUser\.id\);\s*if \(requestId\.current !== currentRequest\) return;/);
-  assert.match(accountSession, /deploymentHealth\.invalidate\(\)/);
+test("ChatGPT credential import is explicit and invalidates model readiness", () => {
+  assert.doesNotMatch(accountSession, /localDevelopmentCredential/);
+  assert.match(accountMenu, /localDevelopmentCredential\.refresh\(accountId\)/);
+  assert.match(accountMenu, /notifyModelCredentialChanged\(\)/);
   assert.doesNotMatch(session, /localDevelopmentCredential|deploymentHealth\.invalidate\(\)/);
   assert.match(localCredential, /LOCAL_DEVELOPMENT_HOSTS\.has\(hostname\)/);
   assert.match(localCredential, /current\?\.userId === userId/);

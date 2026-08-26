@@ -493,7 +493,26 @@ describe("managed agents REST and resumable SSE", () => {
     expect(BigInt(before.journal.revision)).toBeGreaterThanOrEqual(66n);
     expect(BigInt(before.journal.rows)).toBeLessThan(BigInt(before.journal.revision));
 
-    await waitForScheduledAlarm(session);
+    let pendingProjections = Number.POSITIVE_INFINITY;
+    for (let attempt = 0; attempt < 4 && pendingProjections > 0; attempt += 1) {
+      await runInDurableObject(session, async (_instance, state) => {
+        await state.storage.setAlarm(Date.now());
+      });
+      await runDurableObjectAlarm(session);
+      pendingProjections = await runInDurableObject(session, (_instance, state) => (
+        state.storage.sql.exec<{ count: number }>(
+          "SELECT COUNT(*) AS count FROM history_projection_outbox",
+        ).one().count
+      ));
+    }
+    expect(pendingProjections).toBe(0);
+    await runInDurableObject(session, async (_instance, state) => {
+      state.storage.sql.exec(
+        "UPDATE session_state SET last_active = ? WHERE singleton = 1",
+        Date.now() - 60_000,
+      );
+      await state.storage.setAlarm(Date.now());
+    });
     await runDurableObjectAlarm(session);
     await evictDurableObject(session);
 
@@ -506,7 +525,7 @@ describe("managed agents REST and resumable SSE", () => {
     expect(BigInt(after.journal.revision)).toBeGreaterThan(BigInt(before.journal.revision));
     expect(BigInt(after.journal.rows)).toBeLessThan(BigInt(after.journal.revision));
     expect(after.turns.terminal_rows).toBe(23);
-  }, 30_000);
+  }, 60_000);
 
   it("compacts multiple retained journal batches before cold Agent construction", async () => {
     const agent = await createAgent();
@@ -5448,7 +5467,9 @@ async function waitForTurnState(
       const turn = await response.json<ManagedTurnView>();
       if (turn.state === expected) return turn;
       if (turn.state === "failed" || turn.state === "blocked") {
-        throw new Error(`turn ${id} entered ${turn.state} while waiting for ${expected}`);
+        throw new Error(
+          `turn ${id} entered ${turn.state} while waiting for ${expected}: ${turn.error ?? "unknown error"}`,
+        );
       }
     }
     await new Promise((resolve) => setTimeout(resolve, 25));

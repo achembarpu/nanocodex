@@ -3543,7 +3543,7 @@ mod tests {
         assert!(matches!(
             worker.try_recv(),
             Ok(WorkerCommand::SplitBtw { id: split_id, cwd })
-                if split_id == id && cwd == PathBuf::from("/workspace")
+                if split_id == id && cwd.as_path() == std::path::Path::new("/workspace")
         ));
     }
 

@@ -1,4 +1,9 @@
-import { authenticate, type AccountAuthEnv } from "./account-auth";
+import {
+  authenticate,
+  forwardPrincipalAssertions,
+  type AccountAuthEnv,
+  type Principal,
+} from "./account-auth";
 import { bindAgentCredential, browserModelSubject } from "./credentials";
 
 const MODEL_HOST = "nanocodex.internal";
@@ -58,7 +63,7 @@ export async function routeBrowserModel(
     });
   }
   const realtimeSubject = model && url.pathname.startsWith("/v1/realtime/")
-    ? await ownedRealtimeSubject(request, env, principal.userId)
+    ? await ownedRealtimeSubject(request, env, principal)
     : undefined;
   if (realtimeSubject instanceof Response) return realtimeSubject;
   const subject = realtimeSubject ?? await browserModelSubject(principal.userId);
@@ -124,7 +129,7 @@ async function agentSubjectUnavailable(response: Response): Promise<boolean> {
 async function ownedRealtimeSubject(
   request: Request,
   env: BrowserModelEnv,
-  userId: string,
+  principal: Principal,
 ): Promise<string | Response | undefined> {
   const agentId = request.headers.get("x-nanocodex-agent-id");
   if (agentId === null) return undefined;
@@ -137,8 +142,10 @@ async function ownedRealtimeSubject(
     return Response.json({ error: "not_found" }, { status: 404 });
   }
   const durableId = env.NANOCODEX_SESSIONS.idFromName(agentId);
+  const ownershipHeaders = new Headers();
+  forwardPrincipalAssertions(ownershipHeaders, principal);
   const owned = await env.NANOCODEX_SESSIONS.get(durableId).fetch("https://session.internal/state", {
-    headers: { "x-nanocodex-owner-id": userId },
+    headers: ownershipHeaders,
   });
   await owned.body?.cancel();
   if (!owned.ok) return Response.json({ error: "not_found" }, { status: 404 });

@@ -1,5 +1,6 @@
 import {
   authenticate,
+  forwardPrincipalAssertions,
   requireSameOriginMutation,
   type AccountAuthEnv,
 } from "./account-auth";
@@ -13,7 +14,6 @@ const MAX_CALL_BODY_BYTES = 64 * 1024;
 const MAX_INSTRUCTIONS_BYTES = 32 * 1024;
 const MAX_SDP_BYTES = 32 * 1024;
 const PROVIDER_PLACEHOLDER = "Bearer NANOCODEX_PROVIDER_CREDENTIAL";
-const OWNER_ASSERTION = "x-nanocodex-owner-id";
 const REALTIME_MODEL = "gpt-live-1-codex";
 const REALTIME_VOICES = new Set([
   "juniper", "maple", "spruce", "ember", "vale", "breeze", "arbor", "sol", "cove",
@@ -66,12 +66,14 @@ export async function routeManagedRealtimeTransport(
 
   const durableId = env.NANOCODEX_SESSIONS.idFromName(agentId);
   const subject = durableId.toString();
+  const ownershipHeaders = new Headers();
+  forwardPrincipalAssertions(ownershipHeaders, principal);
   let owned: boolean;
   try {
     owned = await fetchResponseWithDeadline(
       env.NANOCODEX_SESSIONS.get(durableId),
       "https://session.internal/state",
-      { headers: { [OWNER_ASSERTION]: principal.userId } },
+      { headers: ownershipHeaders },
       ownershipTimeoutMs,
       "managed Realtime ownership assertion",
       (response) => response.ok,

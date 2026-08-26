@@ -532,11 +532,9 @@ fn session_instructions(
     }
     let mut instructions =
         custom.unwrap_or_else(|| ResponsesServiceConfig::default().system_prompt.to_string());
-    if !instructions.contains(SUBAGENT_INSTRUCTIONS) {
-        if subagents_enabled {
-            instructions.push_str("\n\n");
-            instructions.push_str(SUBAGENT_INSTRUCTIONS);
-        }
+    if !instructions.contains(SUBAGENT_INSTRUCTIONS) && subagents_enabled {
+        instructions.push_str("\n\n");
+        instructions.push_str(SUBAGENT_INSTRUCTIONS);
     }
     if memory_enabled && !instructions.contains(MEMORY_INSTRUCTIONS) {
         instructions.push_str("\n\n");

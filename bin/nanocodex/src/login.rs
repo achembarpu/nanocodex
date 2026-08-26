@@ -210,7 +210,7 @@ impl Login {
         if let Some(stored) = &mut active {
             finish_pending_retirement(&paths, stored).await?;
             if stored.satisfies_login(self.mpp) {
-                print_summary(&stored);
+                print_summary(stored);
                 return Ok(());
             }
         }
@@ -326,7 +326,7 @@ struct RequestedCapabilities {
 }
 
 impl RequestedCapabilities {
-    fn login(mpp: bool) -> Self {
+    const fn login(mpp: bool) -> Self {
         Self {
             connectors: Vec::new(),
             mcp_targets: Vec::new(),
@@ -455,10 +455,9 @@ impl LoginFlow {
                 .verification_uri_complete
                 .as_deref()
                 .or(Some(registration.verification_uri.as_str()))
+            && let Err(error) = open_browser(url)
         {
-            if let Err(error) = open_browser(url) {
-                eprintln!("Could not open a browser automatically ({error}). Use the URL above.");
-            }
+            eprintln!("Could not open a browser automatically ({error}). Use the URL above.");
         }
         let result = self.poll(&registration, &verifier).await?;
         let approved = validate_wallet_result(result, &signer, requested_expiry, &request)?;
@@ -1677,7 +1676,7 @@ impl fmt::Debug for ScopedManagedCredential {
 }
 
 impl ScopedManagedCredential {
-    pub(crate) fn origin(&self) -> &Url {
+    pub(crate) const fn origin(&self) -> &Url {
         &self.origin
     }
 
@@ -1696,7 +1695,7 @@ impl ScopedManagedCredential {
     }
 
     #[allow(dead_code)]
-    pub(crate) fn account_address(&self) -> Address {
+    pub(crate) const fn account_address(&self) -> Address {
         self.account_address
     }
 

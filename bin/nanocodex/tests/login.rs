@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 mod auth {
-    pub(crate) fn open_browser(_url: &str) -> std::io::Result<()> {
+    pub(crate) const fn open_browser(_url: &str) -> std::io::Result<()> {
         Ok(())
     }
 }

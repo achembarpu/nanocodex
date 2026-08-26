@@ -109,6 +109,7 @@ import {
   attachAgent,
   authenticate,
   detachAgent,
+  forwardPrincipalAssertions,
   isOrganizationCapabilities,
   isUserId,
   listAgents,
@@ -417,14 +418,6 @@ const json = (body: unknown, init: ResponseInit = {}) => Response.json(body, {
   ...init,
   headers: { "cache-control": "no-store", ...init.headers },
 });
-
-function forwardPrincipalAssertions(headers: Headers, principal: Principal): void {
-  headers.set(SESSION_OWNER_ASSERTION, principal.userId);
-  headers.set(SESSION_ORGANIZATION_ASSERTION, principal.organizationId);
-  headers.set(SESSION_TEAM_ASSERTION, principal.teamId);
-  headers.set(SESSION_AUTHORIZATION_EPOCH_ASSERTION, String(principal.authorizationEpoch));
-  headers.set(SESSION_CAPABILITIES_ASSERTION, JSON.stringify(principal.capabilities));
-}
 
 function forwardedPrincipal(headers: Headers): Readonly<{
   ownerId: string;
@@ -1710,6 +1703,13 @@ export class NanocodexSession extends DurableComputerSession {
       this.#scheduleRecovery();
       return;
     }
+    const session = this.#session();
+    if ((this.#agent || this.#agentPromise)
+      && session !== undefined
+      && session.last_active + this.#idleTimeoutMs() > Date.now()) {
+      await this.#scheduleNextAlarm();
+      return;
+    }
     this.#logCapacity("idle_shutdown");
     while (this.#eventArchive.needsSeal(this.#eventLog)) {
       if (!(await this.#sealEventArchive(false)).sealed) break;
@@ -1721,7 +1721,8 @@ export class NanocodexSession extends DurableComputerSession {
       if (!(await this.#sealRealtimeArchive(false)).sealed) break;
     }
     await this.#shutdownAgent();
-    this.#scheduleRecovery();
+    if (this.#recoverableTurnCount() > 0) this.#scheduleRecovery();
+    else await this.#scheduleNextAlarm();
   }
 
   #upgrade(authorization: TurnAuthorization): Response {
@@ -4195,9 +4196,6 @@ export class NanocodexSession extends DurableComputerSession {
     if (this.#deleting) return;
     const session = this.#session();
     if (!session || session.runtime_profile !== "managed") return;
-    const memory = this.env.NANOCODEX_MEMORY.getByName(session.organization_id);
-    const initialized = await initializeMemoryScope(memory, session.organization_id);
-    if (!initialized.ok) throw new Error(`memory scope initialization failed with HTTP ${initialized.status}`);
     const rows = this.ctx.storage.sql.exec<HistoryProjectionOutboxRow>(
       `SELECT turn_id, payload_json, attempt_count, retry_at
        FROM history_projection_outbox
@@ -4206,6 +4204,10 @@ export class NanocodexSession extends DurableComputerSession {
        LIMIT 16`,
       Date.now(),
     ).toArray();
+    if (rows.length === 0) return;
+    const memory = this.env.NANOCODEX_MEMORY.getByName(session.organization_id);
+    const initialized = await initializeMemoryScope(memory, session.organization_id);
+    if (!initialized.ok) throw new Error(`memory scope initialization failed with HTTP ${initialized.status}`);
     for (const row of rows) {
       if (this.#deleting) return;
       try {
@@ -4648,7 +4650,8 @@ export class NanocodexSession extends DurableComputerSession {
       targets.push(now + 1);
     }
     if (this.#agent || this.#agentPromise || this.#turns.size > 0 || this.#pendingTurnIds.size > 0) {
-      targets.push(now + this.#idleTimeoutMs());
+      const session = this.#session();
+      targets.push(Math.max(now + 1, (session?.last_active ?? now) + this.#idleTimeoutMs()));
     }
     if (!this.#streamError) {
       for (const row of this.#managedTurns(
