@@ -2,7 +2,7 @@ use std::{
     io::Write,
     sync::{
         Arc, OnceLock,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicU64, Ordering},
     },
 };
 
@@ -406,7 +406,40 @@ struct EventChannel {
     next_seq: Arc<AtomicU64>,
     session: mpsc::UnboundedSender<TimedAgentEvent>,
     turn: Option<mpsc::UnboundedSender<TimedAgentEvent>>,
-    turn_terminal: Option<Arc<AtomicBool>>,
+    turn_admission: Option<Arc<AtomicU64>>,
+}
+
+const TURN_TERMINAL: u64 = 1 << 63;
+const TURN_ADMISSIONS: u64 = TURN_TERMINAL - 1;
+
+struct TurnAdmission<'a> {
+    state: &'a AtomicU64,
+}
+
+impl Drop for TurnAdmission<'_> {
+    fn drop(&mut self) {
+        self.state.fetch_sub(1, Ordering::Release);
+    }
+}
+
+struct TerminalClaim<'a> {
+    state: &'a AtomicU64,
+    committed: bool,
+}
+
+impl TerminalClaim<'_> {
+    fn commit(mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for TerminalClaim<'_> {
+    fn drop(&mut self) {
+        if !self.committed {
+            debug_assert_eq!(self.state.load(Ordering::Relaxed), TURN_TERMINAL);
+            self.state.store(0, Ordering::Release);
+        }
+    }
 }
 
 impl EventChannel {
@@ -418,7 +451,7 @@ impl EventChannel {
                 next_seq: Arc::new(AtomicU64::new(1)),
                 session,
                 turn: None,
-                turn_terminal: None,
+                turn_admission: None,
             },
             AgentEvents {
                 request_id,
@@ -435,7 +468,7 @@ impl EventChannel {
                 next_seq: Arc::clone(&self.next_seq),
                 session: self.session.clone(),
                 turn: Some(turn),
-                turn_terminal: Some(Arc::new(AtomicBool::new(false))),
+                turn_admission: Some(Arc::new(AtomicU64::new(0))),
             },
             AgentEvents {
                 request_id: Arc::clone(&self.request_id),
@@ -445,16 +478,102 @@ impl EventChannel {
     }
 
     fn turn_is_terminal(&self) -> bool {
-        self.turn_terminal
+        self.turn_admission
             .as_ref()
-            .is_some_and(|terminal| terminal.load(Ordering::Acquire))
+            .is_some_and(|state| state.load(Ordering::Acquire) & TURN_TERMINAL != 0)
     }
 
-    fn ensure_turn_open(&self) -> Result<(), EventError> {
-        if self.turn_is_terminal() {
-            Err(EventError::TurnAlreadyTerminal)
+    fn admit_non_terminal(&self) -> Result<Option<TurnAdmission<'_>>, EventError> {
+        let Some(state) = self.turn_admission.as_deref() else {
+            return Ok(None);
+        };
+        let mut current = state.load(Ordering::Acquire);
+        loop {
+            if current & TURN_TERMINAL != 0 {
+                return Err(EventError::TurnAlreadyTerminal);
+            }
+            if current == TURN_ADMISSIONS {
+                return Err(EventError::SequenceExhausted);
+            }
+            match state.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return Ok(Some(TurnAdmission { state })),
+                Err(observed) => current = observed,
+            }
+        }
+    }
+
+    /// Atomically closes admission, then waits for publications admitted before
+    /// the terminal to finish routing. The low 63 bits count those admissions,
+    /// so exhaustion requires `2^63 - 1` simultaneous in-flight publications.
+    fn claim_terminal(&self) -> Result<Option<TerminalClaim<'_>>, EventError> {
+        let Some(state) = self.turn_admission.as_deref() else {
+            return Ok(None);
+        };
+        let previous = state.fetch_or(TURN_TERMINAL, Ordering::AcqRel);
+        if previous & TURN_TERMINAL != 0 {
+            return Err(EventError::TurnAlreadyTerminal);
+        }
+        while state.load(Ordering::Acquire) != TURN_TERMINAL {
+            std::hint::spin_loop();
+        }
+        Ok(Some(TerminalClaim {
+            state,
+            committed: false,
+        }))
+    }
+
+    fn reserve_publisher_event(
+        &self,
+        event: &AgentEvent,
+    ) -> Result<Option<TurnAdmission<'_>>, EventError> {
+        let terminal_claim = if event.kind.is_terminal() {
+            self.claim_terminal()?
         } else {
-            Ok(())
+            None
+        };
+        let admission = if terminal_claim.is_none() && !event.kind.is_terminal() {
+            self.admit_non_terminal()?
+        } else {
+            None
+        };
+        self.reserve_exact_sequence(event.seq)?;
+        if let Some(claim) = terminal_claim {
+            claim.commit();
+        }
+        Ok(admission)
+    }
+
+    fn reserve_exact_sequence(&self, seq: u64) -> Result<(), EventError> {
+        let next_seq = seq.checked_add(1).ok_or(EventError::SequenceExhausted)?;
+        self.next_seq
+            .compare_exchange(seq, next_seq, Ordering::AcqRel, Ordering::Acquire)
+            .map(|_| ())
+            .map_err(|expected| EventError::SequenceMismatch {
+                expected,
+                actual: seq,
+            })
+    }
+
+    #[cfg(feature = "client")]
+    fn allocate_sequence(&self) -> Result<u64, EventError> {
+        self.next_seq
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |seq| {
+                seq.checked_add(1)
+            })
+            .map_err(|_| EventError::SequenceExhausted)
+    }
+
+    #[cfg(feature = "client")]
+    fn record_local_terminal(&self, kind: AgentEventKind) {
+        if kind.is_terminal()
+            && let Some(state) = &self.turn_admission
+        {
+            state.fetch_or(TURN_TERMINAL, Ordering::Release);
         }
     }
 
@@ -468,22 +587,9 @@ impl EventChannel {
     }
 
     fn publish(&self, event: TimedAgentEvent) {
-        let terminal = event.event.kind.is_terminal();
         drop(self.session.send(event.clone()));
         if let Some(turn) = &self.turn {
             drop(turn.send(event));
-        }
-        if terminal && let Some(turn_terminal) = &self.turn_terminal {
-            turn_terminal.store(true, Ordering::Release);
-        }
-    }
-
-    #[cfg(feature = "client")]
-    fn record_terminal(&self, kind: AgentEventKind) {
-        if kind.is_terminal()
-            && let Some(turn_terminal) = &self.turn_terminal
-        {
-            turn_terminal.store(true, Ordering::Release);
         }
     }
 }
@@ -553,25 +659,9 @@ impl AgentEventPublisher {
 
     fn publish_timed(&self, event: TimedAgentEvent) -> Result<(), EventError> {
         self.validate(&event.event)?;
-        self.channel.ensure_turn_open()?;
-        let next_seq = event
-            .event
-            .seq
-            .checked_add(1)
-            .ok_or(EventError::SequenceExhausted)?;
-        self.channel
-            .next_seq
-            .compare_exchange(
-                event.event.seq,
-                next_seq,
-                Ordering::Relaxed,
-                Ordering::Relaxed,
-            )
-            .map_err(|expected| EventError::SequenceMismatch {
-                expected,
-                actual: event.event.seq,
-            })?;
+        let admission = self.channel.reserve_publisher_event(&event.event)?;
         self.channel.publish(event);
+        drop(admission);
         Ok(())
     }
 
@@ -629,7 +719,8 @@ impl EventSink {
     ///
     /// # Errors
     ///
-    /// Returns an error when the payload cannot be converted to JSON.
+    /// Returns an error when the payload cannot be converted to JSON or the
+    /// sequence is exhausted.
     pub fn emit<P: Serialize>(&self, kind: AgentEventKind, payload: P) -> Result<(), EventError> {
         self.emit_with_sequence(kind, payload).map(|_| ())
     }
@@ -641,7 +732,8 @@ impl EventSink {
     ///
     /// # Errors
     ///
-    /// Returns an error when the payload cannot be converted to JSON.
+    /// Returns an error when the payload cannot be converted to JSON or the
+    /// sequence is exhausted.
     pub fn emit_with_sequence<P: Serialize>(
         &self,
         kind: AgentEventKind,
@@ -658,21 +750,13 @@ impl EventSink {
         source_received_ns: Option<u64>,
     ) -> Result<u64, EventError> {
         if self.publisher.channel.receivers_are_closed() {
-            let seq = self
-                .publisher
-                .channel
-                .next_seq
-                .fetch_add(1, Ordering::Relaxed);
-            self.publisher.channel.record_terminal(kind);
+            let seq = self.publisher.channel.allocate_sequence()?;
+            self.publisher.channel.record_local_terminal(kind);
             return Ok(seq);
         }
 
         let payload = Arc::from(to_raw_value(&payload).map_err(EventError::Encode)?);
-        let seq = self
-            .publisher
-            .channel
-            .next_seq
-            .fetch_add(1, Ordering::Relaxed);
+        let seq = self.publisher.channel.allocate_sequence()?;
         let event = TimedAgentEvent {
             event: AgentEvent {
                 protocol_version: AGENT_EVENT_PROTOCOL_VERSION,
@@ -687,6 +771,7 @@ impl EventSink {
             },
         };
         self.publisher.channel.publish(event);
+        self.publisher.channel.record_local_terminal(kind);
         Ok(seq)
     }
 
@@ -710,6 +795,9 @@ mod tests {
     use std::sync::Arc;
 
     #[cfg(feature = "client")]
+    use std::sync::atomic::Ordering;
+
+    #[cfg(feature = "client")]
     use serde::{Serialize, Serializer};
     #[cfg(feature = "client")]
     use serde_json::json;
@@ -720,7 +808,8 @@ mod tests {
     #[cfg(feature = "client")]
     use super::EventSink;
     use super::{
-        AGENT_EVENT_PROTOCOL_VERSION, AgentEvent, AgentEventKind, AgentEventPublisher, EventError,
+        AGENT_EVENT_PROTOCOL_VERSION, AgentEvent, AgentEventKind, AgentEventPublisher,
+        AgentEventTiming, EventError, TimedAgentEvent,
     };
 
     #[cfg(feature = "client")]
@@ -935,6 +1024,77 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn terminal_reservation_closes_cloned_publishers_before_delivery() {
+        let (publisher, mut session) = AgentEventPublisher::channel("request-1");
+        let (publisher, mut turn) = publisher.mirrored_channel();
+        let non_terminal = AgentEvent {
+            protocol_version: AGENT_EVENT_PROTOCOL_VERSION,
+            request_id: Arc::from("request-1"),
+            seq: 1,
+            kind: AgentEventKind::AssistantDelta,
+            payload: Arc::from(serde_json::from_str::<Box<RawValue>>("{}").unwrap()),
+        };
+        let terminal = AgentEvent {
+            protocol_version: AGENT_EVENT_PROTOCOL_VERSION,
+            request_id: Arc::from("request-1"),
+            seq: 2,
+            kind: AgentEventKind::RunCompleted,
+            payload: Arc::from(serde_json::from_str::<Box<RawValue>>("{}").unwrap()),
+        };
+        let admission = publisher
+            .channel
+            .reserve_publisher_event(&non_terminal)
+            .unwrap()
+            .expect("non-terminal publication should hold admission");
+        let terminal_publisher = publisher.clone();
+        let terminal_thread = std::thread::spawn(move || terminal_publisher.publish(terminal));
+        while !publisher.turn_is_terminal() {
+            std::thread::yield_now();
+        }
+        assert!(matches!(
+            publisher.publish(AgentEvent {
+                protocol_version: AGENT_EVENT_PROTOCOL_VERSION,
+                request_id: Arc::from("request-1"),
+                seq: 3,
+                kind: AgentEventKind::AssistantDelta,
+                payload: Arc::from(serde_json::from_str::<Box<RawValue>>("{}").unwrap()),
+            }),
+            Err(EventError::TurnAlreadyTerminal)
+        ));
+        assert!(session.receiver.try_recv().is_err());
+        assert!(turn.receiver.try_recv().is_err());
+
+        publisher.channel.publish(TimedAgentEvent {
+            event: non_terminal,
+            timing: AgentEventTiming {
+                emitted_ns: 0,
+                source_received_ns: None,
+            },
+        });
+        drop(admission);
+        terminal_thread.join().unwrap().unwrap();
+
+        assert_eq!(
+            session.receiver.try_recv().unwrap().event.kind,
+            AgentEventKind::AssistantDelta
+        );
+        assert_eq!(
+            turn.receiver.try_recv().unwrap().event.kind,
+            AgentEventKind::AssistantDelta
+        );
+        assert_eq!(
+            session.receiver.try_recv().unwrap().event.kind,
+            AgentEventKind::RunCompleted
+        );
+        assert_eq!(
+            turn.receiver.try_recv().unwrap().event.kind,
+            AgentEventKind::RunCompleted
+        );
+        assert!(session.receiver.try_recv().is_err());
+        assert!(turn.receiver.try_recv().is_err());
+    }
+
     #[cfg(feature = "client")]
     #[test]
     fn closed_turn_stream_records_terminal_without_changing_sink_behavior() {
@@ -963,6 +1123,38 @@ mod tests {
                 .emit_with_sequence(AgentEventKind::AssistantDelta, MustNotSerialize)
                 .unwrap(),
             2
+        );
+    }
+
+    #[cfg(feature = "client")]
+    #[test]
+    fn closed_sink_fails_before_sequence_wrap_without_serializing() {
+        struct MustNotSerialize;
+
+        impl Serialize for MustNotSerialize {
+            fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: Serializer,
+            {
+                panic!("closed event streams must not serialize payloads")
+            }
+        }
+
+        let (events, receiver) = EventSink::channel("request-1".to_owned());
+        drop(receiver);
+        events
+            .publisher
+            .channel
+            .next_seq
+            .store(u64::MAX, Ordering::Relaxed);
+
+        assert!(matches!(
+            events.emit_with_sequence(AgentEventKind::ApiEvent, MustNotSerialize),
+            Err(EventError::SequenceExhausted)
+        ));
+        assert_eq!(
+            events.publisher.channel.next_seq.load(Ordering::Relaxed),
+            u64::MAX
         );
     }
 
