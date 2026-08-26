@@ -14,7 +14,7 @@ use super::{
     NestedToolCall, OwnedToolContext,
 };
 use crate::{
-    Tools,
+    ToolExposure, Tools,
     runtime_config::{ImageGenerationConfig, WebSearchConfig},
 };
 
@@ -32,8 +32,14 @@ pub struct EmbeddedToolRuntime {
     working_directory: Arc<str>,
     host: Option<Arc<dyn CodeModeHost>>,
     session_id: Option<Arc<str>>,
-    local: Vec<(Arc<str>, Arc<dyn Tool>)>,
+    local: Vec<LocalTool>,
     callable_tool_names: RwLock<HashSet<String>>,
+}
+
+struct LocalTool {
+    name: Arc<str>,
+    handler: Arc<dyn Tool>,
+    model_visible: bool,
 }
 
 /// Cancellation handle for work owned by an embedding host.
@@ -78,11 +84,11 @@ impl EmbeddedToolRuntime {
         self.local = tools
             .registered
             .iter()
-            .map(|registered| {
-                (
-                    Arc::from(registered.handler.definition().name()),
-                    Arc::clone(&registered.handler),
-                )
+            .map(|registered| LocalTool {
+                name: Arc::from(registered.handler.definition().name()),
+                handler: Arc::clone(&registered.handler),
+                model_visible: registered.exposure.unwrap_or_else(|| tools.exposure())
+                    != ToolExposure::Hidden,
             })
             .collect();
         self
@@ -140,7 +146,7 @@ impl EmbeddedToolRuntime {
             !self
                 .local
                 .iter()
-                .any(|(name, _)| name.as_ref() == definition.name())
+                .any(|tool| tool.name.as_ref() == definition.name())
         });
         crate::code_mode_order::sort_definitions(&mut definitions);
         if let Ok(mut names) = self.callable_tool_names.write() {
@@ -157,7 +163,12 @@ impl EmbeddedToolRuntime {
             );
         }
         if mode == EmbeddedToolMode::Direct {
-            definitions.extend(self.local.iter().map(|(_, tool)| tool.definition()));
+            definitions.extend(
+                self.local
+                    .iter()
+                    .filter(|tool| tool.model_visible)
+                    .map(|tool| tool.handler.definition()),
+            );
             crate::code_mode_order::sort_definitions(&mut definitions);
             return (definitions, Vec::new());
         }
@@ -185,7 +196,12 @@ impl EmbeddedToolRuntime {
             .map(crate::code_mode_description::augment_definition_for_code_mode)
             .collect();
         crate::code_mode_order::sort_direct_definitions(&mut direct_definitions);
-        direct_definitions.extend(self.local.iter().map(|(_, tool)| tool.definition()));
+        direct_definitions.extend(
+            self.local
+                .iter()
+                .filter(|tool| tool.model_visible)
+                .map(|tool| tool.handler.definition()),
+        );
         crate::code_mode_order::sort_direct_definitions(&mut direct_definitions);
         let code_mode_tool_names = code_mode_definitions
             .iter()
@@ -246,9 +262,7 @@ impl EmbeddedToolRuntime {
     /// request.
     #[must_use]
     pub fn contains(&self, name: &str) -> bool {
-        self.local
-            .iter()
-            .any(|(configured, _)| configured.as_ref() == name)
+        self.local.iter().any(|tool| tool.name.as_ref() == name)
             || self.host.as_ref().is_some_and(|_| {
                 self.callable_tool_names
                     .read()
@@ -267,12 +281,9 @@ impl EmbeddedToolRuntime {
         input: ToolInput,
         context: ToolContext<'_>,
     ) -> ToolOutput {
-        if let Some((_, tool)) = self
-            .local
-            .iter()
-            .find(|(configured, _)| configured.as_ref() == name)
-        {
+        if let Some(tool) = self.local.iter().find(|tool| tool.name.as_ref() == name) {
             return tool
+                .handler
                 .execute(input, context)
                 .await
                 .unwrap_or_else(|error| ToolOutput::error(error.to_string()));
@@ -424,10 +435,10 @@ mod tests {
 
     use super::EmbeddedToolRuntime;
     use crate::{
-        Tool, ToolContext, ToolDefinition, ToolInput, ToolOutput, ToolResult, Tools,
+        Tool, ToolContext, ToolDefinition, ToolExposure, ToolInput, ToolOutput, ToolResult, Tools,
         embedded::{
-            CodeModeExecution, CodeModeHost, CodeModeHostError, HostFuture, NestedToolCall,
-            bind_host,
+            CodeModeExecution, CodeModeHost, CodeModeHostError, EmbeddedToolMode, HostFuture,
+            NestedToolCall, bind_host,
         },
     };
 
@@ -444,6 +455,10 @@ mod tests {
     struct ExecHost;
 
     struct LocalAlpha;
+
+    struct LocalPrivate;
+
+    struct DirectHost;
 
     struct WebHost;
 
@@ -463,6 +478,42 @@ mod tests {
                 json!({"session_id": context.session_id()}),
                 true,
             ))
+        }
+    }
+
+    #[async_trait]
+    impl Tool for LocalPrivate {
+        fn definition(&self) -> ToolDefinition {
+            ToolDefinition::function(
+                "_internal/tool",
+                "Private Rust tool.",
+                json!({"type": "object"}),
+            )
+        }
+
+        async fn execute(&self, _input: ToolInput, _context: ToolContext<'_>) -> ToolResult {
+            Ok(ToolOutput::from_json(json!({"private": true}), true))
+        }
+    }
+
+    impl CodeModeHost for DirectHost {
+        fn tool_mode(&self) -> EmbeddedToolMode {
+            EmbeddedToolMode::Direct
+        }
+
+        fn tool_definitions(
+            &self,
+            _session_id: &str,
+        ) -> Result<Vec<ToolDefinition>, CodeModeHostError> {
+            Ok(Vec::new())
+        }
+
+        fn execute<'a>(
+            &'a self,
+            _source: &'a str,
+            _context: ToolContext<'a>,
+        ) -> HostFuture<'a, Result<CodeModeExecution, CodeModeHostError>> {
+            Box::pin(async { unreachable!("direct host does not execute Code Mode") })
         }
     }
 
@@ -723,6 +774,38 @@ mod tests {
             .await;
         assert!(output.success);
         assert_eq!(output.structured_result()["session_id"], "session-1");
+    }
+
+    #[tokio::test]
+    async fn hidden_private_tools_dispatch_without_entering_embedded_model_specs() {
+        let tools = Tools::builder()
+            .without_defaults()
+            .tool_with_exposure(LocalPrivate, ToolExposure::Hidden)
+            .build()
+            .unwrap();
+        let code_tools = bind_host(tools.clone(), EchoHost).for_session("session-1");
+        let direct_tools = bind_host(tools, DirectHost);
+        let code_runtime = EmbeddedToolRuntime::new_with_tools(".", None, None, &code_tools);
+        let direct_runtime = EmbeddedToolRuntime::new_with_tools(".", None, None, &direct_tools);
+
+        for runtime in [&code_runtime, &direct_runtime] {
+            assert!(
+                runtime
+                    .model_specs("session-1")
+                    .iter()
+                    .all(|definition| definition.name() != "_internal/tool")
+            );
+            assert!(runtime.contains("_internal/tool"));
+        }
+
+        let output = code_runtime
+            .execute_tool(
+                "_internal/tool",
+                ToolInput::Function(serde_json::value::to_raw_value(&json!({})).unwrap()),
+                ToolContext::new("gpt-5", "session-1", "call-1", &[], 1_000),
+            )
+            .await;
+        assert_eq!(output.structured_result(), json!({"private": true}));
     }
 
     #[tokio::test]
