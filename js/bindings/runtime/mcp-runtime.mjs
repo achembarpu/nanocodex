@@ -10,11 +10,6 @@ const MAX_SEARCH_LIMIT = 32;
 const DEFAULT_STARTUP_TIMEOUT_MS = 30_000;
 const DEFAULT_TOOL_TIMEOUT_MS = 5 * 60_000;
 const SEARCH_DESCRIPTION_PREFIX = "# Tool discovery\n\nSearches over deferred tool metadata with BM25 and exposes matching tools for the next model call.";
-const RESOURCE_TOOL_NAMES = new Set([
-  "list_mcp_resources",
-  "list_mcp_resource_templates",
-  "read_mcp_resource",
-]);
 
 export async function createMcpRuntime(configuration, options = {}) {
   const servers = normalizeServers(configuration);
@@ -23,7 +18,6 @@ export async function createMcpRuntime(configuration, options = {}) {
   const entries = [];
   const failures = Object.create(null);
   const ownedClients = [];
-  const connectedServers = new Map();
   const pendingServers = new Set(servers.map((server) => server.name));
   const initializationControllers = new Map();
   const byName = new Map();
@@ -55,7 +49,6 @@ export async function createMcpRuntime(configuration, options = {}) {
         }
       }
       if (connection.owned) ownedClients.push(connection.client);
-      connectedServers.set(server.name, { client: connection.client, server });
       for (const entry of nextEntries) {
         entries.push(entry);
         byName.set(entry.canonicalName, entry);
@@ -74,7 +67,6 @@ export async function createMcpRuntime(configuration, options = {}) {
     parallelSafe: true,
     handler: ({ query, limit }) => searchTools(query, limit),
   };
-  const resourceTools = createResourceTools(connectedServers, pendingServers, failures);
 
   function searchTools(query, limit = DEFAULT_SEARCH_LIMIT) {
     if (typeof query !== "string" || !query.trim()) {
@@ -108,15 +100,11 @@ export async function createMcpRuntime(configuration, options = {}) {
     definitions() {
       return [
         toolSearchDefinition(servers),
-        ...resourceTools.map((tool) => tool.definition),
         ...entries.map((entry) => entry.definition),
       ];
     },
     resolve(name) {
       if (name === "tool_search") return toolSearch;
-      if (RESOURCE_TOOL_NAMES.has(name)) {
-        return resourceTools.find((tool) => tool.name === name);
-      }
       const entry = byName.get(name);
       if (!entry) return undefined;
       return {
@@ -287,196 +275,6 @@ function normalizeServers(configuration) {
 
 function isStringArray(value) {
   return Array.isArray(value) && value.every((item) => typeof item === "string");
-}
-
-function createResourceTools(connectedServers, pendingServers, failures) {
-  const byServer = connectedServers;
-  return [
-    {
-      name: "list_mcp_resources",
-      definition: listResourcesDefinition(
-        "list_mcp_resources",
-        "Lists resources provided by MCP servers. Resources allow servers to share data that provides context to language models, such as files, database schemas, or application-specific information. Prefer resources over web search when possible.",
-        "resources",
-      ),
-      handler: (input, context) => listMcpEntries(
-        byServer,
-        pendingServers,
-        failures,
-        input,
-        "resources",
-        context?.signal,
-      ),
-      parallelSafe: true,
-    },
-    {
-      name: "list_mcp_resource_templates",
-      definition: listResourcesDefinition(
-        "list_mcp_resource_templates",
-        "Lists resource templates provided by MCP servers. Parameterized resource templates allow servers to share data that takes parameters and provides context to language models, such as files, database schemas, or application-specific information. Prefer resource templates over web search when possible.",
-        "resource templates",
-      ),
-      handler: (input, context) =>
-        listMcpEntries(
-          byServer,
-          pendingServers,
-          failures,
-          input,
-          "resourceTemplates",
-          context?.signal,
-        ),
-      parallelSafe: true,
-    },
-    {
-      name: "read_mcp_resource",
-      definition: {
-        type: "function",
-        name: "read_mcp_resource",
-        description: "Read a specific resource from an MCP server given the server name and resource URI.",
-        strict: false,
-        parameters: {
-          type: "object",
-          properties: {
-            server: {
-              type: "string",
-              description: "MCP server name exactly as configured. Must match the 'server' field returned by list_mcp_resources.",
-            },
-            uri: {
-              type: "string",
-              description: "Resource URI to read. Must be one of the URIs returned by list_mcp_resources.",
-            },
-          },
-          required: ["server", "uri"],
-          additionalProperties: false,
-        },
-      },
-      handler: (input, context) => readMcpResource(byServer, input, context?.signal),
-      parallelSafe: true,
-    },
-  ];
-}
-
-function listResourcesDefinition(name, description, noun) {
-  return {
-    type: "function",
-    name,
-    description,
-    strict: false,
-    parameters: {
-      type: "object",
-      properties: {
-        cursor: {
-          type: "string",
-          description: `Opaque cursor from a previous ${name} call; omit for the first page.`,
-        },
-        server: {
-          type: "string",
-          description: `MCP server name. Omit to list ${noun} from every configured server.`,
-        },
-      },
-      additionalProperties: false,
-    },
-  };
-}
-
-async function listMcpEntries(byServer, pendingServers, failures, input, kind, signal) {
-  const { cursor, server } = normalizeListInput(input);
-  if (server) {
-    if (pendingServers.has(server)) {
-      throw new Error(`MCP server discovery is still pending: ${server}`);
-    }
-    if (failures[server]) {
-      throw new Error(`MCP server discovery failed: ${server}: ${failures[server]}`);
-    }
-    const connection = requiredMcpConnection(byServer, server);
-    const result = await listMcpPage(connection, kind, cursor, signal);
-    return {
-      server,
-      [kind]: tagMcpEntries(result[kind], server),
-      ...(result.nextCursor ? { nextCursor: result.nextCursor } : {}),
-    };
-  }
-  if (cursor) throw new Error("cursor can only be used when a server is specified");
-  const pages = await Promise.allSettled([...byServer].map(async ([name, connection]) =>
-    tagMcpEntries(await listAllMcpEntries(connection, kind, signal), name)));
-  return {
-    [kind]: pages.flatMap((page) => page.status === "fulfilled" ? page.value : []),
-    ...(pendingServers.size || Object.keys(failures).length ? {
-      pending_servers: pendingServers.size,
-      failed_servers: { ...failures },
-    } : {}),
-  };
-}
-
-function normalizeListInput(input) {
-  if (!input || typeof input !== "object" || Array.isArray(input)) {
-    throw new TypeError("MCP resource listing requires an object");
-  }
-  const normalized = {};
-  for (const field of ["cursor", "server"]) {
-    const value = input[field];
-    if (value === undefined) continue;
-    if (typeof value !== "string") throw new TypeError(`${field} must be a string`);
-    if (value.trim()) normalized[field] = value.trim();
-  }
-  return normalized;
-}
-
-async function listAllMcpEntries(connection, kind, signal) {
-  const entries = [];
-  const seen = new Set();
-  let cursor;
-  for (let page = 0; page < 100; page += 1) {
-    const result = await listMcpPage(connection, kind, cursor, signal);
-    entries.push(...(result[kind] ?? []));
-    if (!result.nextCursor) return entries;
-    if (seen.has(result.nextCursor)) {
-      throw new Error(`MCP ${kind} returned a repeated cursor`);
-    }
-    seen.add(result.nextCursor);
-    cursor = result.nextCursor;
-  }
-  throw new Error(`MCP ${kind} exceeded 100 pages`);
-}
-
-function listMcpPage(connection, kind, cursor, signal) {
-  const params = cursor ? { cursor } : undefined;
-  return withMcpRequest(connection.server, signal, (options) =>
-    kind === "resources"
-      ? connection.client.listResources(params, options)
-      : connection.client.listResourceTemplates(params, options));
-}
-
-function tagMcpEntries(entries = [], server) {
-  return entries.map((entry) => ({ ...entry, server }));
-}
-
-async function readMcpResource(byServer, input, signal) {
-  if (!input || typeof input !== "object" || Array.isArray(input)) {
-    throw new TypeError("read_mcp_resource requires an object");
-  }
-  const server = requiredString(input.server, "server");
-  const uri = requiredString(input.uri, "uri");
-  const connection = requiredMcpConnection(byServer, server);
-  const result = await withMcpRequest(connection.server, signal, (options) =>
-    connection.client.readResource({ uri }, options));
-  if (!result || typeof result !== "object" || Array.isArray(result)) {
-    throw new Error("MCP resources/read returned a non-object result");
-  }
-  return { ...result, server, uri };
-}
-
-function requiredMcpConnection(byServer, server) {
-  const connection = byServer.get(server);
-  if (!connection) throw new Error(`unknown MCP server: ${server}`);
-  return connection;
-}
-
-function requiredString(value, name) {
-  if (typeof value !== "string" || !value.trim()) {
-    throw new TypeError(`${name} must not be empty`);
-  }
-  return value.trim();
 }
 
 function createEntry(server, client, tool) {

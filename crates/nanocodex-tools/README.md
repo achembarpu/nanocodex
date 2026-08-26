@@ -157,8 +157,7 @@ MCP namespaces for direct model calls and also activate matching Code Mode
 definitions, keeping large catalogs out of the initial tool list.
 `McpServer::tool_exposure` independently selects `DeferredOnly`,
 `CodeModeOnly`, `DeferredAndCodeMode`, or `Hidden` for each server. Automatic
-catalog and aggregate resource pagination is bounded by page, item, cursor,
-and wall-clock limits.
+catalog pagination is bounded by page, item, cursor, and wall-clock limits.
 
 ## Attach one immutable recipe
 

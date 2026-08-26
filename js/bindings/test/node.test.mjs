@@ -149,28 +149,6 @@ test("Node host disposal closes MCP that resolves after disposal starts", async 
   assert.doesNotMatch(host.toolDefinitions(), /tool_search|mcp__delayed__/);
 });
 
-test("Node host closes MCP when provider admission collides", async () => {
-  let aborted = false;
-  const host = createNodeHost({
-    tools: {
-      list_mcp_resources: { handler() {} },
-    },
-    mcpServers: {
-      colliding: {
-        client: {
-          listTools(_params, { signal }) {
-            signal.addEventListener("abort", () => { aborted = true; }, { once: true });
-            return new Promise(() => {});
-          },
-        },
-      },
-    },
-  });
-  await assert.rejects(host.ready(), /duplicate tool name/);
-  assert.equal(aborted, true);
-  await assert.rejects(host.dispose(), /duplicate tool name/);
-});
-
 test("Node host readiness preserves MCP construction failures", async () => {
   const host = createNodeHost({ mcpServers: {} });
   await assert.rejects(host.ready());
@@ -214,12 +192,9 @@ test("Node host loads and calls deferred Mercator MCP tools", async () => {
     );
     assert.deepEqual(definitions.map((definition) => definition.name ?? definition.type), [
       "tool_search",
-      "list_mcp_resources",
-      "list_mcp_resource_templates",
-      "read_mcp_resource",
       "mcp__mercator__search_services",
     ]);
-    assert.equal(definitions[4].defer_loading, true);
+    assert.equal(definitions[1].defer_loading, true);
     const execution = JSON.parse(await host.executeCode(
       "text(await tools.mcp__mercator__search_services({ query: 'weather' }));",
       "node-session",

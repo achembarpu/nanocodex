@@ -346,29 +346,6 @@ impl ProviderState {
             .collect())
     }
 
-    pub(crate) async fn client(&self, server_name: &str) -> Result<Client, String> {
-        self.wait_for_startup().await;
-        let catalog = self.catalog();
-        if let Some(client) = catalog.clients.get(server_name) {
-            return Ok(Arc::clone(client));
-        }
-        if let Some(error) = catalog.failures.get(server_name) {
-            return Err(format!(
-                "MCP server `{server_name}` is unavailable: {error}"
-            ));
-        }
-        Err(format!("unknown MCP server `{server_name}`"))
-    }
-
-    pub(crate) async fn clients(&self) -> Vec<(String, Client)> {
-        self.wait_for_startup().await;
-        self.catalog()
-            .clients
-            .iter()
-            .map(|(name, client)| (name.clone(), Arc::clone(client)))
-            .collect()
-    }
-
     async fn wait_for_startup(&self) {
         if self.catalog().search_index.is_some() {
             return;

@@ -659,28 +659,6 @@ test("web-target WASM executes the complete browser harness tool contract", asyn
         ],
       };
     },
-    async listResources(params) {
-      effects.mcp.push({ name: "listResources", input: params ?? null });
-      return params?.cursor
-        ? { resources: [{ uri: "fixture://two", name: "Two" }] }
-        : {
-            resources: [{ uri: "fixture://one", name: "One" }],
-            nextCursor: "second-page",
-          };
-    },
-    async listResourceTemplates(params) {
-      effects.mcp.push({ name: "listResourceTemplates", input: params ?? null });
-      return {
-        resourceTemplates: [{
-          uriTemplate: "fixture://{slug}",
-          name: "Fixture template",
-        }],
-      };
-    },
-    async readResource({ uri }) {
-      effects.mcp.push({ name: "readResource", input: { uri } });
-      return { contents: [{ uri, text: "fixture resource body" }] };
-    },
     async callTool({ name, arguments: input }) {
       effects.mcp.push({ name: "callTool", input: { name, arguments: input } });
       if (name === "fail") {
@@ -841,12 +819,9 @@ test("web-target WASM executes the complete browser harness tool contract", asyn
       "const queried = await tools.dataset({ operation: \"query\", dataset_id: opened.datasetId, columns: [\"id\"], filters: [{ column: \"label\", op: \"eq\", value: \"beta\" }], limit: 1 });",
       "const closed = await tools.dataset({ operation: \"close\", dataset_id: opened.datasetId });",
       "const rendered = await tools.render_artifact({ id: \"combined\", title: \"Combined\", source: \"function App() { return React.createElement('main', null, 'combined'); }\" });",
-      "const resources = await tools.list_mcp_resources({});",
-      "const templates = await tools.list_mcp_resource_templates({ server: \"fixture\" });",
-      "const resource = await tools.read_mcp_resource({ server: \"fixture\", uri: \"fixture://one\" });",
       "const remote = await tools.mcp__fixture__echo({ message: \"nested\" });",
       "let remoteFailed = false; try { await tools.mcp__fixture__fail({}); } catch (error) { remoteFailed = error.isError === true; }",
-      "text(JSON.stringify({ patched: patched.includes('M note.txt'), viewed: viewed.detail, web, image: generated.image_url, rows: queried.rows, closed: closed.closed, rendered, resourceUris: resources.resources.map((entry) => entry.uri), template: templates.resourceTemplates[0].uriTemplate, resourceText: resource.contents[0].text, remote: remote.content[0].text, remoteFailed }));",
+      "text(JSON.stringify({ patched: patched.includes('M note.txt'), viewed: viewed.detail, web, image: generated.image_url, rows: queried.rows, closed: closed.closed, rendered, remote: remote.content[0].text, remoteFailed }));",
     ].join("\n");
     send(socket, {
       type: "response.completed",
@@ -899,9 +874,6 @@ test("web-target WASM executes the complete browser harness tool contract", asyn
         title: "Combined",
         runtime: "react",
       },
-      resourceUris: ["fixture://one", "fixture://two"],
-      template: "fixture://{slug}",
-      resourceText: "fixture resource body",
       remote: "fixture:nested",
       remoteFailed: true,
     });
@@ -953,10 +925,6 @@ test("web-target WASM executes the complete browser harness tool contract", asyn
       ],
     );
     assert.deepEqual(effects.mcp, [
-      { name: "listResources", input: null },
-      { name: "listResources", input: { cursor: "second-page" } },
-      { name: "listResourceTemplates", input: null },
-      { name: "readResource", input: { uri: "fixture://one" } },
       {
         name: "callTool",
         input: { name: "echo", arguments: { message: "nested" } },
@@ -1006,9 +974,6 @@ test("web-target WASM executes the complete browser harness tool contract", asyn
         "dataset",
         "dataset",
         "render_artifact",
-        "list_mcp_resources",
-        "list_mcp_resource_templates",
-        "read_mcp_resource",
         "mcp__fixture__echo",
         "mcp__fixture__fail",
       ],

@@ -1238,9 +1238,6 @@ tool_timeout_sec = 9.5
 
         assert!(encoded.contains("\"type\":\"tool_search\""));
         assert!(encoded.contains("Some deferred nested tools may be omitted"));
-        assert!(encoded.contains("list_mcp_resource_templates"));
-        assert!(encoded.contains("list_mcp_resources"));
-        assert!(encoded.contains("read_mcp_resource"));
         assert!(!encoded.contains("mcp__openaiDeveloperDocs__"));
         assert!(!encoded.contains("mcp__tempo__"));
         assert!(!encoded.contains("mcp__cloudflare__"));

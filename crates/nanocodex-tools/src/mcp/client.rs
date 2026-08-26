@@ -3,10 +3,7 @@ use std::{collections::HashMap, sync::Arc};
 use http::{HeaderName, HeaderValue, header::USER_AGENT};
 use rmcp::{
     ServiceExt,
-    model::{
-        CallToolRequestParams, CallToolResult, ListResourceTemplatesResult, ListResourcesResult,
-        PaginatedRequestParams, ReadResourceRequestParams, ReadResourceResult, Tool,
-    },
+    model::{CallToolRequestParams, CallToolResult, Tool},
     service::{RoleClient, RunningService, ServiceError},
     transport::{
         StreamableHttpClientTransport, streamable_http_client::StreamableHttpClientTransportConfig,
@@ -103,51 +100,6 @@ impl ClientInner {
         }
     }
 
-    pub(crate) async fn list_resources(
-        &self,
-        params: Option<PaginatedRequestParams>,
-    ) -> Result<ListResourcesResult, String> {
-        let parent = Span::current();
-        self.refresh_oauth().await?;
-        let result = self
-            .service
-            .list_resources(params)
-            .await
-            .map_err(|error| error.to_string());
-        self.persist_oauth(&parent).await;
-        result
-    }
-
-    pub(crate) async fn list_resource_templates(
-        &self,
-        params: Option<PaginatedRequestParams>,
-    ) -> Result<ListResourceTemplatesResult, String> {
-        let parent = Span::current();
-        self.refresh_oauth().await?;
-        let result = self
-            .service
-            .list_resource_templates(params)
-            .await
-            .map_err(|error| error.to_string());
-        self.persist_oauth(&parent).await;
-        result
-    }
-
-    pub(crate) async fn read_resource(
-        &self,
-        params: ReadResourceRequestParams,
-    ) -> Result<ReadResourceResult, String> {
-        let parent = Span::current();
-        self.refresh_oauth().await?;
-        let result = self
-            .service
-            .read_resource(params)
-            .await
-            .map_err(|error| error.to_string());
-        self.persist_oauth(&parent).await;
-        result
-    }
-
     async fn list_all_tools(&self, parent: &Span) -> Result<Vec<Tool>, String> {
         let service = Arc::clone(&self.service);
         let tools = collect_paginated("tools/list", move |params| {
@@ -167,14 +119,6 @@ impl ClientInner {
             tracing::warn!(%error, "failed to persist refreshed MCP OAuth credentials");
         }
         tools
-    }
-
-    async fn persist_oauth(&self, parent: &Span) {
-        if let Some(oauth) = &self.oauth
-            && let Err(error) = oauth.persist_if_changed(parent).await
-        {
-            tracing::warn!(%error, "failed to persist refreshed MCP OAuth credentials");
-        }
     }
 
     pub(crate) async fn refresh_oauth(&self) -> Result<(), String> {

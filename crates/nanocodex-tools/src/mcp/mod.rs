@@ -5,7 +5,6 @@ mod client;
 mod config;
 mod oauth;
 mod pagination;
-mod resources;
 mod stdio;
 
 use std::{
@@ -554,14 +553,7 @@ impl DynamicToolProvider for Mcp {
     }
 
     fn direct_tools(&self) -> Vec<Arc<dyn Tool>> {
-        vec![
-            Arc::new(resources::ListMcpResourceTemplates::new(Arc::clone(
-                &self.state,
-            ))) as Arc<dyn Tool>,
-            Arc::new(resources::ListMcpResources::new(Arc::clone(&self.state))),
-            Arc::new(resources::ReadMcpResource::new(Arc::clone(&self.state))),
-            Arc::clone(&self.search) as Arc<dyn Tool>,
-        ]
+        vec![Arc::clone(&self.search) as Arc<dyn Tool>]
     }
 
     fn available_definitions(&self) -> Vec<ToolDefinition> {
@@ -832,7 +824,7 @@ fn search_description(servers: &[NamedServer]) -> String {
         }
     }
     format!(
-        "# Tool discovery\n\nSearches over deferred tool metadata with BM25 and exposes matching tools for the next model call.\n\nYou have access to tools from the following sources:\n{sources}\nSome of the tools may not have been provided to you upfront, and you should use this tool (`tool_search`) to search for the required tools. For MCP tool discovery, always use `tool_search` instead of `list_mcp_resources` or `list_mcp_resource_templates`. Each search result reports whether it supports parallel tool calls. After discovery, invoke two or more independent supported tools together from one `exec` cell with `Promise.all` instead of using serial model rounds."
+        "# Tool discovery\n\nSearches over deferred tool metadata with BM25 and exposes matching tools for the next model call.\n\nYou have access to tools from the following sources:\n{sources}\nSome of the tools may not have been provided to you upfront. For MCP tool discovery, always use `tool_search`. Each search result reports whether it supports parallel tool calls. After discovery, invoke two or more independent supported tools together from one `exec` cell with `Promise.all` instead of using serial model rounds."
     )
 }
 
@@ -967,7 +959,7 @@ mod tests {
             json!({
                 "type": "tool_search",
                 "execution": "client",
-                "description": "# Tool discovery\n\nSearches over deferred tool metadata with BM25 and exposes matching tools for the next model call.\n\nYou have access to tools from the following sources:\n- docs: Search product documentation.\nSome of the tools may not have been provided to you upfront, and you should use this tool (`tool_search`) to search for the required tools. For MCP tool discovery, always use `tool_search` instead of `list_mcp_resources` or `list_mcp_resource_templates`. Each search result reports whether it supports parallel tool calls. After discovery, invoke two or more independent supported tools together from one `exec` cell with `Promise.all` instead of using serial model rounds.",
+                "description": "# Tool discovery\n\nSearches over deferred tool metadata with BM25 and exposes matching tools for the next model call.\n\nYou have access to tools from the following sources:\n- docs: Search product documentation.\nSome of the tools may not have been provided to you upfront. For MCP tool discovery, always use `tool_search`. Each search result reports whether it supports parallel tool calls. After discovery, invoke two or more independent supported tools together from one `exec` cell with `Promise.all` instead of using serial model rounds.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -1038,13 +1030,6 @@ mod tests {
         );
 
         let description = specs[0].description();
-        for tool in [
-            "### `list_mcp_resource_templates`",
-            "### `list_mcp_resources`",
-            "### `read_mcp_resource`",
-        ] {
-            assert!(description.contains(tool), "missing {tool}: {description}");
-        }
         assert!(description.contains("Some deferred nested tools may be omitted"));
         assert!(
             !description.contains("### `mcp__fixture__echo`"),
@@ -1058,79 +1043,8 @@ mod tests {
                 .into_iter()
                 .map(|(name, _)| name)
                 .collect::<Vec<_>>(),
-            [
-                "list_mcp_resource_templates",
-                "list_mcp_resources",
-                "mcp__fixture__echo",
-                "read_mcp_resource",
-            ],
-            "all deferred MCP tools must be callable through Code Mode from its first cell"
-        );
-
-        let resources = runtime
-            .execute_tool(
-                "list_mcp_resources",
-                ToolInput::Function(to_raw_value(&json!({})).unwrap()),
-                test_context("test-session", "list-resources"),
-            )
-            .await;
-        assert!(resources.success);
-        assert_eq!(
-            resources.structured_result()["resources"],
-            json!([
-                {
-                    "server": "fixture",
-                    "uri": "fixture://first",
-                    "name": "fixture-first",
-                    "mimeType": "text/plain"
-                },
-                {
-                    "server": "fixture",
-                    "uri": "fixture://second",
-                    "name": "fixture-second",
-                    "mimeType": "text/plain"
-                }
-            ]),
-            "aggregate listing must exhaust every server's pagination"
-        );
-
-        let templates = runtime
-            .execute_tool(
-                "list_mcp_resource_templates",
-                ToolInput::Function(to_raw_value(&json!({})).unwrap()),
-                test_context("test-session", "list-resource-templates"),
-            )
-            .await;
-        assert!(templates.success);
-        assert_eq!(
-            templates.structured_result()["resourceTemplates"][0],
-            json!({
-                "server": "fixture",
-                "uriTemplate": "fixture://item/{id}",
-                "name": "fixture-item",
-                "mimeType": "text/plain"
-            })
-        );
-
-        let read = runtime
-            .execute_tool(
-                "read_mcp_resource",
-                ToolInput::Function(
-                    to_raw_value(&json!({
-                        "server": "fixture",
-                        "uri": "fixture://first"
-                    }))
-                    .unwrap(),
-                ),
-                test_context("test-session", "read-resource"),
-            )
-            .await;
-        assert!(read.success);
-        assert_eq!(read.structured_result()["server"], "fixture");
-        assert_eq!(read.structured_result()["uri"], "fixture://first");
-        assert_eq!(
-            read.structured_result()["contents"][0]["text"],
-            "fixture resource body"
+            ["mcp__fixture__echo"],
+            "discovered MCP tools must be callable through Code Mode from its first cell"
         );
     }
 

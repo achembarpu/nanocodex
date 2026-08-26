@@ -98,9 +98,6 @@ describe("durable managed default MCP catalog", () => {
         "mcp__tempo__search",
         "mcp__viem__search",
         "mcp__vocs__search",
-        "list_mcp_resources",
-        "list_mcp_resource_templates",
-        "read_mcp_resource",
       ].sort());
       socket.receive({ type: "ready" });
       const client = await connecting;

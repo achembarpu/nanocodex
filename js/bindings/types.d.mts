@@ -471,24 +471,6 @@ export type McpClient = {
     resultSchema?: unknown,
     options?: Record<string, unknown>,
   ): Promise<unknown>;
-  listResources?(
-    params?: { cursor?: string | undefined },
-    options?: Record<string, unknown>,
-  ): Promise<{
-    resources: readonly Record<string, unknown>[];
-    nextCursor?: string | undefined;
-  }>;
-  listResourceTemplates?(
-    params?: { cursor?: string | undefined },
-    options?: Record<string, unknown>,
-  ): Promise<{
-    resourceTemplates: readonly Record<string, unknown>[];
-    nextCursor?: string | undefined;
-  }>;
-  readResource?(
-    params: { uri: string },
-    options?: Record<string, unknown>,
-  ): Promise<Record<string, unknown>>;
 };
 
 export type McpTool = {

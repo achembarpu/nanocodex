@@ -181,11 +181,7 @@ test("remote MCP stays deferred behind tool_search and executes through Code Mod
   const definitions = JSON.parse(runtime.toolDefinitions());
   assert.equal(definitions[0].type, "tool_search");
   assert.deepEqual(
-    definitions.slice(1, 4).map((definition) => definition.name),
-    ["list_mcp_resources", "list_mcp_resource_templates", "read_mcp_resource"],
-  );
-  assert.deepEqual(
-    definitions.slice(4).map((definition) => [definition.name, definition.defer_loading]),
+    definitions.slice(1).map((definition) => [definition.name, definition.defer_loading]),
     [
       ["mcp__mercator__call", true],
       ["mcp__mercator__search_endpoints", true],
@@ -224,59 +220,6 @@ test("remote MCP stays deferred behind tool_search and executes through Code Mod
   assert.match(JSON.stringify(execution.output), /called call/);
 });
 
-test("browser MCP exposes native-compatible resource listing and reads", async () => {
-  const client = {
-    async listTools() {
-      return { tools: [] };
-    },
-    async listResources(params) {
-      return params?.cursor
-        ? { resources: [{ uri: "docs://two", name: "Two" }] }
-        : { resources: [{ uri: "docs://one", name: "One" }], nextCursor: "next" };
-    },
-    async listResourceTemplates() {
-      return { resourceTemplates: [{ uriTemplate: "docs://{slug}", name: "Docs" }] };
-    },
-    async readResource({ uri }) {
-      return { contents: [{ uri, text: "resource body" }] };
-    },
-  };
-  const mcp = await createMcpRuntime({ docs: { client } });
-  await mcp.settled();
-  const runtime = createCodeRuntime();
-  runtime.addProvider(mcp);
-
-  const listed = JSON.parse(await runtime.executeTool(
-    "list_mcp_resources",
-    "{}",
-  ));
-  assert.deepEqual(JSON.parse(listed.output), {
-    resources: [
-      { server: "docs", uri: "docs://one", name: "One" },
-      { server: "docs", uri: "docs://two", name: "Two" },
-    ],
-  });
-
-  const templates = JSON.parse(await runtime.executeTool(
-    "list_mcp_resource_templates",
-    JSON.stringify({ server: "docs" }),
-  ));
-  assert.deepEqual(JSON.parse(templates.output), {
-    server: "docs",
-    resourceTemplates: [{ server: "docs", uriTemplate: "docs://{slug}", name: "Docs" }],
-  });
-
-  const read = JSON.parse(await runtime.executeTool(
-    "read_mcp_resource",
-    JSON.stringify({ server: "docs", uri: "docs://one" }),
-  ));
-  assert.deepEqual(JSON.parse(read.output), {
-    contents: [{ uri: "docs://one", text: "resource body" }],
-    server: "docs",
-    uri: "docs://one",
-  });
-});
-
 test("remote MCP failures are reported by tool_search without breaking agent creation", async () => {
   const mcp = await createMcpRuntime({
     unavailable: {
@@ -297,21 +240,6 @@ test("remote MCP failures are reported by tool_search without breaking agent cre
   assert.deepEqual(JSON.parse(result.output).failed_servers, {
     unavailable: "connection refused",
   });
-  const resources = JSON.parse(await runtime.executeTool(
-    "list_mcp_resources",
-    JSON.stringify({}),
-  ));
-  assert.deepEqual(JSON.parse(resources.output), {
-    resources: [],
-    pending_servers: 0,
-    failed_servers: { unavailable: "connection refused" },
-  });
-  const explicit = JSON.parse(await runtime.executeTool(
-    "list_mcp_resources",
-    JSON.stringify({ server: "unavailable" }),
-  ));
-  assert.equal(explicit.success, false);
-  assert.match(explicit.output, /discovery failed: unavailable: connection refused/);
 });
 
 test("MCP discovery runs behind agent readiness and reports pending catalogs", async () => {
@@ -332,21 +260,6 @@ test("MCP discovery runs behind agent readiness and reports pending catalogs", a
     JSON.stringify({ query: "documentation" }),
   ));
   assert.equal(JSON.parse(pending.output).pending_servers, 1);
-  const pendingResources = JSON.parse(await runtime.executeTool(
-    "list_mcp_resources",
-    JSON.stringify({}),
-  ));
-  assert.deepEqual(JSON.parse(pendingResources.output), {
-    resources: [],
-    pending_servers: 1,
-    failed_servers: {},
-  });
-  const explicitPending = JSON.parse(await runtime.executeTool(
-    "list_mcp_resources",
-    JSON.stringify({ server: "docs" }),
-  ));
-  assert.equal(explicitPending.success, false);
-  assert.match(explicitPending.output, /discovery is still pending: docs/);
 
   finishDiscovery({
     tools: [{
