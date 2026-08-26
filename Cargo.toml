@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "bin/nanocodex",
+    "bin/nanocodex/nanocodex2",
     "bin/nanousd",
     "bin/nanousd-api",
     "crates/nanocodex",

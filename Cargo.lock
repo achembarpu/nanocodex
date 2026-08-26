@@ -5717,6 +5717,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "nanocodex2-bin"
+version = "0.5.0"
+dependencies = [
+ "axum",
+ "clap",
+ "dotenvy",
+ "futures-util",
+ "nanocodex-agent",
+ "nanocodex-managed",
+ "nanocodex-tools",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "toml",
+ "uuid",
+]
+
+[[package]]
 name = "nanousd"
 version = "0.5.0"
 dependencies = [
