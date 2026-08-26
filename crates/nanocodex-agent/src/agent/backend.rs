@@ -431,8 +431,15 @@ impl LifecycleBackend for LocalLifecycle {
     }
 
     fn flush(&self) -> BackendFuture<Result<()>> {
-        let execution = self.execution.clone();
-        Box::pin(async move { execution.flush().await })
+        #[cfg(not(target_family = "wasm"))]
+        {
+            let execution = self.execution.clone();
+            Box::pin(async move { execution.flush().await })
+        }
+        #[cfg(target_family = "wasm")]
+        {
+            Box::pin(async { Ok(()) })
+        }
     }
 
     fn shutdown(&self) -> BackendFuture<Result<()>> {
