@@ -3000,7 +3000,8 @@ export class NanocodexSession extends DurableComputerSession {
       const accountInput = initialAccountContext?.turn_id === row.id
         ? withInitialAccountInfo(input, initialAccountContext.account)
         : input;
-      const modelInput = (this.#session()?.completed_turns ?? 0) > 0
+      const modelInput = initialAccountContext !== undefined
+        && initialAccountContext.turn_id !== row.id
         ? appendMemoryReviewCheckpoint(accountInput)
         : accountInput;
       const dispatchable = this.#managedTurn(row.id);

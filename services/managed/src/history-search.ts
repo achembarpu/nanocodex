@@ -4,7 +4,7 @@ const DEFAULT_LIMIT = 8;
 export const MAX_HISTORY_SEARCH_LIMIT = 20;
 export const HISTORY_VECTOR_MATCH_THRESHOLD = 0.5;
 const MAX_QUERY_BYTES = 4_096;
-const THREAD_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const THREAD_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[78][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const TURN_ID = /^[A-Za-z0-9._:-]{1,128}$/;
 const EXACT_IDENTIFIER = /^(?=.{2,128}$)(?=.*[_:])[\p{L}\p{N}][\p{L}\p{N}._:-]*$/u;
 const HISTORY_TERM = /[\p{L}\p{N}_-]+/gu;

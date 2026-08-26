@@ -4,9 +4,28 @@ import { defineConfig } from "vitest/config";
 const TEST_BROKER = `
 const subjects = new Set();
 const connectors = new Map();
+let heldSubject;
+let holdSubjectBind = false;
+let heldSubjectUnbinds = 0;
 export default {
   async fetch(request) {
     const url = new URL(request.url);
+    if (url.pathname === "/test/hold-subject-bind") {
+      if (request.method === "POST") {
+        heldSubject = undefined;
+        heldSubjectUnbinds = 0;
+        holdSubjectBind = true;
+        return new Response(null, { status: 204 });
+      }
+      if (request.method === "GET") {
+        return Response.json({ subject: heldSubject, unbinds: heldSubjectUnbinds });
+      }
+      if (request.method === "DELETE") {
+        holdSubjectBind = false;
+        return new Response(null, { status: 204 });
+      }
+      return Response.json({ error: "method_not_allowed" }, { status: 405 });
+    }
     const connectorRoute = url.pathname.match(/^\\/users\\/([^/]+)\\/connectors(?:\\/(github|gmail|gdrive|x)(\\/callback)?)?$/);
     if (connectorRoute) {
       const [, userId, connector, callback] = connectorRoute;
@@ -54,10 +73,15 @@ export default {
       if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(body?.user_id ?? "")) {
         return Response.json({ error: "invalid_request" }, { status: 400 });
       }
+      if (holdSubjectBind) {
+        heldSubject = subjectRoute[1];
+        while (holdSubjectBind) await scheduler.wait(1);
+      }
       subjects.add(subjectRoute[1]);
       return new Response(null, { status: 204 });
     }
     if (subjectRoute && request.method === "DELETE") {
+      if (subjectRoute[1] === heldSubject) heldSubjectUnbinds += 1;
       subjects.delete(subjectRoute[1]);
       return new Response(null, { status: 204 });
     }

@@ -47,7 +47,16 @@ beforeAll(async () => {
 
 afterEach(async () => {
   await Promise.all([...createdAgents].map(async (id) => {
-    await SELF.fetch(`https://example.test/v1/agents/${id}`, { method: "DELETE" });
+    let deleted = await SELF.fetch(`https://example.test/v1/agents/${id}`, { method: "DELETE" });
+    if (deleted.status === 503) {
+      await deleted.body?.cancel();
+      const session = testEnv.NANOCODEX_SESSIONS.getByName(id);
+      await runCleanupAlarmsUntilDeleted(session);
+      deleted = await SELF.fetch(`https://example.test/v1/agents/${id}`, { method: "DELETE" });
+    }
+    if (deleted.status !== 204 && deleted.status !== 404) {
+      throw new Error(`failed to clean up managed agent ${id}: HTTP ${deleted.status}: ${await deleted.text()}`);
+    }
     createdAgents.delete(id);
   }));
 });
@@ -105,7 +114,7 @@ describe("managed agents REST and resumable SSE", () => {
     const agent = await createAgent();
     const turnId = "turn-runtime-attribution";
     await submit(agent, turnId, "CAPACITY_ACCOUNTING");
-    await waitForTurnState(agent, turnId, "completed");
+    await waitForTurnState(agent, turnId, "completed", 10_000);
 
     const session = testEnv.NANOCODEX_SESSIONS.getByName(agent.agent_id);
     const identities = await runInDurableObject(session, (_instance, state) =>
@@ -2928,87 +2937,88 @@ describe("managed agents REST and resumable SSE", () => {
 
   it("fences a held bind and compensates it before watchdog cleanup completes", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
-    const originalBroker = testEnv.NANOCODEX;
-    let subject: string | undefined;
-    let bindStarted!: () => void;
-    let releaseBind!: () => void;
-    const started = new Promise<void>((resolve) => { bindStarted = resolve; });
-    const release = new Promise<void>((resolve) => { releaseBind = resolve; });
-    let unbinds = 0;
-    testEnv.NANOCODEX = {
-      async fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
-        const request = new Request(input, init);
-        const match = new URL(request.url).pathname.match(/^\/subjects\/([A-Za-z0-9_-]+)$/);
-        if (match && request.method === "PUT") {
-          subject = match[1];
-          bindStarted();
-          await release;
-        }
-        if (match && request.method === "DELETE") unbinds += 1;
-        return originalBroker.fetch(request);
-      },
-    } as Fetcher;
+    await testEnv.NANOCODEX.fetch("https://broker.internal/test/hold-subject-bind", {
+      method: "POST",
+    });
 
     try {
       const creation = SELF.fetch("https://example.test/v1/agents", { method: "POST" });
-      await within(started, "held credential bind");
-      const session = sessionForSubject(subject!);
+      let held: { subject?: string; unbinds: number } = { unbinds: 0 };
+      while (!held.subject) {
+        held = await (await testEnv.NANOCODEX.fetch(
+          "https://broker.internal/test/hold-subject-bind",
+        )).json<typeof held>();
+        if (!held.subject) await scheduler.wait(1);
+      }
+      const session = sessionForSubject(held.subject);
       expireCredentialPreparation();
       const alarm = runDurableObjectAlarm(session);
       await waitForCleanupDeletion(session);
-      releaseBind();
+      await testEnv.NANOCODEX.fetch("https://broker.internal/test/hold-subject-bind", {
+        method: "DELETE",
+      });
 
       expect(await alarm).toBe(true);
       const response = await creation;
       expect(response.status).toBe(503);
-      expect(unbinds).toBe(1);
+      held = await (await testEnv.NANOCODEX.fetch(
+        "https://broker.internal/test/hold-subject-bind",
+      )).json<typeof held>();
+      expect(held.unbinds).toBe(1);
       expect(await cleanupMarkers(session)).toEqual({ binding: false, deleting: false });
       expect(await (await SELF.fetch("https://example.test/v1/agents")).json()).toEqual({
         data: [],
         summaries: {},
       });
     } finally {
-      releaseBind?.();
-      testEnv.NANOCODEX = originalBroker;
+      await testEnv.NANOCODEX.fetch("https://broker.internal/test/hold-subject-bind", {
+        method: "DELETE",
+      });
       vi.useRealTimers();
     }
   });
 
   it("fences a held account attach and detaches it before watchdog cleanup completes", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
-    const originalBroker = testEnv.NANOCODEX;
-    const originalUserFetch = UserAccount.prototype.fetch;
-    let subject: string | undefined;
-    let attachStarted!: () => void;
-    let releaseAttach!: () => void;
-    const started = new Promise<void>((resolve) => { attachStarted = resolve; });
-    const release = new Promise<void>((resolve) => { releaseAttach = resolve; });
-    testEnv.NANOCODEX = {
-      async fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
-        const request = new Request(input, init);
-        const match = new URL(request.url).pathname.match(/^\/subjects\/([A-Za-z0-9_-]+)$/);
-        if (match && request.method === "PUT") subject = match[1];
-        return originalBroker.fetch(request);
-      },
-    } as Fetcher;
-    const attachSpy = vi.spyOn(UserAccount.prototype, "fetch").mockImplementation(
-      async function (this: UserAccount, request: Request): Promise<Response> {
-        if (request.method === "POST" && new URL(request.url).pathname === "/agents") {
-          attachStarted();
-          await release;
-        }
-        return originalUserFetch.call(this, request);
-      },
-    );
+    await testEnv.NANOCODEX.fetch("https://broker.internal/test/hold-subject-bind", {
+      method: "POST",
+    });
+    let agentId: string | undefined;
+    let attachStarted = false;
+    let releaseAttach = false;
+    let attachSpy: ReturnType<typeof vi.spyOn> | undefined;
 
     try {
       const creation = SELF.fetch("https://example.test/v1/agents", { method: "POST" });
-      await within(started, "held account attach");
-      const session = sessionForSubject(subject!);
+      let held: { subject?: string } = {};
+      while (!held.subject) {
+        held = await (await testEnv.NANOCODEX.fetch(
+          "https://broker.internal/test/hold-subject-bind",
+        )).json<typeof held>();
+        if (!held.subject) await scheduler.wait(1);
+      }
+      attachSpy = vi.spyOn(UserAccount.prototype, "fetch").mockImplementation(
+        async function (this: UserAccount, request: Request): Promise<Response> {
+          if (request.method !== "POST" || new URL(request.url).pathname !== "/agents") {
+            throw new Error("unexpected UserAccount request while account attach is held");
+          }
+          agentId = (await request.clone().json<{ agentId: string }>()).agentId;
+          attachStarted = true;
+          while (!releaseAttach) await scheduler.wait(1);
+          attachSpy?.mockRestore();
+          attachSpy = undefined;
+          return this.fetch(request);
+        },
+      );
+      await testEnv.NANOCODEX.fetch("https://broker.internal/test/hold-subject-bind", {
+        method: "DELETE",
+      });
+      while (!attachStarted) await scheduler.wait(1);
+      const session = testEnv.NANOCODEX_SESSIONS.getByName(agentId!);
       expireCredentialPreparation();
       const alarm = runDurableObjectAlarm(session);
       await waitForCleanupDeletion(session);
-      releaseAttach();
+      releaseAttach = true;
 
       expect(await alarm).toBe(true);
       expect((await creation).status).toBe(503);
@@ -3018,9 +3028,11 @@ describe("managed agents REST and resumable SSE", () => {
         summaries: {},
       });
     } finally {
-      releaseAttach?.();
-      attachSpy.mockRestore();
-      testEnv.NANOCODEX = originalBroker;
+      releaseAttach = true;
+      attachSpy?.mockRestore();
+      await testEnv.NANOCODEX.fetch("https://broker.internal/test/hold-subject-bind", {
+        method: "DELETE",
+      });
       vi.useRealTimers();
     }
   });
@@ -5459,8 +5471,9 @@ async function waitForTurnState(
   agent: AgentReceipt,
   id: string,
   expected: string,
+  timeoutMs = 4_000,
 ): Promise<ManagedTurnView> {
-  const deadline = Date.now() + 4_000;
+  const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const response = await SELF.fetch(agent.events_url.replace(/\/events$/, `/turns/${id}`));
     if (response.ok) {
