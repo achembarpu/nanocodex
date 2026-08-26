@@ -1,4 +1,20 @@
-use super::*;
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
+
+#[cfg(all(not(target_family = "wasm"), feature = "native"))]
+use super::{CODEX_THREAD_ID_ENV_VAR, async_trait, fmt};
+#[cfg(all(not(target_family = "wasm"), feature = "native"))]
+use serde_json::Value;
+#[cfg(all(not(target_family = "wasm"), feature = "native"))]
+use std::ffi::OsString;
+#[cfg(target_family = "wasm")]
+use std::fmt;
+
+use crate::{Tool, ToolDefinition};
+#[cfg(all(not(target_family = "wasm"), feature = "native"))]
+use crate::{ToolContext, ToolOutput};
 
 /// Nanocodex's model-visible tool exposure policy.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -15,7 +31,9 @@ pub enum ToolExposure {
     Hidden,
 }
 
+#[cfg(feature = "native")]
 impl ToolExposure {
+    #[cfg(not(target_family = "wasm"))]
     pub(super) const fn is_direct(self) -> bool {
         matches!(self, Self::DirectAndCodeMode | Self::DirectOnly)
     }
@@ -26,15 +44,17 @@ impl ToolExposure {
 }
 
 #[derive(Clone)]
-pub(super) struct RegisteredTool {
-    pub(super) handler: Arc<dyn Tool>,
-    pub(super) exposure: Option<ToolExposure>,
+pub(crate) struct RegisteredTool {
+    pub(crate) handler: Arc<dyn Tool>,
+    #[cfg(feature = "native")]
+    pub(crate) exposure: Option<ToolExposure>,
 }
 
 /// A lazily populated family of Code Mode tools.
 ///
 /// Providers start with the agent driver, advertise only their small direct
 /// tool surface initially, and may make additional tools callable at runtime.
+#[cfg(all(not(target_family = "wasm"), feature = "native"))]
 #[async_trait]
 pub trait DynamicToolProvider: Send + Sync {
     /// Starts background discovery or connection work. Implementations must be idempotent.
@@ -99,13 +119,14 @@ mod source_sealed {
 
     impl<T: crate::Tool + 'static> Sealed for T {}
 
+    #[cfg(all(not(target_family = "wasm"), feature = "workspace-runtime"))]
     impl Sealed for crate::WorkspaceTools {}
 }
 
-/// One tool source accepted by [`ToolsBuilder::add`].
+/// One capability source accepted by [`ToolsBuilder::add`].
 ///
 /// The sealed implementations cover fixed [`Tool`] values and canonical
-/// [`crate::WorkspaceTools`] recipes.
+/// [`crate::WorkspaceTools`] recipes when workspace tools are enabled.
 pub trait ToolSource: source_sealed::Sealed + Sized {
     #[doc(hidden)]
     fn install(self, builder: ToolsBuilder) -> ToolsBuilder;
@@ -117,6 +138,7 @@ impl<T: Tool + 'static> ToolSource for T {
     }
 }
 
+#[cfg(all(not(target_family = "wasm"), feature = "workspace-runtime"))]
 impl ToolSource for crate::WorkspaceTools {
     fn install(self, mut builder: ToolsBuilder) -> ToolsBuilder {
         if builder.tools.workspace_tools.is_some() {
@@ -135,15 +157,27 @@ pub struct Tools {
     workspace: bool,
     web_search: bool,
     image_generation: bool,
+    #[cfg(all(not(target_family = "wasm"), feature = "native"))]
     pub(super) working_directory: Option<Arc<str>>,
+    #[cfg(all(not(target_family = "wasm"), feature = "native"))]
     pub(super) default_shell: Option<Arc<str>>,
+    #[cfg(all(not(target_family = "wasm"), feature = "native"))]
     process_environment: Arc<Vec<(OsString, OsString)>>,
+    #[cfg(all(not(target_family = "wasm"), feature = "native"))]
     remote_http_client: Option<reqwest::Client>,
-    pub(super) registered: Vec<RegisteredTool>,
+    pub(crate) registered: Vec<RegisteredTool>,
+    #[cfg(all(not(target_family = "wasm"), feature = "native"))]
     pub(super) provider_direct: Vec<Arc<dyn Tool>>,
+    #[cfg(all(not(target_family = "wasm"), feature = "native"))]
     pub(super) providers: Vec<Arc<dyn DynamicToolProvider>>,
+    #[cfg(all(not(target_family = "wasm"), feature = "workspace-runtime"))]
     pub(crate) workspace_tools: Option<crate::WorkspaceTools>,
+    #[cfg(all(not(target_family = "wasm"), feature = "native"))]
     pub(super) deferred_tools_guidance_enabled: bool,
+    #[cfg(feature = "native")]
+    pub(crate) embedded_host: Option<Arc<dyn crate::embedded::CodeModeHost>>,
+    #[cfg(feature = "native")]
+    pub(crate) embedded_session_id: Option<Arc<str>>,
 }
 
 impl Default for Tools {
@@ -153,19 +187,32 @@ impl Default for Tools {
             workspace: true,
             web_search: true,
             image_generation: true,
+            #[cfg(all(not(target_family = "wasm"), feature = "native"))]
             working_directory: None,
+            #[cfg(all(not(target_family = "wasm"), feature = "native"))]
             default_shell: None,
+            #[cfg(all(not(target_family = "wasm"), feature = "native"))]
             process_environment: Arc::new(Vec::new()),
+            #[cfg(all(not(target_family = "wasm"), feature = "native"))]
             remote_http_client: None,
             registered: Vec::new(),
+            #[cfg(all(not(target_family = "wasm"), feature = "native"))]
             provider_direct: Vec::new(),
+            #[cfg(all(not(target_family = "wasm"), feature = "native"))]
             providers: Vec::new(),
+            #[cfg(all(not(target_family = "wasm"), feature = "workspace-runtime"))]
             workspace_tools: None,
+            #[cfg(all(not(target_family = "wasm"), feature = "native"))]
             deferred_tools_guidance_enabled: false,
+            #[cfg(feature = "native")]
+            embedded_host: None,
+            #[cfg(feature = "native")]
+            embedded_session_id: None,
         }
     }
 }
 
+#[cfg(all(not(target_family = "wasm"), feature = "native"))]
 impl fmt::Debug for Tools {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let remote_http_client_configured = self.remote_http_client.is_some();
@@ -204,6 +251,32 @@ impl fmt::Debug for Tools {
                 &self.workspace_tools.is_some(),
             )
             .finish()
+    }
+}
+
+#[cfg(any(target_family = "wasm", not(feature = "native")))]
+impl fmt::Debug for Tools {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut debug = formatter.debug_struct("Tools");
+        debug
+            .field("exposure", &self.exposure)
+            .field("workspace", &self.workspace)
+            .field("web_search", &self.web_search)
+            .field("image_generation", &self.image_generation)
+            .field(
+                "registered",
+                &self
+                    .registered
+                    .iter()
+                    .map(|tool| tool.handler.definition().name().to_owned())
+                    .collect::<Vec<_>>(),
+            );
+        #[cfg(all(not(target_family = "wasm"), feature = "workspace-runtime"))]
+        debug.field(
+            "workspace_tools_configured",
+            &self.workspace_tools.is_some(),
+        );
+        debug.finish()
     }
 }
 
@@ -250,35 +323,47 @@ impl Tools {
 
     /// Returns this tool selection bound to one agent session.
     ///
-    /// Native workspace commands receive the session ID through
-    /// `CODEX_THREAD_ID`. This binding replaces a caller-provided value without
-    /// mutating other clones of the tool selection.
+    /// An embedded execution host receives the session ID directly. Native
+    /// workspace commands additionally receive it through `CODEX_THREAD_ID`.
+    /// This binding does not mutate other clones of the tool selection.
     #[must_use]
+    #[cfg(feature = "native")]
     pub fn for_session(mut self, session_id: &str) -> Self {
+        self.embedded_session_id = Some(Arc::from(session_id));
+        #[cfg(not(target_family = "wasm"))]
         self.insert_process_environment(CODEX_THREAD_ID_ENV_VAR.into(), session_id.into());
         self
     }
 
+    #[cfg(all(not(target_family = "wasm"), feature = "native"))]
     pub(super) fn process_environment(&self) -> Arc<Vec<(OsString, OsString)>> {
         Arc::clone(&self.process_environment)
     }
 
+    #[cfg(all(not(target_family = "wasm"), feature = "native"))]
     fn insert_process_environment(&mut self, name: OsString, value: OsString) {
         let environment = Arc::make_mut(&mut self.process_environment);
         environment.retain(|(candidate, _)| candidate != &name);
         environment.push((name, value));
     }
 
+    #[cfg(all(not(target_family = "wasm"), feature = "native"))]
     pub(super) fn remote_http_client(&self) -> Option<reqwest::Client> {
         self.remote_http_client.clone()
     }
 
     /// Starts all dynamic providers without waiting for their handshakes.
+    #[cfg(feature = "native")]
+    #[cfg(not(target_family = "wasm"))]
     pub fn start_providers(&self) {
         for provider in &self.providers {
             provider.start();
         }
     }
+
+    /// Starts all dynamic providers without waiting for their handshakes.
+    #[cfg(all(feature = "native", target_family = "wasm"))]
+    pub const fn start_providers(&self) {}
 }
 
 /// Builder for the built-in tool selection.
@@ -307,8 +392,8 @@ pub enum ToolsBuildError {
     #[error("tool name `{0}` is registered more than once")]
     DuplicateName(Box<str>),
 
-    /// A singleton tool source was added more than once.
-    #[error("tool source `{0}` is configured more than once")]
+    /// A singleton capability source was added more than once.
+    #[error("tool capability source `{0}` is configured more than once")]
     DuplicateSource(&'static str),
 
     /// A custom tool collides with an enabled built-in tool.
@@ -338,7 +423,10 @@ pub enum ToolsBuildError {
 }
 
 impl ToolsBuilder {
-    /// Adds one fixed tool or canonical workspace recipe.
+    /// Adds one capability source to this recipe.
+    ///
+    /// Fixed tools and workspace tools use this same composition path;
+    /// execution placement is selected only after the recipe is built.
     #[must_use]
     #[allow(
         clippy::should_implement_trait,
@@ -370,11 +458,22 @@ impl ToolsBuilder {
 
     /// Enables or disables the standard command, patch, plan, and file tools.
     #[must_use]
+    #[cfg(not(target_family = "wasm"))]
+    #[allow(clippy::missing_const_for_fn)]
     pub fn workspace(mut self, enabled: bool) -> Self {
         self.tools.workspace = enabled;
+        #[cfg(all(not(target_family = "wasm"), feature = "workspace-runtime"))]
         if !enabled {
             self.tools.workspace_tools = None;
         }
+        self
+    }
+
+    /// Enables or disables the standard command, patch, plan, and file tools.
+    #[must_use]
+    #[cfg(target_family = "wasm")]
+    pub const fn workspace(mut self, enabled: bool) -> Self {
+        self.tools.workspace = enabled;
         self
     }
 
@@ -394,6 +493,7 @@ impl ToolsBuilder {
 
     /// Overrides the default working directory described to the model.
     #[must_use]
+    #[cfg(all(not(target_family = "wasm"), feature = "native"))]
     pub fn working_directory(mut self, directory: impl Into<Arc<str>>) -> Self {
         self.tools.working_directory = Some(directory.into());
         self
@@ -401,6 +501,7 @@ impl ToolsBuilder {
 
     /// Overrides the default shell described to the model.
     #[must_use]
+    #[cfg(all(not(target_family = "wasm"), feature = "native"))]
     pub fn default_shell(mut self, shell: impl Into<Arc<str>>) -> Self {
         self.tools.default_shell = Some(shell.into());
         self
@@ -411,6 +512,7 @@ impl ToolsBuilder {
     /// Overrides are scoped to commands spawned by this tool selection and do
     /// not mutate the embedding process. A later value for the same name wins.
     #[must_use]
+    #[cfg(all(not(target_family = "wasm"), feature = "native"))]
     pub fn process_environment<I, K, V>(mut self, variables: I) -> Self
     where
         I: IntoIterator<Item = (K, V)>,
@@ -426,6 +528,7 @@ impl ToolsBuilder {
 
     /// Overrides the HTTP client used by in-process remote tools.
     #[must_use]
+    #[cfg(all(not(target_family = "wasm"), feature = "native"))]
     pub fn remote_http_client(mut self, client: reqwest::Client) -> Self {
         self.tools.remote_http_client = Some(client);
         self
@@ -436,6 +539,7 @@ impl ToolsBuilder {
     pub fn tool<T: Tool + 'static>(mut self, tool: T) -> Self {
         self.tools.registered.push(RegisteredTool {
             handler: Arc::new(tool),
+            #[cfg(feature = "native")]
             exposure: None,
         });
         self
@@ -448,8 +552,11 @@ impl ToolsBuilder {
         tool: T,
         exposure: ToolExposure,
     ) -> Self {
+        #[cfg(not(feature = "native"))]
+        let _ = exposure;
         self.tools.registered.push(RegisteredTool {
             handler: Arc::new(tool),
+            #[cfg(feature = "native")]
             exposure: Some(exposure),
         });
         self
@@ -457,6 +564,7 @@ impl ToolsBuilder {
 
     /// Adds a dynamic family of Code Mode tools.
     #[must_use]
+    #[cfg(all(not(target_family = "wasm"), feature = "native"))]
     pub fn provider<P: DynamicToolProvider + 'static>(mut self, provider: P) -> Self {
         let provider: Arc<dyn DynamicToolProvider> = Arc::new(provider);
         self.tools.providers.push(provider);
@@ -469,11 +577,14 @@ impl ToolsBuilder {
     /// # Errors
     ///
     /// Returns an error for empty, duplicate, or enabled built-in tool names.
+    #[allow(unused_mut, reason = "native provider refresh mutates this builder")]
     pub fn build(mut self) -> Result<Tools, ToolsBuildError> {
         if self.duplicate_workspace {
             return Err(ToolsBuildError::DuplicateSource("workspace"));
         }
+        #[cfg(all(not(target_family = "wasm"), feature = "native"))]
         self.refresh_provider_direct();
+        #[cfg(all(not(target_family = "wasm"), feature = "native"))]
         if self
             .tools
             .working_directory
@@ -482,6 +593,7 @@ impl ToolsBuilder {
         {
             return Err(ToolsBuildError::EmptyWorkingDirectory);
         }
+        #[cfg(all(not(target_family = "wasm"), feature = "native"))]
         if self
             .tools
             .default_shell
@@ -490,13 +602,10 @@ impl ToolsBuilder {
         {
             return Err(ToolsBuildError::EmptyDefaultShell);
         }
-        let mut names = HashSet::with_capacity(
-            self.tools
-                .registered
-                .len()
-                .saturating_add(self.tools.provider_direct.len()),
-        );
+        let mut names = HashSet::with_capacity(self.tools.registered.len());
+        #[cfg(feature = "native")]
         let mut code_mode_names = HashMap::new();
+        #[cfg(feature = "native")]
         if self.tools.exposure.is_available_in_code_mode() {
             for name in enabled_built_in_names(&self.tools) {
                 insert_code_mode_name(&mut code_mode_names, name)?;
@@ -505,7 +614,10 @@ impl ToolsBuilder {
         for tool in &self.tools.registered {
             let definition = tool.handler.definition();
             let name = definition.name();
-            validate_registered_tool_name(name)?;
+            validate_registered_tool_name(
+                name,
+                matches!(definition, ToolDefinition::ToolSearch { .. }),
+            )?;
             if host_owned_name(name)
                 || (name == "tool_search"
                     && !matches!(definition, ToolDefinition::ToolSearch { .. }))
@@ -518,6 +630,7 @@ impl ToolsBuilder {
             if !names.insert(name.to_owned()) {
                 return Err(ToolsBuildError::DuplicateName(name.into()));
             }
+            #[cfg(feature = "native")]
             if tool
                 .exposure
                 .unwrap_or_else(|| self.tools.exposure())
@@ -527,10 +640,14 @@ impl ToolsBuilder {
                 insert_code_mode_name(&mut code_mode_names, name)?;
             }
         }
+        #[cfg(all(not(target_family = "wasm"), feature = "native"))]
         for tool in &self.tools.provider_direct {
             let definition = tool.definition();
             let name = definition.name();
-            validate_registered_tool_name(name)?;
+            validate_registered_tool_name(
+                name,
+                matches!(definition, ToolDefinition::ToolSearch { .. }),
+            )?;
             if host_owned_name(name) {
                 return Err(ToolsBuildError::ReservedName(name.into()));
             }
@@ -546,10 +663,14 @@ impl ToolsBuilder {
                 insert_code_mode_name(&mut code_mode_names, name)?;
             }
         }
+        #[cfg(all(not(target_family = "wasm"), feature = "native"))]
         for provider in &self.tools.providers {
             for definition in provider.available_definitions() {
                 let name = definition.name();
-                validate_registered_tool_name(name)?;
+                validate_registered_tool_name(
+                    name,
+                    matches!(definition, ToolDefinition::ToolSearch { .. }),
+                )?;
                 if host_owned_name(name)
                     || (name == "tool_search"
                         && !matches!(definition, ToolDefinition::ToolSearch { .. }))
@@ -570,6 +691,7 @@ impl ToolsBuilder {
         Ok(self.tools)
     }
 
+    #[cfg(all(not(target_family = "wasm"), feature = "native"))]
     fn refresh_provider_direct(&mut self) {
         self.tools.deferred_tools_guidance_enabled = self.tools.providers.iter().any(|provider| {
             provider
@@ -586,6 +708,7 @@ impl ToolsBuilder {
     }
 }
 
+#[cfg(not(target_family = "wasm"))]
 #[allow(
     dead_code,
     reason = "the next catalog source consumes this validation seam"
@@ -604,6 +727,7 @@ pub(crate) enum PublicToolCatalogError {
     },
 }
 
+#[cfg(not(target_family = "wasm"))]
 #[allow(
     dead_code,
     reason = "the next catalog source consumes this validation seam"
@@ -628,16 +752,20 @@ pub(crate) fn validate_public_tool_catalog_names<'a>(
     Ok(())
 }
 
-fn validate_registered_tool_name(name: &str) -> Result<(), ToolsBuildError> {
+fn validate_registered_tool_name(
+    name: &str,
+    native_tool_search: bool,
+) -> Result<(), ToolsBuildError> {
     if name.is_empty() {
         return Err(ToolsBuildError::EmptyName);
     }
-    if !valid_public_tool_name_grammar(name) {
+    if !valid_public_tool_name_grammar(name) && !(native_tool_search && name == "tool_search") {
         return Err(ToolsBuildError::InvalidPublicName(name.into()));
     }
     Ok(())
 }
 
+#[cfg(not(target_family = "wasm"))]
 #[allow(
     dead_code,
     reason = "the next catalog source consumes this validation seam"
@@ -657,6 +785,7 @@ fn valid_public_tool_name_grammar(name: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-'))
 }
 
+#[cfg(feature = "native")]
 fn insert_code_mode_name(
     names: &mut HashMap<String, String>,
     name: &str,
@@ -686,6 +815,10 @@ pub(crate) fn normalize_public_tool_name(name: &str) -> String {
         .collect()
 }
 
+fn host_owned_name(name: &str) -> bool {
+    matches!(name, "exec" | "wait")
+}
+
 fn built_in_name(tools: &Tools, name: &str) -> bool {
     (tools.workspace
         && matches!(
@@ -696,6 +829,7 @@ fn built_in_name(tools: &Tools, name: &str) -> bool {
         || (tools.image_generation && name == "image_gen__imagegen")
 }
 
+#[cfg(feature = "native")]
 fn enabled_built_in_names(tools: &Tools) -> impl Iterator<Item = &'static str> {
     [
         (tools.workspace, "exec_command"),

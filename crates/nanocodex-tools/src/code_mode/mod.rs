@@ -26,7 +26,7 @@ use tracing::{Instrument, info_span};
 
 use super::{ToolContext, ToolOutputBody, ToolOutputContent};
 use crate::code_mode_description as description;
-pub use crate::hosted::{
+pub use crate::embedded::{
     CodeModeExecution, CodeModeNotification, CodeModeObserver, CodeModeUpdate, NestedToolCall,
 };
 use crate::runtime::{OwnedToolContext, ToolRegistry};

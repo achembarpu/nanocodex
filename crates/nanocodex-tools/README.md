@@ -117,11 +117,12 @@ impl Tool for DeploymentRegion {
 
 ## Embed Code Mode in another host
 
-[`hosted`] is the portable boundary for environments that own JavaScript
-execution outside Rust. Implement [`hosted::CodeModeHost`] and pass it to
-[`hosted::HostedTools`]; the adapter reuses the same execution, nested-call,
-notification, observer, and owned-context types as native Code Mode. The
-[`hosted`] module documentation includes a complete host implementation.
+[`embedded`] is the portable boundary for environments that own JavaScript
+execution outside Rust. Build the ordinary [`Tools`] recipe, implement
+[`embedded::CodeModeHost`], and bind that host at the embedding boundary. The
+adapter reuses the same execution, nested-call, notification, observer, and
+owned-context types as native Code Mode. The [`embedded`] module documentation
+includes a complete host implementation.
 
 ## MCP is native and always available
 
@@ -181,7 +182,7 @@ deliberately restoring proxy-safe credential markers to tool subprocesses.
 
 - [`contract`] contains complete model-visible inputs, outputs, errors, and
   retained wire forms.
-- [`hosted`] contains the portable application-owned Code Mode boundary.
+- [`embedded`] contains the portable application-owned Code Mode boundary.
 - [`runtime`] contains the stateful per-agent executor, built-in connection
   configuration, and dynamic-provider contract.
 - [`code_mode`] contains cell results, notifications, and nested-tool updates.

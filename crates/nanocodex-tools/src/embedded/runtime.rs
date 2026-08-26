@@ -10,10 +10,13 @@ use nanocodex_oai_api::{
 };
 
 use super::{
-    CodeModeExecution, CodeModeHost, CodeModeNotification, CodeModeObserver, HostedToolMode,
+    CodeModeExecution, CodeModeHost, CodeModeNotification, CodeModeObserver, EmbeddedToolMode,
     NestedToolCall, OwnedToolContext,
 };
-use crate::runtime_config::{ImageGenerationConfig, WebSearchConfig};
+use crate::{
+    Tools,
+    runtime_config::{ImageGenerationConfig, WebSearchConfig},
+};
 
 const EXEC_GRAMMAR: &str = r"start: /[\s\S]+/";
 const EXEC_DESCRIPTION: &str = r"Run JavaScript in the embedded host.
@@ -24,89 +27,8 @@ const EXEC_DESCRIPTION: &str = r"Run JavaScript in the embedded host.
 - JavaScript runs inside the Node or browser host supplied by the embedding application.";
 const DEFERRED_TOOLS_DESCRIPTION: &str = r"Some deferred nested tools are omitted from this description. They remain available on the global `tools` object and are listed in `ALL_TOOLS`. Use `tool_search` to discover remote tools before calling them.";
 
-/// Tool selection backed by an embedding [`CodeModeHost`].
-#[derive(Clone, Default)]
-pub struct HostedTools {
-    host: Option<Arc<dyn CodeModeHost>>,
-    session_id: Option<Arc<str>>,
-    local: Vec<(Arc<str>, Arc<dyn Tool>)>,
-}
-
-/// Invalid composition of Rust extension tools in a hosted runtime.
-#[derive(Debug)]
-pub struct HostedToolsBuildError(String);
-
-impl std::fmt::Display for HostedToolsBuildError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(&self.0)
-    }
-}
-
-impl std::error::Error for HostedToolsBuildError {}
-
-impl HostedTools {
-    /// Selects an application-owned Code Mode host.
-    #[must_use]
-    pub fn new(host: impl CodeModeHost) -> Self {
-        Self {
-            host: Some(Arc::new(host)),
-            session_id: None,
-            local: Vec::new(),
-        }
-    }
-
-    /// Adds a Rust-owned direct tool while retaining the embedding host's tools.
-    pub fn with_tool(mut self, tool: impl Tool) -> Result<Self, HostedToolsBuildError> {
-        let name = tool.definition().name().trim().to_owned();
-        if name.is_empty() {
-            return Err(HostedToolsBuildError(
-                "tool name cannot be empty".to_owned(),
-            ));
-        }
-        if self
-            .local
-            .iter()
-            .any(|(configured, _)| configured.as_ref() == name)
-        {
-            return Err(HostedToolsBuildError(format!(
-                "tool is already configured: {name}"
-            )));
-        }
-        self.local.push((Arc::from(name), Arc::new(tool)));
-        Ok(self)
-    }
-
-    /// Returns `false`; direct web search belongs to the embedding host.
-    #[must_use]
-    pub const fn web_search_enabled(&self) -> bool {
-        false
-    }
-
-    /// Returns `false`; direct image generation belongs to the embedding host.
-    #[must_use]
-    pub const fn image_generation_enabled(&self) -> bool {
-        false
-    }
-
-    /// Returns this hosted tool selection bound to one agent session.
-    ///
-    /// Hosted tool discovery and execution receive the session ID directly, so
-    /// there is no Rust-owned subprocess environment to update here.
-    #[must_use]
-    pub fn for_session(mut self, session_id: &str) -> Self {
-        self.session_id = Some(Arc::from(session_id));
-        self
-    }
-
-    /// Starts dynamic tool discovery.
-    ///
-    /// The embedding host owns discovery, so hosted selections have no
-    /// background providers to start.
-    pub const fn start_providers(&self) {}
-}
-
 /// Stateful Code Mode adapter over an application-owned host.
-pub struct HostedToolRuntime {
+pub struct EmbeddedToolRuntime {
     working_directory: Arc<str>,
     host: Option<Arc<dyn CodeModeHost>>,
     session_id: Option<Arc<str>>,
@@ -116,17 +38,17 @@ pub struct HostedToolRuntime {
 
 /// Cancellation handle for work owned by an embedding host.
 #[derive(Clone, Default)]
-pub struct HostedToolRuntimeControl {
+pub struct EmbeddedToolRuntimeControl {
     host: Option<Arc<dyn CodeModeHost>>,
     session_id: Option<Arc<str>>,
 }
 
-impl HostedToolRuntime {
+impl EmbeddedToolRuntime {
     /// Creates a runtime without an application host.
     ///
     /// Calls return a model-visible failure until [`Self::with_tools`] supplies
-    /// a [`HostedTools`] value containing a host. HTTP tool configurations are
-    /// accepted for parity with the native runtime and ignored.
+    /// a [`Tools`] recipe bound to an embedding host. HTTP tool configurations
+    /// are accepted for parity with the native runtime and ignored.
     pub fn new(
         workspace: impl Into<PathBuf>,
         _web_search: Option<WebSearchConfig>,
@@ -142,23 +64,32 @@ impl HostedToolRuntime {
         }
     }
 
-    /// Builds a runtime from one complete hosted tool selection.
+    /// Builds a runtime from one complete embedded tool selection.
     #[must_use]
     pub fn new_with_tools(
         workspace: impl Into<PathBuf>,
         web_search: Option<WebSearchConfig>,
         image_generation: Option<ImageGenerationConfig>,
-        tools: &HostedTools,
+        tools: &Tools,
     ) -> Self {
         Self::new(workspace, web_search, image_generation).with_tools(tools)
     }
 
     /// Applies an embedding host to this runtime.
     #[must_use]
-    pub fn with_tools(mut self, tools: &HostedTools) -> Self {
-        self.host.clone_from(&tools.host);
-        self.session_id.clone_from(&tools.session_id);
-        self.local.clone_from(&tools.local);
+    pub fn with_tools(mut self, tools: &Tools) -> Self {
+        self.host.clone_from(&tools.embedded_host);
+        self.session_id.clone_from(&tools.embedded_session_id);
+        self.local = tools
+            .registered
+            .iter()
+            .map(|registered| {
+                (
+                    Arc::from(registered.handler.definition().name()),
+                    Arc::clone(&registered.handler),
+                )
+            })
+            .collect();
         self
     }
 
@@ -176,8 +107,8 @@ impl HostedToolRuntime {
 
     /// Returns a cancellation handle for the runtime.
     #[must_use]
-    pub fn control(&self) -> HostedToolRuntimeControl {
-        HostedToolRuntimeControl {
+    pub fn control(&self) -> EmbeddedToolRuntimeControl {
+        EmbeddedToolRuntimeControl {
             host: self.host.clone(),
             session_id: self.session_id.clone(),
         }
@@ -196,7 +127,7 @@ impl HostedToolRuntime {
         let mode = self
             .host
             .as_ref()
-            .map_or(HostedToolMode::Code, |host| host.tool_mode());
+            .map_or(EmbeddedToolMode::Code, |host| host.tool_mode());
         let mut definitions = self.host.as_ref().map_or_else(Vec::new, |host| {
             match host.tool_definitions(session_id) {
                 Ok(definitions) => definitions,
@@ -204,7 +135,7 @@ impl HostedToolRuntime {
                     tracing::warn!(
                         target: "nanocodex_tools",
                         %error,
-                        "hosted Code Mode tool discovery failed"
+                        "embedded Code Mode tool discovery failed"
                     );
                     Vec::new()
                 }
@@ -227,10 +158,10 @@ impl HostedToolRuntime {
         } else {
             tracing::warn!(
                 target: "nanocodex_tools",
-                "hosted callable-tool registry lock was poisoned"
+                "embedded callable-tool registry lock was poisoned"
             );
         }
-        if mode == HostedToolMode::Direct {
+        if mode == EmbeddedToolMode::Direct {
             definitions.extend(self.local.iter().map(|(_, tool)| tool.definition()));
             crate::code_mode_order::sort_definitions(&mut definitions);
             return (definitions, Vec::new());
@@ -304,7 +235,7 @@ impl HostedToolRuntime {
         (model_definitions, code_mode_tool_names)
     }
 
-    /// Returns `false`; hosted definitions execute inside one Code Mode cell.
+    /// Returns `false`; embedded definitions execute inside one Code Mode cell.
     ///
     /// The embedding host owns any concurrency policy below that cell.
     #[must_use]
@@ -330,7 +261,7 @@ impl HostedToolRuntime {
             })
     }
 
-    /// Dispatches a direct hosted definition or returns a model-visible failure.
+    /// Dispatches a direct embedded definition or returns a model-visible failure.
     #[allow(
         clippy::unused_async,
         reason = "matches the native tool-runtime contract"
@@ -352,10 +283,10 @@ impl HostedToolRuntime {
                 .unwrap_or_else(|error| ToolOutput::error(error.to_string()));
         }
         let Some(host) = &self.host else {
-            return ToolOutput::error("no hosted tool adapter is configured");
+            return ToolOutput::error("no embedded tool adapter is configured");
         };
         if !self.contains(name) {
-            return ToolOutput::error(format!("direct hosted tool `{name}` is unavailable"));
+            return ToolOutput::error(format!("direct embedded tool `{name}` is unavailable"));
         }
         match host.execute_tool(name, input, context).await {
             Ok(output) => output,
@@ -366,7 +297,7 @@ impl HostedToolRuntime {
     /// Executes one Code Mode cell through the embedding host.
     pub async fn execute_code(&self, source: &str, context: ToolContext<'_>) -> CodeModeExecution {
         let Some(host) = &self.host else {
-            return failed("no hosted Code Mode adapter is configured");
+            return failed("no embedded Code Mode adapter is configured");
         };
         match host.execute(source, context).await {
             Ok(execution) => execution,
@@ -392,7 +323,7 @@ impl HostedToolRuntime {
         observer: &mut dyn CodeModeObserver,
     ) -> CodeModeExecution {
         let Some(host) = &self.host else {
-            return failed("no hosted Code Mode adapter is configured");
+            return failed("no embedded Code Mode adapter is configured");
         };
         match host
             .execute_with_updates(source, context.as_context(), observer)
@@ -403,7 +334,7 @@ impl HostedToolRuntime {
         }
     }
 
-    /// Returns a failed result because hosted cells cannot currently yield.
+    /// Returns a failed result because embedded cells cannot currently yield.
     #[allow(
         clippy::unused_async,
         reason = "matches the native tool-runtime contract"
@@ -413,10 +344,10 @@ impl HostedToolRuntime {
         _input: &str,
         _context: ToolContext<'_>,
     ) -> CodeModeExecution {
-        failed("background code-mode cells are unavailable in a hosted runtime")
+        failed("background code-mode cells are unavailable in an embedded runtime")
     }
 
-    /// Waits for hosted Code Mode, which cannot currently yield nested work.
+    /// Waits for embedded Code Mode, which cannot currently yield nested work.
     pub async fn wait_for_code_with_updates(
         &self,
         input: &str,
@@ -456,7 +387,7 @@ fn normalize_identifier(name: &str) -> String {
     }
 }
 
-impl HostedToolRuntimeControl {
+impl EmbeddedToolRuntimeControl {
     /// Begins a new logical agent turn.
     pub const fn begin_turn(&self) {}
 
@@ -473,7 +404,7 @@ impl HostedToolRuntimeControl {
             tracing::warn!(
                 target: "nanocodex_tools",
                 %error,
-                "hosted Code Mode cancellation failed"
+                "embedded Code Mode cancellation failed"
             );
         }
     }
@@ -490,15 +421,24 @@ fn failed(message: &str) -> CodeModeExecution {
 
 #[cfg(all(test, not(target_family = "wasm")))]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
     use async_trait::async_trait;
     use nanocodex_oai_api::tools::ToolOutputBody;
     use serde_json::json;
 
-    use super::{HostedToolRuntime, HostedTools};
+    use super::EmbeddedToolRuntime;
     use crate::{
-        Tool, ToolContext, ToolDefinition, ToolInput, ToolOutput, ToolResult,
-        hosted::{CodeModeExecution, CodeModeHost, CodeModeHostError, HostFuture, NestedToolCall},
+        Tool, ToolContext, ToolDefinition, ToolInput, ToolOutput, ToolResult, Tools,
+        embedded::{
+            CodeModeExecution, CodeModeHost, CodeModeHostError, HostFuture, NestedToolCall,
+            bind_host,
+        },
     };
+
+    fn bound_tools(host: impl CodeModeHost) -> Tools {
+        bind_host(Tools::builder().without_defaults().build().unwrap(), host)
+    }
 
     struct EchoHost;
 
@@ -511,6 +451,11 @@ mod tests {
     struct LocalAlpha;
 
     struct WebHost;
+
+    #[derive(Clone)]
+    struct CancelHost {
+        cancelled_sessions: Arc<Mutex<Vec<String>>>,
+    }
 
     #[async_trait]
     impl Tool for LocalAlpha {
@@ -691,20 +636,51 @@ mod tests {
         }
     }
 
+    impl CodeModeHost for CancelHost {
+        fn tool_definitions(
+            &self,
+            _session_id: &str,
+        ) -> Result<Vec<ToolDefinition>, CodeModeHostError> {
+            Ok(Vec::new())
+        }
+
+        fn execute<'a>(
+            &'a self,
+            _source: &'a str,
+            _context: ToolContext<'a>,
+        ) -> HostFuture<'a, Result<CodeModeExecution, CodeModeHostError>> {
+            Box::pin(async { unreachable!("this host only verifies cancellation") })
+        }
+
+        fn cancel<'a>(
+            &'a self,
+            session_id: &'a str,
+        ) -> HostFuture<'a, Result<(), CodeModeHostError>> {
+            Box::pin(async move {
+                self.cancelled_sessions
+                    .lock()
+                    .unwrap()
+                    .push(session_id.to_owned());
+                Ok(())
+            })
+        }
+    }
+
     #[test]
     fn model_description_orders_host_definitions() {
-        let tools = HostedTools::new(EchoHost).for_session("session-1");
+        let tools = bound_tools(EchoHost).for_session("session-1");
         tools.start_providers();
         let specs =
-            HostedToolRuntime::new_with_tools(".", None, None, &tools).model_specs("session-1");
+            EmbeddedToolRuntime::new_with_tools(".", None, None, &tools).model_specs("session-1");
         let description = specs[0].description();
         assert!(description.find("tools.alpha").unwrap() < description.find("tools.zeta").unwrap());
     }
 
     #[test]
-    fn model_description_includes_hosted_tool_argument_shapes() {
-        let specs = HostedToolRuntime::new_with_tools(".", None, None, &HostedTools::new(WebHost))
-            .model_specs("session-1");
+    fn model_description_includes_embedded_tool_argument_shapes() {
+        let tools = bound_tools(WebHost);
+        let specs =
+            EmbeddedToolRuntime::new_with_tools(".", None, None, &tools).model_specs("session-1");
         let description = specs[0].description();
 
         assert!(description.contains("web__run(args:"));
@@ -714,8 +690,9 @@ mod tests {
 
     #[test]
     fn direct_workspace_tool_describes_its_code_mode_return_shape() {
-        let specs = HostedToolRuntime::new_with_tools(".", None, None, &HostedTools::new(ExecHost))
-            .model_specs("session-1");
+        let tools = bound_tools(ExecHost);
+        let specs =
+            EmbeddedToolRuntime::new_with_tools(".", None, None, &tools).model_specs("session-1");
         let exec_command = specs
             .iter()
             .find(|definition| definition.name() == "exec_command")
@@ -728,8 +705,13 @@ mod tests {
 
     #[tokio::test]
     async fn rust_extension_tools_shadow_host_tools_and_dispatch_directly() {
-        let tools = HostedTools::new(EchoHost).with_tool(LocalAlpha).unwrap();
-        let runtime = HostedToolRuntime::new_with_tools(".", None, None, &tools);
+        let tools = Tools::builder()
+            .without_defaults()
+            .tool(LocalAlpha)
+            .build()
+            .unwrap();
+        let tools = bind_host(tools, EchoHost);
+        let runtime = EmbeddedToolRuntime::new_with_tools(".", None, None, &tools);
         let specs = runtime.model_specs("session-1");
         assert_eq!(
             specs.iter().map(ToolDefinition::name).collect::<Vec<_>>(),
@@ -750,11 +732,11 @@ mod tests {
 
     #[tokio::test]
     async fn code_mode_keeps_tool_search_direct_and_mcp_tools_deferred() {
-        let tools = HostedTools::new(DeferredHost);
-        let runtime = HostedToolRuntime::new_with_tools(".", None, None, &tools);
+        let tools = bound_tools(DeferredHost);
+        let runtime = EmbeddedToolRuntime::new_with_tools(".", None, None, &tools);
         let specs = runtime.model_specs("session-1");
-        let pending_tools = HostedTools::new(PendingDeferredHost);
-        let pending_runtime = HostedToolRuntime::new_with_tools(".", None, None, &pending_tools);
+        let pending_tools = bound_tools(PendingDeferredHost);
+        let pending_runtime = EmbeddedToolRuntime::new_with_tools(".", None, None, &pending_tools);
         let pending_specs = pending_runtime.model_specs("session-1");
         let names = specs.iter().map(ToolDefinition::name).collect::<Vec<_>>();
         assert_eq!(names, ["exec", "tool_search"]);
@@ -792,8 +774,8 @@ mod tests {
 
     #[tokio::test]
     async fn execution_receives_the_standard_tool_context() {
-        let tools = HostedTools::new(EchoHost);
-        let runtime = HostedToolRuntime::new_with_tools(".", None, None, &tools);
+        let tools = bound_tools(EchoHost);
+        let runtime = EmbeddedToolRuntime::new_with_tools(".", None, None, &tools);
         let execution = runtime
             .execute_code(
                 "echo",
@@ -804,5 +786,29 @@ mod tests {
             panic!("expected text output");
         };
         assert_eq!(output, "echo:session-1:call-1");
+    }
+
+    #[tokio::test]
+    async fn cancellation_is_scoped_to_the_bound_session() {
+        let cancelled_sessions = Arc::new(Mutex::new(Vec::new()));
+        let first_tools = bound_tools(CancelHost {
+            cancelled_sessions: Arc::clone(&cancelled_sessions),
+        })
+        .for_session("session-1");
+        let second_tools = bound_tools(CancelHost {
+            cancelled_sessions: Arc::clone(&cancelled_sessions),
+        })
+        .for_session("session-2");
+        let first = EmbeddedToolRuntime::new_with_tools(".", None, None, &first_tools);
+        let second = EmbeddedToolRuntime::new_with_tools(".", None, None, &second_tools);
+
+        first.control().cancel_turn().await;
+        assert_eq!(cancelled_sessions.lock().unwrap().as_slice(), ["session-1"]);
+
+        second.control().cancel().await;
+        assert_eq!(
+            cancelled_sessions.lock().unwrap().as_slice(),
+            ["session-1", "session-2"]
+        );
     }
 }

@@ -8,7 +8,8 @@ use std::{
 use js_sys::Promise;
 use nanocodex::{
     AgentEvents, AgentSessionContext, DurableAgentExt, Model, Nanocodex as RustNanocodex,
-    NanocodexError, OpenAi, PromptRoute, ReasoningMode, Thinking, Turn, TurnControl, TurnResult,
+    NanocodexError, OpenAi, PromptRoute, ReasoningMode, Thinking, Tools, Turn, TurnControl,
+    TurnResult,
     agent::{
         ExecutionEnvironment, PromptRequest,
         durability::{
@@ -27,9 +28,9 @@ use nanocodex::{
     tools::{
         ToolContext, ToolDefinition, ToolInput, ToolOutput,
         contract::ToolOutputWire,
-        hosted::{
+        embedded::{
             CodeModeExecution, CodeModeHost, CodeModeHostError, CodeModeObserver, CodeModeUpdate,
-            HostFuture, HostedToolMode, HostedTools, NestedToolCall,
+            EmbeddedToolMode, HostFuture, NestedToolCall, bind_host,
         },
         standard::StandardTool,
     },
@@ -447,7 +448,7 @@ impl JournalStore for JavaScriptDurabilityStore {
 
 struct JavaScriptCodeModeHost {
     definition_host_id: u32,
-    mode: HostedToolMode,
+    mode: EmbeddedToolMode,
 }
 
 #[derive(Deserialize)]
@@ -467,16 +468,16 @@ impl JavaScriptCodeModeHost {
         Self {
             definition_host_id,
             mode: if host_tool_mode(definition_host_id, "") == "direct" {
-                HostedToolMode::Direct
+                EmbeddedToolMode::Direct
             } else {
-                HostedToolMode::Code
+                EmbeddedToolMode::Code
             },
         }
     }
 }
 
 impl CodeModeHost for JavaScriptCodeModeHost {
-    fn tool_mode(&self) -> HostedToolMode {
+    fn tool_mode(&self) -> EmbeddedToolMode {
         self.mode
     }
 
@@ -967,22 +968,25 @@ impl WasmNanocodex {
             .host_transport(JavaScriptResponsesHost)
             .build()
             .map_err(js_error)?;
-        let hosted_tools = HostedTools::new(JavaScriptCodeModeHost::new(config.host_definition_id));
+        let tools = Tools::builder()
+            .without_defaults()
+            .build()
+            .map_err(js_error)?;
+        let tools = bind_host(
+            tools,
+            JavaScriptCodeModeHost::new(config.host_definition_id),
+        );
         let (mut builder, subagents) = if let Some(subagents) = config.subagents {
             let (registry, control, updates) =
                 nanocodex_subagents::channel(subagents.max_concurrency);
             (
                 RustNanocodex::builder(openai).tools_factory(move |agent| {
-                    nanocodex_subagents::install_tools(
-                        hosted_tools.clone(),
-                        agent,
-                        registry.clone(),
-                    )
+                    nanocodex_subagents::install_tools(tools.clone(), agent, registry.clone())
                 }),
                 Some(WasmSubagents::new(control, updates)),
             )
         } else {
-            (RustNanocodex::builder(openai).tools(hosted_tools), None)
+            (RustNanocodex::builder(openai).tools(tools), None)
         };
         if let Some(instructions) = config.instructions {
             builder = builder.instructions(instructions);

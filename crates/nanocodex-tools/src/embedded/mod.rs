@@ -1,16 +1,16 @@
 //! Portable adapter for Code Mode runtimes owned by an embedding host.
 //!
-//! Hosted runtimes are useful when Rust owns the agent lifecycle but another
+//! Embedded runtimes are useful when Rust owns the agent lifecycle but another
 //! environment owns JavaScript execution and application-defined tools. The
 //! adapter is independent of `wasm-bindgen`; a Node or browser binding can
 //! implement [`CodeModeHost`] without leaking JavaScript types into this crate.
 //!
 //! ```
 //! use nanocodex_tools::{
-//!     ToolContext,
+//!     ToolContext, Tools,
 //!     contract::ToolOutputBody,
-//!     hosted::{
-//!         CodeModeExecution, CodeModeHost, CodeModeHostError, HostFuture, HostedTools,
+//!     embedded::{
+//!         CodeModeExecution, CodeModeHost, CodeModeHostError, HostFuture, bind_host,
 //!     },
 //! };
 //!
@@ -40,8 +40,12 @@
 //!     }
 //! }
 //!
-//! let tools = HostedTools::new(ApplicationHost);
+//! # fn configure() -> Result<(), nanocodex_tools::ToolsBuildError> {
+//! let tools = Tools::builder().without_defaults().build()?;
+//! let tools = bind_host(tools, ApplicationHost);
 //! assert!(!tools.web_search_enabled());
+//! # Ok(())
+//! # }
 //! ```
 
 mod input;
@@ -53,22 +57,31 @@ use std::{error::Error, fmt, future::Future, pin::Pin};
 use crate::{ToolContext, ToolDefinition, ToolInput, ToolOutput};
 
 pub use input::{prepare_output_images, prepare_user_input};
-pub use runtime::{
-    HostedToolRuntime, HostedToolRuntimeControl, HostedTools, HostedToolsBuildError,
-};
+pub use runtime::{EmbeddedToolRuntime, EmbeddedToolRuntimeControl};
 pub use types::{
     CodeModeExecution, CodeModeNotification, CodeModeObserver, CodeModeUpdate, NestedToolCall,
     OwnedToolContext,
 };
 
-/// Future returned by a hosted Code Mode operation.
+/// Binds a caller-owned Code Mode host to one immutable [`crate::Tools`] recipe.
+///
+/// This is an embedding seam for language bindings. Application tool policy
+/// remains configured through the ordinary [`crate::ToolsBuilder`].
+#[doc(hidden)]
+#[must_use]
+pub fn bind_host(mut tools: crate::Tools, host: impl CodeModeHost) -> crate::Tools {
+    tools.embedded_host = Some(std::sync::Arc::new(host));
+    tools
+}
+
+/// Future returned by an embedded Code Mode operation.
 ///
 /// Native host futures must be sendable because a native agent driver may run
 /// on a multithreaded executor.
 #[cfg(not(target_family = "wasm"))]
 pub type HostFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
-/// Future returned by a hosted Code Mode operation.
+/// Future returned by an embedded Code Mode operation.
 ///
 /// Browser host futures may retain JavaScript values, which are local to the
 /// browser thread.
@@ -107,7 +120,7 @@ impl Error for CodeModeHostError {}
 
 /// Model-visible dispatch policy selected by an embedding host.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum HostedToolMode {
+pub enum EmbeddedToolMode {
     /// Expose one Code Mode `exec` tool and nest application tools below it.
     #[default]
     Code,
@@ -124,8 +137,8 @@ pub enum HostedToolMode {
 /// [`CodeModeHostError`] for failures in the host bridge itself.
 pub trait CodeModeHost: Send + Sync + 'static {
     /// Selects Code Mode or CSP-safe direct function dispatch.
-    fn tool_mode(&self) -> HostedToolMode {
-        HostedToolMode::Code
+    fn tool_mode(&self) -> EmbeddedToolMode {
+        EmbeddedToolMode::Code
     }
 
     /// Returns the tools available to Code Mode for this session.
@@ -176,7 +189,7 @@ pub trait CodeModeHost: Send + Sync + 'static {
     ) -> HostFuture<'a, Result<ToolOutput, CodeModeHostError>> {
         Box::pin(async move {
             Err(CodeModeHostError::new(format!(
-                "direct hosted tool `{name}` is unavailable"
+                "direct embedded tool `{name}` is unavailable"
             )))
         })
     }

@@ -41,7 +41,7 @@ pub async fn prepare_user_input(input: &PromptInput) -> Vec<ContentItem> {
         .collect()
 }
 
-/// Leaves host-prepared tool images unchanged.
+/// Leaves embedding-prepared tool images unchanged.
 #[allow(
     clippy::unused_async,
     reason = "matches the native output-preparation contract"

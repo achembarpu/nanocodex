@@ -23,7 +23,7 @@ mod code_mode_description;
 #[cfg(feature = "native")]
 mod code_mode_order;
 #[cfg(feature = "native")]
-pub mod hosted;
+pub mod embedded;
 #[cfg(all(not(target_family = "wasm"), feature = "native"))]
 #[cfg_attr(docsrs, doc(cfg(not(target_family = "wasm"))))]
 pub mod image;
@@ -39,6 +39,9 @@ mod plan;
 pub mod runtime;
 #[cfg(feature = "native")]
 mod runtime_config;
+#[cfg(all(target_family = "wasm", feature = "native"))]
+#[path = "runtime/selection.rs"]
+mod selection;
 #[cfg(all(not(target_family = "wasm"), feature = "workspace-runtime"))]
 mod shell;
 #[cfg(feature = "workspace-runtime")]
@@ -67,30 +70,30 @@ pub mod contract {
 }
 
 #[cfg(all(target_family = "wasm", feature = "native"))]
-/// Code Mode results and observation contracts for the host-backed WASM runtime.
+/// Code Mode results and observation contracts for the embedded WASM runtime.
 pub mod code_mode {
-    pub use crate::hosted::{
+    pub use crate::embedded::{
         CodeModeExecution, CodeModeNotification, CodeModeObserver, CodeModeUpdate, NestedToolCall,
     };
 }
 
 #[cfg(all(target_family = "wasm", feature = "native"))]
-/// Image input and output preparation for the host-backed WASM runtime.
+/// Image input and output preparation for the embedded WASM runtime.
 pub mod image {
-    pub use crate::hosted::{prepare_output_images, prepare_user_input};
+    pub use crate::embedded::{prepare_output_images, prepare_user_input};
     pub use nanocodex_oai_api::ImageDetail;
 }
 
 #[cfg(all(target_family = "wasm", feature = "native"))]
-/// Host-backed tool selection and execution runtime.
+/// Embedded tool selection and execution runtime.
 pub mod runtime {
     pub use crate::{
-        hosted::{
-            HostedToolMode, HostedToolRuntime as ToolRuntime,
-            HostedToolRuntimeControl as ToolRuntimeControl, HostedTools as Tools,
-            HostedToolsBuildError as ToolsBuildError, OwnedToolContext,
+        embedded::{
+            EmbeddedToolMode, EmbeddedToolRuntime as ToolRuntime,
+            EmbeddedToolRuntimeControl as ToolRuntimeControl, OwnedToolContext,
         },
         runtime_config::{ImageGenerationConfig, WebSearchConfig},
+        selection::{ToolExposure, ToolSource, Tools, ToolsBuildError, ToolsBuilder},
     };
 }
 
@@ -99,8 +102,6 @@ pub(crate) use contract::ToolOutputBody;
 #[cfg(all(not(target_family = "wasm"), feature = "workspace-runtime"))]
 pub(crate) use contract::ToolOutputContent;
 pub use contract::{Tool, ToolContext, ToolDefinition, ToolInput, ToolOutput, ToolResult};
-#[cfg(all(target_family = "wasm", feature = "native"))]
-pub use hosted::HostedToolsBuildError as ToolsBuildError;
 #[cfg(all(not(target_family = "wasm"), feature = "workspace-runtime"))]
 pub(crate) use nanocodex_oai_api::ImageDetail;
 #[cfg(all(not(target_family = "wasm"), feature = "native"))]
@@ -116,6 +117,8 @@ pub(crate) use runtime::{DynamicToolProvider, ImageGenerationConfig, WebSearchCo
 #[cfg(all(not(target_family = "wasm"), feature = "native"))]
 #[cfg_attr(docsrs, doc(cfg(not(target_family = "wasm"))))]
 pub use runtime::{ToolSource, ToolsBuildError, ToolsBuilder};
+#[cfg(all(target_family = "wasm", feature = "native"))]
+pub use selection::{ToolExposure, ToolSource, ToolsBuildError, ToolsBuilder};
 #[cfg(all(not(target_family = "wasm"), feature = "native"))]
 #[cfg_attr(docsrs, doc(cfg(all(not(target_family = "wasm"), feature = "native"))))]
 pub use shell::ambient_sensitive_environment;

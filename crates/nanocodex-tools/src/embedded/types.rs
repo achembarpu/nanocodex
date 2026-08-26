@@ -11,7 +11,7 @@ use serde_json::{Value, value::RawValue};
 ///
 /// Prefer [`ToolContext`] for ordinary synchronous tool handlers. This owned
 /// form retains shared history without copying it again when execution crosses
-/// an asynchronous host boundary.
+/// an asynchronous embedding boundary.
 pub struct OwnedToolContext {
     pub(crate) model: String,
     pub(crate) session_id: String,

@@ -559,7 +559,6 @@ impl Tool for ChangeAgentLifecycle {
     }
 }
 
-#[cfg(not(target_family = "wasm"))]
 pub fn install_tools(
     tools: Tools,
     parent: AgentHandle,
@@ -592,39 +591,6 @@ pub fn install_tools(
             operation: LifecycleOperation::Close,
         })
         .build()
-}
-
-#[cfg(target_family = "wasm")]
-pub fn install_tools(
-    tools: Tools,
-    parent: AgentHandle,
-    registry: Arc<Registry>,
-) -> Result<Tools, ToolsBuildError> {
-    tools
-        .with_tool(SubmitResult {
-            registry: Arc::downgrade(&registry),
-        })?
-        .with_tool(SpawnAgent {
-            parent,
-            registry: Arc::downgrade(&registry),
-        })?
-        .with_tool(SendAgentMessage {
-            registry: Arc::downgrade(&registry),
-        })?
-        .with_tool(ListAgents {
-            registry: Arc::downgrade(&registry),
-        })?
-        .with_tool(WaitAgent {
-            registry: Arc::downgrade(&registry),
-        })?
-        .with_tool(ChangeAgentLifecycle {
-            registry: Arc::downgrade(&registry),
-            operation: LifecycleOperation::Interrupt,
-        })?
-        .with_tool(ChangeAgentLifecycle {
-            registry: Arc::downgrade(&registry),
-            operation: LifecycleOperation::Close,
-        })
 }
 
 fn spawn_agent_output_schema() -> Value {
