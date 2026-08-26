@@ -90,7 +90,8 @@ export function imageGeneration(options = {}) {
 
 export function viewImage(options) {
   return namedTool("view_image", {
-    supportsParallelToolCalls: true,
+    supportsParallelToolCalls: false,
+    provider: "workspace",
     description: "View a local image file from the filesystem when visual inspection is needed. Use this for images already available on disk.",
     parameters: {
       type: "object",

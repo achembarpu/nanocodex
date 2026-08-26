@@ -99,9 +99,10 @@ export async function justBash(options) {
   let executionTail = Promise.resolve();
 
   const tool = namedTool("exec_command", {
-    description: "Runs a shell command, returning output or a session ID for ongoing interaction.",
+    description: "Runs a command in a PTY, returning output or a session ID for ongoing interaction.",
     parameters: EXEC_PARAMETERS,
     outputSchema: EXEC_OUTPUT,
+    provider: "workspace",
     handler(input, context) {
       const execute = () => executeCommand({
         bash,

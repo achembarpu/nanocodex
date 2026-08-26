@@ -129,7 +129,10 @@ test("image generation resolves recent session images without owning conversatio
 test("each factory returns an immutable named tool for direct array composition", () => {
   assert(Object.isFrozen(updatePlan()));
   assert.equal(dataset().name, "dataset");
-  assert.equal(viewImage({ workspace: { readFile: async () => new Uint8Array() } }).name, "view_image");
+  const image = viewImage({ workspace: { readFile: async () => new Uint8Array() } });
+  assert.equal(image.name, "view_image");
+  assert.equal(image.provider, "workspace");
+  assert.equal(image.supportsParallelToolCalls, false);
 });
 
 test("update_plan validates active work and releases session-owned state", async () => {

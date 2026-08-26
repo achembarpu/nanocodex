@@ -3,6 +3,15 @@ import test from "node:test";
 
 import { justBash } from "../tools/bash.mjs";
 
+test("Just Bash advertises the native workspace exec contract", async () => {
+  const { tool } = await justBash({ filesystem: memoryWorkspace() });
+  assert.equal(tool.provider, "workspace");
+  assert.equal(
+    tool.description,
+    "Runs a command in a PTY, returning output or a session ID for ongoing interaction.",
+  );
+});
+
 test("Just Bash mounts one persistent workspace without a process sandbox", async () => {
   const workspace = memoryWorkspace();
   const first = await justBash({ filesystem: workspace });
