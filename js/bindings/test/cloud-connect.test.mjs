@@ -147,6 +147,7 @@ test("Connect durable prompts reach native fetch without wrapping their POST bod
             type: "turn_completed",
             final_message: "received",
             usage: null,
+            citations: [],
           },
         });
       },

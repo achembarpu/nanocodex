@@ -419,6 +419,7 @@ test("browser online recovery replaces a half-open managed event stream from its
       id: "turn-online",
       final_message: "recovered online",
       usage: null,
+      citations: [],
     }));
 
     assert.equal((await watching).data.final_message, "recovered online");
@@ -638,7 +639,7 @@ test("prompts and a watcher multiplex one active managed event request without s
     id: `turn-${number}`,
     final_message: `done ${number}`,
     usage: null,
-    ...(number === 1 ? {} : { citations: [] }),
+    citations: [],
   })).join(""));
 
   const completed = await Promise.all(results);
@@ -1068,6 +1069,7 @@ test("paused managed event subscribers fail with a terminal-safe reconnect curso
     id: "turn-terminal",
     final_message: "terminal retained",
     usage: null,
+    citations: [],
   }));
   assert.equal((await terminal).value.data.final_message, "terminal retained");
   await resumed.return();
@@ -1142,6 +1144,7 @@ test("an inactive managed SSE reconnects from the exact cursor", async () => {
             id: "turn-inactive",
             final_message: "reconnected",
             usage: null,
+            citations: [],
           })));
         }
         return connection.response;
@@ -1220,6 +1223,7 @@ test("managed terminal retention is bounded by encoded bytes as well as turn cou
       id: `turn-cache-${index}`,
       final_message: `${index}:${"x".repeat(1024 * 1024)}`,
       usage: null,
+      citations: [],
     }));
     await waitFor(() => observed === index + 1);
   }
@@ -1268,6 +1272,7 @@ test("the first managed terminal is canonical, identical replay is ignored, and 
     id: "turn-canonical",
     final_message: "first answer",
     usage: null,
+    citations: [],
   };
   const first = events.next();
   await waitFor(() => connections.length === 1);
@@ -1343,6 +1348,7 @@ test("managed prompts retry browser transport failures with one idempotency key"
           type: "turn_completed",
           final_message: "done",
           usage: null,
+          citations: [],
         },
       });
     },
@@ -1392,6 +1398,7 @@ test("managed prompts replay a committed turn when its acknowledgement never set
             type: "turn_completed",
             final_message: "recovered",
             usage: null,
+            citations: [],
           },
         }, { status: 202 });
       },
@@ -1454,6 +1461,7 @@ test("managed results recover a retained terminal from authoritative turn state"
               type: "turn_completed",
               final_message: "recovered from durable state",
               usage: null,
+              citations: [],
             },
           });
         }
@@ -1522,6 +1530,7 @@ test("managed result recovery retries a nonsettling authoritative turn read", as
               type: "turn_completed",
               final_message: "recovered after a half-open state read",
               usage: null,
+              citations: [],
             },
           });
         }
