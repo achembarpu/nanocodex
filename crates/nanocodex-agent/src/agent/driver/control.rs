@@ -316,9 +316,7 @@ pub(super) fn handle_idle_command<S>(
             let outcome = spawner.spawn_clean_many(
                 workspace,
                 session_id,
-                defaults.model,
-                defaults.thinking,
-                defaults.fast_mode,
+                defaults,
                 count,
                 observer.as_deref(),
             );

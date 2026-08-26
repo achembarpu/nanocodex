@@ -472,7 +472,7 @@ async fn request_spawn_many(
     commands: &mpsc::Sender<Command>,
     shutdown: &DriverShutdown,
     count: usize,
-    observer: Option<Arc<dyn Fn(&str) + Send + Sync>>,
+    observer: Option<Arc<SpawnObserver>>,
 ) -> Result<Vec<(Nanocodex, AgentEvents)>> {
     request_command(commands, shutdown, |result| Command::SpawnBatch {
         count,

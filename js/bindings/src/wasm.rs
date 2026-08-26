@@ -1582,21 +1582,22 @@ impl WasmNanocodex {
             .subagents
             .as_ref()
             .ok_or_else(|| js_error("subagents are not configured for this Agent"))?;
-        let parents = match subagents.parents.lock() {
-            Ok(parents) => parents,
-            Err(poisoned) => poisoned.into_inner(),
+        let parent = {
+            let parents = match subagents.parents.lock() {
+                Ok(parents) => parents,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            parents
+                .get(self.inner.session_id())
+                .cloned()
+                .ok_or_else(|| js_error("subagent parent is not ready"))?
         };
-        let parent = parents
-            .get(&self.inner.session_id().to_string())
-            .cloned()
-            .ok_or_else(|| js_error("subagent parent is not ready"))?;
-        drop(parents);
         let cleanup = WasmBatchParentCleanup::new(Arc::clone(&subagents.parents));
         let observed_sessions = Arc::clone(&cleanup.sessions);
         let reports = start_agents_observed(
             &parent,
             &subagents.registry,
-            &self.inner.session_id().to_string(),
+            self.inner.session_id(),
             tasks,
             move |session| {
                 let mut observed = match observed_sessions.lock() {

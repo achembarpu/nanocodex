@@ -61,6 +61,9 @@ type ToolsFactory =
     Arc<dyn Fn(AgentHandle) -> std::result::Result<Tools, ToolsBuildError> + Send + Sync>;
 
 #[cfg(feature = "openai")]
+type SpawnObserver = dyn Fn(&str) + Send + Sync;
+
+#[cfg(feature = "openai")]
 enum InitialResume {
     Exact(Box<ModelCheckpoint>),
     History(Box<HistoryCheckpoint>),

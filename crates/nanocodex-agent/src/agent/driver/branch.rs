@@ -126,20 +126,18 @@ where
         &self,
         workspace: Option<Arc<str>>,
         parent_session_id: &str,
-        model: Model,
-        thinking: Thinking,
-        fast_mode: bool,
+        defaults: TurnDefaults,
         count: usize,
-        observer: Option<&(dyn Fn(&str) + Send + Sync)>,
+        observer: Option<&SpawnObserver>,
     ) -> Result<Vec<(Nanocodex, AgentEvents)>> {
         let mut children = Vec::with_capacity(count);
         for _ in 0..count {
             let child = self.spawn_clean(
                 workspace.clone(),
                 parent_session_id,
-                model,
-                thinking,
-                fast_mode,
+                defaults.model,
+                defaults.thinking,
+                defaults.fast_mode,
             )?;
             if let Some(observer) = observer {
                 observer(child.0.session_id());
