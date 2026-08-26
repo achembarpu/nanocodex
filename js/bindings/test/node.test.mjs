@@ -575,18 +575,48 @@ test("Node host invokes canonical subagent handlers without a root model turn", 
       state: "completed",
       output: { answer: "thread-memory-confirmed" },
     });
-    await Subagents.close(agent, started.agent_id);
+    const childClosed = new Promise((resolve) => childSocket.once("close", resolve));
+    const closed = await Subagents.close(agent, started.agent_id);
+    assert.deepEqual(closed.agents[0].status, {
+      state: "closed",
+    });
+    await bounded(childClosed, "direct child socket close");
     await assert.rejects(
       Subagents.wait(agent, { agentIds: [started.agent_id], timeoutMs: 0 }),
       /timeoutMs must be greater than zero/,
     );
     const nonRoot = await agent.session.spawn();
+    assert.deepEqual(await Subagents.list(nonRoot, { includeCompleted: true }), { agents: [] });
     await assert.rejects(
       Subagents.wait(nonRoot, { agentIds: [started.agent_id], timeoutMs: 1 }),
-      /require the owning root agent/,
+      /unknown agent_id/,
     );
-    nonRoot.dispose();
-    assert.equal(server.connections, 1);
+    const siblingChildConnection = new Promise((resolve) =>
+      server.websocketServer.once("connection", resolve));
+    const siblingStartedPromise = Subagents.spawn(nonRoot, {
+      role: "independent-root-child",
+      task: "Wait until the owning root closes this child.",
+      outputSchema: true,
+    });
+    const siblingChildSocket = await bounded(siblingChildConnection, "sibling child connection");
+    const siblingChildReader = messageReader(siblingChildSocket);
+    await bounded(siblingChildReader.next(), "sibling child warmup");
+    sendWarmup(siblingChildSocket, "sibling-child-warmup");
+    const siblingStarted = await bounded(siblingStartedPromise, "sibling direct spawn");
+    assert.deepEqual((await Subagents.list(nonRoot)).agents.map(({ agent_id }) => agent_id), [
+      siblingStarted.agent_id,
+    ]);
+    assert.equal(
+      (await Subagents.list(agent, { includeCompleted: true })).agents.some(
+        ({ role }) => role === "independent-root-child",
+      ),
+      false,
+    );
+    const siblingChildClosed = new Promise((resolve) => siblingChildSocket.once("close", resolve));
+    await Subagents.close(nonRoot, siblingStarted.agent_id);
+    await bounded(siblingChildClosed, "sibling child socket close");
+    await nonRoot.session.shutdown();
+    assert.equal(server.connections, 2);
   } finally {
     await agent.session.shutdown();
     await server.close();

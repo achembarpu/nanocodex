@@ -283,6 +283,11 @@ async function check() {
       additionalProperties: false,
     },
   });
+  await Subagents.spawn(agent, {
+    role: "accept-any-json",
+    task: "Return any JSON value.",
+    outputSchema: true,
+  });
   const localLifecycle: AgentLifecycle = agent;
   void localLifecycle;
   const childWait = await Subagents.wait(agent, {

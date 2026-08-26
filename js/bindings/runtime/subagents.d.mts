@@ -27,12 +27,13 @@ export type AgentSummary = Readonly<{
   status: AgentStatus;
   last_output?: unknown;
 }>;
+export type JsonSchema = boolean | Readonly<Record<string, unknown>>;
 export type SpawnOptions = Readonly<{
   role: string;
   task: string;
   model?: "sol" | "terra" | "luna" | undefined;
   thinking?: Thinking | undefined;
-  outputSchema: Record<string, unknown>;
+  outputSchema: JsonSchema;
 }>;
 export type SpawnReport = Readonly<{
   agent_id: AgentId;

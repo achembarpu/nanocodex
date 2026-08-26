@@ -44,10 +44,17 @@ impl Clone for Nanocodex {
 pub struct AgentHandle {
     pub(super) commands: mpsc::WeakSender<Command>,
     pub(super) shutdown: DriverShutdown,
+    pub(super) session_id: Arc<str>,
 }
 
 #[cfg(feature = "openai")]
 impl AgentHandle {
+    /// Returns the session owned by this weak driver capability.
+    #[must_use]
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
     /// Starts a clean agent with the containing driver's private configuration,
     /// service factory, workspace policy, and per-agent tools factory.
     ///

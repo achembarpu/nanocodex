@@ -3,7 +3,7 @@ use std::{
     collections::{HashMap, VecDeque},
     path::PathBuf,
     rc::Rc,
-    sync::{Arc, OnceLock},
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
@@ -964,8 +964,7 @@ pub struct WasmNanocodex {
 struct WasmSubagents {
     registry: Arc<SubagentRegistry>,
     control: SubagentControl,
-    parent: Arc<OnceLock<AgentHandle>>,
-    root_session_id: Arc<OnceLock<String>>,
+    parents: Arc<Mutex<HashMap<String, AgentHandle>>>,
     sessions: Rc<RefCell<HashMap<(String, SubagentId), String>>>,
     event_forwarders: Rc<Cell<usize>>,
 }
@@ -975,7 +974,7 @@ impl WasmSubagents {
         registry: Arc<SubagentRegistry>,
         control: SubagentControl,
         updates: tokio::sync::mpsc::UnboundedReceiver<ScopedAgentUpdate>,
-        parent: Arc<OnceLock<AgentHandle>>,
+        parents: Arc<Mutex<HashMap<String, AgentHandle>>>,
     ) -> Self {
         let sessions = Rc::new(RefCell::new(HashMap::new()));
         let event_forwarders = Rc::new(Cell::new(0));
@@ -983,29 +982,20 @@ impl WasmSubagents {
         Self {
             registry,
             control,
-            parent,
-            root_session_id: Arc::new(OnceLock::new()),
+            parents,
             sessions,
             event_forwarders,
         }
     }
 
-    fn bind_root(&self, session_id: String) {
-        let _ = self.root_session_id.set(session_id);
-    }
-
-    fn require_root(&self, session_id: &str) -> Result<(), JsValue> {
-        if self
-            .root_session_id
-            .get()
-            .is_some_and(|root| root == session_id)
-        {
-            Ok(())
-        } else {
-            Err(js_error(
-                "direct subagent lifecycle methods require the owning root agent",
-            ))
-        }
+    fn parent(&self, session_id: &str) -> Result<AgentHandle, JsValue> {
+        let parents = match self.parents.lock() {
+            Ok(parents) => parents,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        parents.get(session_id).cloned().ok_or_else(|| {
+            js_error("direct subagent lifecycle methods require an owning agent handle")
+        })
     }
 
     fn set_event_forwarding(&self, enabled: bool) {
@@ -1020,6 +1010,14 @@ impl WasmSubagents {
     async fn close_all(&self, root_session_id: &str) -> std::io::Result<()> {
         self.control.close_all(root_session_id).await?;
         release_subagent_scope(&self.sessions, root_session_id);
+        match self.parents.lock() {
+            Ok(mut parents) => {
+                parents.remove(root_session_id);
+            }
+            Err(poisoned) => {
+                poisoned.into_inner().remove(root_session_id);
+            }
+        }
         Ok(())
     }
 }
@@ -1089,15 +1087,24 @@ impl WasmNanocodex {
         let (mut builder, subagents) = if let Some(subagents) = config.subagents {
             let (registry, control, updates) =
                 nanocodex_subagents::channel(subagents.max_concurrency);
-            let parent = Arc::new(OnceLock::new());
+            let parents = Arc::new(Mutex::new(HashMap::new()));
             let tool_registry = Arc::clone(&registry);
-            let tool_parent = Arc::clone(&parent);
+            let tool_parents = Arc::clone(&parents);
             (
                 RustNanocodex::builder(openai).tools_factory(move |agent| {
-                    let _ = tool_parent.set(agent.clone());
+                    match tool_parents.lock() {
+                        Ok(mut parents) => {
+                            parents.insert(agent.session_id().to_owned(), agent.clone());
+                        }
+                        Err(poisoned) => {
+                            poisoned
+                                .into_inner()
+                                .insert(agent.session_id().to_owned(), agent.clone());
+                        }
+                    }
                     nanocodex_subagents::install_tools(tools.clone(), agent, tool_registry.clone())
                 }),
-                Some(WasmSubagents::new(registry, control, updates, parent)),
+                Some(WasmSubagents::new(registry, control, updates, parents)),
             )
         } else {
             (RustNanocodex::builder(openai).tools(tools), None)
@@ -1143,9 +1150,6 @@ impl WasmNanocodex {
             builder = builder.durability(journal).await.map_err(js_error)?;
         }
         let (inner, events) = builder.build().map_err(js_error)?;
-        if let Some(subagents) = &subagents {
-            subagents.bind_root(inner.session_id().to_string());
-        }
         Ok(Self::from_parts(inner, events, subagents))
     }
 
@@ -1182,11 +1186,7 @@ impl WasmNanocodex {
             .subagents
             .as_ref()
             .ok_or_else(|| js_error("this agent was not created with the subagent extension"))?;
-        subagents.require_root(&self.inner.session_id().to_string())?;
-        let parent = subagents
-            .parent
-            .get()
-            .ok_or_else(|| js_error("the root subagent handle is unavailable"))?;
+        let parent = subagents.parent(self.inner.session_id())?;
         let mut options = SpawnOptions::new();
         if let Some(model) = task.model {
             options = options.model(model);
@@ -1195,7 +1195,7 @@ impl WasmNanocodex {
             options = options.thinking(thinking);
         }
         let report = start_agent_with(
-            parent,
+            &parent,
             &subagents.registry,
             &self.inner.session_id().to_string(),
             AgentTask {
@@ -1219,7 +1219,7 @@ impl WasmNanocodex {
             .subagents
             .as_ref()
             .ok_or_else(|| js_error("this agent was not created with the subagent extension"))?;
-        subagents.require_root(&self.inner.session_id().to_string())?;
+        subagents.parent(self.inner.session_id())?;
         let timeout_ms = task.timeout_ms.unwrap_or(30_000);
         if timeout_ms == 0 {
             return Err(js_error(
@@ -1248,7 +1248,7 @@ impl WasmNanocodex {
             .subagents
             .as_ref()
             .ok_or_else(|| js_error("this agent was not created with the subagent extension"))?;
-        subagents.require_root(&self.inner.session_id().to_string())?;
+        subagents.parent(self.inner.session_id())?;
         let agents = subagents
             .registry
             .directory(
@@ -1269,7 +1269,7 @@ impl WasmNanocodex {
             .subagents
             .as_ref()
             .ok_or_else(|| js_error("this agent was not created with the subagent extension"))?;
-        subagents.require_root(&self.inner.session_id().to_string())?;
+        subagents.parent(self.inner.session_id())?;
         let receipt = subagents
             .registry
             .send_message(
@@ -1294,7 +1294,7 @@ impl WasmNanocodex {
             .subagents
             .as_ref()
             .ok_or_else(|| js_error("this agent was not created with the subagent extension"))?;
-        subagents.require_root(&self.inner.session_id().to_string())?;
+        subagents.parent(self.inner.session_id())?;
         let agents = subagents
             .registry
             .interrupt(&self.inner.session_id().to_string(), task.agent_id)
@@ -1312,7 +1312,7 @@ impl WasmNanocodex {
             .subagents
             .as_ref()
             .ok_or_else(|| js_error("this agent was not created with the subagent extension"))?;
-        subagents.require_root(&self.inner.session_id().to_string())?;
+        subagents.parent(self.inner.session_id())?;
         let agents = subagents
             .registry
             .close(&self.inner.session_id().to_string(), task.agent_id)
