@@ -9,21 +9,26 @@ let holdSubjectBind = false;
 let heldSubjectBinds = 0;
 let heldSubjectUnbinds = 0;
 let heldSubjectResponses = 0;
+let heldSubjectOrder = [];
 export default {
   async fetch(request) {
     const url = new URL(request.url);
     if (url.pathname === "/test/hold-subject-bind") {
       if (request.method === "POST") {
-        heldSubject = undefined;
+        let body;
+        try { body = await request.json(); } catch {}
+        heldSubject = typeof body?.subject === "string" ? body.subject : undefined;
         heldSubjectBinds = 0;
         heldSubjectUnbinds = 0;
         heldSubjectResponses = 0;
-        holdSubjectBind = true;
+        heldSubjectOrder = [];
+        holdSubjectBind = body?.hold !== false;
         return new Response(null, { status: 204 });
       }
       if (request.method === "GET") {
         return Response.json({
           binds: heldSubjectBinds,
+          order: heldSubjectOrder,
           responses: heldSubjectResponses,
           subject: heldSubject,
           unbinds: heldSubjectUnbinds,
@@ -82,16 +87,22 @@ export default {
       if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(body?.user_id ?? "")) {
         return Response.json({ error: "invalid_request" }, { status: 400 });
       }
-      if (holdSubjectBind) {
+      if (holdSubjectBind && heldSubject === undefined) heldSubject = subjectRoute[1];
+      if (subjectRoute[1] === heldSubject) {
         heldSubjectBinds += 1;
-        heldSubject = subjectRoute[1];
+        heldSubjectOrder.push("bind");
+      }
+      if (holdSubjectBind && subjectRoute[1] === heldSubject) {
         while (holdSubjectBind) await scheduler.wait(1);
       }
       subjects.add(subjectRoute[1]);
       return new Response(null, { status: 204 });
     }
     if (subjectRoute && request.method === "DELETE") {
-      if (subjectRoute[1] === heldSubject) heldSubjectUnbinds += 1;
+      if (subjectRoute[1] === heldSubject) {
+        heldSubjectUnbinds += 1;
+        heldSubjectOrder.push("unbind");
+      }
       subjects.delete(subjectRoute[1]);
       return new Response(null, { status: 204 });
     }
@@ -226,7 +237,10 @@ export default {
       return Response.json({ error: "test_broker_denied" }, { status: 403 });
     }
     const pair = new WebSocketPair();
-    if (subject === heldSubject) heldSubjectResponses += 1;
+    if (subject === heldSubject) {
+      heldSubjectResponses += 1;
+      heldSubjectOrder.push("transport");
+    }
     const [client, server] = Object.values(pair);
     server.accept();
     let pendingResponse;

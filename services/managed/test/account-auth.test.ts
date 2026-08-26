@@ -12,6 +12,7 @@ const TEAM_ID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const LOCAL_HMAC_KEY = "shared-local-development-hmac-key";
 const CREDENTIAL_ID = "cG9ydGFibGUtY3JlZGVudGlhbA";
 const PUBLIC_KEY = "0x01020304";
+const LOCAL_PASSKEY_COOKIE = "nanocodex_local_passkey";
 
 describe("account provisioning", () => {
   it("accepts a matching persistent account after a create conflict", async () => {
@@ -97,8 +98,8 @@ describe("local WebAuthn credential portability", () => {
       headers: { cookie: `nanocodex_account=${sessionToken}` },
     }), source.env, new URL("http://one.nanocodex.localhost:20735/v1/me"));
     expect(migrated?.status).toBe(200);
-    const setCookie = migrated!.headers.get("set-cookie");
-    expect(setCookie).toContain("nanocodex_local_passkey=");
+    const setCookie = localPasskeySetCookie(migrated!.headers);
+    expect(setCookie).toBeDefined();
     expect(setCookie).toContain("Domain=nanocodex.localhost");
     expect(setCookie).toContain("HttpOnly");
     expect(setCookie).toContain("SameSite=Lax");
@@ -153,7 +154,7 @@ describe("local WebAuthn credential portability", () => {
     const migrated = await routeAccountRequest(new Request("http://one.nanocodex.localhost:20735/v1/me", {
       headers: { cookie: `nanocodex_account=${sessionToken}` },
     }), source.env, new URL("http://one.nanocodex.localhost:20735/v1/me"));
-    const portableCookie = migrated!.headers.get("set-cookie")!.split(";", 1)[0]!;
+    const portableCookie = localPasskeySetCookie(migrated!.headers)!.split(";", 1)[0]!;
     const [name, value] = portableCookie.split("=", 2) as [string, string];
     const [payload, signature] = value.split(".") as [string, string];
     const tamperedSignature = `${signature[0] === "A" ? "B" : "A"}${signature.slice(1)}`;
@@ -188,7 +189,8 @@ describe("local WebAuthn credential portability", () => {
       "http://passkey-a.nanocodex.localhost:20735/v1/me",
       { headers: { cookie: `nanocodex_account=${sessionToken}` } },
     ), source.env, new URL("http://passkey-a.nanocodex.localhost:20735/v1/me"));
-    const setCookie = migrated!.headers.get("set-cookie");
+    const setCookie = localPasskeySetCookie(migrated!.headers);
+    expect(setCookie).toBeDefined();
     expect(setCookie).toContain("Domain=nanocodex.localhost");
     expect(setCookie).toContain("Secure");
 
@@ -213,7 +215,7 @@ describe("local WebAuthn credential portability", () => {
       { method: "DELETE", headers: { origin } },
     ), env, new URL(`${origin}/webauthn/portable-credential`));
     expect(response?.status).toBe(204);
-    expect(response?.headers.get("set-cookie")).toContain(
+    expect(localPasskeySetCookie(response!.headers)).toContain(
       "nanocodex_local_passkey=; Path=/; Domain=nanocodex.localhost; Max-Age=0",
     );
 
@@ -237,7 +239,7 @@ describe("local WebAuthn credential portability", () => {
     const migrated = await routeAccountRequest(new Request("http://nanocodex.localhost:5173/v1/me", {
       headers: { cookie: `nanocodex_account=${portableSessionToken}` },
     }), source.env, new URL("http://nanocodex.localhost:5173/v1/me"));
-    const portableCookie = migrated!.headers.get("set-cookie")!.split(";", 1)[0]!;
+    const portableCookie = localPasskeySetCookie(migrated!.headers)!.split(";", 1)[0]!;
 
     for (const origin of [
       "https://nanocodex.example",
@@ -260,7 +262,7 @@ describe("local WebAuthn credential portability", () => {
         headers: { cookie: `nanocodex_account=${sessionToken}` },
       }), local.env, new URL(`${origin}/v1/me`));
       expect(response?.status).toBe(200);
-      expect(response?.headers.get("set-cookie")).toBeNull();
+      expect(localPasskeySetCookie(response!.headers)).toBeUndefined();
 
       await loginWithPortableCookie(local.env, portableCookie, CREDENTIAL_ID, origin);
       expect(local.get("webauthn", `credential:${CREDENTIAL_ID}`)).toBeUndefined();
@@ -280,6 +282,10 @@ function accountEnv(fetch: (request: Request) => Promise<Response>): AccountAuth
       },
     },
   } as unknown as AccountAuthEnv;
+}
+
+function localPasskeySetCookie(headers: Headers): string | undefined {
+  return headers.getSetCookie().find((cookie) => cookie.startsWith(`${LOCAL_PASSKEY_COOKIE}=`));
 }
 
 function portableEnv(secret = LOCAL_HMAC_KEY): {

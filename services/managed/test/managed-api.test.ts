@@ -3686,9 +3686,8 @@ describe("managed agents REST and resumable SSE", () => {
     const agent = await createAgent();
     const session = testEnv.NANOCODEX_SESSIONS.getByName(agent.agent_id);
     const subject = testEnv.NANOCODEX_SESSIONS.idFromName(agent.agent_id).toString();
-    const originalBroker = testEnv.NANOCODEX;
 
-    const unbound = await originalBroker.fetch(`https://broker.internal/subjects/${subject}`, {
+    const unbound = await testEnv.NANOCODEX.fetch(`https://broker.internal/subjects/${subject}`, {
       method: "DELETE",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ user_id: USER_ID }),
@@ -3698,7 +3697,7 @@ describe("managed agents REST and resumable SSE", () => {
       await state.storage.delete("nanocodex:credential-binding");
     });
     expect(await cleanupMarkers(session)).toEqual({ binding: false, deleting: false });
-    const missing = await originalBroker.fetch("https://nanocodex.internal/v1/search", {
+    const missing = await testEnv.NANOCODEX.fetch("https://nanocodex.internal/v1/search", {
       method: "POST",
       headers: {
         authorization: "Bearer NANOCODEX_PROVIDER_CREDENTIAL",
@@ -3709,45 +3708,60 @@ describe("managed agents REST and resumable SSE", () => {
     });
     expect(missing.status).toBe(403);
 
-    const order: Array<"bind" | "transport" | "unbind"> = [];
-    testEnv.NANOCODEX = {
-      async fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
-        const request = new Request(input, init);
-        const url = new URL(request.url);
-        if (request.method === "PUT" && url.pathname === `/subjects/${subject}`) {
-          order.push("bind");
-        }
-        if (request.method === "DELETE" && url.pathname === `/subjects/${subject}`) {
-          order.push("unbind");
-        }
-        if (request.method === "GET"
-          && url.pathname === "/v1/responses"
-          && request.headers.get("upgrade")?.toLowerCase() === "websocket") {
-          order.push("transport");
-        }
-        return originalBroker.fetch(request);
+    expect((await testEnv.NANOCODEX.fetch(
+      "https://broker.internal/test/hold-subject-bind",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ hold: false, subject }),
       },
-    } as Fetcher;
+    )).status).toBe(204);
+    const observation = async () => (
+      await testEnv.NANOCODEX.fetch("https://broker.internal/test/hold-subject-bind")
+    ).json<{
+      binds: number;
+      order: Array<"bind" | "transport" | "unbind">;
+      responses: number;
+      subject?: string;
+      unbinds: number;
+    }>();
 
     try {
       await evictDurableObject(session);
       await submit(agent, "retained-rebind-first", "first retained startup");
       await waitForTurnState(agent, "retained-rebind-first", "completed");
-      expect(order).toEqual(["bind", "transport"]);
+      expect(await observation()).toMatchObject({
+        binds: 1,
+        order: ["bind", "transport"],
+        responses: 1,
+        subject,
+        unbinds: 0,
+      });
       expect(await cleanupMarkers(session)).toEqual({ binding: true, deleting: false });
 
       await evictDurableObject(session);
       await submit(agent, "retained-rebind-second", "second retained startup");
       await waitForTurnState(agent, "retained-rebind-second", "completed");
-      expect(order).toEqual(["bind", "transport", "bind", "transport"]);
+      expect((await observation()).order).toEqual([
+        "bind",
+        "transport",
+        "bind",
+        "transport",
+      ]);
 
       const deleted = await SELF.fetch(`https://example.test/v1/agents/${agent.agent_id}`, {
         method: "DELETE",
       });
       expect(deleted.status).toBe(204);
       createdAgents.delete(agent.agent_id);
-      expect(order).toEqual(["bind", "transport", "bind", "transport", "unbind"]);
-      const removed = await originalBroker.fetch("https://nanocodex.internal/v1/search", {
+      expect((await observation()).order).toEqual([
+        "bind",
+        "transport",
+        "bind",
+        "transport",
+        "unbind",
+      ]);
+      const removed = await testEnv.NANOCODEX.fetch("https://nanocodex.internal/v1/search", {
         method: "POST",
         headers: {
           authorization: "Bearer NANOCODEX_PROVIDER_CREDENTIAL",
@@ -3758,7 +3772,9 @@ describe("managed agents REST and resumable SSE", () => {
       });
       expect(removed.status).toBe(403);
     } finally {
-      testEnv.NANOCODEX = originalBroker;
+      await testEnv.NANOCODEX.fetch("https://broker.internal/test/hold-subject-bind", {
+        method: "DELETE",
+      });
     }
   });
 
