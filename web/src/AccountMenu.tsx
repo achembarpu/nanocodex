@@ -7,6 +7,11 @@ import {
   type FormEvent,
 } from "react";
 import { AccountChooser } from "@nanocodex-connect/AccountChooser";
+import {
+  AccountConnectionCard,
+  AccountConnectionSection,
+  AccountConnectionSurface,
+} from "@nanocodex-connect/AccountConnectionSurface";
 import { isRecord, responseFailure, useAccountSession } from "./AccountSession";
 import { clientFailureMessage } from "./clientFailure";
 import { ConnectionLogo } from "./ConnectionLogo";
@@ -371,8 +376,183 @@ export function AccountMenu({ inline = false }: Readonly<{ inline?: boolean }>) 
     );
   }
 
+  if (inline && session.status !== "checking" && accountPersistent && session.account) {
+    return (
+      <div className="account-inline">
+        <AccountConnectionSurface
+          description={<>Signed in as {shortIdentity(session.account.id)}. Manage the same hosted connections your Nanocodex agents can use.</>}
+          title="Account"
+        >
+          <AccountConnectionSection
+            eyebrow="Account"
+            meta={shortIdentity(session.account.id)}
+            title="Passkey identity"
+            titleId="account-identity-heading"
+          >
+            <button
+              className="wizard-sign-out"
+              disabled={session.operation !== null}
+              onClick={() => void session.signOut()}
+              type="button"
+            >
+              Sign out
+            </button>
+          </AccountConnectionSection>
+
+          <AccountConnectionSection
+            eyebrow="Service"
+            meta="Available to your agents"
+            title="Connections"
+            titleId="connections-heading"
+          >
+            {session.error ? (
+              <div className="account-failure" role="alert">
+                <p>{session.error}</p>
+                <button type="button" onClick={() => void session.refresh()}>Retry</button>
+              </div>
+            ) : null}
+            {credentialError ? (
+              <div className="account-failure" role="alert">
+                <p>{credentialError}</p>
+                <button type="button" onClick={() => void loadCredentials()}>Retry</button>
+              </div>
+            ) : null}
+            <ProfileConnectors
+              accountId={session.account.id}
+              after={<>
+                {credentials?.chatgpt.login ? (
+                  <div className="new-api-key" role="status">
+                    <strong>Finish ChatGPT sign-in</strong>
+                    <p>Enter this code on the OpenAI page, then leave this panel open.</p>
+                    <code>{credentials.chatgpt.login.userCode}</code>
+                    <a href={credentials.chatgpt.login.verificationUrl} target="_blank" rel="noreferrer">Open sign-in page</a>
+                  </div>
+                ) : null}
+                {credentials && !credentials.openai.connected && openAiExpanded ? (
+                  <form className="connection-setup api-key-create" onSubmit={(event) => void connectOpenAi(event)}>
+                    <label htmlFor="openai-key">OpenAI API key</label>
+                    <div>
+                      <input
+                        autoComplete="off"
+                        id="openai-key"
+                        onChange={(event) => setOpenAiKey(event.target.value)}
+                        placeholder="sk-…"
+                        type="password"
+                        value={openAiKey}
+                      />
+                      <button type="submit" disabled={!openAiKey.trim() || providerOperation !== null}>Host key</button>
+                    </div>
+                  </form>
+                ) : null}
+              </>}
+              key={session.account.id}
+              presentation="wizard"
+              refreshSession={refreshSession}
+            >
+              {credentials ? (
+                <>
+                  <AccountConnectionCard
+                    action={credentials.chatgpt.connected ? "Disconnect" : "Connect"}
+                    connected={credentials.chatgpt.connected}
+                    detail={credentials.chatgpt.connected
+                      ? credentials.chatgpt.accountId ?? "Connected to your ChatGPT account"
+                      : "Use your ChatGPT subscription for model access"}
+                    disabled={providerOperation !== null}
+                    logo={<ConnectionLogo id="chatgpt" />}
+                    onClick={() => void (credentials.chatgpt.connected
+                      ? disconnectProvider("chatgpt")
+                      : startChatGpt())}
+                    title="ChatGPT"
+                  />
+                  <AccountConnectionCard
+                    action={credentials.openai.connected ? "Disconnect" : openAiExpanded ? "Close" : "Add key"}
+                    connected={credentials.openai.connected}
+                    detail={credentials.openai.connected
+                      ? `Hosted${credentials.active === "openai" ? " · active" : ""}`
+                      : "Host a raw key for model access"}
+                    disabled={providerOperation !== null}
+                    logo={<ConnectionLogo id="openai" />}
+                    onClick={() => void (credentials.openai.connected
+                      ? disconnectProvider("openai")
+                      : setOpenAiExpanded((current) => !current))}
+                    title="OpenAI API key"
+                  />
+                </>
+              ) : null}
+            </ProfileConnectors>
+          </AccountConnectionSection>
+
+          <AccountConnectionSection
+            eyebrow="Access"
+            meta="CLI, CI, and other clients"
+            title="API keys"
+            titleId="api-key-heading"
+          >
+            {keyError ? (
+              <div className="account-failure" role="alert">
+                <p>{keyError}</p>
+                <button type="button" onClick={() => void loadKeys()}>Retry</button>
+              </div>
+            ) : null}
+            {keys && newKey ? (
+              <div className="new-api-key" role="status">
+                <strong>Copy this key now</strong>
+                <p>It won’t be shown again.</p>
+                <code>{newKey.token}</code>
+                <div>
+                  <button type="button" onClick={() => void copyNewKey()}>
+                    {copied ? <Check aria-hidden="true" /> : <Copy aria-hidden="true" />}
+                    {copied ? "Copied" : "Copy key"}
+                  </button>
+                  <button type="button" onClick={() => setNewKey(null)}>Dismiss</button>
+                </div>
+              </div>
+            ) : null}
+            {keys ? (
+              <form className="api-key-create" onSubmit={(event) => void createKey(event)}>
+                <label htmlFor="api-key-label">Nanocodex API key</label>
+                <div>
+                  <input
+                    id="api-key-label"
+                    value={label}
+                    maxLength={120}
+                    placeholder="CLI, CI, or laptop"
+                    onChange={(event) => setLabel(event.target.value)}
+                  />
+                  <button type="submit" disabled={keyOperation !== null}>Create</button>
+                </div>
+              </form>
+            ) : null}
+            {keys?.length ? (
+              <ul className="api-key-list">
+                {keys.map((key) => (
+                  <li key={key.id}>
+                    <div>
+                      <strong>{key.label}</strong>
+                      <code>{key.prefix}…</code>
+                      <time dateTime={new Date(key.createdAt).toISOString()}>
+                        {new Date(key.createdAt).toLocaleDateString()}
+                      </time>
+                    </div>
+                    <button
+                      disabled={keyOperation !== null}
+                      onClick={() => void revokeKey(key)}
+                      type="button"
+                    >
+                      Revoke
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            ) : keys ? <p className="api-key-empty">No API keys.</p> : null}
+          </AccountConnectionSection>
+        </AccountConnectionSurface>
+      </div>
+    );
+  }
+
   return (
-    <div className={inline ? "account-inline" : "account-menu"} ref={menuRef}>
+    <div className={inline ? "wizard-page wizard-review-page account-inline" : "account-menu"} ref={menuRef}>
       {!inline ? (
         <button
           className="account-menu-trigger"
@@ -388,6 +568,14 @@ export function AccountMenu({ inline = false }: Readonly<{ inline?: boolean }>) 
       ) : null}
       {(inline || open) && session.status !== "checking" ? (
         <section className={inline ? "account-inline-panel" : "account-panel"} aria-label="Nanocodex profile">
+          {inline && session.account ? (
+            <header className="wizard-intro">
+              <div className="wizard-app">
+                <h1>Account</h1>
+                <p>Signed in as {shortIdentity(session.account.id)}. Manage the same hosted connections your Nanocodex agents can use.</p>
+              </div>
+            </header>
+          ) : null}
           {!inline ? <header className="account-panel-header">
             <div>
               <span>Profile</span>
@@ -409,11 +597,21 @@ export function AccountMenu({ inline = false }: Readonly<{ inline?: boolean }>) 
 
           {session.account ? (
             <>
-              <div className="account-summary">
-                <span>{session.account.persistent ? "Passkey identity" : "Browser session"}</span>
-                <span>{session.account.persistent ? "Available across devices" : "Add a passkey to keep it"}</span>
+              <section className={inline ? "wizard-section account-identity" : "account-summary"}>
+                {inline ? (
+                  <header className="wizard-section-title">
+                    <div><span>Account</span><h2>Passkey identity</h2></div>
+                    <small>{shortIdentity(session.account.id)}</small>
+                  </header>
+                ) : (
+                  <>
+                    <span>{session.account.persistent ? "Passkey identity" : "Browser session"}</span>
+                    <span>{session.account.persistent ? "Available across devices" : "Add a passkey to keep it"}</span>
+                  </>
+                )}
                 {session.account.persistent ? (
                   <button
+                    className={inline ? "wizard-sign-out" : undefined}
                     type="button"
                     disabled={session.operation !== null}
                     onClick={() => void session.signOut()}
@@ -421,7 +619,7 @@ export function AccountMenu({ inline = false }: Readonly<{ inline?: boolean }>) 
                     Sign out
                   </button>
                 ) : null}
-              </div>
+              </section>
 
               {!accountPersistent ? (
                 <div className="account-auth-actions">
@@ -446,14 +644,17 @@ export function AccountMenu({ inline = false }: Readonly<{ inline?: boolean }>) 
                 </div>
               ) : null}
 
-              <section className="api-key-panel account-profile-content" aria-labelledby="connections-heading">
-                <div className="api-key-heading">
+              <div className={inline ? "account-profile-content wizard-sections" : "api-key-panel account-profile-content"}>
+                <section className={inline ? "wizard-section" : undefined} aria-labelledby="connections-heading">
+                <div className={inline ? "wizard-section-title api-key-heading" : "api-key-heading"}>
                   <div>
+                    {inline ? <span>Service</span> : null}
                     <h2 id="connections-heading">Connections</h2>
-                    <p>{accountPersistent
+                    {!inline ? <p>{accountPersistent
                       ? "Choose a service to connect it through your private broker. Connected services can be removed from the same tile."
-                      : "Add or use a passkey above to enable connections and API keys."}</p>
+                      : "Add or use a passkey above to enable connections and API keys."}</p> : null}
                   </div>
+                  {inline ? <small>Available to your agents</small> : null}
                 </div>
 
                 {credentialError ? (
@@ -466,12 +667,25 @@ export function AccountMenu({ inline = false }: Readonly<{ inline?: boolean }>) 
                 <ProfileConnectors
                   accountId={session.account.id}
                   key={session.account.id}
+                  presentation={inline ? "wizard" : "profile"}
                   requiresLogin={!accountPersistent}
                   refreshSession={refreshSession}
                 >
                   {credentials ? (
                     <>
-                      <button
+                      {inline ? <AccountConnectionCard
+                        action={credentials.chatgpt.connected ? "Disconnect" : "Connect"}
+                        connected={credentials.chatgpt.connected}
+                        detail={credentials.chatgpt.connected
+                          ? credentials.chatgpt.accountId ?? "Connected to your ChatGPT account"
+                          : "Use your ChatGPT subscription for model access"}
+                        disabled={!accountPersistent || providerOperation !== null}
+                        logo={<ConnectionLogo id="chatgpt" />}
+                        onClick={() => void (credentials.chatgpt.connected
+                          ? disconnectProvider("chatgpt")
+                          : startChatGpt())}
+                        title="ChatGPT"
+                      /> : <button
                         className={`connection-card${credentials.chatgpt.connected ? " is-connected" : ""}${accountPersistent ? "" : " is-locked"}`}
                         disabled={!accountPersistent || providerOperation !== null}
                         onClick={() => void (credentials.chatgpt.connected
@@ -489,7 +703,7 @@ export function AccountMenu({ inline = false }: Readonly<{ inline?: boolean }>) 
                         <span className="connection-card-action">
                           {credentials.chatgpt.connected ? "Disconnect" : "Connect"}
                         </span>
-                      </button>
+                      </button>}
                       {credentials.chatgpt.login ? (
                         <div className="new-api-key" role="status">
                           <strong>Finish ChatGPT sign-in</strong>
@@ -498,7 +712,19 @@ export function AccountMenu({ inline = false }: Readonly<{ inline?: boolean }>) 
                           <a href={credentials.chatgpt.login.verificationUrl} target="_blank" rel="noreferrer">Open sign-in page</a>
                         </div>
                       ) : null}
-                      <button
+                      {inline ? <AccountConnectionCard
+                        action={credentials.openai.connected ? "Disconnect" : openAiExpanded ? "Close" : "Add key"}
+                        connected={credentials.openai.connected}
+                        detail={credentials.openai.connected
+                          ? `Hosted${credentials.active === "openai" ? " · active" : ""}`
+                          : "Host a raw key for model access"}
+                        disabled={!accountPersistent || providerOperation !== null}
+                        logo={<ConnectionLogo id="openai" />}
+                        onClick={() => void (credentials.openai.connected
+                          ? disconnectProvider("openai")
+                          : setOpenAiExpanded((current) => !current))}
+                        title="OpenAI API key"
+                      /> : <button
                         className={`connection-card${credentials.openai.connected ? " is-connected" : ""}${accountPersistent ? "" : " is-locked"}`}
                         disabled={!accountPersistent || providerOperation !== null}
                         onClick={() => void (credentials.openai.connected
@@ -516,7 +742,7 @@ export function AccountMenu({ inline = false }: Readonly<{ inline?: boolean }>) 
                         <span className="connection-card-action">
                           {credentials.openai.connected ? "Disconnect" : openAiExpanded ? "Close" : "Add key"}
                         </span>
-                      </button>
+                      </button>}
                       {!credentials.openai.connected && openAiExpanded ? (
                         <form className="connection-setup api-key-create" onSubmit={(event) => void connectOpenAi(event)}>
                           <label htmlFor="openai-key">OpenAI API key</label>
@@ -536,13 +762,16 @@ export function AccountMenu({ inline = false }: Readonly<{ inline?: boolean }>) 
                     </>
                   ) : null}
                 </ProfileConnectors>
+                </section>
 
-                <section className={`account-api-keys${accountPersistent ? "" : " is-locked"}`} aria-labelledby="api-key-heading">
-                  <div className="api-key-heading">
+                <section className={`${inline ? "wizard-section " : ""}account-api-keys${accountPersistent ? "" : " is-locked"}`} aria-labelledby="api-key-heading">
+                  <div className={inline ? "wizard-section-title api-key-heading" : "api-key-heading"}>
                     <div>
+                      {inline ? <span>Access</span> : null}
                       <h2 id="api-key-heading">API keys</h2>
-                      <p>Create Nanocodex API keys for the CLI, CI, and other clients.</p>
+                      {!inline ? <p>Create Nanocodex API keys for the CLI, CI, and other clients.</p> : null}
                     </div>
+                    {inline ? <small>CLI, CI, and other clients</small> : null}
                   </div>
 
                   {keyError ? (
@@ -609,7 +838,7 @@ export function AccountMenu({ inline = false }: Readonly<{ inline?: boolean }>) 
                     <p className="api-key-empty">No API keys.</p>
                   ) : null}
                 </section>
-              </section>
+              </div>
             </>
           ) : (
             <div className="account-auth-actions">

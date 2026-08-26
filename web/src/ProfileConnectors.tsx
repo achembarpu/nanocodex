@@ -1,4 +1,8 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import {
+  AccountConnectionCard,
+  AccountConnectionGrid,
+} from "@nanocodex-connect/AccountConnectionSurface";
 import { isRecord, responseFailure } from "./AccountSession";
 import { clientFailureMessage } from "./clientFailure";
 import { ConnectionLogo } from "./ConnectionLogo";
@@ -45,12 +49,16 @@ const connectorDefinitions = [
 
 export function ProfileConnectors({
   accountId,
+  after,
   children,
+  presentation = "profile",
   requiresLogin = false,
   refreshSession,
 }: {
   accountId: string;
+  after?: ReactNode;
   children?: ReactNode;
+  presentation?: "profile" | "wizard";
   requiresLogin?: boolean;
   refreshSession(): Promise<void>;
 }) {
@@ -185,25 +193,108 @@ export function ProfileConnectors({
   };
 
   if (requiresLogin) {
+    if (presentation === "wizard") {
+      return (
+        <>
+          <AccountConnectionGrid>
+            {children}
+            {connectorDefinitions.map((definition) => (
+              <AccountConnectionCard
+                action="Connect"
+                detail={definition.description}
+                disabled
+                key={definition.id}
+                logo={<ConnectionLogo id={definition.id} />}
+                onClick={() => undefined}
+                title={definition.label}
+              />
+            ))}
+          </AccountConnectionGrid>
+          {after}
+        </>
+      );
+    }
     return (
       <div className="profile-connectors connection-grid profile-connectors--locked">
         {children}
-        {connectorDefinitions.map((definition) => (
-          <button
-            className="connection-card connector-row"
-            disabled
-            key={definition.id}
-            type="button"
-          >
-            <ConnectionLogo id={definition.id} />
-            <span className="connection-card-copy">
-              <strong>{definition.label}</strong>
-              <span>{definition.description}</span>
-            </span>
-            <span className="connection-card-action">Connect</span>
-          </button>
-        ))}
+        {connectorDefinitions.map((definition) => <button
+          className="connection-card connector-row"
+          disabled
+          key={definition.id}
+          type="button"
+        >
+          <ConnectionLogo id={definition.id} />
+          <span className="connection-card-copy">
+            <strong>{definition.label}</strong>
+            <span>{definition.description}</span>
+          </span>
+          <span className="connection-card-action">Connect</span>
+        </button>)}
+        {after}
       </div>
+    );
+  }
+
+  if (presentation === "wizard") {
+    return (
+      <>
+        <AccountConnectionGrid>
+          {children}
+          {connectors ? connectorDefinitions.map((definition) => {
+            const status = connectors[definition.id];
+            const unavailable = status.unavailable;
+            return <AccountConnectionCard
+              action={unavailable ? "Unavailable" : status.connected ? "Disconnect" : "Connect"}
+              connected={status.connected}
+              detail={unavailable
+                ? unavailable
+                : status.connected
+                  ? status.label || status.accountId || "Connected"
+                  : definition.description}
+              disabled={operation !== null || unavailable !== undefined}
+              key={definition.id}
+              logo={<ConnectionLogo id={definition.id} />}
+              onClick={() => void (status.connected
+                ? disconnect(definition.id)
+                : connect(definition.id))}
+              title={definition.label}
+            />;
+          }) : null}
+          {mcpError ? <AccountConnectionCard
+            action="Retry"
+            detail={mcpError}
+            disabled={operation !== null}
+            logo={<ConnectionLogo id="mcp" />}
+            onClick={() => void loadMcpConnections()}
+            title="MCP connections"
+          /> : null}
+          {mcpConnections?.map((connection) => {
+            const connected = connection.status === "connected";
+            return <AccountConnectionCard
+              action={connected ? "Disconnect" : mcpConnectionStatusLabel(connection.status)}
+              connected={connected}
+              detail={mcpConnectionStatusLabel(connection.status)}
+              disabled={operation !== null || !connected}
+              key={connection.id}
+              logo={<ConnectionLogo id="mcp" />}
+              onClick={() => void disconnectMcp(connection)}
+              title={connection.name}
+            />;
+          })}
+        </AccountConnectionGrid>
+        {after}
+        {result ? (
+          <p className={`connector-result connector-result--${result.result}`} role="status">
+            {connectorResultMessage(result)}
+          </p>
+        ) : null}
+        {error ? (
+          <div className="account-failure" role="alert">
+            <p>{error}</p>
+            {!connectors ? <button type="button" onClick={() => void load()}>Retry</button> : null}
+          </div>
+        ) : null}
+      </>
     );
   }
 
@@ -224,6 +315,11 @@ export function ProfileConnectors({
       {connectors ? connectorDefinitions.map((definition) => {
         const status = connectors[definition.id];
         const unavailable = status.unavailable;
+        const detail = unavailable
+          ? unavailable
+          : status.connected
+            ? status.label || status.accountId || "Connected"
+            : definition.description;
         return (
           <button
             className={`connection-card connector-row${status.connected ? " is-connected" : ""}${unavailable ? " is-unavailable" : ""}`}
@@ -237,11 +333,7 @@ export function ProfileConnectors({
             <ConnectionLogo id={definition.id} />
             <span className="connection-card-copy">
               <strong>{definition.label}</strong>
-              <span>{unavailable
-                ? unavailable
-                : status.connected
-                ? status.label || status.accountId || "Connected"
-                : definition.description}</span>
+              <span>{detail}</span>
             </span>
             <span className="connection-card-action">
               {unavailable ? "Unavailable" : status.connected ? "Disconnect" : "Connect"}
@@ -285,6 +377,7 @@ export function ProfileConnectors({
           </button>
         );
       })}
+      {after}
     </div>
   );
 }

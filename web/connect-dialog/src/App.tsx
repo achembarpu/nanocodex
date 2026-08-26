@@ -9,6 +9,12 @@ import {
   type AccountSelection,
   type StoredPasskey,
 } from "./AccountChooser";
+import {
+  AccountConnectionCard,
+  AccountConnectionGrid,
+  AccountConnectionSection,
+  AccountConnectionSurface,
+} from "./AccountConnectionSurface";
 
 import { classifyMachineUsdOrder } from "./machineUsdOrder.mjs";
 import {
@@ -1457,11 +1463,9 @@ function ConnectionWizard({
   }
 
   return (
-    <div className="wizard-page wizard-review-page">
-      <header className="wizard-intro">
-        <div className="wizard-app">
-          <h1>{focused ? `Connect ${focused.name}` : focusedMcp ? `Connect ${focusedMcp.name}` : "Authorize Nanocodex CLI"}</h1>
-          <p>{accountAddress
+    <AccountConnectionSurface
+      confirmationCode={confirmationCode}
+      description={<>{accountAddress
             ? `Signed in as ${shortAddress(accountAddress)}. `
             : selectedAccount
               ? `${selectedAccount.mode === "register" ? "Create" : "Use"} ${selectedAccount.label}. `
@@ -1477,22 +1481,20 @@ function ConnectionWizard({
                     : mcpConnectionAction === focusedMcp.id
                       ? `Continue in ${focusedMcp.name}. You’ll return here when it is connected.`
                       : "Continue with your passkey."
-                : "Review this CLI installation’s hosted access."}</p>
+                : "Review this CLI installation’s hosted access."}</>}
+      footer={completed ? (
+        <div className="completion-actions">
+          <a href="/connect">Connect more accounts</a>
         </div>
-        {confirmationCode ? (
-          <div className="wizard-terminal-code" role="status">
-            <span>Confirm this matches your terminal</span>
-            <strong>{confirmationCode.slice(0, 4)}-{confirmationCode.slice(4)}</strong>
-          </div>
-        ) : null}
-      </header>
-
-      <div className="wizard-sections">
-        {request.permission.connectors.length ? <section className="wizard-section" aria-labelledby="wizard-services-heading">
-          <header className="wizard-section-title">
-            <div><span>Service</span><h2 id="wizard-services-heading">{focused ? focused.name : "Connections"}</h2></div>
-            <small>{focused ? "Requested by CLI" : `${request.permission.connectors.length} requested by CLI`}</small>
-          </header>
+      ) : undefined}
+      title={focused ? `Connect ${focused.name}` : focusedMcp ? `Connect ${focusedMcp.name}` : "Authorize Nanocodex CLI"}
+    >
+        {request.permission.connectors.length ? <AccountConnectionSection
+          eyebrow="Service"
+          meta={focused ? "Requested by CLI" : `${request.permission.connectors.length} requested by CLI`}
+          title={focused ? focused.name : "Connections"}
+          titleId="wizard-services-heading"
+        >
           <WizardConnectorList connectorAction={connectorAction} connectorStatuses={connectorStatuses} disabled={disabled} onConnectConnector={onConnectConnector} request={request} />
           {deviceCode ? (
             <a className="wizard-device-code" href={deviceCode.url} rel="noreferrer" target="_blank">
@@ -1500,13 +1502,14 @@ function ConnectionWizard({
               <strong>{deviceCode.code}</strong>
             </a>
           ) : null}
-        </section> : null}
+        </AccountConnectionSection> : null}
 
-        {request.mcpConnections.length ? <section className="wizard-section" aria-labelledby="wizard-mcp-heading">
-          <header className="wizard-section-title">
-            <div><span>MCP</span><h2 id="wizard-mcp-heading">{focusedMcp ? focusedMcp.name : "MCP connections"}</h2></div>
-            <small>{focusedMcp ? "Requested by CLI" : `${request.mcpConnections.length} requested by CLI`}</small>
-          </header>
+        {request.mcpConnections.length ? <AccountConnectionSection
+          eyebrow="MCP"
+          meta={focusedMcp ? "Requested by CLI" : `${request.mcpConnections.length} requested by CLI`}
+          title={focusedMcp ? focusedMcp.name : "MCP connections"}
+          titleId="wizard-mcp-heading"
+        >
           <McpConnectionList
             action={mcpConnectionAction}
             connections={mcpConnections ?? request.mcpConnections}
@@ -1514,22 +1517,17 @@ function ConnectionWizard({
             focusedId={request.focusMcpConnection}
             onConnect={onConnectMcp}
           />
-        </section> : null}
+        </AccountConnectionSection> : null}
 
-        {!focused && !focusedMcp ? <section className="wizard-section" aria-labelledby="wizard-access-heading">
-          <header className="wizard-section-title">
-            <div><span>Access</span><h2 id="wizard-access-heading">CLI access</h2></div>
-            <small>{request.accessKey ? "30-day key" : "Active key"}</small>
-          </header>
+        {!focused && !focusedMcp ? <AccountConnectionSection
+          eyebrow="Access"
+          meta={request.accessKey ? "30-day key" : "Active key"}
+          title="CLI access"
+          titleId="wizard-access-heading"
+        >
           <WizardRequestSummary appVisibility={appVisibility} request={request} />
-        </section> : null}
-      </div>
-      {completed ? (
-        <div className="completion-actions">
-          <a href="/connect">Connect more accounts</a>
-        </div>
-      ) : null}
-    </div>
+        </AccountConnectionSection> : null}
+    </AccountConnectionSurface>
   );
 }
 
@@ -1544,39 +1542,30 @@ function WizardConnectorList({ connectorAction, connectorStatuses, disabled, onC
     ? request.permission.connectors.filter((connector) => connector.id === request.focusConnector)
     : request.permission.connectors;
   return (
-    <div className="wizard-connectors" role="list">
+    <AccountConnectionGrid>
       {connectors.map((connector) => {
         const id = connector.id as ConnectorId;
         const status = connectorStatuses?.[id];
         const resolved = connectorStatuses !== undefined;
-        const actionDisabled = disabled || connectorAction !== undefined || !resolved || status?.connected;
-        return (
-          <div className="wizard-connector-card" key={id} role="listitem">
-            <button
-              className={`connection-card${status?.connected ? " is-connected" : ""}`}
-              disabled={actionDisabled}
-              onClick={() => onConnectConnector(id)}
-              type="button"
-            >
-              <ConnectorLogo id={id} name={connector.name} />
-              <span className="connection-card-copy">
-                <strong>{permissionTitle(id, connector.name)}</strong>
-                <span>{status?.connected
-                  ? status.label ? `Connected as ${status.label}` : "Connected"
-                  : connector.detail}</span>
-              </span>
-              <span className="connection-card-action">
-                {!resolved
-                  ? "Required"
-                  : status?.connected
-                    ? "Connected"
-                    : connectorAction === id ? "Connecting…" : "Connect"}
-              </span>
-            </button>
-          </div>
-        );
+        const actionDisabled = disabled || connectorAction !== undefined || !resolved || status?.connected === true;
+        return <AccountConnectionCard
+          action={!resolved
+            ? "Required"
+            : status?.connected
+              ? "Connected"
+              : connectorAction === id ? "Connecting…" : "Connect"}
+          connected={status?.connected === true}
+          detail={status?.connected
+            ? status.label ? `Connected as ${status.label}` : "Connected"
+            : connector.detail}
+          disabled={actionDisabled}
+          key={id}
+          logo={<ConnectorLogo id={id} name={connector.name} />}
+          onClick={() => onConnectConnector(id)}
+          title={permissionTitle(id, connector.name)}
+        />;
       })}
-    </div>
+    </AccountConnectionGrid>
   );
 }
 

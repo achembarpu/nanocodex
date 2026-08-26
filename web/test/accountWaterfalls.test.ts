@@ -40,10 +40,10 @@ test("the account trigger remains stable while session data is unavailable", () 
 test("connections and API keys share one account surface", () => {
   assert.match(
     accountMenu,
-    /<section className="api-key-panel account-profile-content"[\s\S]*?<h2 id="connections-heading">Connections<[\s\S]*?<ProfileConnectors[\s\S]*?<strong>ChatGPT<[\s\S]*?<strong>OpenAI API key<[\s\S]*?<section className=\{`account-api-keys/,
+    /from "@nanocodex-connect\/AccountConnectionSurface";[\s\S]*?<AccountConnectionSurface[\s\S]*?<AccountConnectionSection[\s\S]*?title="Connections"[\s\S]*?<ProfileConnectors[\s\S]*?<AccountConnectionCard[\s\S]*?title="ChatGPT"[\s\S]*?<AccountConnectionCard[\s\S]*?title="OpenAI API key"[\s\S]*?<AccountConnectionSection[\s\S]*?title="API keys"/,
   );
-  assert.match(accountMenu, /<h2 id="api-key-heading">API keys<[\s\S]*?Nanocodex API key/);
-  assert.match(profileConnectors, /\{children\}[\s\S]*?connectorDefinitions\.map/);
+  assert.match(accountMenu, /title="API keys"[\s\S]*?Nanocodex API key/);
+  assert.match(profileConnectors, /<AccountConnectionGrid>[\s\S]*?\{children\}[\s\S]*?connectorDefinitions\.map/);
   assert.doesNotMatch(accountMenu, /Model connection|>Refresh<\/button>/);
 });
 

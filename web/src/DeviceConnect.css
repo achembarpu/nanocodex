@@ -793,6 +793,15 @@
   border-top: 1px solid var(--border-soft);
 }
 
+.connect-wizard .account-inline .wizard-sign-out {
+  min-height: 32px;
+  margin-top: 10px;
+  padding: 0 10px;
+  border: 1px solid var(--border-strong);
+  background: transparent;
+  font-size: 8px;
+}
+
 .connect-wizard .wizard-visibility {
   display: grid;
   padding: 6px 0;
@@ -927,7 +936,7 @@
   }
 
   .connect-wizard .wizard-connectors {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: 1fr;
   }
 
   .connect-wizard .mcp-connections {
@@ -960,6 +969,7 @@
   }
 
   .account-inline .account-summary button,
+  .account-inline .wizard-sign-out,
   .account-inline .account-auth-actions button,
   .account-inline .account-failure button,
   .account-inline .api-key-create button,
