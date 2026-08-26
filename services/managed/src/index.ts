@@ -16,6 +16,8 @@ import { Agent as CloudflareAgent } from "nanocodex/cloudflare";
 import { imageGeneration, updatePlan, viewImage, web } from "nanocodex/tools";
 import { justBash } from "nanocodex/tools/bash";
 import { createComputerFilesystem } from "./computer-workspace";
+import { managedCodeEvaluator } from "./code-evaluator";
+import { HostedToolsBroker } from "./hosted-tools-broker";
 import {
   managedCapacitySnapshot,
   type ManagedCapacitySnapshot,
@@ -566,7 +568,7 @@ export default {
     const sessionHeaders = new Headers(request.headers);
     sessionHeaders.set(SESSION_OWNER_ASSERTION, principal.userId);
     const publicOrigin = `public_origin=${encodeURIComponent(url.origin)}`;
-    if (resource === "ws" || resource === "device-host") {
+    if (resource === "ws" || resource === "tool-host" || resource === "device-host") {
       if (request.method !== "GET" || request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
         return new Response("Expected WebSocket upgrade", { status: 426 });
       }
@@ -574,7 +576,7 @@ export default {
         return json({ error: "forbidden_origin" }, { status: 403 });
       }
       return stub.fetch(
-        `https://session.internal/${resource === "ws" ? "socket" : "device-host"}?${publicOrigin}`,
+        `https://session.internal/${resource === "ws" ? "socket" : resource}?${publicOrigin}`,
         new Request(request, { headers: sessionHeaders }),
       );
     }
@@ -745,6 +747,7 @@ export class NanocodexSession extends DurableComputerSession {
   readonly #admissionTasks = new Map<string, Promise<ManagedTurnRow>>();
   #initialAccountContextTask?: Promise<InitialAccountContext | undefined>;
   readonly #cancellationTasks = new Map<string, Promise<void>>();
+  readonly #hostedTools: HostedToolsBroker;
   readonly #pendingDeviceToolCalls = new Map<string, PendingDeviceToolCall>();
   readonly #realtimeOperations = new Map<string, Promise<unknown>>();
   #realtimeOperationTail: Promise<void> = Promise.resolve();
@@ -849,6 +852,7 @@ export class NanocodexSession extends DurableComputerSession {
           updated_at = unixepoch('subsec') * 1000
       WHERE state = 'dispatched';
     `);
+    this.#hostedTools = new HostedToolsBroker(this.ctx);
     this.#eventLog = new DurableEventLog<StreamMessage>(this.ctx.storage);
     this.#eventArchive = new ManagedEventArchive<StreamMessage>(
       this.ctx.storage,
@@ -1168,6 +1172,24 @@ export class NanocodexSession extends DurableComputerSession {
     }
     if (request.method === "GET" && url.pathname === "/socket")
       return this.#upgrade();
+    if (request.method === "GET" && url.pathname === "/tool-host") {
+      if (ownerAssertion === null) return json({ error: "not_found" }, { status: 404 });
+      if (this.#deleting) return new Response("Agent is being deleted", { status: 409 });
+      const session = this.#session();
+      if (!session) return new Response("Unknown session", { status: 404 });
+      if (session.runtime_profile !== "managed") {
+        return new Response("Hosted Tools is unavailable for multiplayer agents", { status: 409 });
+      }
+      // Catalog acknowledgement must follow installation of the owning router's
+      // exact attached/cloud contract validator.
+      try {
+        await this.#ensureAgent();
+      } catch (error) {
+        console.error("managed tool router startup failed", errorMessage(error));
+        return json({ error: "tool_router_unavailable" }, { status: 503 });
+      }
+      return this.#hostedTools.upgrade(session.session_id);
+    }
     if (request.method === "GET" && url.pathname === "/device-host")
       return this.#upgradeDeviceHost();
     const realtimeRoute = url.pathname.match(
@@ -1358,6 +1380,14 @@ export class NanocodexSession extends DurableComputerSession {
   }
 
   async webSocketMessage(socket: WebSocket, message: string | ArrayBuffer): Promise<void> {
+    if (this.#hostedTools.owns(socket)) {
+      if (typeof message !== "string") {
+        closeSocket(socket, 1003, "Hosted Tools requires text frames");
+        return;
+      }
+      await this.#hostedTools.message(socket, message);
+      return;
+    }
     if (typeof message !== "string") {
       this.#send(socket, { type: "error", code: "binary_unsupported", message: "text frames are required" });
       return;
@@ -1384,12 +1414,20 @@ export class NanocodexSession extends DurableComputerSession {
   }
 
   webSocketClose(socket: WebSocket, code: number, reason: string): void {
-    this.#retireDeviceHost(socket, reason || "peer closed");
+    if (this.#hostedTools.owns(socket)) {
+      this.#hostedTools.close(socket, reason || "peer closed");
+    } else {
+      this.#retireDeviceHost(socket, reason || "peer closed");
+    }
     closeSocket(socket, code, reason || "peer closed");
   }
 
   webSocketError(socket: WebSocket): void {
-    this.#retireDeviceHost(socket, "WebSocket failed");
+    if (this.#hostedTools.owns(socket)) {
+      this.#hostedTools.close(socket, "WebSocket failed");
+    } else {
+      this.#retireDeviceHost(socket, "WebSocket failed");
+    }
     closeSocket(socket, 1011, "WebSocket failed");
   }
 
@@ -2775,6 +2813,7 @@ export class NanocodexSession extends DurableComputerSession {
     // by the retained marker/alarm even if the local SQL tombstone has not yet
     // been written. The reverse order can strand external ownership forever.
     this.#deleting = true;
+    this.#hostedTools.shutdown("managed agent is being deleted");
     let markerCommitted = false;
     const task = (async () => {
       await this.ctx.storage.transaction(async (transaction) => {
@@ -3280,9 +3319,16 @@ export class NanocodexSession extends DurableComputerSession {
       session.owner_id,
       !multiplayer,
     );
+    const internalRuntime = Symbol.for("nanocodex.cloudflare.internalRuntime");
+    const hostedProvider = multiplayer ? undefined : this.#hostedTools.provider();
+    const hostedRuntime = hostedProvider === undefined ? undefined : {
+      codeEvaluator: await managedCodeEvaluator(),
+      toolMode: "code" as const,
+      toolProviders: [hostedProvider],
+    };
     let agent: CloudflareAgent.Agent;
     try {
-      agent = await CloudflareAgent.create(this, {
+      const agentOptions: NonNullable<Parameters<typeof CloudflareAgent.create>[1]> = {
         eventPersistence: "caller",
         terminalReceiptRetention: 512,
         instructions: multiplayer
@@ -3294,6 +3340,9 @@ export class NanocodexSession extends DurableComputerSession {
           ].join("\n\n")
           : [
             "You are Nanocodex running as a durable managed agent on Cloudflare Workers.",
+            "Private host tools are deferred. Use tool_search when discovery is needed, and call returned tools from Code Mode.",
+            "For every matching tool name, an attached private host is authoritative. When no matching private tool is attached, the managed cloud tool is used instead.",
+            "The private and cloud workspaces are not synchronized. Never imply that a file created in one exists in the other.",
             "The phone tool's current attached Android device is the authority for phone state and phone actions. A missing device host means the phone is unavailable; there is no cloud fallback.",
             "Never claim that a phone action happened unless the phone tool returned ok=true and status=completed. Report failed, unavailable, and ambiguous phone outcomes accurately.",
             "Your /workspace filesystem is durable Cloudflare Computer storage backed by this agent's Durable Object.",
@@ -3348,7 +3397,11 @@ export class NanocodexSession extends DurableComputerSession {
             }),
           },
         ],
-      });
+      };
+      if (hostedRuntime !== undefined) {
+        Object.defineProperty(agentOptions, internalRuntime, { value: hostedRuntime });
+      }
+      agent = await CloudflareAgent.create(this, agentOptions);
     } catch (error) {
       disposeWorkspace();
       throw error;

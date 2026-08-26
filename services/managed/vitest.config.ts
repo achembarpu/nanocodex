@@ -208,6 +208,10 @@ export default {
       const latest = messages.at(-1);
       const content = Array.isArray(latest?.content) ? latest.content : [];
       const text = content.map((item) => item?.text ?? "").join("").trim();
+      const latestUserIndex = input.findLastIndex((item) => (
+        item?.type === "message" && item.role === "user"
+      ));
+      const activeInput = latestUserIndex < 0 ? input : input.slice(latestUserIndex);
       const toolOutput = input.find((item) => (
         item?.type === "function_call_output" && item.call_id === "managed-web"
       ));
@@ -219,6 +223,13 @@ export default {
       ));
       const multiplayerConnectorOutput = input.find((item) => (
         item?.type === "function_call_output" && item.call_id === "multiplayer-no-connectors"
+      ));
+      const hostedToolsOutput = input.find((item) => (
+        item?.type === "custom_tool_call_output" && item.call_id === "managed-hosted-exec"
+      ));
+      const hostedPriorityOutput = activeInput.slice().reverse().find((item) => (
+        item?.type === "custom_tool_call_output"
+        && (item.call_id === "hosted-priority-local" || item.call_id === "hosted-priority-cloud")
       ));
       const phoneOutput = input.find((item) => (
         item?.type === "function_call_output" && item.call_id === "managed-phone"
@@ -234,6 +245,52 @@ export default {
       ));
       pendingResponse = setTimeout(() => {
         pendingResponse = undefined;
+        if (hostedPriorityOutput) {
+          const local = hostedPriorityOutput.call_id === "hosted-priority-local";
+          const output = JSON.stringify(hostedPriorityOutput.output);
+          const valid = local
+            ? output.includes("private-local")
+            : output.includes("ROUTING_COLLISION_EXEC") && !output.includes("PRIVATE_LOCAL_EXEC");
+          server.send(JSON.stringify({
+            type: "response.completed",
+            response: {
+              id: crypto.randomUUID(),
+              status: "completed",
+              output: [{
+                type: "message",
+                role: "assistant",
+                content: [{
+                  type: "output_text",
+                  text: valid
+                    ? (local ? "HOSTED_LOCAL_PRIORITY_OK" : "HOSTED_CLOUD_FALLBACK_OK")
+                    : "HOSTED_PRIORITY_BAD",
+                }],
+              }],
+              usage: null,
+            },
+          }));
+          return;
+        }
+        if (hostedToolsOutput) {
+          const valid = JSON.stringify(hostedToolsOutput.output).includes("private-host");
+          server.send(JSON.stringify({
+            type: "response.completed",
+            response: {
+              id: crypto.randomUUID(),
+              status: "completed",
+              output: [{
+                type: "message",
+                role: "assistant",
+                content: [{
+                  type: "output_text",
+                  text: valid ? "MANAGED_HOSTED_TOOLS_OK" : "MANAGED_HOSTED_TOOLS_BAD",
+                }],
+              }],
+              usage: null,
+            },
+          }));
+          return;
+        }
         if (submitOutput) {
           server.send(JSON.stringify({
             type: "response.completed",
@@ -386,6 +443,42 @@ export default {
                 call_id: "managed-image",
                 name: "image_gen__imagegen",
                 arguments: JSON.stringify({ prompt: "draw managed" }),
+              }],
+              usage: null,
+            },
+          }));
+          return;
+        }
+        if (text.includes("E2E_HOSTED_TOOLS")) {
+          server.send(JSON.stringify({
+            type: "response.completed",
+            response: {
+              id: crypto.randomUUID(),
+              status: "completed",
+              output: [{
+                type: "custom_tool_call",
+                call_id: "managed-hosted-exec",
+                name: "exec",
+                input: "text(await tools.fixture__lookup({ id: 'item-1' }));",
+              }],
+              usage: null,
+            },
+          }));
+          return;
+        }
+        if (text.includes("E2E_HOSTED_PRIORITY_LOCAL")
+          || text.includes("E2E_HOSTED_PRIORITY_CLOUD")) {
+          const local = text.includes("E2E_HOSTED_PRIORITY_LOCAL");
+          server.send(JSON.stringify({
+            type: "response.completed",
+            response: {
+              id: crypto.randomUUID(),
+              status: "completed",
+              output: [{
+                type: "custom_tool_call",
+                call_id: local ? "hosted-priority-local" : "hosted-priority-cloud",
+                name: "exec",
+                input: "text(await tools.exec_command({ cmd: 'printf ROUTING_COLLISION_EXEC' }));",
               }],
               usage: null,
             },
