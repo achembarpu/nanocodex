@@ -5213,6 +5213,7 @@ version = "0.5.0"
 dependencies = [
  "nanocodex-agent",
  "nanocodex-durability",
+ "nanocodex-managed",
  "nanocodex-oai-api",
  "nanocodex-observability",
  "nanocodex-tools",

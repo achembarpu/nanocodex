@@ -18,17 +18,27 @@ all-features = true
 rustdoc-args = ["-D", "warnings"]
 
 [features]
-default = []
+default = ["durability", "openai", "tools"]
+durability = ["dep:nanocodex-durability", "openai"]
+managed = ["dep:nanocodex-managed"]
 observability = ["dep:nanocodex-observability"]
-realtime = ["nanocodex-oai-api/realtime"]
+openai = ["nanocodex-agent/openai", "nanocodex-oai-api/client"]
+realtime = ["openai", "nanocodex-oai-api/realtime"]
+tools = [
+    "dep:nanocodex-tools",
+    "nanocodex-managed?/tools",
+    "nanocodex-tools/attachment",
+]
+workspace-tools = ["tools", "nanocodex-tools/workspace-runtime"]
 
 [dependencies]
-nanocodex-agent.workspace = true
-nanocodex-durability.workspace = true
-nanocodex-oai-api.workspace = true
-nanocodex-tools.workspace = true
+nanocodex-agent = { path = "../nanocodex-agent", version = "0.5.0", default-features = false }
+nanocodex-durability = { workspace = true, optional = true }
+nanocodex-oai-api = { path = "../nanocodex-oai-api", version = "0.5.0", default-features = false, features = ["events"] }
+nanocodex-tools = { path = "../nanocodex-tools", version = "0.5.0", default-features = false, optional = true }
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
+nanocodex-managed = { workspace = true, optional = true }
 nanocodex-observability = { workspace = true, optional = true }
 
 [dev-dependencies]
