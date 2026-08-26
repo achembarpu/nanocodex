@@ -338,6 +338,7 @@ jobs:
           node-version: 22.15.0
           cache: npm
           cache-dependency-path: |
+            js/bindings/package-lock.json
             services/egress/package-lock.json
             services/managed/package-lock.json
             web/package-lock.json
@@ -351,6 +352,7 @@ jobs:
           path: js/bindings/pkg-web
       - name: Install deployment tooling
         run: |
+          npm ci --prefix js/bindings --ignore-scripts
           npm ci --prefix services/egress --ignore-scripts
           npm ci --prefix services/managed --ignore-scripts
           npm ci --prefix web --ignore-scripts
