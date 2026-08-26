@@ -12,6 +12,7 @@ export type TurnCompleted = {
   id: string;
   final_message: string;
   usage: TurnUsage | null;
+  citations: [];
   usage_error?: string;
 };
 

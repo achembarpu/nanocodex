@@ -31,6 +31,7 @@ export async function materializeTurnTerminal(
         id,
         final_message: result.finalMessage,
         usage,
+        citations: [],
         ...(usageError === undefined ? {} : { usage_error: usageError }),
       },
       reopenAgent: false,

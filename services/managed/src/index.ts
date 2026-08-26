@@ -2269,13 +2269,13 @@ export class NanocodexSession extends DurableComputerSession {
         turn = await CloudflareAgent.route(agent, { input });
       } catch (error) {
         const buffered = this.#takeRealtimeEventBuffer();
-        for (const event of buffered) this.#recordAgentEvent(event);
+        for (const event of buffered) this.#recordAgentEvent(event, agent.sessionId);
         throw error;
       }
       if (turn === undefined) {
         const buffered = this.#takeRealtimeEventBuffer();
         const activeTurnId = this.#eventTurnId;
-        for (const event of buffered) this.#recordAgentEvent(event);
+        for (const event of buffered) this.#recordAgentEvent(event, agent.sessionId);
         if (activeTurnId === undefined) {
           throw new ManagedRequestError(
             503,
@@ -2297,7 +2297,7 @@ export class NanocodexSession extends DurableComputerSession {
         this.#turnInputs.set(turnId, input);
         this.#eventTurnQueue.push(turnId);
         const buffered = this.#takeRealtimeEventBuffer();
-        for (const event of buffered) this.#recordAgentEvent(event);
+        for (const event of buffered) this.#recordAgentEvent(event, agent.sessionId);
         this.ctx.waitUntil(this.#track(this.#ownRoutedTurn(turnId, turn)));
       } catch (error) {
         this.#takeRealtimeEventBuffer();
@@ -3121,7 +3121,7 @@ export class NanocodexSession extends DurableComputerSession {
         throw retryableError("agent construction was superseded");
       }
       const events = agent.events.watch();
-      events.onEvent((event) => this.#recordAgentEvent(event));
+      events.onEvent((event) => this.#recordAgentEvent(event, agent.sessionId));
       if (!this.#ownsAgentConstruction(construction)) {
         events.off();
         try { await this.#retireAgentConstruction(construction, agent); }
@@ -3642,9 +3642,9 @@ export class NanocodexSession extends DurableComputerSession {
     }
   }
 
-  #recordAgentEvent(event: AgentEvent): void {
+  #recordAgentEvent(event: AgentEvent, rootSessionId: string): void {
     if (this.#deleting) return;
-    if (event.request_id !== this.#sessionId()) {
+    if (event.request_id !== rootSessionId) {
       this.#recordAndBroadcast({ type: "event", event }, this.#eventTurnId ?? null);
       return;
     }

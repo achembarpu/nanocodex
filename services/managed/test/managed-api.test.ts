@@ -31,6 +31,35 @@ afterEach(async () => {
 });
 
 describe("managed agents REST and resumable SSE", () => {
+  it("attributes the private runtime session to its public managed turn", async () => {
+    const agent = await createAgent();
+    const turnId = "turn-runtime-attribution";
+    await submit(agent, turnId, "CAPACITY_ACCOUNTING");
+    await waitForTurnState(agent, turnId, "completed");
+
+    const session = testEnv.NANOCODEX_SESSIONS.getByName(agent.agent_id);
+    const identities = await runInDurableObject(session, (_instance, state) =>
+      state.storage.sql.exec<{ managed_id: string; runtime_id: string }>(
+        `SELECT session_state.session_id AS managed_id,
+                nanocodex_cloudflare_agent.session_id AS runtime_id
+         FROM session_state, nanocodex_cloudflare_agent`,
+      ).toArray()[0]!,
+    );
+    expect(identities.runtime_id).not.toBe(identities.managed_id);
+
+    const history = await managedHistory(agent);
+    expect(history.data).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        event: expect.objectContaining({ type: "run.started" }),
+        turn_id: turnId,
+      }),
+      expect.objectContaining({
+        event: expect.objectContaining({ type: "run.completed" }),
+        turn_id: turnId,
+      }),
+    ]));
+  });
+
   it("accounts for each independently growing per-agent durable payload", async () => {
     const agent = await createAgent();
     await submit(agent, "turn-capacity", "CAPACITY_ACCOUNTING");
