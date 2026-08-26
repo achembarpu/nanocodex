@@ -44,10 +44,7 @@ pub struct EmbeddedToolRuntimeControl {
 }
 
 impl EmbeddedToolRuntime {
-    /// Creates a runtime without an application host.
-    ///
-    /// Calls return a model-visible failure until [`Self::with_tools`] supplies
-    /// a [`Tools`] recipe bound to an embedding host. HTTP tool configurations
+    /// Creates a runtime without an application host. HTTP tool configurations
     /// are accepted for parity with the native runtime and ignored.
     pub fn new(
         workspace: impl Into<PathBuf>,
@@ -75,9 +72,7 @@ impl EmbeddedToolRuntime {
         Self::new(workspace, web_search, image_generation).with_tools(tools)
     }
 
-    /// Applies an embedding host to this runtime.
-    #[must_use]
-    pub fn with_tools(mut self, tools: &Tools) -> Self {
+    fn with_tools(mut self, tools: &Tools) -> Self {
         self.host.clone_from(&tools.embedded_host);
         self.session_id.clone_from(&tools.embedded_session_id);
         self.local = tools

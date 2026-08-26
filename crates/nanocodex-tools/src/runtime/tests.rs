@@ -766,28 +766,48 @@ fn registered_tools_cannot_replace_host_owned_routing_tools() {
     );
 }
 
-#[tokio::test]
-async fn extending_a_runtime_keeps_the_first_exact_tool_registration() {
-    let first = Tools::builder()
+#[test]
+fn composing_a_recipe_revalidates_normalized_names() {
+    let tools = Tools::builder()
         .without_defaults()
         .tool(NamedTool {
-            name: "same_name",
+            name: "read-file",
             output: "first",
         })
         .build()
         .unwrap();
-    let second = Tools::builder()
-        .without_defaults()
+    let result = tools
+        .into_builder()
         .tool(NamedTool {
-            name: "same_name",
+            name: "read_file",
             output: "second",
         })
+        .build();
+
+    assert!(matches!(
+        result,
+        Err(super::ToolsBuildError::NormalizedNameCollision { normalized, .. })
+            if normalized.as_ref() == "read_file"
+    ));
+}
+
+#[tokio::test]
+async fn hidden_private_names_remain_dispatchable() {
+    let tools = Tools::builder()
+        .without_defaults()
+        .tool_with_exposure(
+            NamedTool {
+                name: "_internal/tool",
+                output: "private",
+            },
+            ToolExposure::Hidden,
+        )
         .build()
         .unwrap();
-    let runtime = ToolRuntime::new_with_tools(".", None, None, &first).with_tools(&second);
+    let runtime = ToolRuntime::new_with_tools(".", None, None, &tools);
     let output = runtime
         .execute_tool(
-            "same_name",
+            "_internal/tool",
             ToolInput::Function(to_raw_value(&json!({})).unwrap()),
             ToolContext::new(
                 "test-model",
@@ -799,7 +819,28 @@ async fn extending_a_runtime_keeps_the_first_exact_tool_registration() {
         )
         .await;
 
-    assert_eq!(output.structured_result(), json!("first"));
+    assert_eq!(output.structured_result(), json!("private"));
+    assert!(
+        runtime
+            .model_specs("test-session")
+            .iter()
+            .all(|definition| {
+                !serde_json::to_string(definition)
+                    .unwrap()
+                    .contains("_internal/tool")
+            })
+    );
+    assert!(matches!(
+        Tools::builder()
+            .without_defaults()
+            .tool(NamedTool {
+                name: "_internal/tool",
+                output: "visible",
+            })
+            .build(),
+        Err(super::ToolsBuildError::InvalidPublicName(name))
+            if name.as_ref() == "_internal/tool"
+    ));
 }
 
 #[test]
@@ -874,7 +915,7 @@ async fn registered_tool_is_described_and_callable_from_code_mode() {
         .tool(Double)
         .build()
         .unwrap();
-    let runtime = ToolRuntime::new(".", None, None).with_tools(&tools);
+    let runtime = ToolRuntime::new_with_tools(".", None, None, &tools);
     let description = serde_json::to_value(runtime.model_specs("test-session")).unwrap();
     assert!(
         description[0]["description"]
@@ -924,7 +965,7 @@ async fn handler_errors_become_failed_model_visible_results() {
         .tool(Fails)
         .build()
         .unwrap();
-    let runtime = ToolRuntime::new(".", None, None).with_tools(&tools);
+    let runtime = ToolRuntime::new_with_tools(".", None, None, &tools);
     let execution = runtime
         .registry
         .execute_nested(
@@ -955,7 +996,7 @@ async fn handler_panics_become_aborted_outputs_without_escaping_the_runtime() {
         .provider(PanickingProvider)
         .build()
         .unwrap();
-    let runtime = ToolRuntime::new(".", None, None).with_tools(&tools);
+    let runtime = ToolRuntime::new_with_tools(".", None, None, &tools);
     let context = ToolContext::new(
         "test-model",
         "test-session",
@@ -999,7 +1040,7 @@ async fn direct_model_calls_reach_activated_dynamic_tools() {
         .build()
         .unwrap();
     tools.start_providers();
-    let runtime = ToolRuntime::new(".", None, None).with_tools(&tools);
+    let runtime = ToolRuntime::new_with_tools(".", None, None, &tools);
     let context = ToolContext::new(
         "test-model",
         "test-session",
@@ -1039,7 +1080,7 @@ async fn code_mode_can_search_and_call_a_deferred_tool_in_one_cell() {
         .build()
         .unwrap();
     tools.start_providers();
-    let runtime = ToolRuntime::new(".", None, None).with_tools(&tools);
+    let runtime = ToolRuntime::new_with_tools(".", None, None, &tools);
     let model_specs_before = serde_json::to_vec(&runtime.model_specs("test-session")).unwrap();
     let model_specs_value = serde_json::to_value(runtime.model_specs("test-session")).unwrap();
     assert!(

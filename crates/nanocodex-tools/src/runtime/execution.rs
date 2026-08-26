@@ -125,13 +125,7 @@ impl ToolRuntime {
         }
     }
 
-    /// Extends this runtime with a validated declarative tool selection.
-    ///
-    /// Dynamic providers begin discovery immediately. Their [`DynamicToolProvider::start`]
-    /// implementations are required to be idempotent so callers may also start
-    /// discovery earlier during application think time.
-    #[must_use]
-    pub fn with_tools(mut self, tools: &Tools) -> Self {
+    fn with_tools(mut self, tools: &Tools) -> Self {
         tools.start_providers();
         let registry = Arc::make_mut(&mut self.registry);
         if self.exposure.is_none() {

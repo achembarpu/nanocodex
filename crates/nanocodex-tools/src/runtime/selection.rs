@@ -614,10 +614,18 @@ impl ToolsBuilder {
         for tool in &self.tools.registered {
             let definition = tool.handler.definition();
             let name = definition.name();
-            validate_registered_tool_name(
-                name,
-                matches!(definition, ToolDefinition::ToolSearch { .. }),
-            )?;
+            #[cfg(feature = "native")]
+            let exposure = tool.exposure.unwrap_or_else(|| self.tools.exposure());
+            #[cfg(not(feature = "native"))]
+            let exposure = self.tools.exposure();
+            if exposure != ToolExposure::Hidden {
+                validate_registered_tool_name(
+                    name,
+                    matches!(definition, ToolDefinition::ToolSearch { .. }),
+                )?;
+            } else if name.is_empty() {
+                return Err(ToolsBuildError::EmptyName);
+            }
             if host_owned_name(name)
                 || (name == "tool_search"
                     && !matches!(definition, ToolDefinition::ToolSearch { .. }))
@@ -631,10 +639,7 @@ impl ToolsBuilder {
                 return Err(ToolsBuildError::DuplicateName(name.into()));
             }
             #[cfg(feature = "native")]
-            if tool
-                .exposure
-                .unwrap_or_else(|| self.tools.exposure())
-                .is_available_in_code_mode()
+            if exposure.is_available_in_code_mode()
                 && !matches!(definition, ToolDefinition::ToolSearch { .. })
             {
                 insert_code_mode_name(&mut code_mode_names, name)?;
