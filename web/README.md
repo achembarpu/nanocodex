@@ -109,21 +109,22 @@ Set `NANOCODEX_DEV_INSTANCE=<name>` to pin an explicit instance name, or
 port collision. Startup prints both the app and Connect playground URLs for the
 instance. Ordinary shutdown retains that instance's state.
 
-The orchestrator loads the repository-root `.env` once before it selects auth
-or starts a child. It reconstructs every child environment explicitly: only the
-private managed launcher and its credential broker receive `OPENAI_API_KEY` or
-Codex auth configuration. Vite receives only the derived
+The orchestrator loads the main worktree's root `.env` once before it selects
+auth or starts a child, including when an agent launches the stack from a linked
+worktree. It reconstructs every child environment explicitly: only the private
+managed launcher and its credential broker receive `OPENAI_API_KEY` or Codex
+auth configuration. Vite receives only the derived
 `NANOCODEX_LOCAL_MODEL_ACCESS=managed` and non-secret auth mode; it maps those
 to the website Worker's private `MODEL_EGRESS` binding. Vite and both Workers
 otherwise receive only generated local tokens, secretless bindings, and
 non-secret runtime settings. The legacy credential-bearing development proxy
 is not part of managed localhost.
 Vite env loading is disabled, and website `.dev.vars*` files are rejected; keep
-local development settings in the one root `.env` instead.
+local development settings in the main worktree's one root `.env` instead.
 
 Local account connectors read their OAuth application credentials from the
-same root `.env` using the production deployment names. The launcher projects
-them only into the private auxiliary egress Worker:
+same main-worktree `.env` using the production deployment names. The launcher
+projects them only into the private auxiliary egress Worker:
 
 ```text
 NANOCODEX_GITHUB_OAUTH_CLIENT_ID=...
@@ -356,9 +357,9 @@ Development runs on the stable OrbStack HTTPS origin printed at startup. Provide
 credentials remain behind Worker Service Bindings and never enter that browser
 origin.
 
-Local development reads the optional ignored root `.env` through the repository
-workflow. BYOK uses the `BYOK_SESSIONS` Durable Object binding; ChatGPT login
-uses its separate server-owned session boundary.
+Local development reads the optional ignored `.env` from the main Git worktree
+through the repository workflow. BYOK uses the `BYOK_SESSIONS` Durable Object
+binding; ChatGPT login uses its separate server-owned session boundary.
 
 The browser agent does not use JavaScript Promise Integration (JSPI). Its
 consumer startup gate checks only the platform APIs used by the shipped path:

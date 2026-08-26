@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createServer as createNetServer } from "node:net";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
@@ -25,6 +25,7 @@ import {
   localStackChildIsAlive,
   localStackChildOptions,
   loadRootEnvironment,
+  mainWorktreeEnvironmentPath,
   managedChildEnvironment,
   orbStackGatewayChildLaunch,
   orbStackGatewayStop,
@@ -360,8 +361,8 @@ test("local connector app credentials use private auxiliary names", () => {
   });
 });
 
-test("the orchestrator loads one root env source before auth selection", async () => {
-  const temporaryDirectory = await mkdtemp(join(tmpdir(), "nanocodex-root-env-"));
+test("the local launcher loads the main Git worktree environment from a linked worktree", async () => {
+  const temporaryDirectory = await mkdtemp(join(tmpdir(), "nanocodex-main-worktree-env-"));
   const previousApiKey = process.env.OPENAI_API_KEY;
   const previousMode = process.env.NANOCODEX_AUTH_MODE;
   const previousSentinel = process.env.NANOCODEX_ROOT_ENV_SENTINEL;
@@ -369,19 +370,38 @@ test("the orchestrator loads one root env source before auth selection", async (
     delete process.env.OPENAI_API_KEY;
     delete process.env.NANOCODEX_AUTH_MODE;
     delete process.env.NANOCODEX_ROOT_ENV_SENTINEL;
-    const envPath = join(temporaryDirectory, ".env");
+    const mainWorktree = join(temporaryDirectory, "main");
+    const linkedWorktree = join(temporaryDirectory, "linked");
+    const linkedGitDirectory = join(mainWorktree, ".git", "worktrees", "linked");
+    await mkdir(linkedGitDirectory, { recursive: true });
+    await mkdir(linkedWorktree, { recursive: true });
+    await writeFile(join(linkedWorktree, ".git"), `gitdir: ${linkedGitDirectory}\n`);
+    await writeFile(join(linkedGitDirectory, "commondir"), "../..\n");
     await writeFile(
-      envPath,
-      "NANOCODEX_AUTH_MODE=api_key\nOPENAI_API_KEY=root-provider-secret\nNANOCODEX_ROOT_ENV_SENTINEL=loaded-once\n",
+      join(mainWorktree, ".env"),
+      "NANOCODEX_AUTH_MODE=api_key\nOPENAI_API_KEY=main-provider-secret\nNANOCODEX_ROOT_ENV_SENTINEL=main-worktree\n",
     );
-    loadRootEnvironment(envPath);
-    assert.equal(process.env.NANOCODEX_ROOT_ENV_SENTINEL, "loaded-once");
+    await writeFile(
+      join(linkedWorktree, ".env"),
+      "OPENAI_API_KEY=linked-provider-secret\nNANOCODEX_ROOT_ENV_SENTINEL=linked-worktree\n",
+    );
+
+    assert.equal(
+      await mainWorktreeEnvironmentPath(mainWorktree),
+      join(mainWorktree, ".env"),
+    );
+    assert.equal(
+      await mainWorktreeEnvironmentPath(linkedWorktree),
+      join(mainWorktree, ".env"),
+    );
+    await loadRootEnvironment(undefined, linkedWorktree);
+    assert.equal(process.env.NANOCODEX_ROOT_ENV_SENTINEL, "main-worktree");
     const options = parseLocalDevOptions([], process.env);
     assert.equal(options.requestedMode, "api_key");
     assert.equal(await resolveLocalAuthMode(options, process.env), "api_key");
-    assert.equal(managedChildEnvironment(process.env).OPENAI_API_KEY, "root-provider-secret");
+    assert.equal(managedChildEnvironment(process.env).OPENAI_API_KEY, "main-provider-secret");
     assert.equal(providerFreeWebEnvironment(process.env).OPENAI_API_KEY, undefined);
-    assert.throws(() => loadRootEnvironment(envPath), /already loaded/);
+    await assert.rejects(loadRootEnvironment(undefined, linkedWorktree), /already loaded/);
   } finally {
     if (previousApiKey === undefined) delete process.env.OPENAI_API_KEY;
     else process.env.OPENAI_API_KEY = previousApiKey;

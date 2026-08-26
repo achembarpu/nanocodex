@@ -127,11 +127,29 @@ export function localConnectorEnvironment(environment) {
   });
 }
 
-export function loadRootEnvironment(path = resolve(repositoryRoot, ".env")) {
+export async function mainWorktreeEnvironmentPath(repositoryPath = repositoryRoot) {
+  const gitMetadataPath = resolve(repositoryPath, ".git");
+  const metadata = await stat(gitMetadataPath);
+  if (metadata.isDirectory()) return resolve(repositoryPath, ".env");
+  if (!metadata.isFile()) throw new Error(`${gitMetadataPath} is not Git metadata`);
+
+  const pointer = (await readFile(gitMetadataPath, "utf8")).trim();
+  const match = /^gitdir:\s*(.+)$/.exec(pointer);
+  if (!match) throw new Error(`${gitMetadataPath} does not identify a Git directory`);
+  const gitDirectory = resolve(dirname(gitMetadataPath), match[1]);
+  const commonDirectory = resolve(
+    gitDirectory,
+    (await readFile(resolve(gitDirectory, "commondir"), "utf8")).trim(),
+  );
+  return resolve(dirname(commonDirectory), ".env");
+}
+
+export async function loadRootEnvironment(path, repositoryPath = repositoryRoot) {
   if (rootEnvironmentLoaded) throw new Error("the root environment was already loaded");
   rootEnvironmentLoaded = true;
+  const environmentPath = path ?? await mainWorktreeEnvironmentPath(repositoryPath);
   try {
-    process.loadEnvFile(path);
+    process.loadEnvFile(environmentPath);
   } catch (error) {
     if (error?.code !== "ENOENT") throw error;
   }
@@ -313,7 +331,7 @@ async function main() {
   lifecycle.installSignalHandlers();
 
   try {
-    loadRootEnvironment();
+    await loadRootEnvironment();
     const environment = process.env;
     if (process.argv.slice(2).length > 0) {
       throw new Error("local development has one production-shaped account and managed-agent topology");
