@@ -489,9 +489,21 @@ where
                 catalog_digest == config.catalog_digest.as_ref(),
             ).into());
         }
-        Ok(RemoteFrame::Fenced { reason, .. }) => {
+        Ok(RemoteFrame::Fenced {
+            lease_id: fence_lease,
+            generation: fence_generation,
+            reason,
+            ..
+        }) => {
             policy_close(&mut socket).await;
-            return ConnectionEnd::Fenced(reason.into());
+            return ConnectionEnd::Fenced(
+                if fence_lease == lease_id && fence_generation == generation {
+                    reason
+                } else {
+                    "fence pin did not match active lease".to_owned()
+                }
+                .into(),
+            );
         }
         Ok(frame) => {
             policy_close(&mut socket).await;
