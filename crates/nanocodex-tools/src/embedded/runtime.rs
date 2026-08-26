@@ -265,6 +265,13 @@ impl EmbeddedToolRuntime {
         if self.local.iter().any(|tool| tool.name.as_ref() == name) {
             return true;
         }
+        if self
+            .callable_tool_names
+            .read()
+            .is_ok_and(|names| names.contains(name))
+        {
+            return true;
+        }
         if let (Some(host), Some(session_id)) = (&self.host, &self.session_id)
             && let Ok(definitions) = host.tool_definitions(session_id)
         {
@@ -281,9 +288,7 @@ impl EmbeddedToolRuntime {
             }
             return found;
         }
-        self.callable_tool_names
-            .read()
-            .is_ok_and(|names| names.contains(name))
+        false
     }
 
     /// Dispatches a direct embedded definition or returns a model-visible failure.
@@ -445,7 +450,7 @@ fn failed(message: &str) -> CodeModeExecution {
 mod tests {
     use std::sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     };
 
     use async_trait::async_trait;
@@ -474,6 +479,7 @@ mod tests {
     #[derive(Clone)]
     struct LateDeferredHost {
         ready: Arc<AtomicBool>,
+        definition_reads: Arc<AtomicUsize>,
     }
 
     struct ExecHost;
@@ -637,6 +643,7 @@ mod tests {
             &self,
             _session_id: &str,
         ) -> Result<Vec<ToolDefinition>, CodeModeHostError> {
+            self.definition_reads.fetch_add(1, Ordering::Relaxed);
             let mut definitions = vec![ToolDefinition::tool_search(
                 "client",
                 "Search deferred MCP tools.",
@@ -918,8 +925,10 @@ mod tests {
     #[tokio::test]
     async fn direct_dispatch_refreshes_tools_discovered_after_the_model_prefix() {
         let ready = Arc::new(AtomicBool::new(false));
+        let definition_reads = Arc::new(AtomicUsize::new(0));
         let tools = bound_tools(LateDeferredHost {
             ready: Arc::clone(&ready),
+            definition_reads: Arc::clone(&definition_reads),
         })
         .for_session("session-1");
         let runtime = EmbeddedToolRuntime::new_with_tools(".", None, None, &tools);
@@ -941,6 +950,7 @@ mod tests {
             .await;
         assert!(output.success);
         assert_eq!(output.structured_result()["name"], "mcp__viem__search_docs");
+        assert_eq!(definition_reads.load(Ordering::Relaxed), 3);
     }
 
     #[tokio::test]
