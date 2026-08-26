@@ -997,10 +997,16 @@ function updateFormationControllers(state: WorldState): void {
       if (!desired) continue;
       if (actor.scene === anchorPosition.scene) {
         constraint.targetArc ??= targetArc;
-        constraint.targetOffset ??= Object.freeze({
-          x: desired.x - anchorPosition.x,
-          y: desired.y - anchorPosition.y,
-        });
+        const feasibleX = desired.x - anchorPosition.x;
+        const feasibleY = desired.y - anchorPosition.y;
+        if (
+          constraint.targetOffset === undefined
+          || constraint.targetOffset.x !== feasibleX
+          || constraint.targetOffset.y !== feasibleY
+        ) {
+          constraint.targetOffset = Object.freeze({ x: feasibleX, y: feasibleY });
+          constraint.slotsRematched = false;
+        }
       }
       targetClaims.add(worldPositionKey(desired));
       desiredByResident.set(target.residentId, desired);
@@ -1246,13 +1252,16 @@ function nearestFeasibleFormationTarget(
   unavailable: ReadonlySet<string>,
 ): WorldPosition | undefined {
   const start = actorWorldPosition(actor);
-  for (let radius = 0; radius <= 6; radius += 1) {
+  // Preserve the semantic contour while projecting crowded or obstructed slots
+  // into a bounded local feasible set. The wider horizon matters for subgroup
+  // contours beside buildings, where a six-tile neighborhood can contain fewer
+  // free tiles than residents even though nearby town space is available.
+  for (let radius = 0; radius <= 12; radius += 1) {
     const candidates: WorldPosition[] = [];
-    for (let dy = -radius; dy <= radius; dy += 1) {
-      for (let dx = -radius; dx <= radius; dx += 1) {
-        if (Math.abs(dx) + Math.abs(dy) !== radius) continue;
-        candidates.push({ scene, x: target.x + dx, y: target.y + dy });
-      }
+    for (let dx = -radius; dx <= radius; dx += 1) {
+      const dy = radius - Math.abs(dx);
+      candidates.push({ scene, x: target.x + dx, y: target.y - dy });
+      if (dy > 0) candidates.push({ scene, x: target.x + dx, y: target.y + dy });
     }
     candidates.sort((left, right) => left.y - right.y || left.x - right.x);
     for (const candidate of candidates) {

@@ -133,6 +133,34 @@ test("formation target selection avoids Scout and non-member current and reserve
   assert.ok(state.actors.cinder.formationConstraint);
 });
 
+test("a newly occupied retained slot is replaced by a canonical feasible slot", () => {
+  const state = formationWorld(["cinder", "moss"]);
+  relocate(state, "player", "town", 16, 13);
+  relocate(state, "cinder", "town", 10, 13);
+  relocate(state, "moss", "town", 8, 8);
+  assert.equal(applyFormation(state, "cinder", formationAction({
+    generation: 15,
+    formation_id: "projected-retained-slot",
+    closed: false,
+    path_tiles: [{ x: 2, y: 0 }, { x: 3, y: 0 }],
+    members: ["cinder"],
+  })).accepted, true);
+  advanceUntil(state, () => formationSnapshotFor(state, 15).waves[0]?.status === "holding", 500);
+
+  const oldTarget = actorWorldPosition(state.actors.cinder);
+  relocate(state, "cinder", "town", oldTarget.x - 4, oldTarget.y);
+  relocate(state, "moss", oldTarget.scene, oldTarget.x, oldTarget.y);
+  advanceUntil(state, () => formationSnapshotFor(state, 15).waves[0]?.status === "holding", 500);
+
+  const current = actorWorldPosition(state.actors.cinder);
+  assert.notDeepEqual(current, oldTarget);
+  assert.notDeepEqual(current, actorWorldPosition(state.actors.moss));
+  assert.deepEqual(state.actors.cinder.formationConstraint?.targetOffset, {
+    x: current.x - state.actors.player.x,
+    y: current.y - state.actors.player.y,
+  });
+});
+
 test("retained formations execute accepted say, emote, and non-positional random choices", () => {
   const state = formationWorld(["cinder"]);
   assert.equal(applyFormation(state, "cinder", formationAction({

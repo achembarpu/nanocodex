@@ -91,9 +91,9 @@ test("helper and arbitrary formation language never becomes reducer-owned destin
 test("task-tree completion requires current reducer evidence from every resident", () => {
   const worker = source("../src/monsterWorldAgent.worker.ts");
   assert.match(worker, /feedback: Map<ResidentId, ResidentActEvidence>/);
-  assert.match(worker, /validateCoordinationCompletion\(active, result\.finalMessage\)/);
-  assert.match(worker, /World coordination completed without fresh action evidence/);
-  assert.match(worker, /result\.remainingGaps\.length !== 0/);
+  assert.doesNotMatch(worker, /coordinatorPrompt|MANDATORY GLOBAL REVIEW/);
+  assert.match(worker, /const unresolved = \[\.\.\.active\.addressed\]\.filter/);
+  assert.match(worker, /World reducer finished without holding evidence/);
   assert.match(worker, /active\.feedback\.get\(residentId\)\?\.result\.outcome\.status !== "completed"/);
   assert.doesNotMatch(worker, /result\.evidence/);
   assert.doesNotMatch(worker, /full roster, current order/);

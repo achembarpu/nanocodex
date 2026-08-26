@@ -110,8 +110,10 @@ export function AgentSessionBar({
       {status?.state === "signed_out" ? (
         <p className="agent-session-note" role="status">Sign in with a passkey from the account menu.</p>
       ) : null}
-      {agentStatus === "error" && agentError ? (
-        <p className="agent-byok-error" role="alert">{agentStartFailure(agentError)}</p>
+      {agentError ? (
+        <p className="agent-byok-error" role="alert">
+          {agentStatus === "error" ? agentStartFailure(agentError) : agentError}
+        </p>
       ) : null}
     </div>
   );

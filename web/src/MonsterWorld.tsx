@@ -403,7 +403,9 @@ export function MonsterWorld() {
       nextCoordinationAt.current = 0;
     } else if (message.outcome === "failed") {
       setAgentError(message.message ?? "The World task tree could not complete this call.");
-      nextCoordinationAt.current = performance.now() + 5_000;
+      nextCoordinationAt.current = message.failure === "invalid"
+        ? Number.POSITIVE_INFINITY
+        : performance.now() + 5_000;
     } else {
       nextCoordinationAt.current = 0;
     }
@@ -585,6 +587,7 @@ export function MonsterWorld() {
     if (!worldRef.current) return;
     const speech = playerSpeak(worldRef.current, input, voiceLevel);
     if (!speech) return;
+    setAgentError(undefined);
     const mindsToWake = speech.liveAddressed;
     supersedeResidentTurns(mindsToWake);
     nextCoordinationAt.current = 0;
