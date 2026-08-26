@@ -5490,6 +5490,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "nanocodex-managed"
+version = "0.5.0"
+dependencies = [
+ "axum",
+ "futures-util",
+ "nanocodex-agent",
+ "nanocodex-oai-api",
+ "nanocodex-tools",
+ "reqwest",
+ "rustls",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tower",
+ "url",
+ "uuid",
+ "zeroize",
+]
+
+[[package]]
 name = "nanocodex-oai-api"
 version = "0.5.0"
 dependencies = [

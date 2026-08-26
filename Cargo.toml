@@ -5,6 +5,7 @@ members = [
     "bin/nanousd-api",
     "crates/nanocodex",
     "crates/nanocodex-agent",
+    "crates/nanocodex-managed",
     "crates/nanocodex-durability",
     "crates/experimental/nanocodex-browser",
     "crates/experimental/nanocodex-egress",
@@ -78,6 +79,7 @@ krun = { package = "libkrun", version = "=2.0.0-dev", git = "https://github.com/
 mpp = { version = "=0.11.0", git = "https://github.com/tempoxyz/mpp-rs", rev = "2e265801d216ef54a85b31acda5d0fac192e1b5e", default-features = false }
 nanocodex = { version = "0.5.0", path = "crates/nanocodex" }
 nanocodex-agent = { version = "0.5.0", path = "crates/nanocodex-agent" }
+nanocodex-managed = { version = "0.5.0", path = "crates/nanocodex-managed" }
 nanocodex-durability = { version = "0.5.0", path = "crates/nanocodex-durability" }
 nanocodex-browser = { version = "0.5.0", path = "crates/experimental/nanocodex-browser" }
 nanocodex-egress = { version = "0.5.0", path = "crates/experimental/nanocodex-egress" }
