@@ -9,12 +9,16 @@ import {
   type ReactNode,
 } from "react";
 import { Provider, Storage, webAuthn } from "accounts";
+import {
+  getCurrentUser,
+  isRecord,
+  responseFailure,
+  type AuthenticatedAccount,
+} from "./accountSessionRequest";
 import { clientFailureMessage } from "./clientFailure";
 
-export type AuthenticatedAccount = Readonly<{
-  id: string;
-  persistent: boolean;
-}>;
+export { isRecord, responseFailure } from "./accountSessionRequest";
+export type { AuthenticatedAccount } from "./accountSessionRequest";
 
 type SessionStatus = "checking" | "ready" | "error";
 type AccountOperation = "new-account" | "register" | "sign-in" | "sign-out";
@@ -32,7 +36,6 @@ type AccountSession = Readonly<{
 }>;
 
 const AccountSessionContext = createContext<AccountSession | null>(null);
-const USER_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 function createAccountProvider() {
   return Provider.create({
@@ -179,46 +182,9 @@ export function useAccountSession(): AccountSession {
   return session;
 }
 
-async function getCurrentUser(): Promise<AuthenticatedAccount | null> {
-  const response = await fetch("/v1/me", {
-    cache: "no-store",
-    credentials: "same-origin",
-    headers: { accept: "application/json" },
-  });
-  if (response.status === 401) {
-    const body: unknown = await response.json().catch(() => undefined);
-    if (isRecord(body) && body.error === "invalid_session") {
-      throw new Error("Your account session expired. Retry to start a new browser session, or sign in with your passkey.");
-    }
-    return null;
-  }
-  if (!response.ok) throw await responseFailure(response, "Account service unavailable.");
-  const body: unknown = await response.json();
-  if (!isRecord(body) || !isRecord(body.user)) throw new Error("Invalid account response.");
-  const { id, persistent } = body.user;
-  if (
-    typeof id !== "string"
-    || !USER_ID.test(id)
-    || typeof persistent !== "boolean"
-  ) throw new Error("Invalid account response.");
-  return { id, persistent };
-}
-
-export async function responseFailure(response: Response, fallback: string): Promise<Error> {
-  const body: unknown = await response.json().catch(() => undefined);
-  const reason = isRecord(body) && typeof body.error === "string"
-    ? body.error.replaceAll("_", " ")
-    : fallback;
-  return new Error(reason);
-}
-
 function accountFailure(cause: unknown, fallback: string): string {
   if (cause instanceof DOMException && cause.name === "NotAllowedError") {
     return "No matching passkey was available, or the request was cancelled. Try another passkey or create a new account.";
   }
   return clientFailureMessage(cause, fallback);
-}
-
-export function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
