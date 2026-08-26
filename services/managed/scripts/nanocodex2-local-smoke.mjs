@@ -22,6 +22,8 @@ const alpha = join(root, "alpha");
 const beta = join(root, "beta");
 const home = join(root, "home");
 let apiKey;
+let apiKeyId;
+let browserCookie;
 let agentId;
 let failure;
 
@@ -32,22 +34,27 @@ try {
     writeFile(join(alpha, "workspace-origin.txt"), "literal-local-workspace-alpha\n"),
     writeFile(join(beta, "workspace-origin.txt"), "literal-local-workspace-beta\n"),
   ]);
-  apiKey = await createLocalApiKey();
+  ({ apiKey, apiKeyId, browserCookie } = await createLocalApiKey());
   const environment = {
     ...process.env,
     NANOCODEX_MANAGED_URL: baseUrl.origin,
     NANOCODEX_HOME: home,
+    NANOCODEX_API_KEY: apiKey,
     NC_API_KEY: apiKey,
   };
+
+  const created = await run(binary, ["new"], root, environment, "nanocodex2 local create");
+  agentId = JSON.parse(created.trim().split("\n").at(-1)).agent_id;
+  assert(agentId, "nanocodex2 did not report its created managed agent");
 
   const first = await run(binary, [
     "run",
     prompt("alpha"),
+    "--agent",
+    agentId,
     "--idempotency-key",
     `nanocodex2-alpha-${randomUUID()}`,
   ], alpha, environment, "nanocodex2 alpha workspace");
-  agentId = first.match(/Managed agent: ([0-9a-z-]+)/)?.[1];
-  assert(agentId, "nanocodex2 did not report its created managed agent");
   await assertTurn(first, alpha, "alpha");
 
   await runDetachedCloudTurn(agentId, apiKey);
@@ -80,12 +87,31 @@ try {
       ...process.env,
       NANOCODEX_MANAGED_URL: baseUrl.origin,
       NANOCODEX_HOME: home,
+      NANOCODEX_API_KEY: apiKey,
       NC_API_KEY: apiKey,
     }, "nanocodex2 local cleanup").catch((error) => {
       failure = failure
         ? new AggregateError([failure, error], "nanocodex2 smoke and cleanup failed")
         : error;
     });
+  }
+  if (apiKeyId && browserCookie) {
+    const revoked = await fetch(new URL(`/v1/api-keys/${apiKeyId}`, baseUrl), {
+      method: "DELETE",
+      headers: { cookie: browserCookie, origin: baseUrl.origin },
+    }).catch((error) => {
+      failure = failure
+        ? new AggregateError([failure, error], "nanocodex2 smoke and credential cleanup failed")
+        : error;
+      return undefined;
+    });
+    if (revoked && revoked.status !== 204 && revoked.status !== 404) {
+      const error = new Error(`local API key cleanup failed with HTTP ${revoked.status}`);
+      failure = failure
+        ? new AggregateError([failure, error], "nanocodex2 smoke and credential cleanup failed")
+        : error;
+    }
+    await revoked?.body?.cancel();
   }
   await rm(root, { recursive: true, force: true });
 }
@@ -207,7 +233,8 @@ async function createLocalApiKey() {
     typeof value.api_key === "string" && /^ncx_live_[A-Za-z0-9_-]{12}_[A-Za-z0-9_-]{43}$/.test(value.api_key),
     "local API key creation returned an invalid key",
   );
-  return value.api_key;
+  assert(typeof value.key?.id === "string", "local API key creation returned no key id");
+  return { apiKey: value.api_key, apiKeyId: value.key.id, browserCookie: cookie };
 }
 
 async function run(command, arguments_, cwd, env, label) {
@@ -222,7 +249,6 @@ async function run(command, arguments_, cwd, env, label) {
     });
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
-    agentId ??= detail.match(/Managed agent: ([0-9a-z-]+)/)?.[1];
     const terminal = detail.split("\n").filter((line) =>
       line.includes('"type":"run.') || line.startsWith("Error:"),
     ).slice(-8);
