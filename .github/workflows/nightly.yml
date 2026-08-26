@@ -35,9 +35,11 @@ jobs:
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             artifact: nanocodex-x86_64-unknown-linux-gnu
+            companion: nanocodex2-x86_64-unknown-linux-gnu
           - os: macos-14
             target: aarch64-apple-darwin
             artifact: nanocodex-aarch64-apple-darwin
+            companion: nanocodex2-aarch64-apple-darwin
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
@@ -65,6 +67,10 @@ jobs:
             cargo build --locked --profile nightly \
               --package nanocodex-bin --bin nanocodex --features tempo \
               --target ${{ matrix.target }}
+          VERGEN_GIT_SHA="$BUILD_SHA" \
+            cargo build --locked --profile nightly \
+              --package nanocodex2-bin --bin nanocodex2 \
+              --target ${{ matrix.target }}
       - name: Stage artifact
         shell: bash
         env:
@@ -72,22 +78,31 @@ jobs:
         run: |
           mkdir dist
           cp "target/${{ matrix.target }}/nightly/nanocodex" "dist/${{ matrix.artifact }}"
+          cp "target/${{ matrix.target }}/nightly/nanocodex2" "dist/${{ matrix.companion }}"
           if [[ -z "$PR_NUMBER" ]]; then
             gzip -n -9 -c "dist/${{ matrix.artifact }}" \
               > "dist/${{ matrix.artifact }}.gz"
+            gzip -n -9 -c "dist/${{ matrix.companion }}" \
+              > "dist/${{ matrix.companion }}.gz"
           fi
+      - name: Smoke nightly binaries
+        shell: bash
+        run: |
+          "dist/${{ matrix.artifact }}" --help >/dev/null
+          "dist/${{ matrix.companion }}" --help >/dev/null
       - name: Stage PR provenance and checksum
         if: github.event_name == 'workflow_dispatch' && inputs.pr != ''
         shell: bash
         env:
           ARTIFACT: ${{ matrix.artifact }}
+          COMPANION: ${{ matrix.companion }}
           PR_NUMBER: ${{ inputs.pr }}
         run: |
           cd dist
           if command -v sha256sum >/dev/null 2>&1; then
-            sha256sum "$ARTIFACT" > "$ARTIFACT.sha256"
+            sha256sum "$ARTIFACT" "$COMPANION" > "$ARTIFACT.sha256"
           else
-            shasum -a 256 "$ARTIFACT" > "$ARTIFACT.sha256"
+            shasum -a 256 "$ARTIFACT" "$COMPANION" > "$ARTIFACT.sha256"
           fi
           printf '{"repository":"%s","pr":%s,"sha":"%s","artifact":"%s","run_id":%s}\n' \
             "$GITHUB_REPOSITORY" "$PR_NUMBER" "$BUILD_SHA" "$ARTIFACT" \
@@ -172,7 +187,7 @@ jobs:
         shell: bash
         run: |
           cd dist
-          sha256sum nanocodex-*.gz > SHA256SUMS
+          sha256sum nanocodex-*.gz nanocodex2-*.gz > SHA256SUMS
       - name: Publish immutable and rolling releases
         env:
           GH_TOKEN: ${{ github.token }}
@@ -200,7 +215,7 @@ jobs:
 
           # Rolling releases retain raw binaries for updaters shipped before
           # gzip support. Their checksum manifest covers both representations.
-          (cd dist && sha256sum nanocodex-* > SHA256SUMS)
+          (cd dist && sha256sum nanocodex-* nanocodex2-* > SHA256SUMS)
 
           # SHA256SUMS is the commit marker for clients that still read rolling assets.
           rolling_exists=false
@@ -212,13 +227,15 @@ jobs:
               gh api --method DELETE \
                 "repos/${GITHUB_REPOSITORY}/releases/assets/${checksum_asset_id}"
             fi
-            gh release upload nightly dist/nanocodex-* \
+            gh release upload nightly dist/nanocodex-* dist/nanocodex2-* \
               --repo "$GITHUB_REPOSITORY" --clobber
 
             while IFS=$'\t' read -r asset_id asset_name; do
               case "$asset_name" in
                 nanocodex-aarch64-apple-darwin|nanocodex-aarch64-apple-darwin.gz|\
                 nanocodex-x86_64-unknown-linux-gnu|nanocodex-x86_64-unknown-linux-gnu.gz|\
+                nanocodex2-aarch64-apple-darwin|nanocodex2-aarch64-apple-darwin.gz|\
+                nanocodex2-x86_64-unknown-linux-gnu|nanocodex2-x86_64-unknown-linux-gnu.gz|\
                 nanocodex-vm-guest-x86_64-unknown-linux-musl|nanocodex-vm-guest-x86_64-unknown-linux-musl.gz)
                   ;;
                 *)
@@ -248,7 +265,7 @@ jobs:
             gh release create nightly --repo "$GITHUB_REPOSITORY" \
               --target "$GITHUB_SHA" --title "Nanocodex Nightly" \
               --notes-file "$notes_file" --prerelease
-            gh release upload nightly dist/nanocodex-* \
+            gh release upload nightly dist/nanocodex-* dist/nanocodex2-* \
               --repo "$GITHUB_REPOSITORY" --clobber
           fi
           gh release upload nightly dist/SHA256SUMS \

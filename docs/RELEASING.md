@@ -14,6 +14,16 @@ resolves and verifies assets from the corresponding immutable release. Raw
 executables remain only on the rolling release so pre-compression updaters can
 cross the format transition.
 
+Each native nightly contains both `nanocodex` and `nanocodex2`; x86_64 Linux
+also contains the static VM guest. `nanocodex update --nightly` verifies and
+installs that complete platform bundle atomically and exposes both CLI launchers
+under `$NANOCODEX_DIR/bin`. Switching back to a stable, PR, or local build
+removes the owned `nanocodex2` launcher because those channels do not publish
+the companion yet. Updaters published before this bundle contract need one
+nightly update to promote the bundle-aware manager and a second invocation to
+fetch `nanocodex2`; subsequent nightly updates install the complete bundle in
+one invocation.
+
 ## JavaScript package previews
 
 Every pull request and every commit merged to `master` builds and tests the

@@ -807,7 +807,7 @@ mod tests {
         SUBAGENT_INSTRUCTIONS, direct_websocket_url, select_auth, select_auth_with_default,
         selected_api_base_url, selected_subagent_tools, session_instructions,
     };
-    use crate::subagents::SubagentToolSet;
+    use crate::{managed_memory::MEMORY_INSTRUCTIONS, subagents::SubagentToolSet};
 
     #[test]
     fn default_websocket_url_follows_the_selected_auth_mode() {

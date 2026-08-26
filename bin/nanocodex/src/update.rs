@@ -29,6 +29,8 @@ const NIGHTLY_RELEASE_API: &str =
     "https://api.github.com/repos/gakonst/nanocodex/releases/tags/nightly";
 const TAGGED_RELEASE_API: &str = "https://api.github.com/repos/gakonst/nanocodex/releases/tags";
 const CHECKSUMS_ASSET: &str = "SHA256SUMS";
+const NANOCODEX2_LINUX_ASSET: &str = "nanocodex2-x86_64-unknown-linux-gnu";
+const NANOCODEX2_MACOS_ASSET: &str = "nanocodex2-aarch64-apple-darwin";
 const VM_GUEST_ASSET: &str = "nanocodex-vm-guest-x86_64-unknown-linux-musl";
 const DOWNLOAD_ATTEMPTS: usize = 5;
 const DOWNLOAD_RETRY_DELAY: Duration = Duration::from_millis(250);
@@ -171,8 +173,8 @@ impl Update {
         let key = latest
             .as_ref()
             .map_or_else(|| nightly_key(&release), |version| Ok(version.to_string()))?;
-        let cached = if self.nightly && vm_guest_binary_asset_name().is_some() {
-            store.is_cached_with_vm_guest(&key)?
+        let cached = if self.nightly {
+            store.is_cached_nightly(&key, vm_guest_binary_asset_name().is_some())?
         } else {
             store.is_cached(&key)?
         };
@@ -193,13 +195,31 @@ impl Update {
         let checksum_manifest = download(&client, checksums, false).await?;
         let archive = download_verified(&client, binary, &checksum_manifest, true).await?;
         let contents = unpack_release_asset(archive, &binary.name, compressed)?;
-        if self.nightly
-            && let Some(guest_name) = vm_guest_binary_asset_name()
-        {
-            let (guest, compressed) = find_preferred_asset(&release, guest_name)?;
-            let guest_archive = download_verified(&client, guest, &checksum_manifest, true).await?;
-            let guest_contents = unpack_release_asset(guest_archive, &guest.name, compressed)?;
-            store.install_with_vm_guest(&key, &contents, &guest_contents)?;
+        if self.nightly {
+            let (companion, compressed) =
+                find_preferred_asset(&release, nanocodex2_binary_asset_name()?)?;
+            let companion_archive =
+                download_verified(&client, companion, &checksum_manifest, true).await?;
+            let companion_contents =
+                unpack_release_asset(companion_archive, &companion.name, compressed)?;
+            let guest_contents = if let Some(guest_name) = vm_guest_binary_asset_name() {
+                let (guest, compressed) = find_preferred_asset(&release, guest_name)?;
+                let guest_archive =
+                    download_verified(&client, guest, &checksum_manifest, true).await?;
+                Some(unpack_release_asset(
+                    guest_archive,
+                    &guest.name,
+                    compressed,
+                )?)
+            } else {
+                None
+            };
+            store.install_nightly_bundle(
+                &key,
+                &contents,
+                &companion_contents,
+                guest_contents.as_deref(),
+            )?;
         } else {
             store.install(&key, &contents)?;
         }
@@ -482,7 +502,14 @@ fn nightly_key(release: &Release) -> Result<String> {
 fn nightly_key_for(release: &Release, os: &str, arch: &str) -> Result<String> {
     let sha = exact_release_commit(release)?;
     let (binary, _) = find_preferred_asset(release, binary_asset_name_for(os, arch)?)?;
-    let mut key = format!("nightly-{}-{}", sha.to_ascii_lowercase(), binary.id);
+    let (companion, _) =
+        find_preferred_asset(release, nanocodex2_binary_asset_name_for(os, arch)?)?;
+    let mut key = format!(
+        "nightly-{}-{}-{}",
+        sha.to_ascii_lowercase(),
+        binary.id,
+        companion.id
+    );
     if let Some(guest_name) = vm_guest_binary_asset_name_for(os, arch) {
         let (guest, _) = find_preferred_asset(release, guest_name)?;
         key.push_str(&format!("-{}", guest.id));
@@ -587,6 +614,18 @@ fn release_asset_name_for(os: &str, arch: &str) -> Result<String> {
 
 fn binary_asset_name() -> Result<&'static str> {
     binary_asset_name_for(std::env::consts::OS, std::env::consts::ARCH)
+}
+
+fn nanocodex2_binary_asset_name() -> Result<&'static str> {
+    nanocodex2_binary_asset_name_for(std::env::consts::OS, std::env::consts::ARCH)
+}
+
+fn nanocodex2_binary_asset_name_for(os: &str, arch: &str) -> Result<&'static str> {
+    match (os, arch) {
+        ("linux", "x86_64") => Ok(NANOCODEX2_LINUX_ASSET),
+        ("macos", "aarch64") => Ok(NANOCODEX2_MACOS_ASSET),
+        _ => Err(eyre!("self-update is not supported on {os} {arch}")),
+    }
 }
 
 fn vm_guest_binary_asset_name() -> Option<&'static str> {
@@ -796,7 +835,7 @@ mod tests {
     }
 
     #[test]
-    fn nightly_versions_are_bound_to_the_commit_and_both_assets() {
+    fn nightly_versions_are_bound_to_the_commit_and_every_asset() {
         let release = Release {
             tag_name: "nightly-0123456789abcdef0123456789abcdef01234567".to_owned(),
             target_commitish: "0123456789abcdef0123456789abcdef01234567".to_owned(),
@@ -808,6 +847,11 @@ mod tests {
                 },
                 ReleaseAsset {
                     id: 12,
+                    name: format!("{NANOCODEX2_LINUX_ASSET}.gz"),
+                    browser_download_url: "https://example.invalid/nanocodex2".to_owned(),
+                },
+                ReleaseAsset {
+                    id: 13,
                     name: format!("{VM_GUEST_ASSET}.gz"),
                     browser_download_url: "https://example.invalid/nanocodex-vm-guest".to_owned(),
                 },
@@ -816,7 +860,11 @@ mod tests {
 
         assert_eq!(
             nightly_key_for(&release, "linux", "x86_64").unwrap(),
-            "nightly-0123456789abcdef0123456789abcdef01234567-11-12"
+            "nightly-0123456789abcdef0123456789abcdef01234567-11-12-13"
+        );
+        assert_eq!(
+            nanocodex2_binary_asset_name_for("macos", "aarch64").unwrap(),
+            NANOCODEX2_MACOS_ASSET
         );
         assert_eq!(
             vm_guest_binary_asset_name_for("linux", "x86_64"),

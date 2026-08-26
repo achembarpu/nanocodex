@@ -9,6 +9,7 @@ use sha2::{Digest, Sha256};
 use tempfile::NamedTempFile;
 
 const CHECKSUM_FILE: &str = "nanocodex.sha256";
+const NANOCODEX2_CHECKSUM_FILE: &str = "nanocodex2.sha256";
 const VM_GUEST_BINARY_NAME: &str = "nanocodex-vm-guest";
 const VM_GUEST_CHECKSUM_FILE: &str = "nanocodex-vm-guest.sha256";
 
@@ -16,6 +17,11 @@ const VM_GUEST_CHECKSUM_FILE: &str = "nanocodex-vm-guest.sha256";
 const BINARY_NAME: &str = "nanocodex.exe";
 #[cfg(not(windows))]
 const BINARY_NAME: &str = "nanocodex";
+
+#[cfg(windows)]
+const NANOCODEX2_BINARY_NAME: &str = "nanocodex2.exe";
+#[cfg(not(windows))]
+const NANOCODEX2_BINARY_NAME: &str = "nanocodex2";
 
 pub(super) struct VersionStore {
     root: PathBuf,
@@ -98,16 +104,17 @@ impl VersionStore {
         )
     }
 
-    pub(super) fn install_with_vm_guest(
+    pub(super) fn install_nightly_bundle(
         &self,
         key: &str,
         binary: &[u8],
-        vm_guest: &[u8],
+        nanocodex2: &[u8],
+        vm_guest: Option<&[u8]>,
     ) -> Result<()> {
         validate_key(key)?;
         fs::create_dir_all(self.versions_dir())
             .wrap_err("failed to create the Nanocodex version store")?;
-        if self.is_cached_with_vm_guest(key)? {
+        if self.is_cached_nightly(key, vm_guest.is_some())? {
             return Ok(());
         }
 
@@ -130,23 +137,40 @@ impl VersionStore {
             format!("{}\n", hex::encode(Sha256::digest(binary))).as_bytes(),
             false,
         )?;
-        atomic_write(&staging.path().join(VM_GUEST_BINARY_NAME), vm_guest, true)?;
         atomic_write(
-            &staging.path().join(VM_GUEST_CHECKSUM_FILE),
-            format!("{}\n", hex::encode(Sha256::digest(vm_guest))).as_bytes(),
+            &staging.path().join(NANOCODEX2_BINARY_NAME),
+            nanocodex2,
+            true,
+        )?;
+        atomic_write(
+            &staging.path().join(NANOCODEX2_CHECKSUM_FILE),
+            format!("{}\n", hex::encode(Sha256::digest(nanocodex2))).as_bytes(),
             false,
         )?;
+        if let Some(vm_guest) = vm_guest {
+            atomic_write(&staging.path().join(VM_GUEST_BINARY_NAME), vm_guest, true)?;
+            atomic_write(
+                &staging.path().join(VM_GUEST_CHECKSUM_FILE),
+                format!("{}\n", hex::encode(Sha256::digest(vm_guest))).as_bytes(),
+                false,
+            )?;
+        }
         fs::rename(staging.path(), &directory)
             .wrap_err_with(|| format!("failed to install {}", directory.display()))?;
         Ok(())
     }
 
-    pub(super) fn is_cached_with_vm_guest(&self, key: &str) -> Result<bool> {
+    pub(super) fn is_cached_nightly(&self, key: &str, requires_vm_guest: bool) -> Result<bool> {
         Ok(self.is_cached(key)?
             && file_matches_checksum(
-                &self.version_dir(key).join(VM_GUEST_BINARY_NAME),
-                &self.version_dir(key).join(VM_GUEST_CHECKSUM_FILE),
-            )?)
+                &self.version_dir(key).join(NANOCODEX2_BINARY_NAME),
+                &self.version_dir(key).join(NANOCODEX2_CHECKSUM_FILE),
+            )?
+            && (!requires_vm_guest
+                || file_matches_checksum(
+                    &self.version_dir(key).join(VM_GUEST_BINARY_NAME),
+                    &self.version_dir(key).join(VM_GUEST_CHECKSUM_FILE),
+                )?))
     }
 
     pub(super) fn activate(&self, key: &str) -> Result<()> {
@@ -158,6 +182,7 @@ impl VersionStore {
         {
             self.activate_symlink(key)?;
             self.install_launcher()?;
+            self.sync_nanocodex2_launcher(key)?;
         }
 
         #[cfg(not(unix))]
@@ -394,6 +419,37 @@ exec "$install_root/current/nanocodex" "$@"
         }
         atomic_write(&path, LAUNCHER.as_bytes(), true)
     }
+
+    #[cfg(unix)]
+    fn sync_nanocodex2_launcher(&self, key: &str) -> Result<()> {
+        const LAUNCHER: &str = r#"#!/bin/sh
+set -eu
+
+case "$0" in
+    */*) launcher=$0 ;;
+    *) launcher=$(command -v "$0") ;;
+esac
+bin_dir=$(CDPATH= cd -- "$(dirname -- "$launcher")" && pwd -P)
+install_root=$(dirname -- "$bin_dir")
+export NANOCODEX_DIR="$install_root"
+exec "$install_root/current/nanocodex2" "$@"
+"#;
+
+        let path = self.root.join("bin").join(NANOCODEX2_BINARY_NAME);
+        if file_matches_checksum(
+            &self.version_dir(key).join(NANOCODEX2_BINARY_NAME),
+            &self.version_dir(key).join(NANOCODEX2_CHECKSUM_FILE),
+        )? {
+            return atomic_write(&path, LAUNCHER.as_bytes(), true);
+        }
+        match fs::read(&path) {
+            Ok(contents) if contents == LAUNCHER.as_bytes() => fs::remove_file(&path)
+                .wrap_err_with(|| format!("failed to remove {}", path.display())),
+            Ok(_) => Ok(()),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error).wrap_err_with(|| format!("failed to read {}", path.display())),
+        }
+    }
 }
 
 fn validate_key(key: &str) -> Result<()> {
@@ -554,16 +610,23 @@ mod tests {
     }
 
     #[test]
-    fn installs_cli_and_vm_guest_as_one_activatable_directory() {
+    fn installs_nightly_binaries_and_vm_guest_as_one_activatable_directory() {
         let directory = tempfile::tempdir().unwrap();
         let store = VersionStore::at(directory.path());
 
         store
-            .install_with_vm_guest("nightly-build", b"cli", b"guest")
+            .install_nightly_bundle("nightly-build", b"cli", b"managed-cli", Some(b"guest"))
             .unwrap();
         store.activate("nightly-build").unwrap();
 
-        assert!(store.is_cached_with_vm_guest("nightly-build").unwrap());
+        assert!(store.is_cached_nightly("nightly-build", true).unwrap());
+        assert_eq!(
+            fs::read(directory.path().join("current/nanocodex2")).unwrap(),
+            b"managed-cli"
+        );
+        let companion_launcher =
+            fs::read_to_string(directory.path().join("bin/nanocodex2")).unwrap();
+        assert!(companion_launcher.contains("current/nanocodex2"));
         assert_eq!(
             fs::read(directory.path().join("current/nanocodex-vm-guest")).unwrap(),
             b"guest"
@@ -572,10 +635,30 @@ mod tests {
         fs::write(
             store
                 .version_dir("nightly-build")
+                .join(NANOCODEX2_BINARY_NAME),
+            b"corrupted",
+        )
+        .unwrap();
+        assert!(!store.is_cached_nightly("nightly-build", true).unwrap());
+        fs::write(
+            store
+                .version_dir("nightly-build")
+                .join(NANOCODEX2_BINARY_NAME),
+            b"managed-cli",
+        )
+        .unwrap();
+
+        fs::write(
+            store
+                .version_dir("nightly-build")
                 .join(VM_GUEST_BINARY_NAME),
             b"corrupted",
         )
         .unwrap();
-        assert!(!store.is_cached_with_vm_guest("nightly-build").unwrap());
+        assert!(!store.is_cached_nightly("nightly-build", true).unwrap());
+
+        store.install("stable", b"stable").unwrap();
+        store.activate("stable").unwrap();
+        assert!(!directory.path().join("bin/nanocodex2").exists());
     }
 }
