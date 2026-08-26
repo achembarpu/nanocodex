@@ -1,5 +1,6 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { CfWorkerJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/cfworker";
 import MiniSearch from "minisearch";
 
 import { toolResult } from "./code-runtime.mjs";
@@ -17,6 +18,8 @@ const RESOURCE_TOOL_NAMES = new Set([
 
 export async function createMcpRuntime(configuration, options = {}) {
   const servers = normalizeServers(configuration);
+  const jsonSchemaValidator = options.jsonSchemaValidator
+    ?? new CfWorkerJsonSchemaValidator();
   const entries = [];
   const failures = Object.create(null);
   const ownedClients = [];
@@ -33,7 +36,7 @@ export async function createMcpRuntime(configuration, options = {}) {
     try {
       const { connection, tools } = await initializeServer(
         server,
-        options,
+        { ...options, jsonSchemaValidator },
         controller.signal,
       );
       if (closed) {
@@ -207,6 +210,8 @@ async function connectServer(server, options, signal) {
   const client = server.client ?? new Client({
     name: options.clientName ?? "nanocodex-js",
     version: options.clientVersion ?? "0.0.0",
+  }, {
+    jsonSchemaValidator: options.jsonSchemaValidator,
   });
   if (server.payment) {
     const { McpClient } = await import("mppx/mcp/client");

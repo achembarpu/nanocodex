@@ -9,7 +9,9 @@ import type {
   AgentEvent,
   AgentSessionContext,
   EventWatcher,
+  NamedTool,
   PromptInput,
+  Tools,
   Turn,
 } from "nanocodex";
 import { Agent as CloudflareAgent } from "nanocodex/cloudflare";
@@ -17,6 +19,7 @@ import { imageGeneration, updatePlan, viewImage, web } from "nanocodex/tools";
 import { justBash } from "nanocodex/tools/bash";
 import { createComputerFilesystem } from "./computer-workspace";
 import { managedCodeEvaluator } from "./code-evaluator";
+import { createDefaultManagedTools } from "./default-mcp";
 import { HostedToolsBroker } from "./hosted-tools-broker";
 import {
   managedCapacitySnapshot,
@@ -3326,8 +3329,61 @@ export class NanocodexSession extends DurableComputerSession {
       toolMode: "code" as const,
       toolProviders: [hostedProvider],
     };
+    const cloudTools: NamedTool[] = [
+      execCommand,
+      ...(multiplayer ? [] : [{
+        name: "phone",
+        description: "Read current phone state or perform a phone operation on the currently attached Android device. This has no cloud fallback; inspect ok and status before claiming success.",
+        supportsParallelToolCalls: false,
+        parameters: {
+          type: "object",
+          properties: {
+            operation: { type: "string", minLength: 1, maxLength: 128 },
+            arguments: { type: "object" },
+          },
+          required: ["operation"],
+          additionalProperties: false,
+        },
+        handler: (input: unknown, context: { callId: string }) => this.#executePhone(input, context),
+      }]),
+      ...(multiplayer ? [] : [{
+        name: "accountInfo",
+        description: "Report account authentication, stablecoin balances, and app authorization boundaries. Never returns credentials.",
+        parameters: { type: "object", additionalProperties: false },
+        handler: currentAccountInfo,
+      }]),
+      web({
+        url: "https://managed-tools.internal/web-search",
+        fetch: managedWebFetch(this.env, this.ctx.id.toString()),
+      }),
+      imageGeneration({
+        url: "https://managed-tools.internal/image-generation",
+        fetch: managedImageFetch(this.env, this.ctx.id.toString()),
+        workspace: shell.filesystem,
+      }),
+      viewImage({ workspace: shell.filesystem }),
+      updatePlan(),
+      {
+        name: "runtimeInfo",
+        description: "Return information about the current durable agent runtime.",
+        parameters: { type: "object", additionalProperties: false },
+        handler: async () => ({
+          runtime: "cloudflare-durable-object",
+          shell: "nanocodex-just-bash",
+          shell_network: multiplayer ? "public-http-only" : "connector-http-gateway",
+          sandbox: "disabled",
+          workspace: "/workspace",
+          custom_commands: ["gh"],
+          account: await currentAccountInfo(),
+        }),
+      },
+    ];
+    let preparedTools: Tools | undefined;
     let agent: CloudflareAgent.Agent;
     try {
+      preparedTools = multiplayer
+        ? undefined
+        : await createDefaultManagedTools(cloudTools);
       const agentOptions: NonNullable<Parameters<typeof CloudflareAgent.create>[1]> = {
         eventPersistence: "caller",
         terminalReceiptRetention: 512,
@@ -3348,62 +3404,26 @@ export class NanocodexSession extends DurableComputerSession {
             "Your /workspace filesystem is durable Cloudflare Computer storage backed by this agent's Durable Object.",
             "Call accountInfo to see the current identities, stablecoin balances, and app authorization boundaries, then use gh or curl normally through transparent authenticated egress. accountInfo is a tool, not a shell command.",
           ].join("\n\n"),
-        tools: [
-          execCommand,
-          ...(multiplayer ? [] : [{
-            name: "phone",
-            description: "Read current phone state or perform a phone operation on the currently attached Android device. This has no cloud fallback; inspect ok and status before claiming success.",
-            supportsParallelToolCalls: false,
-            parameters: {
-              type: "object",
-              properties: {
-                operation: { type: "string", minLength: 1, maxLength: 128 },
-                arguments: { type: "object" },
-              },
-              required: ["operation"],
-              additionalProperties: false,
-            },
-            handler: (input: unknown, context: { callId: string }) => this.#executePhone(input, context),
-          }]),
-          ...(multiplayer ? [] : [{
-            name: "accountInfo",
-            description: "Report account authentication, stablecoin balances, and app authorization boundaries. Never returns credentials.",
-            parameters: { type: "object", additionalProperties: false },
-            handler: currentAccountInfo,
-          }]),
-          web({
-            url: "https://managed-tools.internal/web-search",
-            fetch: managedWebFetch(this.env, this.ctx.id.toString()),
-          }),
-          imageGeneration({
-            url: "https://managed-tools.internal/image-generation",
-            fetch: managedImageFetch(this.env, this.ctx.id.toString()),
-            workspace: shell.filesystem,
-          }),
-          viewImage({ workspace: shell.filesystem }),
-          updatePlan(),
-          {
-            name: "runtimeInfo",
-            description: "Return information about the current durable agent runtime.",
-            parameters: { type: "object", additionalProperties: false },
-            handler: async () => ({
-              runtime: "cloudflare-durable-object",
-              shell: "nanocodex-just-bash",
-              shell_network: multiplayer ? "public-http-only" : "connector-http-gateway",
-              sandbox: "disabled",
-              workspace: "/workspace",
-              custom_commands: ["gh"],
-              account: await currentAccountInfo(),
-            }),
-          },
-        ],
+        tools: preparedTools ?? cloudTools,
       };
       if (hostedRuntime !== undefined) {
         Object.defineProperty(agentOptions, internalRuntime, { value: hostedRuntime });
       }
       agent = await CloudflareAgent.create(this, agentOptions);
     } catch (error) {
+      let cleanupError: unknown;
+      try {
+        await preparedTools?.close();
+      } catch (failure) {
+        cleanupError = failure;
+      }
       disposeWorkspace();
+      if (cleanupError !== undefined) {
+        throw new AggregateError(
+          [error, cleanupError],
+          "managed Agent creation and tool cleanup both failed",
+        );
+      }
       throw error;
     }
     this.#logCapacity("agent_constructed", {
