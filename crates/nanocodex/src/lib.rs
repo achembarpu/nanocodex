@@ -4,8 +4,8 @@
 
 pub use nanocodex_agent::{
     AgentEvents, AgentSessionContext, CostStatus, EstimatedUsdCost, ExecutionPolicyDisposition,
-    Nanocodex, NanocodexBuilder, NanocodexError, PromptRequest, PromptRoute, ServiceTier, Turn,
-    TurnControl, TurnResult, TurnUsage, UsdAmount,
+    Nanocodex, NanocodexBuilder, NanocodexError, PromptRequest, PromptRoute, ReportedTurnUsage,
+    ServiceTier, Turn, TurnControl, TurnResult, TurnUsage, UsdAmount,
 };
 pub use nanocodex_durability::DurableAgentExt;
 pub use nanocodex_oai_api::{Model, OpenAi, ReasoningMode, Thinking};
@@ -26,8 +26,9 @@ pub mod agent {
     pub use nanocodex_agent::{
         AgentEvents, AgentHandle, AgentSessionContext, CostStatus, EstimatedUsdCost,
         ExecutionEnvironment, ExecutionPolicyDisposition, Nanocodex, NanocodexBuilder,
-        NanocodexError, PromptRequest, PromptRoute, Result, ServiceTier, SpawnOptions, Turn,
-        TurnControl, TurnResult, TurnUsage, UsdAmount, events, execution, input, session, usage,
+        NanocodexError, PromptRequest, PromptRoute, ReportedTurnUsage, Result, ServiceTier,
+        SpawnOptions, Turn, TurnControl, TurnResult, TurnUsage, UsdAmount, events, execution,
+        input, session, usage,
     };
 }
 

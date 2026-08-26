@@ -2259,7 +2259,11 @@ impl WasmTurnResult {
     ///
     /// Throws when serialization fails.
     pub fn snapshot(&self) -> Result<String, JsValue> {
-        serde_json::to_string(&self.inner.snapshot()).map_err(js_error)
+        let snapshot = self
+            .inner
+            .snapshot()
+            .ok_or_else(|| js_error("the local agent did not retain a snapshot"))?;
+        serde_json::to_string(&snapshot).map_err(js_error)
     }
 
     /// Serializes exact aggregate usage for this completed logical turn.
@@ -2268,7 +2272,11 @@ impl WasmTurnResult {
     ///
     /// Throws when serialization fails.
     pub fn usage(&self) -> Result<String, JsValue> {
-        serde_json::to_string(self.inner.usage()).map_err(js_error)
+        let usage = self
+            .inner
+            .usage()
+            .ok_or_else(|| js_error("the local agent did not retain turn usage"))?;
+        serde_json::to_string(usage).map_err(js_error)
     }
 }
 

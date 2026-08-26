@@ -1223,7 +1223,7 @@ where
                         persisted.map(|()| TurnResult {
                             request_id: execution_operation.clone(),
                             final_message,
-                            usage,
+                            usage: Some(usage),
                             checkpoint: TurnCheckpoint::Live(checkpoint),
                         }),
                         false,
@@ -1602,7 +1602,7 @@ async fn accept_execution_command(
             drop(result.send(Ok(TurnResult {
                 request_id: Some(operation_id),
                 final_message: output.final_message,
-                usage: output.usage,
+                usage: Some(output.usage),
                 checkpoint: TurnCheckpoint::Replayed(snapshot),
             })));
             None
@@ -1723,7 +1723,7 @@ async fn accept_idle_route(
             drop(turn_result.send(Ok(TurnResult {
                 request_id: Some(operation_id),
                 final_message: output.final_message,
-                usage: output.usage,
+                usage: Some(output.usage),
                 checkpoint: TurnCheckpoint::Replayed(snapshot),
             })));
             None

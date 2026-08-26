@@ -1701,7 +1701,9 @@ async fn durable_terminal_replays_emit_one_terminal_without_model_execution() ->
         .await?
         .result()
         .await?;
-    let snapshot = completed.snapshot();
+    let snapshot = completed
+        .snapshot()
+        .expect("local turns always retain a snapshot");
     assert_eq!(generations.load(std::sync::atomic::Ordering::SeqCst), 1);
     seed.shutdown().await?;
     drop((seed, seed_events));
@@ -2427,7 +2429,8 @@ async fn abandoned_terminal_replay_acceptance_emits_no_terminal_event() -> Resul
         .await?
         .result()
         .await?
-        .snapshot();
+        .snapshot()
+        .expect("local turns always retain a snapshot");
     seed.shutdown().await?;
     drop((seed, seed_events));
 
@@ -2496,7 +2499,8 @@ async fn abandoned_routed_terminal_replay_emits_no_terminal_event() -> Result<()
         .await?
         .result()
         .await?
-        .snapshot();
+        .snapshot()
+        .expect("local turns always retain a snapshot");
     seed.shutdown().await?;
     drop((seed, seed_events));
 

@@ -828,7 +828,11 @@ async fn pre_turn_compaction_keeps_creation_time_agents_md() -> Result<()> {
     );
     assert_eq!(follow_on.input[6]["content"][0]["text"], "second prompt");
 
-    let snapshot = serde_json::to_value(second.snapshot())?;
+    let snapshot = serde_json::to_value(
+        second
+            .snapshot()
+            .expect("local turns always retain a snapshot"),
+    )?;
     let history = snapshot["history"]
         .as_array()
         .expect("snapshot history is an array");

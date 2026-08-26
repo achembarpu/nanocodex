@@ -39,7 +39,9 @@ pub use nanocodex_oai_api::{
 #[cfg_attr(docsrs, doc(cfg(not(target_family = "wasm"))))]
 pub use nanocodex_tools::tool;
 pub use nanocodex_tools::{Tool, Tools};
-pub use usage::{CostStatus, EstimatedUsdCost, ServiceTier, TurnUsage, UsdAmount};
+pub use usage::{
+    CostStatus, EstimatedUsdCost, ReportedTurnUsage, ServiceTier, TurnUsage, UsdAmount,
+};
 
 /// Complete typed lifecycle events emitted by an agent.
 pub mod events {

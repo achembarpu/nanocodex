@@ -201,7 +201,11 @@ async fn serialized_session_and_codex_rollout_share_committed_history() -> Resul
         .path()
         .to_path_buf();
     let first = agent.prompt("first prompt").await?.result().await?;
-    let encoded = serde_json::to_vec(&first.snapshot())?;
+    let encoded = serde_json::to_vec(
+        &first
+            .snapshot()
+            .expect("local turns always retain a snapshot"),
+    )?;
     agent.flush_rollout().await?;
     let durable_config = RolloutConfig::new(&rollout_home);
     let durable = durable_config.load_session("019c0d31-c308-7d91-bff4-5dca82d15ac6")?;
@@ -396,7 +400,11 @@ async fn serialized_session_rebinds_deployed_instructions_and_tools() -> Result<
         .prompt_cache_key("durable-cache")
         .build()?;
     let first = agent.prompt("first prompt").await?.result().await?;
-    let snapshot_json = serde_json::to_value(first.snapshot())?;
+    let snapshot_json = serde_json::to_value(
+        first
+            .snapshot()
+            .expect("local turns always retain a snapshot"),
+    )?;
     assert_eq!(snapshot_json["model"], "gpt-5.6-luna");
     let snapshot = serde_json::from_value(snapshot_json)?;
     drop((agent, events, first));

@@ -350,7 +350,10 @@ async fn run_prompt(
         .result()
         .await
         .wrap_err("agent turn failed")?;
-    persist_snapshot(state_file, &result.snapshot()).await?;
+    let snapshot = result
+        .snapshot()
+        .ok_or_else(|| eyre::eyre!("the local agent did not retain a snapshot"))?;
+    persist_snapshot(state_file, &snapshot).await?;
     Ok(PromptResponse {
         final_message: result.into_final_message(),
     })

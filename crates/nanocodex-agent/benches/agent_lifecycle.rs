@@ -109,7 +109,12 @@ fn benchmark_agent_lifecycle(criterion: &mut Criterion) {
                     .expect("prompt accepted")
                     .await
                     .expect("turn completed");
-                black_box((result.final_message(), result.usage().total_tokens()));
+                black_box((
+                    result.final_message(),
+                    result
+                        .usage()
+                        .map_or(0, nanocodex_agent::TurnUsage::total_tokens),
+                ));
             },
             BatchSize::SmallInput,
         );

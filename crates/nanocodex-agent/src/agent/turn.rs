@@ -164,7 +164,7 @@ pub(super) struct TurnKey(pub(super) u64);
 pub struct TurnResult {
     pub(super) request_id: Option<String>,
     pub(super) final_message: String,
-    pub(super) usage: TurnUsage,
+    pub(super) usage: Option<TurnUsage>,
     pub(super) checkpoint: TurnCheckpoint,
 }
 
@@ -172,6 +172,7 @@ pub struct TurnResult {
 pub(super) enum TurnCheckpoint {
     Live(Arc<CommittedSession>),
     Replayed(SessionSnapshot),
+    Unavailable,
 }
 
 impl TurnResult {
@@ -193,22 +194,40 @@ impl TurnResult {
         self.final_message
     }
 
-    /// Returns exact aggregate token usage for this logical agent turn.
+    /// Returns exact aggregate token usage when reported by the backend.
     #[must_use]
-    pub const fn usage(&self) -> &TurnUsage {
-        &self.usage
+    pub const fn usage(&self) -> Option<&TurnUsage> {
+        self.usage.as_ref()
     }
 
-    /// Copies this completed boundary into a serializable, caller-owned session snapshot.
+    /// Returns a serializable, caller-owned session snapshot when retained by the backend.
     ///
     /// The snapshot contains the complete unredacted model-visible conversation,
     /// including reasoning payloads and tool inputs and outputs. Applications are
     /// responsible for protecting and retaining serialized snapshots appropriately.
     #[must_use]
-    pub fn snapshot(&self) -> SessionSnapshot {
+    pub fn snapshot(&self) -> Option<SessionSnapshot> {
         match &self.checkpoint {
-            TurnCheckpoint::Live(checkpoint) => checkpoint.snapshot(),
-            TurnCheckpoint::Replayed(snapshot) => snapshot.clone(),
+            TurnCheckpoint::Live(checkpoint) => Some(checkpoint.snapshot()),
+            TurnCheckpoint::Replayed(snapshot) => Some(snapshot.clone()),
+            TurnCheckpoint::Unavailable => None,
+        }
+    }
+
+    /// Constructs a completed result for a backend without a transferable
+    /// local session checkpoint.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn from_backend(
+        request_id: Option<String>,
+        final_message: String,
+        usage: Option<TurnUsage>,
+    ) -> Self {
+        Self {
+            request_id,
+            final_message,
+            usage,
+            checkpoint: TurnCheckpoint::Unavailable,
         }
     }
 }
@@ -219,6 +238,20 @@ impl fmt::Debug for TurnResult {
             .debug_struct("TurnResult")
             .field("final_message", &self.final_message)
             .finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TurnResult;
+
+    #[test]
+    fn backend_result_can_omit_usage_and_local_snapshot() {
+        let result = TurnResult::from_backend(None, "done".to_owned(), None);
+
+        assert_eq!(result.final_message(), "done");
+        assert!(result.usage().is_none());
+        assert!(result.snapshot().is_none());
     }
 }
 

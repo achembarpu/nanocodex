@@ -26,6 +26,30 @@ pub struct TurnUsage {
     cost_status: CostStatus,
 }
 
+/// Exact turn usage reported by an external backend.
+///
+/// Every field is named and required so wire adapters cannot silently swap or
+/// default adjacent token counters.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReportedTurnUsage {
+    /// All input tokens billed or reported by the backend.
+    pub input_tokens: u64,
+    /// Input tokens served from the backend's prompt cache.
+    pub cached_input_tokens: u64,
+    /// Input tokens newly written into the backend's prompt cache.
+    pub cache_write_input_tokens: u64,
+    /// All output tokens billed or reported by the backend.
+    pub output_tokens: u64,
+    /// Reasoning tokens included within `output_tokens`.
+    pub reasoning_output_tokens: u64,
+    /// Backend-reported aggregate token count.
+    pub total_tokens: u64,
+    /// Exact retained cost estimate, when one was reported.
+    pub estimated_cost: Option<EstimatedUsdCost>,
+    /// Availability and provenance of `estimated_cost`.
+    pub cost_status: CostStatus,
+}
+
 #[allow(clippy::struct_field_names)]
 #[derive(Clone, Copy)]
 pub(crate) struct TurnUsageCounts {
@@ -39,6 +63,26 @@ pub(crate) struct TurnUsageCounts {
 }
 
 impl TurnUsage {
+    /// Constructs exact usage reported by an external backend.
+    ///
+    /// All counts, the optional retained estimate, and its status are explicit
+    /// so a wire boundary cannot silently default an omitted field. This API
+    /// lets dependency-light backends construct usage without a serialization
+    /// round trip.
+    #[must_use]
+    pub fn from_reported(reported: ReportedTurnUsage) -> Self {
+        Self {
+            input_tokens: reported.input_tokens,
+            cached_input_tokens: reported.cached_input_tokens,
+            cache_write_input_tokens: reported.cache_write_input_tokens,
+            output_tokens: reported.output_tokens,
+            reasoning_output_tokens: reported.reasoning_output_tokens,
+            total_tokens: reported.total_tokens,
+            estimated_cost: reported.estimated_cost.map(Box::new),
+            cost_status: reported.cost_status,
+        }
+    }
+
     pub(crate) fn from_counts(
         counts: TurnUsageCounts,
         model: nanocodex_oai_api::Model,
@@ -132,5 +176,33 @@ impl TurnUsage {
     #[must_use]
     pub const fn cost_status(&self) -> CostStatus {
         self.cost_status
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CostStatus, ReportedTurnUsage, TurnUsage};
+
+    #[test]
+    fn externally_reported_usage_preserves_exact_counts_and_cost_status() {
+        let usage = TurnUsage::from_reported(ReportedTurnUsage {
+            input_tokens: 13,
+            cached_input_tokens: 5,
+            cache_write_input_tokens: 2,
+            output_tokens: 8,
+            reasoning_output_tokens: 3,
+            total_tokens: 21,
+            estimated_cost: None,
+            cost_status: CostStatus::UsageNotReported,
+        });
+
+        assert_eq!(usage.input_tokens(), 13);
+        assert_eq!(usage.cached_input_tokens(), 5);
+        assert_eq!(usage.cache_write_input_tokens(), 2);
+        assert_eq!(usage.output_tokens(), 8);
+        assert_eq!(usage.reasoning_output_tokens(), 3);
+        assert_eq!(usage.total_tokens(), 21);
+        assert_eq!(usage.cost_status(), CostStatus::UsageNotReported);
+        assert!(usage.estimated_cost().is_none());
     }
 }

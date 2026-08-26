@@ -20,7 +20,10 @@ async fn main() -> Result<()> {
         .await?;
 
     // The embedding application chooses the storage and retention policy.
-    let stored = serde_json::to_vec(&completed.snapshot())?;
+    let snapshot = completed
+        .snapshot()
+        .ok_or_else(|| eyre::eyre!("the local agent did not retain a snapshot"))?;
+    let stored = serde_json::to_vec(&snapshot)?;
     drop((agent, completed));
 
     let snapshot: SessionSnapshot = serde_json::from_slice(&stored)?;

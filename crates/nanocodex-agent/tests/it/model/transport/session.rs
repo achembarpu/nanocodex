@@ -32,18 +32,18 @@ async fn a_turn_stream_mirrors_one_turn_and_await_retains_its_result() -> Result
     }
     let result = turn.await?;
     assert_eq!(result.final_message(), "done");
-    assert_eq!(result.usage().input_tokens(), 10);
-    assert_eq!(result.usage().cached_input_tokens(), 5);
-    assert_eq!(result.usage().cache_write_input_tokens(), 0);
-    assert_eq!(result.usage().output_tokens(), 2);
-    assert_eq!(result.usage().reasoning_output_tokens(), 1);
-    assert_eq!(result.usage().total_tokens(), 12);
-    let estimated_cost = result
-        .usage()
+    let usage = result.usage().expect("local turns always report usage");
+    assert_eq!(usage.input_tokens(), 10);
+    assert_eq!(usage.cached_input_tokens(), 5);
+    assert_eq!(usage.cache_write_input_tokens(), 0);
+    assert_eq!(usage.output_tokens(), 2);
+    assert_eq!(usage.reasoning_output_tokens(), 1);
+    assert_eq!(usage.total_tokens(), 12);
+    let estimated_cost = usage
         .estimated_cost()
         .expect("provider usage should produce an estimate");
     assert_eq!(estimated_cost.amount().decimal(), "0.0000875");
-    assert_eq!(result.usage().cost_status(), CostStatus::EstimatedFromUsage);
+    assert_eq!(usage.cost_status(), CostStatus::EstimatedFromUsage);
 
     drop(agent);
     let mut session = Vec::new();

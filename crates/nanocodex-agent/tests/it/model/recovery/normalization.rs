@@ -186,7 +186,11 @@ async fn agent_repairs_unmatched_tool_calls_before_continuing_and_restores_delta
     assert_eq!(healthy.input.len(), 1);
     assert_eq!(healthy.input[0]["role"], "user");
 
-    let snapshot = serde_json::to_value(second.snapshot())?;
+    let snapshot = serde_json::to_value(
+        second
+            .snapshot()
+            .expect("local turns always retain a snapshot"),
+    )?;
     let repaired_outputs = snapshot["history"]
         .as_array()
         .expect("snapshot history is an array")

@@ -303,12 +303,20 @@ async fn queued_prompts_retain_effort_captured_when_accepted() -> Result<()> {
     first.result().await?;
     let queued = queued.result().await?;
     assert_eq!(
-        serde_json::to_value(queued.snapshot())?["model"],
+        serde_json::to_value(
+            queued
+                .snapshot()
+                .expect("local turns always retain a snapshot"),
+        )?["model"],
         "gpt-5.6-luna"
     );
     let updated = agent.prompt("updated prompt").await?.result().await?;
     assert_eq!(
-        serde_json::to_value(updated.snapshot())?["model"],
+        serde_json::to_value(
+            updated
+                .snapshot()
+                .expect("local turns always retain a snapshot"),
+        )?["model"],
         "gpt-5.6-luna"
     );
 

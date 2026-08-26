@@ -440,8 +440,9 @@ async fn completed_response_accepts_null_usage() -> Result<()> {
     assert!(output.contains("\"model.call.completed\""));
     assert!(output.contains("\"usage\":null"));
     assert!(output.contains("\"run.completed\""));
-    assert!(result.usage().estimated_cost().is_none());
-    assert_eq!(result.usage().cost_status(), CostStatus::UsageNotReported);
+    let usage = result.usage().expect("local turns always report usage");
+    assert!(usage.estimated_cost().is_none());
+    assert_eq!(usage.cost_status(), CostStatus::UsageNotReported);
     let terminal: Value = serde_json::from_str(
         output
             .lines()

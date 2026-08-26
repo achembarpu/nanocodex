@@ -305,7 +305,11 @@ async fn legacy_snapshot_reconstructs_agents_md_before_diffing() -> Result<()> {
         .session_id(test_session_id())
         .build()?;
     let first = agent.prompt("first prompt").await?.result().await?;
-    let mut legacy = serde_json::to_value(first.snapshot())?;
+    let mut legacy = serde_json::to_value(
+        first
+            .snapshot()
+            .expect("local turns always retain a snapshot"),
+    )?;
     legacy
         .as_object_mut()
         .ok_or_else(|| eyre!("snapshot is not an object"))?

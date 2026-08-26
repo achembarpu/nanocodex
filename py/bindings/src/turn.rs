@@ -123,12 +123,19 @@ impl TurnResult {
 
     /// Exact aggregate token usage and automatic USD estimate.
     fn usage(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
-        usage_dict(py, self.inner.usage())
+        let usage = self
+            .inner
+            .usage()
+            .ok_or_else(|| PyRuntimeError::new_err("the local agent did not retain turn usage"))?;
+        usage_dict(py, usage)
     }
 
     /// Copy this completed boundary into a caller-owned session snapshot.
-    fn snapshot(&self) -> SessionSnapshot {
-        SessionSnapshot::new(self.inner.snapshot())
+    fn snapshot(&self) -> PyResult<SessionSnapshot> {
+        self.inner
+            .snapshot()
+            .map(SessionSnapshot::new)
+            .ok_or_else(|| PyRuntimeError::new_err("the local agent did not retain a snapshot"))
     }
 
     fn __repr__(&self) -> String {
