@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 
 import { runBoundedProcess } from "./child-process.mjs";
 import { credentialSafeHttpOrigin } from "./credential-origin.mjs";
+import { managedAccountFetch } from "./managed-account-auth.mjs";
 
 const managedRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const baseUrl = credentialSafeHttpOrigin(
@@ -49,6 +50,10 @@ try {
   assert(agentId, "nanocodex2 did not report its created managed agent");
   await assertTurn(first, alpha, "alpha");
 
+  await runDetachedCloudTurn(agentId, apiKey);
+  await assertAbsent(join(alpha, "cloud-after-detach.txt"));
+  await assertAbsent(join(beta, "cloud-after-detach.txt"));
+
   const second = await run(binary, [
     "run",
     prompt("beta"),
@@ -63,9 +68,9 @@ try {
 
   console.log(JSON.stringify({
     status: "ok",
-    turns: 2,
+    turns: 3,
     workspaces: ["alpha", "beta"],
-    routing: "attached-local",
+    routing: ["attached-local", "detached-cloud", "attached-local"],
   }));
 } catch (error) {
   failure = error;
@@ -103,6 +108,76 @@ async function assertTurn(output, workspace, label) {
   );
   const proof = await readFile(join(workspace, "attachment-proof.txt"), "utf8");
   assert(proof === `${label}-attached\n`, `${label} tool call did not write to the local workspace`);
+}
+
+async function runDetachedCloudTurn(id, key) {
+  const turnId = `nanocodex2-detached-${randomUUID()}`;
+  const turnUrl = new URL(`/v1/agents/${id}/turns/${turnId}`, baseUrl);
+  const accepted = await managedAccountFetch(key, new URL(`/v1/agents/${id}/turns`, baseUrl), {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "idempotency-key": turnId,
+    },
+    body: JSON.stringify({
+      id: turnId,
+      input: [
+        "Use exec_command exactly once.",
+        "Run: test ! -e workspace-origin.txt && printf 'cloud-detached\\n' > cloud-after-detach.txt && cat cloud-after-detach.txt",
+        "Reply with exactly the output line and nothing else.",
+      ].join(" "),
+    }),
+  });
+  assert(accepted.status === 202, `detached cloud turn returned HTTP ${accepted.status}`);
+  await accepted.body?.cancel();
+
+  const deadline = performance.now() + timeoutMs;
+  let completed = false;
+  while (performance.now() < deadline) {
+    const response = await managedAccountFetch(key, turnUrl);
+    assert(response.ok, `detached cloud turn read returned HTTP ${response.status}`);
+    const turn = await response.json();
+    if (turn.state === "completed") {
+      assert(
+        turn.terminal?.final_message?.includes("cloud-detached"),
+        "detached cloud turn returned the wrong final message",
+      );
+      completed = true;
+      break;
+    }
+    if (["failed", "blocked", "cancelled"].includes(turn.state)) {
+      throw new Error(`detached cloud turn ended as ${turn.state}: ${turn.error ?? "unknown error"}`);
+    }
+    await new Promise((resolve_) => setTimeout(resolve_, 25));
+  }
+  assert(completed, "detached cloud turn did not complete");
+
+  const historyResponse = await managedAccountFetch(
+    key,
+    new URL(`/v1/agents/${id}/events/history?limit=256`, baseUrl),
+  );
+  assert(historyResponse.ok, `detached cloud history returned HTTP ${historyResponse.status}`);
+  const history = await historyResponse.json();
+  const call = history.data?.find((message) =>
+    message.turn_id === turnId
+      && message.event?.type === "tool.call"
+      && message.event.payload?.tool === "exec_command");
+  assert(call, "detached cloud turn did not call exec_command");
+  const result = history.data?.find((message) =>
+    message.turn_id === turnId
+      && message.event?.type === "tool.result"
+      && message.event.payload?.call_id === call.event.payload.call_id);
+  assert(result?.event.payload?.status === "completed", "detached cloud exec_command did not complete");
+}
+
+async function assertAbsent(path) {
+  try {
+    await access(path);
+  } catch (error) {
+    if (error?.code === "ENOENT") return;
+    throw error;
+  }
+  throw new Error(`${path} unexpectedly exists`);
 }
 
 async function createLocalApiKey() {
