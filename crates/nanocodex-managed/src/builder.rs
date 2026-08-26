@@ -6,7 +6,6 @@ use std::{
 
 use nanocodex_agent::{
     AgentEvents, BuilderBackend, Nanocodex, NanocodexError, backend::BackendRuntime,
-    session::SessionId,
 };
 use tower::{Layer, Service, ServiceExt};
 
@@ -339,11 +338,8 @@ impl<S> ManagedBuilder<S> {
             None => None,
         };
 
-        let session_id = state
-            .session_id
-            .parse::<SessionId>()
-            .map_err(backend_error)?;
-        let (runtime, events) = BackendRuntime::new(session_id);
+        let (runtime, events) =
+            BackendRuntime::with_agent_id(agent_id.clone(), state.session_id.clone());
         let (backend, commands, shutdown) = ManagedAgent::new();
         let driver = ManagedDriver::new(
             self.managed.service,
