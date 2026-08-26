@@ -4,23 +4,13 @@ use chrono::{Local, Utc};
 use nanocodex_oai_api::responses::{ContentItem, MessageRole, ResponseItem};
 
 use crate::agent::ExecutionEnvironment;
+pub(crate) use crate::session::{
+    AgentsMdSnapshot, ContextBaseline, ContextSnapshot, EnvironmentSnapshot,
+};
 
 const REPLACEMENT_NOTICE: &str =
     "These AGENTS.md instructions replace all previously provided AGENTS.md instructions.";
 const REMOVAL_NOTICE: &str = "The previously provided AGENTS.md instructions no longer apply.";
-
-#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
-pub(crate) struct ContextSnapshot {
-    agents_md: Option<AgentsMdSnapshot>,
-    environment: Option<EnvironmentSnapshot>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
-#[serde(tag = "kind", content = "snapshot", rename_all = "snake_case")]
-pub(crate) enum ContextBaseline {
-    Missing,
-    Known(ContextSnapshot),
-}
 
 impl ContextBaseline {
     pub(crate) fn reconstruct(history: &[ResponseItem]) -> Self {
@@ -31,20 +21,6 @@ impl ContextBaseline {
             Self::Known(reconstructed)
         }
     }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
-struct AgentsMdSnapshot {
-    directory: String,
-    text: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
-struct EnvironmentSnapshot {
-    cwd: String,
-    shell: String,
-    current_date: String,
-    timezone: String,
 }
 
 #[derive(Clone)]

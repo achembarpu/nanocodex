@@ -1,27 +1,57 @@
-use std::{fmt, sync::Arc};
+use std::fmt;
+#[cfg(feature = "openai")]
+use std::sync::Arc;
 
-use nanocodex_oai_api::{
-    Model,
-    responses::{MessageRole, ResponseItem},
-};
+use nanocodex_oai_api::responses::ResponseItem;
+#[cfg(feature = "openai")]
+use nanocodex_oai_api::{Model, responses::MessageRole};
 
+#[cfg(feature = "openai")]
 pub use nanocodex_oai_api::session::SessionId;
 
-use crate::{
-    NanocodexError, Result,
-    model::{context::ContextBaseline, run::ModelCheckpoint},
-};
+#[cfg(feature = "openai")]
+use crate::{NanocodexError, Result, model::run::ModelCheckpoint};
 
+#[cfg(feature = "openai")]
 const SESSION_SNAPSHOT_VERSION: u32 = 1;
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct ContextSnapshot {
+    pub(crate) agents_md: Option<AgentsMdSnapshot>,
+    pub(crate) environment: Option<EnvironmentSnapshot>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(tag = "kind", content = "snapshot", rename_all = "snake_case")]
+pub(crate) enum ContextBaseline {
+    Missing,
+    Known(ContextSnapshot),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct AgentsMdSnapshot {
+    pub(crate) directory: String,
+    pub(crate) text: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub(crate) struct EnvironmentSnapshot {
+    pub(crate) cwd: String,
+    pub(crate) shell: String,
+    pub(crate) current_date: String,
+    pub(crate) timezone: String,
+}
 
 /// One immutable model boundary shared by forks, durable snapshots, and rollout projection.
 #[derive(Clone)]
+#[cfg(feature = "openai")]
 pub(crate) struct CommittedSession {
     lineage_id: Arc<str>,
     selected_model: Model,
     model: ModelCheckpoint,
 }
 
+#[cfg(feature = "openai")]
 impl CommittedSession {
     pub(crate) const fn new(
         lineage_id: Arc<str>,
@@ -43,7 +73,7 @@ impl CommittedSession {
         &self.model
     }
 
-    #[cfg(not(target_family = "wasm"))]
+    #[cfg(all(feature = "openai", not(target_family = "wasm")))]
     pub(crate) const fn selected_model(&self) -> Model {
         self.selected_model
     }
@@ -58,7 +88,7 @@ impl CommittedSession {
         self.model.history_revision()
     }
 
-    #[cfg(not(target_family = "wasm"))]
+    #[cfg(all(feature = "openai", not(target_family = "wasm")))]
     pub(crate) const fn context_baseline(&self) -> &ContextBaseline {
         self.model.context_baseline()
     }
@@ -118,7 +148,7 @@ impl fmt::Debug for SessionSnapshot {
 }
 
 impl SessionSnapshot {
-    #[cfg(not(target_family = "wasm"))]
+    #[cfg(all(feature = "openai", not(target_family = "wasm")))]
     pub(crate) fn from_rollout(
         model: Model,
         thread_id: String,
@@ -162,6 +192,7 @@ impl SessionSnapshot {
         &self.workspace
     }
 
+    #[cfg(feature = "openai")]
     pub(crate) fn into_resume(self) -> Result<SessionResume> {
         if self.version != SESSION_SNAPSHOT_VERSION {
             return Err(NanocodexError::InvalidSessionSnapshot(format!(
@@ -237,6 +268,7 @@ impl SessionSnapshot {
     }
 }
 
+#[cfg(feature = "openai")]
 pub(crate) struct SessionResume {
     pub(crate) model: Model,
     pub(crate) lineage_id: Arc<str>,

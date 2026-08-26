@@ -145,6 +145,7 @@ fn steer_validation_error(error: PromptValidationError) -> NanocodexError {
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
+#[cfg(feature = "openai")]
 pub(super) struct TurnKey(pub(super) u64);
 
 /// Final result of a completed turn.
@@ -154,10 +155,12 @@ pub struct TurnResult {
     pub(super) request_id: Option<String>,
     pub(super) final_message: String,
     pub(super) usage: Option<TurnUsage>,
+    #[cfg(feature = "openai")]
     pub(super) checkpoint: TurnCheckpoint,
 }
 
 #[derive(Clone)]
+#[cfg(feature = "openai")]
 pub(super) enum TurnCheckpoint {
     Live(Arc<CommittedSession>),
     Replayed(SessionSnapshot),
@@ -195,12 +198,16 @@ impl TurnResult {
     /// including reasoning payloads and tool inputs and outputs. Applications are
     /// responsible for protecting and retaining serialized snapshots appropriately.
     #[must_use]
+    #[allow(clippy::missing_const_for_fn)]
     pub fn snapshot(&self) -> Option<SessionSnapshot> {
+        #[cfg(feature = "openai")]
         match &self.checkpoint {
             TurnCheckpoint::Live(checkpoint) => Some(checkpoint.snapshot()),
             TurnCheckpoint::Replayed(snapshot) => Some(snapshot.clone()),
             TurnCheckpoint::Unavailable => None,
         }
+        #[cfg(not(feature = "openai"))]
+        None
     }
 
     /// Constructs a completed result for a backend without a transferable
@@ -216,6 +223,7 @@ impl TurnResult {
             request_id,
             final_message,
             usage,
+            #[cfg(feature = "openai")]
             checkpoint: TurnCheckpoint::Unavailable,
         }
     }
@@ -332,8 +340,22 @@ impl SpawnOptions {
         self.thinking = Some(thinking);
         self
     }
+    /// Returns the requested model override, when supplied.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn selected_model(&self) -> Option<Model> {
+        self.model
+    }
+
+    /// Returns the requested reasoning-effort override, when supplied.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn selected_thinking(&self) -> Option<Thinking> {
+        self.thinking
+    }
 }
 
+#[cfg(feature = "openai")]
 pub(super) enum Command {
     Prompt {
         key: TurnKey,
@@ -393,12 +415,14 @@ pub(super) enum Command {
     Shutdown,
 }
 
+#[cfg(feature = "openai")]
 pub(super) enum ExecutionOperation {
     Caller(String),
     Automatic(String),
     Admitted(String),
 }
 
+#[cfg(feature = "openai")]
 impl ExecutionOperation {
     pub(super) fn into_id(self) -> String {
         match self {
@@ -410,11 +434,13 @@ impl ExecutionOperation {
 }
 
 #[derive(Clone, Copy)]
+#[cfg(feature = "openai")]
 pub(super) enum PromptRouteKind {
     Started,
     Steered,
 }
 
+#[cfg(feature = "openai")]
 pub(super) enum QueuedTurn {
     Pending {
         key: TurnKey,

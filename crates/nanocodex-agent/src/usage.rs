@@ -1,4 +1,5 @@
 pub use nanocodex_oai_api::pricing::{CostStatus, EstimatedUsdCost, ServiceTier, UsdAmount};
+#[cfg(feature = "openai")]
 use nanocodex_oai_api::{
     pricing,
     responses::{InputTokenDetails, Usage},
@@ -52,6 +53,7 @@ pub struct ReportedTurnUsage {
 
 #[allow(clippy::struct_field_names)]
 #[derive(Clone, Copy)]
+#[cfg(feature = "openai")]
 pub(crate) struct TurnUsageCounts {
     pub(crate) input_tokens: u64,
     pub(crate) cached_input_tokens: u64,
@@ -83,6 +85,7 @@ impl TurnUsage {
         }
     }
 
+    #[cfg(feature = "openai")]
     pub(crate) fn from_counts(
         counts: TurnUsageCounts,
         model: nanocodex_oai_api::Model,

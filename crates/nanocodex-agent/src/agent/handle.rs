@@ -3,7 +3,7 @@ use super::backend::{
 };
 use super::*;
 
-#[cfg(not(target_family = "wasm"))]
+#[cfg(all(feature = "openai", not(target_family = "wasm")))]
 use crate::rollout::RolloutInfo;
 
 /// Cheap, cloneable command handle for an owned agent driver.
@@ -11,8 +11,11 @@ pub struct Nanocodex {
     pub(super) backend: Arc<dyn LifecycleBackend>,
     pub(super) events: nanocodex_oai_api::events::AgentEventPublisher,
     pub(super) next_turn: Arc<AtomicU64>,
-    pub(super) session_id: SessionId,
-    #[cfg(not(target_family = "wasm"))]
+    pub(super) agent_id: Arc<str>,
+    pub(super) session_id: Arc<str>,
+    #[cfg(feature = "openai")]
+    pub(super) local_session_id: Option<SessionId>,
+    #[cfg(all(feature = "openai", not(target_family = "wasm")))]
     pub(super) rollout: Option<RolloutInfo>,
 }
 
@@ -22,8 +25,11 @@ impl Clone for Nanocodex {
             backend: Arc::clone(&self.backend),
             events: self.events.clone(),
             next_turn: Arc::clone(&self.next_turn),
-            session_id: self.session_id,
-            #[cfg(not(target_family = "wasm"))]
+            agent_id: Arc::clone(&self.agent_id),
+            session_id: Arc::clone(&self.session_id),
+            #[cfg(feature = "openai")]
+            local_session_id: self.local_session_id,
+            #[cfg(all(feature = "openai", not(target_family = "wasm")))]
             rollout: self.rollout.clone(),
         }
     }
@@ -34,11 +40,13 @@ impl Clone for Nanocodex {
 /// A tools factory receives a fresh handle for every agent driver. Holding the
 /// handle does not keep its agent alive.
 #[derive(Clone)]
+#[cfg(feature = "openai")]
 pub struct AgentHandle {
     pub(super) commands: mpsc::WeakSender<Command>,
     pub(super) shutdown: DriverShutdown,
 }
 
+#[cfg(feature = "openai")]
 impl AgentHandle {
     /// Starts a clean agent with the containing driver's private configuration,
     /// service factory, workspace policy, and per-agent tools factory.
@@ -83,7 +91,7 @@ impl AgentHandle {
 }
 
 impl Nanocodex {
-    /// Starts configuring an agent from a reusable [`OpenAi`] client recipe.
+    /// Starts configuring an agent from a concrete backend input.
     #[must_use]
     pub fn builder<B>(backend: B) -> B::Builder
     where
@@ -92,15 +100,29 @@ impl Nanocodex {
         backend.into_builder()
     }
 
+    /// Returns the stable agent identity used to reopen durable backends.
+    #[must_use]
+    pub fn agent_id(&self) -> &str {
+        &self.agent_id
+    }
+
     /// Returns the stable identity used by events, transport metadata, and any rollout.
     #[must_use]
-    pub const fn session_id(&self) -> SessionId {
-        self.session_id
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    /// Returns the typed local OpenAI identity when this handle owns that backend.
+    #[cfg(feature = "openai")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "openai")))]
+    #[must_use]
+    pub const fn local_session_id(&self) -> Option<SessionId> {
+        self.local_session_id
     }
 
     /// Returns the Codex-compatible rollout identity and path when recording is enabled.
-    #[cfg(not(target_family = "wasm"))]
-    #[cfg_attr(docsrs, doc(cfg(not(target_family = "wasm"))))]
+    #[cfg(all(feature = "openai", not(target_family = "wasm")))]
+    #[cfg_attr(docsrs, doc(cfg(all(feature = "openai", not(target_family = "wasm")))))]
     #[must_use]
     pub const fn rollout(&self) -> Option<&RolloutInfo> {
         self.rollout.as_ref()
@@ -116,8 +138,8 @@ impl Nanocodex {
     /// # Errors
     ///
     /// Returns an error when the configured rollout cannot be written.
-    #[cfg(not(target_family = "wasm"))]
-    #[cfg_attr(docsrs, doc(cfg(not(target_family = "wasm"))))]
+    #[cfg(all(feature = "openai", not(target_family = "wasm")))]
+    #[cfg_attr(docsrs, doc(cfg(all(feature = "openai", not(target_family = "wasm")))))]
     pub async fn flush_rollout(&self) -> Result<()> {
         self.backend.flush().await
     }
@@ -382,6 +404,7 @@ impl Nanocodex {
     }
 }
 
+#[cfg(feature = "openai")]
 pub(super) async fn request_fork(
     commands: &mpsc::Sender<Command>,
     shutdown: &DriverShutdown,
@@ -394,6 +417,7 @@ pub(super) async fn request_fork(
     .await
 }
 
+#[cfg(feature = "openai")]
 pub(super) async fn request_spawn(
     commands: &mpsc::Sender<Command>,
     shutdown: &DriverShutdown,
@@ -406,6 +430,7 @@ pub(super) async fn request_spawn(
     .await
 }
 
+#[cfg(feature = "openai")]
 pub(super) async fn request_command<T>(
     commands: &mpsc::Sender<Command>,
     shutdown: &DriverShutdown,

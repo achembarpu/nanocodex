@@ -1,3 +1,4 @@
+#[cfg(feature = "openai")]
 use super::handle::{request_fork, request_spawn};
 use super::*;
 
@@ -109,17 +110,48 @@ pub trait LifecycleBackend: Send + Sync + 'static {
 /// Backend-neutral construction context for the common agent handle.
 #[doc(hidden)]
 pub struct BackendRuntime {
-    session_id: SessionId,
+    agent_id: Arc<str>,
+    session_id: Arc<str>,
+    #[cfg(feature = "openai")]
+    local_session_id: Option<SessionId>,
     events: nanocodex_oai_api::events::AgentEventPublisher,
 }
 
 impl BackendRuntime {
     /// Creates one session event channel before the concrete driver starts.
     #[must_use]
-    pub fn new(session_id: SessionId) -> (Self, AgentEvents) {
+    pub fn new(session_id: impl Into<Arc<str>>) -> (Self, AgentEvents) {
+        let session_id = session_id.into();
+        Self::with_agent_id(Arc::clone(&session_id), session_id)
+    }
+
+    /// Creates one session event channel with a distinct durable agent identity.
+    #[must_use]
+    pub fn with_agent_id(
+        agent_id: impl Into<Arc<str>>,
+        session_id: impl Into<Arc<str>>,
+    ) -> (Self, AgentEvents) {
+        let agent_id = agent_id.into();
+        let session_id = session_id.into();
         let (events, stream) =
             nanocodex_oai_api::events::AgentEventPublisher::channel(session_id.to_string());
-        (Self { session_id, events }, stream)
+        (
+            Self {
+                agent_id,
+                session_id,
+                #[cfg(feature = "openai")]
+                local_session_id: None,
+                events,
+            },
+            stream,
+        )
+    }
+
+    #[cfg(feature = "openai")]
+    pub(super) fn new_openai(session_id: SessionId) -> (Self, AgentEvents) {
+        let (mut runtime, events) = Self::new(session_id.to_string());
+        runtime.local_session_id = Some(session_id);
+        (runtime, events)
     }
 
     /// Returns the canonical event publisher consumed by the concrete driver.
@@ -138,13 +170,16 @@ impl BackendRuntime {
             backend: Arc::new(backend),
             events: self.events,
             next_turn: Arc::new(AtomicU64::new(1)),
+            agent_id: self.agent_id,
             session_id: self.session_id,
-            #[cfg(not(target_family = "wasm"))]
+            #[cfg(feature = "openai")]
+            local_session_id: self.local_session_id,
+            #[cfg(all(feature = "openai", not(target_family = "wasm")))]
             rollout: None,
         }
     }
 
-    #[cfg(not(target_family = "wasm"))]
+    #[cfg(all(feature = "openai", not(target_family = "wasm")))]
     pub(super) fn bind_with_rollout<B>(
         self,
         backend: B,
@@ -157,12 +192,14 @@ impl BackendRuntime {
             backend: Arc::new(backend),
             events: self.events,
             next_turn: Arc::new(AtomicU64::new(1)),
+            agent_id: self.agent_id,
             session_id: self.session_id,
+            local_session_id: self.local_session_id,
             rollout,
         }
     }
 
-    #[cfg(target_family = "wasm")]
+    #[cfg(all(feature = "openai", target_family = "wasm"))]
     pub(super) fn bind_with_rollout<B>(self, backend: B, _rollout: Option<()>) -> Nanocodex
     where
         B: LifecycleBackend,
@@ -171,6 +208,7 @@ impl BackendRuntime {
     }
 }
 
+#[cfg(feature = "openai")]
 pub(super) struct LocalLifecycle {
     pub(super) commands: mpsc::Sender<Command>,
     pub(super) execution: Execution,
@@ -178,6 +216,7 @@ pub(super) struct LocalLifecycle {
     pub(super) lineage_id: Arc<str>,
 }
 
+#[cfg(feature = "openai")]
 impl LifecycleBackend for LocalLifecycle {
     fn submit(&self, request: BackendPrompt) -> BackendFuture<Result<BackendTurn>> {
         let commands = self.commands.clone();
