@@ -47,10 +47,10 @@ checkpoint without replaying the complete retained context.
 
 ## Usage and USD estimates
 
-Every completed turn reports aggregate provider usage. Cost remains explicit:
-Nanocodex automatically applies the selected model's published standard or
-priority rates. Terra and Luna use their documented rates rather than Sol's
-higher rates.
+When the provider reports aggregate usage for a completed turn, cost remains
+explicit: Nanocodex automatically applies the selected model's published
+standard or priority rates. Terra and Luna use their documented rates rather
+than Sol's higher rates.
 
 ```rust,no_run
 use nanocodex::{Nanocodex, OpenAi};
@@ -62,10 +62,12 @@ let (agent, _events) = Nanocodex::builder(openai)
     .build()?;
 
 let result = agent.prompt("Explain the identifier req_7f3.").await?.await?;
-if let Some(cost) = result.usage().estimated_cost() {
-    println!("estimated {}", cost.amount());
-} else {
-    println!("cost unavailable: {}", result.usage().cost_status().as_str());
+if let Some(usage) = result.usage() {
+    if let Some(cost) = usage.estimated_cost() {
+        println!("estimated {}", cost.amount());
+    } else {
+        println!("cost unavailable: {}", usage.cost_status().as_str());
+    }
 }
 agent.shutdown().await?;
 # Ok(())
