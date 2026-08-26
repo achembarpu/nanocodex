@@ -181,7 +181,7 @@ where
     let rollout = None;
     let agent = runtime.bind_with_rollout(
         LocalLifecycle {
-            commands: commands.clone(),
+            commands,
             execution: execution.clone(),
             shutdown: shutdown.clone(),
             lineage_id: Arc::clone(&spawner.lineage_id),

@@ -1202,7 +1202,7 @@ impl WasmNanocodex {
         let report = start_agent_with(
             &parent,
             &subagents.registry,
-            &self.inner.session_id().to_string(),
+            self.inner.session_id(),
             AgentTask {
                 role: task.role,
                 task: task.task,
@@ -1234,11 +1234,7 @@ impl WasmNanocodex {
         let duration = Duration::from_millis(timeout_ms.min(300_000));
         let (agents, timed_out) = subagents
             .registry
-            .wait(
-                &self.inner.session_id().to_string(),
-                &task.agent_ids,
-                duration,
-            )
+            .wait(self.inner.session_id(), &task.agent_ids, duration)
             .await
             .map_err(js_error)?;
         serde_json::to_string(&WasmSubagentWaitReport { agents, timed_out }).map_err(js_error)
@@ -1257,7 +1253,7 @@ impl WasmNanocodex {
         let agents = subagents
             .registry
             .directory(
-                &self.inner.session_id().to_string(),
+                self.inner.session_id(),
                 task.include_completed,
                 task.include_self,
             )
@@ -1278,7 +1274,7 @@ impl WasmNanocodex {
         let receipt = subagents
             .registry
             .send_message(
-                &self.inner.session_id().to_string(),
+                self.inner.session_id(),
                 task.agent_id,
                 task.priority,
                 task.purpose,
@@ -1302,7 +1298,7 @@ impl WasmNanocodex {
         subagents.parent(self.inner.session_id())?;
         let agents = subagents
             .registry
-            .interrupt(&self.inner.session_id().to_string(), task.agent_id)
+            .interrupt(self.inner.session_id(), task.agent_id)
             .await
             .map_err(js_error)?;
         serde_json::to_string(&WasmSubagentLifecycleReport { agents }).map_err(js_error)
@@ -1320,7 +1316,7 @@ impl WasmNanocodex {
         subagents.parent(self.inner.session_id())?;
         let agents = subagents
             .registry
-            .close(&self.inner.session_id().to_string(), task.agent_id)
+            .close(self.inner.session_id(), task.agent_id)
             .await
             .map_err(js_error)?;
         serde_json::to_string(&WasmSubagentLifecycleReport { agents }).map_err(js_error)
@@ -1547,7 +1543,7 @@ impl WasmNanocodex {
     pub async fn shutdown(&self) -> Result<(), JsValue> {
         if let Some(subagents) = &self.subagents {
             subagents
-                .close_all(&self.inner.session_id().to_string())
+                .close_all(self.inner.session_id())
                 .await
                 .map_err(js_error)?;
         }
@@ -1617,8 +1613,7 @@ impl WasmBrowserVoice {
             .append_developer_message(REALTIME_START_INSTRUCTIONS)
             .await
             .map_err(js_error)?;
-        let tree =
-            browser_workspace_tree(context.workspace(), &self.agent.session_id().to_string()).await;
+        let tree = browser_workspace_tree(context.workspace(), self.agent.session_id()).await;
         let history = browser_voice_history(context.history());
         self.startup_context.replace(build_browser_startup_context(
             &history,
