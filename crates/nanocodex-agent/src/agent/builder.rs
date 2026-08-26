@@ -16,6 +16,27 @@ pub struct NanocodexBuilder<F = StandardServiceFactory> {
     pub(super) factory: F,
 }
 
+impl<F> BuilderBackend for OpenAi<F>
+where
+    F: ResponsesServiceFactory,
+{
+    type Builder = NanocodexBuilder<F>;
+
+    fn into_builder(self) -> Self::Builder {
+        let (config, factory) = into_openai_parts(self);
+        NanocodexBuilder {
+            config,
+            tools: ToolsConfiguration::Shared(Tools::default()),
+            workspace: None,
+            session_id: None,
+            prompt_cache: PromptCacheConfig::default(),
+            codex: CodexCompatibility::default(),
+            resume: None,
+            factory,
+        }
+    }
+}
+
 #[derive(Clone, Default)]
 pub(super) struct PromptCacheConfig {
     pub(super) key: Option<String>,

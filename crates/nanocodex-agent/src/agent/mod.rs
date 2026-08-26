@@ -81,6 +81,7 @@ impl ToolsConfiguration {
     }
 }
 
+pub mod backend;
 mod builder;
 mod context_source;
 mod driver;
@@ -91,6 +92,7 @@ mod session_context;
 mod spawn;
 mod turn;
 
+pub use backend::BuilderBackend;
 pub use builder::NanocodexBuilder;
 pub use context_source::ExecutionEnvironment;
 pub use handle::{AgentHandle, Nanocodex};
@@ -98,6 +100,7 @@ pub use session_context::AgentSessionContext;
 use turn::TurnCheckpoint;
 pub use turn::{PromptRequest, PromptRoute, SpawnOptions, Turn, TurnControl, TurnResult};
 
+use backend::{BackendRuntime, LocalLifecycle};
 use builder::{CodexCompatibility, PromptCacheConfig};
 pub(crate) use context_source::ContextSource;
 use context_source::ContextSourceConfig;

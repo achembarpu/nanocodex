@@ -1,3 +1,4 @@
+use super::backend::{BackendFuture, BackendTurnKey, LifecycleBackend};
 use super::*;
 use nanocodex_oai_api::PromptValidationError;
 
@@ -14,7 +15,7 @@ pub struct Turn {
     pub(super) control: TurnControl,
     pub(super) request_id: Option<String>,
     pub(super) events: AgentEvents,
-    pub(super) result: oneshot::Receiver<Result<TurnResult>>,
+    pub(super) result: BackendFuture<Result<TurnResult>>,
 }
 
 /// Outcome of routing live user input into an agent session.
@@ -100,18 +101,15 @@ impl Future for Turn {
     type Output = Result<TurnResult>;
 
     fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
-        Pin::new(&mut self.result)
-            .poll(context)
-            .map(|result| result.map_err(|_| NanocodexError::TurnStopped)?)
+        self.result.as_mut().poll(context)
     }
 }
 
 /// Cheap cloneable control capability for one accepted turn.
 #[derive(Clone)]
 pub struct TurnControl {
-    pub(super) key: TurnKey,
-    pub(super) commands: mpsc::Sender<Command>,
-    pub(super) shutdown: DriverShutdown,
+    pub(super) key: BackendTurnKey,
+    pub(super) backend: Arc<dyn LifecycleBackend>,
 }
 
 impl TurnControl {
@@ -124,12 +122,7 @@ impl TurnControl {
     pub async fn steer(&self, prompt: impl Into<Prompt>) -> Result<()> {
         let prompt = prompt.into();
         prompt.validate().map_err(steer_validation_error)?;
-        request_command(&self.commands, &self.shutdown, |result| Command::Steer {
-            key: self.key,
-            prompt,
-            result,
-        })
-        .await
+        self.backend.steer(self.key, prompt).await
     }
 
     /// Cancels the targeted unfinished turn.
@@ -139,11 +132,7 @@ impl TurnControl {
     /// Returns an error when the turn has already finished or if the driver
     /// stops.
     pub async fn cancel(&self) -> Result<()> {
-        request_command(&self.commands, &self.shutdown, |result| Command::Cancel {
-            key: self.key,
-            result,
-        })
-        .await
+        self.backend.cancel(self.key).await
     }
 }
 

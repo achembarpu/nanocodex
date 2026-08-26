@@ -27,9 +27,15 @@ pub mod session;
 /// Per-turn token accounting and USD estimates.
 pub mod usage;
 
+/// Backend implementor surface used by first-party lifecycle crates.
+#[doc(hidden)]
+pub mod backend {
+    pub use crate::agent::backend::*;
+}
+
 pub use agent::{
-    AgentHandle, AgentSessionContext, ExecutionEnvironment, Nanocodex, NanocodexBuilder,
-    PromptRequest, PromptRoute, SpawnOptions, Turn, TurnControl, TurnResult,
+    AgentHandle, AgentSessionContext, BuilderBackend, ExecutionEnvironment, Nanocodex,
+    NanocodexBuilder, PromptRequest, PromptRoute, SpawnOptions, Turn, TurnControl, TurnResult,
 };
 pub use error::{ExecutionPolicyDisposition, NanocodexError, Result};
 pub use nanocodex_oai_api::{

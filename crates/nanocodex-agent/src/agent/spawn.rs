@@ -152,8 +152,9 @@ where
         origin.parent_session_id.as_deref(),
         initial_resume.as_ref().map(InitialResume::history_len),
     )?;
+    let (runtime, event_stream) = BackendRuntime::new(session_id);
+    let events = EventSink::from_publisher(runtime.events());
     shutdown.set_execution_policy_owned(execution.identifies_prompts());
-    let (events, event_stream) = EventSink::channel(session_id_text.clone());
     let initial_model = initial_resume
         .map(|initial| match initial {
             InitialResume::Exact(checkpoint) => prepare_resumed_checkpoint(
@@ -173,15 +174,19 @@ where
         })
         .transpose()?;
     let transport_stats = Arc::new(TransportStats::default());
-    let agent = Nanocodex {
-        commands,
-        events: events.clone(),
-        next_turn: Arc::new(AtomicU64::new(1)),
-        lineage_id: Arc::clone(&spawner.lineage_id),
-        session_id,
-        execution: execution.clone(),
-        shutdown: shutdown.clone(),
-    };
+    #[cfg(not(target_family = "wasm"))]
+    let rollout = execution.info().cloned();
+    #[cfg(target_family = "wasm")]
+    let rollout = None;
+    let agent = runtime.bind_with_rollout(
+        LocalLifecycle {
+            commands: commands.clone(),
+            execution: execution.clone(),
+            shutdown: shutdown.clone(),
+            lineage_id: Arc::clone(&spawner.lineage_id),
+        },
+        rollout,
+    );
     // Start discovery before returning the handle so an idle CLI or TUI immediately
     // contributes its human think time to provider prewarming.
     tools.start_providers();
