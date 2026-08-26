@@ -15,6 +15,7 @@ import {
   AccountConnectionSection,
   AccountConnectionSurface,
 } from "./AccountConnectionSurface";
+import { logoutBrowserAccountSession } from "./browserAccountSession";
 
 import { classifyMachineUsdOrder } from "./machineUsdOrder.mjs";
 import {
@@ -2075,7 +2076,6 @@ function createProvider(browserLocal: boolean) {
           name: "Nanocodex",
           rdns: "xyz.paradigm.nanocodex",
         }),
-    maxAccounts: 1,
     mpp: false,
     storage: Storage.idb({ key: "nanocodex" }),
   });
@@ -2119,7 +2119,7 @@ function invalidateBrowserSession() {
 async function prepareRegistrationSession() {
   let session = await ensureBrowserSession();
   if (!session.persistent) return session.id;
-  await provider.request({ method: "wallet_disconnect" });
+  await logoutBrowserAccountSession();
   invalidateBrowserSession();
   session = await ensureBrowserSession();
   if (session.persistent) {

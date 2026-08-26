@@ -21,6 +21,7 @@ import {
   responseFailure,
   type AuthenticatedAccount,
 } from "./accountSessionRequest";
+import { logoutBrowserAccountSession } from "@nanocodex-connect/browserAccountSession";
 import { clientFailureMessage } from "./clientFailure";
 
 export { isRecord, responseFailure } from "./accountSessionRequest";
@@ -52,7 +53,6 @@ function createAccountProvider() {
       name: "Nanocodex",
       rdns: "xyz.paradigm.nanocodex",
     }),
-    maxAccounts: 1,
     mpp: false,
     storage: Storage.idb({ key: "nanocodex" }),
   });
@@ -138,7 +138,7 @@ export function AccountSessionProvider({ children }: { children: ReactNode }) {
     try {
       let registrationUser = user;
       if (selection.mode === "register" && (!registrationUser || registrationUser.persistent)) {
-        await provider.request({ method: "wallet_disconnect" });
+        await logoutBrowserAccountSession();
         registrationUser = await getCurrentUser();
       }
       if (selection.mode === "register" && !registrationUser) {
@@ -190,7 +190,7 @@ export function AccountSessionProvider({ children }: { children: ReactNode }) {
     setOperation("sign-out");
     setError(null);
     try {
-      await provider.request({ method: "wallet_disconnect" });
+      await logoutBrowserAccountSession();
       const nextUser = await getCurrentUser();
       requestId.current++;
       setUser(nextUser);
@@ -201,7 +201,7 @@ export function AccountSessionProvider({ children }: { children: ReactNode }) {
     } finally {
       setOperation(null);
     }
-  }, [provider]);
+  }, []);
 
   const value = useMemo<AccountSession>(() => ({
     account: user,

@@ -47,6 +47,12 @@ test("connections and API keys share one account surface", () => {
   assert.doesNotMatch(accountMenu, /Model connection|>Refresh<\/button>/);
 });
 
+test("account sign-out retains the shared remembered-passkey catalog", () => {
+  assert.doesNotMatch(accountSession, /maxAccounts:\s*1/);
+  assert.doesNotMatch(accountSession, /signOut[\s\S]*?wallet_disconnect/);
+  assert.match(accountSession, /signOut[\s\S]*?logoutBrowserAccountSession\(\)/);
+});
+
 test("guest account mutations stay visibly disabled behind passkey actions", () => {
   assert.match(profileConnectors, /if \(requiresLogin\)[\s\S]*?<button[\s\S]*?disabled[\s\S]*?definition\.description/);
   assert.doesNotMatch(profileConnectors, /onLoginRequired/);
