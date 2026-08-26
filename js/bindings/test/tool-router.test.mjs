@@ -86,7 +86,7 @@ test("duplicate and normalized collisions reject and addSource rolls back", () =
   assert.deepEqual(router.definitions().map(({ name }) => name), ["a.b"]);
 });
 
-test("attached overlay requires exact catalog parity for definition and execution metadata", async () => {
+test("attached overlay requires callable parity but keeps placement metadata independent", async () => {
   const entry = {
     definition: contract("echo"),
     parallelSafe: true,
@@ -99,11 +99,6 @@ test("attached overlay requires exact catalog parity for definition and executio
   for (const changed of [
     { ...entry, definition: contract("echo", { strict: false }) },
     { ...entry, definition: contract("echo", { output_schema: { type: "string" } }) },
-    { ...entry, provider: "device" },
-    { ...entry, remoteName: "remote_echo" },
-    { ...entry, parallelSafe: false },
-    { ...entry, summary: "Different summary." },
-    { ...entry, timeoutMs: 42_001 },
   ]) {
     const router = new ToolRouter([cloud]);
     await assert.rejects(
@@ -112,8 +107,18 @@ test("attached overlay requires exact catalog parity for definition and executio
     );
   }
   const router = new ToolRouter([cloud]);
-  await router.attachSource(source("attached", [{ ...entry, handler: () => "attached" }], { kind: "attached" }));
-  assert.equal(router.resolve("echo").parallelSafe, true);
+  await router.attachSource(source("attached", [{
+    ...entry,
+    definition: contract("echo", { description: "Echo through the attached host." }),
+    provider: "device",
+    remoteName: "remote_echo",
+    parallelSafe: false,
+    summary: "Different placement summary.",
+    timeoutMs: 42_001,
+    handler: () => "attached",
+  }], { kind: "attached" }));
+  assert.equal(router.resolve("echo").parallelSafe, false);
+  assert.equal(router.modelDefinitions().find(({ name }) => name === "echo").description, "Call echo.");
   assert.equal(
     logicalContractFingerprint(contract("echo")),
     logicalContractFingerprint(contract("echo", { defer_loading: true })),
@@ -142,7 +147,7 @@ test("pre-publication validation consumes a complete hosted catalog candidate", 
     }],
     resolve: (name) => ({ name, handler() {}, parallelSafe: true }),
   }), true);
-  assert.throws(() => router.validateSource({
+  assert.equal(router.validateSource({
     id: "attached",
     kind: "attached",
     mode: "attached-over-cloud",
@@ -154,7 +159,7 @@ test("pre-publication validation consumes a complete hosted catalog candidate", 
       timeout_ms: 120_000,
     }],
     resolve: (name) => ({ name, handler() {}, parallelSafe: false }),
-  }), /catalog parity mismatch/);
+  }), true);
 });
 
 test("overlay keeps cloud fallback but only uses the typed pre-dispatch sentinel", async () => {
@@ -295,4 +300,3 @@ test("createTools accepts the portable WorkspaceBackend shape", async () => {
   assert.equal(new TextDecoder().decode(files.get("rn.txt")), "portable");
   await tools.close();
 });
-

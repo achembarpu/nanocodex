@@ -3,12 +3,12 @@ import test from "node:test";
 
 import { justBash } from "../tools/bash.mjs";
 
-test("Just Bash advertises the native workspace exec contract", async () => {
+test("Just Bash advertises its cloud workspace execution", async () => {
   const { tool } = await justBash({ filesystem: memoryWorkspace() });
-  assert.equal(tool.provider, "workspace");
+  assert.equal(tool.provider, undefined);
   assert.equal(
     tool.description,
-    "Runs a command in a PTY, returning output or a session ID for ongoing interaction.",
+    "Runs a shell command, returning output or a session ID for ongoing interaction.",
   );
 });
 

@@ -1,9 +1,6 @@
 const MAX_CONCURRENT_CALLS = 128;
 const CANCELLATION_MESSAGE = "tool execution was cancelled";
 const TOOL_RESULT = Symbol.for("nanocodex.toolResult");
-const DEFAULT_CATALOG_PROVIDER = "javascript";
-const DEFAULT_CATALOG_TIMEOUT_MS = 120_000;
-
 export const toolRouterBrand = Symbol.for("nanocodex.toolRouter");
 export const toolRouterRuntime = Symbol("nanocodex.toolRouterRuntime");
 export const toolRuntimeLifecycle = Symbol("nanocodex.toolRuntimeLifecycle");
@@ -191,7 +188,7 @@ export class ToolRouter {
         const resolved = normalizeResolvedTool(definition.name, tool, candidate);
         entries.push({
           definition,
-          fingerprint: behavioralCatalogFingerprint(exactDefinition, resolved),
+          fingerprint: callableContractFingerprint(exactDefinition),
           normalizedName: normalizeToolName(definition.name),
           source,
           sourceIndex,
@@ -507,17 +504,11 @@ function normalizeResolvedTool(name, tool, candidate) {
   });
 }
 
-function behavioralCatalogFingerprint(definition, tool) {
+function callableContractFingerprint(definition) {
   const logical = { ...definition };
   delete logical.defer_loading;
-  return stableJson({
-    provider: tool.provider ?? DEFAULT_CATALOG_PROVIDER,
-    remote_name: tool.remoteName ?? definition.name,
-    definition: logical,
-    parallel_safe: tool.parallelSafe,
-    ...(tool.summary !== undefined ? { summary: tool.summary } : {}),
-    timeout_ms: tool.timeoutMs ?? DEFAULT_CATALOG_TIMEOUT_MS,
-  });
+  delete logical.description;
+  return stableJson(logical);
 }
 
 function compareEntries(a, b) {
@@ -640,4 +631,3 @@ class AsyncReadWriteGate {
 }
 
 function once(callback) { let called = false; return () => { if (called) return; called = true; callback(); }; }
-

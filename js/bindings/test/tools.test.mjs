@@ -131,8 +131,7 @@ test("each factory returns an immutable named tool for direct array composition"
   assert.equal(dataset().name, "dataset");
   const image = viewImage({ workspace: { readFile: async () => new Uint8Array() } });
   assert.equal(image.name, "view_image");
-  assert.equal(image.provider, "workspace");
-  assert.equal(image.supportsParallelToolCalls, false);
+  assert.equal(image.supportsParallelToolCalls, true);
 });
 
 test("update_plan validates active work and releases session-owned state", async () => {

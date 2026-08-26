@@ -277,6 +277,7 @@ function mismatchedPriorityCatalogEntry() {
     definition: {
       ...entry.definition,
       description: "An intentionally incompatible attached exec contract.",
+      strict: true,
     },
   };
 }
@@ -427,4 +428,3 @@ async function seedApiKey(): Promise<void> {
   });
   expect(record.status).toBe(201);
 }
-
