@@ -12,6 +12,7 @@ import { Provider, Storage, webAuthn } from "accounts";
 import {
   getCurrentUser,
   isRecord,
+  ReauthenticationRequiredError,
   responseFailure,
   type AuthenticatedAccount,
 } from "./accountSessionRequest";
@@ -33,6 +34,7 @@ type AccountSession = Readonly<{
   register: () => Promise<void>;
   signIn: () => Promise<void>;
   signOut: () => Promise<void>;
+  reauthenticationRequired: boolean;
 }>;
 
 const AccountSessionContext = createContext<AccountSession | null>(null);
@@ -61,6 +63,7 @@ export function AccountSessionProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<AuthenticatedAccount | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [operation, setOperation] = useState<AccountOperation | null>(null);
+  const [reauthenticationRequired, setReauthenticationRequired] = useState(false);
   const requestId = useRef(0);
   const refreshRequest = useRef<Promise<void> | undefined>(undefined);
 
@@ -74,9 +77,17 @@ export function AccountSessionProvider({ children }: { children: ReactNode }) {
         setUser(nextUser);
         setStatus("ready");
         setError(null);
+        setReauthenticationRequired(false);
       },
       (cause: unknown) => {
         if (requestId.current !== currentRequest) return;
+        if (cause instanceof ReauthenticationRequiredError) {
+          setUser(null);
+          setStatus("ready");
+          setError(null);
+          setReauthenticationRequired(true);
+          return;
+        }
         setStatus("error");
         setError(accountFailure(cause, "Couldn’t check your account session."));
       },
@@ -112,6 +123,7 @@ export function AccountSessionProvider({ children }: { children: ReactNode }) {
       requestId.current++;
       setUser(nextUser);
       setStatus("ready");
+      setReauthenticationRequired(false);
     } catch (cause) {
       setError(accountFailure(
         cause,
@@ -130,17 +142,19 @@ export function AccountSessionProvider({ children }: { children: ReactNode }) {
     setOperation("new-account");
     setError(null);
     try {
+      await accountProvider().request({ method: "wallet_disconnect" });
       const nextUser = await getCurrentUser();
       if (!nextUser) throw new Error("The browser session was not created.");
       requestId.current++;
       setUser(nextUser);
       setStatus("ready");
+      setReauthenticationRequired(false);
     } catch (cause) {
       setError(accountFailure(cause, "Couldn’t start a new account. Try again."));
     } finally {
       setOperation(null);
     }
-  }, []);
+  }, [accountProvider]);
   const signOut = useCallback(async () => {
     setOperation("sign-out");
     setError(null);
@@ -150,6 +164,7 @@ export function AccountSessionProvider({ children }: { children: ReactNode }) {
       requestId.current++;
       setUser(nextUser);
       setStatus("ready");
+      setReauthenticationRequired(false);
     } catch (cause) {
       setError(accountFailure(cause, "Couldn’t sign out. Try again."));
     } finally {
@@ -167,7 +182,8 @@ export function AccountSessionProvider({ children }: { children: ReactNode }) {
     register,
     signIn,
     signOut,
-  }), [error, operation, refresh, register, signIn, signOut, startNewAccount, status, user]);
+    reauthenticationRequired,
+  }), [error, operation, reauthenticationRequired, refresh, register, signIn, signOut, startNewAccount, status, user]);
 
   return (
     <AccountSessionContext.Provider value={value}>

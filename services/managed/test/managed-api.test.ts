@@ -1345,7 +1345,7 @@ describe("managed agents REST and resumable SSE", () => {
     expect(response.headers.get("set-cookie")).toBeNull();
   });
 
-  it("rejects and clears stale account cookies instead of minting a replacement identity", async () => {
+  it("renews only stale anonymous sessions instead of minting over passkey accounts", async () => {
     const expiredToken = `a_${"e".repeat(43)}`;
     const auth = testEnv.NANOCODEX_AUTH.getByName("account");
     const stored = await auth.fetch(
@@ -1369,7 +1369,6 @@ describe("managed agents REST and resumable SSE", () => {
       "malformed",
       `a_${"z".repeat(43)}`,
       expiredToken,
-      "z".repeat(43),
     ]) {
       const response = await RAW_SELF.fetch("https://example.test/v1/me", {
         headers: { cookie: `other=value; nanocodex_account=${token}` },
@@ -1380,6 +1379,15 @@ describe("managed agents REST and resumable SSE", () => {
         /^nanocodex_account=; Path=\/; Max-Age=0; HttpOnly; SameSite=Lax; Secure$/,
       );
     }
+
+    const expiredPasskey = await RAW_SELF.fetch("https://example.test/v1/me", {
+      headers: { cookie: `nanocodex_account=${"z".repeat(43)}` },
+    });
+    expect(expiredPasskey.status).toBe(401);
+    expect(await expiredPasskey.json()).toEqual({ error: "reauthentication_required" });
+    expect(expiredPasskey.headers.get("set-cookie")).toBe(
+      `nanocodex_account=${"z".repeat(43)}; Path=/; Max-Age=31536000; HttpOnly; SameSite=Lax; Secure`,
+    );
 
     const unrelatedCookie = await RAW_SELF.fetch("https://example.test/v1/me", {
       headers: { cookie: "other=value" },
@@ -1403,7 +1411,9 @@ describe("managed agents REST and resumable SSE", () => {
         user: { id: userId, persistent: true },
         authentication: "account_session",
       });
-      expect(response.headers.get("set-cookie")).toBeNull();
+      expect(response.headers.get("set-cookie")).toBe(
+        `nanocodex_account=${token}; Path=/; Max-Age=31536000; HttpOnly; SameSite=Lax; Secure`,
+      );
     }
   });
 

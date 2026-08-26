@@ -5,6 +5,13 @@ export type AuthenticatedAccount = Readonly<{
 
 const USER_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
+export class ReauthenticationRequiredError extends Error {
+  constructor() {
+    super("Your passkey session expired. Sign in to restore your account.");
+    this.name = "ReauthenticationRequiredError";
+  }
+}
+
 export function getCurrentUser(fetcher: typeof fetch = fetch): Promise<AuthenticatedAccount | null> {
   return readCurrentUser(fetcher, true);
 }
@@ -20,6 +27,9 @@ async function readCurrentUser(
   });
   if (response.status === 401) {
     const body: unknown = await response.json().catch(() => undefined);
+    if (isRecord(body) && body.error === "reauthentication_required") {
+      throw new ReauthenticationRequiredError();
+    }
     if (isRecord(body) && body.error === "invalid_session") {
       if (recoverInvalidSession) return readCurrentUser(fetcher, false);
       throw new Error("Couldn’t renew your browser session. Reload and try again.");

@@ -597,7 +597,9 @@ export function AccountMenu({ inline = false }: Readonly<{ inline?: boolean }>) 
             </>
           ) : (
             <div className="account-auth-actions">
-              <p>Sign in with your passkey, or explicitly start a separate account.</p>
+              <p>{session.reauthenticationRequired
+                ? "Your passkey session expired. Sign in to restore this account’s memory and connections."
+                : "Sign in with your passkey, or explicitly start a separate account."}</p>
               <div className="account-auth-buttons">
                 <button
                   className="account-primary-action"

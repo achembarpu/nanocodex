@@ -51,3 +51,15 @@ test("an unauthenticated response without a stale session remains signed out", a
   assert.equal(user, null);
   assert.equal(requests, 1);
 });
+
+test("an expired passkey session requires reauthentication without creating another account", async () => {
+  let requests = 0;
+  await assert.rejects(
+    getCurrentUser(async () => {
+      requests++;
+      return Response.json({ error: "reauthentication_required" }, { status: 401 });
+    }),
+    { name: "ReauthenticationRequiredError" },
+  );
+  assert.equal(requests, 1);
+});

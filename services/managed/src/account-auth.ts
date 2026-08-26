@@ -8,10 +8,12 @@ const LOCAL_PORTABLE_CREDENTIAL_COOKIE = "nanocodex_local_passkey";
 const LOCAL_WEBAUTHN_RP_ID = "nanocodex.localhost";
 const LOCAL_WEBAUTHN_HOST = /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)?nanocodex\.localhost$/;
 const SESSION_TTL_SECONDS = 30 * 24 * 60 * 60;
+const PASSKEY_REAUTH_WINDOW_SECONDS = 365 * 24 * 60 * 60;
 const USER_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const API_KEY = /^ncx_live_([A-Za-z0-9_-]{12})_([A-Za-z0-9_-]{43})$/;
 const ANONYMOUS_SESSION_TOKEN = /^a_[A-Za-z0-9_-]{43}$/;
+const PASSKEY_SESSION_TOKEN = /^[A-Za-z0-9_-]{43}$/;
 const PORTABLE_CREDENTIAL_ID = /^[A-Za-z0-9_-]{1,512}$/;
 const PORTABLE_PUBLIC_KEY = /^0x(?:[0-9a-fA-F]{2}){1,1024}$/;
 const BASE64_URL = /^[A-Za-z0-9_-]+$/;
@@ -260,6 +262,14 @@ export async function routeAccountRequest(
     const portableCookie = resolved.persistent
       ? await portableLocalCredentialCookieForSession(request, env, url, principal)
       : undefined;
+    const persistentCookie = resolved.persistent
+      ? serializePersistentSessionCookie(request, url.protocol)
+      : undefined;
+    const cookies = [resolved.cookie ?? persistentCookie, portableCookie].filter(
+      (cookie): cookie is string => Boolean(cookie),
+    );
+    const headers = new Headers();
+    for (const cookie of cookies) headers.append("set-cookie", cookie);
     return json({
       user: {
         id: principal.userId,
@@ -269,8 +279,8 @@ export async function routeAccountRequest(
       team: { id: principal.teamId },
       role: principal.role,
       authentication: principal.kind,
-    }, resolved.cookie || portableCookie
-      ? { headers: { "set-cookie": resolved.cookie ?? portableCookie! } }
+    }, cookies.length
+      ? { headers }
       : undefined);
   }
   if (url.pathname === "/v1/organization") {
@@ -865,9 +875,19 @@ async function resolveOrCreateBrowserAccount(
   // did not present either account or bearer authentication.
   if (request.headers.has("authorization")) return unauthorized();
   if (hasCookie(request, ACCOUNT_COOKIE)) {
-    return json({ error: "invalid_session" }, {
+    const token = cookieValue(request, ACCOUNT_COOKIE);
+    const reauthenticationRequired = Boolean(token && PASSKEY_SESSION_TOKEN.test(token));
+    return json({
+      error: reauthenticationRequired
+        ? "reauthentication_required"
+        : "invalid_session",
+    }, {
       status: 401,
-      headers: { "set-cookie": clearAccountCookie(new URL(request.url).protocol) },
+      headers: {
+        "set-cookie": reauthenticationRequired
+          ? accountCookie(token!, PASSKEY_REAUTH_WINDOW_SECONDS, new URL(request.url).protocol)
+          : clearAccountCookie(new URL(request.url).protocol),
+      },
     });
   }
 
@@ -941,6 +961,13 @@ function rawCookie(request: Request, name: string): { present: boolean; value: s
 
 function serializeAccountCookie(token: string, protocol: string): string {
   return accountCookie(token, SESSION_TTL_SECONDS, protocol);
+}
+
+function serializePersistentSessionCookie(request: Request, protocol: string): string | undefined {
+  const token = cookieValue(request, ACCOUNT_COOKIE);
+  return token && PASSKEY_SESSION_TOKEN.test(token)
+    ? accountCookie(token, PASSKEY_REAUTH_WINDOW_SECONDS, protocol)
+    : undefined;
 }
 
 function clearAccountCookie(protocol: string): string {
@@ -1654,13 +1681,12 @@ async function readJson(request: Request): Promise<Record<string, unknown> | Res
 }
 
 function json(body: unknown, init: ResponseInit = {}): Response {
+  const headers = new Headers(init.headers);
+  headers.set("cache-control", "no-store");
+  headers.set("x-content-type-options", "nosniff");
   return Response.json(body, {
     ...init,
-    headers: {
-      "cache-control": "no-store",
-      "x-content-type-options": "nosniff",
-      ...init.headers,
-    },
+    headers,
   });
 }
 
