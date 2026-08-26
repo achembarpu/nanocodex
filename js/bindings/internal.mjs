@@ -176,6 +176,10 @@ export async function spawnSubagent(agent, options) {
   return JSON.parse(await agentState(agent).raw.spawnSubagent(JSON.stringify(options)));
 }
 
+export async function spawnSubagents(agent, options) {
+  return JSON.parse(await agentState(agent).raw.spawnSubagents(JSON.stringify(options)));
+}
+
 export async function waitSubagents(agent, options) {
   return JSON.parse(await agentState(agent).raw.waitSubagents(JSON.stringify(options)));
 }

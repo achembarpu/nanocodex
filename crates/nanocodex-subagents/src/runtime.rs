@@ -88,6 +88,7 @@ struct AgentScope {
     topology: TaskTree,
     sessions: HashMap<AgentId, ChildSession>,
     messages: MessageThreads,
+    closing: bool,
 }
 
 pub(super) struct AgentReservation {
@@ -107,6 +108,45 @@ pub(super) struct ClosedSessions {
     pub(super) summaries: Vec<AgentSummary>,
     pub(super) harness_tasks: Vec<Task<()>>,
     pub(super) event_tasks: Vec<Task<()>>,
+}
+
+pub(super) struct BatchStartup {
+    registry: Arc<Registry>,
+    cleanup: Option<(String, Vec<AgentId>)>,
+}
+
+impl BatchStartup {
+    pub(super) fn track(&mut self, root_session_id: &str, id: AgentId) {
+        let (_, ids) = self
+            .cleanup
+            .get_or_insert_with(|| (root_session_id.to_owned(), Vec::new()));
+        ids.push(id);
+    }
+
+    pub(super) async fn rollback(mut self) {
+        let cleanup = self.cleanup.take();
+        let registry = Arc::clone(&self.registry);
+        drop(self);
+        if let Some((root_session_id, ids)) = cleanup {
+            registry.close_batch(&root_session_id, ids).await;
+        }
+    }
+
+    pub(super) fn commit(mut self) {
+        self.cleanup = None;
+    }
+}
+
+impl Drop for BatchStartup {
+    fn drop(&mut self) {
+        let Some((root_session_id, ids)) = self.cleanup.take() else {
+            return;
+        };
+        let registry = Arc::clone(&self.registry);
+        drop(platform::spawn(async move {
+            registry.close_batch(&root_session_id, ids).await;
+        }));
+    }
 }
 
 #[derive(Clone, Serialize)]
@@ -259,6 +299,15 @@ impl RegistryState {
 
     fn reserve_for(&mut self, session_id: &str) -> std::io::Result<AgentReservation> {
         let root_session_id = self.root_session_id(session_id).to_owned();
+        if self
+            .scopes
+            .get(&root_session_id)
+            .is_some_and(|scope| scope.closing)
+        {
+            return Err(std::io::Error::other(
+                "subagent scope is closing and cannot spawn children",
+            ));
+        }
         let parent = self
             .scopes
             .get(&root_session_id)
@@ -287,6 +336,15 @@ impl RegistryState {
         parent: Option<AgentId>,
     ) -> std::io::Result<AgentReservation> {
         let root_session_id = self.root_session_id(session_id).to_owned();
+        if self
+            .scopes
+            .get(&root_session_id)
+            .is_some_and(|scope| scope.closing)
+        {
+            return Err(std::io::Error::other(
+                "subagent scope is closing and cannot reserve children",
+            ));
+        }
         let id = self.scope_mut(&root_session_id).topology.reserve(parent)?;
         Ok(AgentReservation {
             root_session_id,
@@ -327,6 +385,39 @@ impl RegistryState {
         self.scope_mut(&root_session_id)
             .sessions
             .insert(id, session);
+        Ok(())
+    }
+
+    fn validate_insert(
+        &self,
+        root_session_id: &str,
+        descriptor: &AgentDescriptor,
+    ) -> std::io::Result<()> {
+        if self
+            .scopes
+            .get(root_session_id)
+            .is_some_and(|scope| scope.closing)
+        {
+            return Err(std::io::Error::other(
+                "subagent scope stopped while spawning children",
+            ));
+        }
+        if let Some(parent) = descriptor.parent {
+            let parent_session = self
+                .scopes
+                .get(root_session_id)
+                .and_then(|scope| scope.sessions.get(&parent))
+                .ok_or_else(|| std::io::Error::other(format!("unknown parent agent {parent}")))?;
+            if matches!(
+                parent_session.status,
+                AgentStatus::Closing | AgentStatus::Closed
+            ) {
+                return Err(std::io::Error::other(format!(
+                    "agent {parent} stopped while spawning child {}",
+                    descriptor.id
+                )));
+            }
+        }
         Ok(())
     }
 
@@ -572,15 +663,11 @@ impl RegistryState {
 
     fn request_close_all(&mut self, session_id: &str) -> std::io::Result<CloseRequest> {
         let root_session_id = self.root_session_id(session_id).to_owned();
-        let Some(scope) = self.scopes.get(&root_session_id) else {
-            return Ok(CloseRequest {
-                root_session_id,
-                ids: Vec::new(),
-                harnesses: Vec::new(),
-                status_updates: Vec::new(),
-            });
+        let ids = {
+            let scope = self.scope_mut(&root_session_id);
+            scope.closing = true;
+            scope.topology.all_postorder()
         };
-        let ids = scope.topology.all_postorder();
         let harnesses = self.harnesses(&root_session_id, &ids, true)?;
         let status_updates = ids
             .iter()
@@ -740,6 +827,17 @@ impl Registry {
         self.capacity.reserve()
     }
 
+    pub(super) fn batch_startup(self: &Arc<Self>) -> BatchStartup {
+        BatchStartup {
+            registry: Arc::clone(self),
+            cleanup: None,
+        }
+    }
+
+    pub(super) fn reserve_turns(&self, count: usize) -> std::io::Result<Vec<TurnCapacity>> {
+        self.capacity.reserve_many(count)
+    }
+
     pub fn set_max_concurrency(&self, limit: usize) {
         self.capacity.set_limit(limit);
     }
@@ -755,6 +853,15 @@ impl Registry {
 
     pub(super) async fn reserve(&self, session_id: &str) -> std::io::Result<AgentReservation> {
         self.state.lock().await.reserve_for(session_id)
+    }
+
+    pub(super) async fn reserve_many(
+        &self,
+        session_id: &str,
+        count: usize,
+    ) -> std::io::Result<Vec<AgentReservation>> {
+        let mut state = self.state.lock().await;
+        (0..count).map(|_| state.reserve_for(session_id)).collect()
     }
 
     pub(super) async fn submit_result(
@@ -801,6 +908,8 @@ impl Registry {
         contract: OutputContract,
     ) -> std::io::Result<()> {
         let OutputContract { validator, schema } = contract;
+        let mut state = self.state.lock().await;
+        state.validate_insert(&root_session_id, &descriptor)?;
         let (harness, harness_task) = harness::spawn(
             root_session_id.clone(),
             descriptor.id,
@@ -809,7 +918,7 @@ impl Registry {
             Arc::downgrade(self),
             schema,
         );
-        self.state.lock().await.insert(
+        state.insert(
             root_session_id,
             descriptor.id,
             descriptor.session_id.clone(),
@@ -828,6 +937,7 @@ impl Registry {
                 last_output: None,
             },
         )?;
+        drop(state);
         self.changed();
         Ok(())
     }
@@ -1240,6 +1350,12 @@ impl Registry {
         self.stop_and_close(root_session_id, ids, harnesses).await
     }
 
+    async fn close_batch(&self, root_session_id: &str, ids: Vec<AgentId>) {
+        for id in ids.into_iter().rev() {
+            drop(self.close(root_session_id, id).await);
+        }
+    }
+
     async fn close_all(&self, session_id: &str) -> std::io::Result<Vec<AgentSummary>> {
         let _message_guard = self.message_lock.lock().await;
         let CloseRequest {
@@ -1569,7 +1685,7 @@ mod tests {
         time::Duration,
     };
     use tokio::{
-        sync::{Notify, oneshot},
+        sync::{Notify, mpsc, oneshot},
         time::timeout,
     };
     use tower::Service;
@@ -1627,6 +1743,92 @@ mod tests {
         assert!(instructions.contains("exactly once"));
         assert!(instructions.contains("\"report\""));
         assert!(contract.validator.is_valid(&json!({ "report": "done" })));
+    }
+
+    #[tokio::test]
+    async fn batch_reservations_are_stable_and_contiguous() {
+        let (updates, _receiver) = mpsc::unbounded_channel();
+        let registry = Registry::new(updates, 3);
+
+        let batch = registry.reserve_many("root", 3).await.unwrap();
+        assert_eq!(
+            batch
+                .into_iter()
+                .map(|reservation| reservation.id)
+                .collect::<Vec<_>>(),
+            [AgentId::new(1), AgentId::new(2), AgentId::new(3)]
+        );
+        assert_eq!(registry.reserve("root").await.unwrap().id, AgentId::new(4));
+    }
+
+    #[tokio::test]
+    async fn close_all_fences_a_batch_before_its_first_insert() {
+        let (updates, _receiver) = mpsc::unbounded_channel();
+        let registry = Arc::new(Registry::new(updates, 1));
+        let reservation = registry.reserve("root").await.unwrap();
+        let closed = registry.close_all("root").await.unwrap();
+        assert!(closed.is_empty());
+
+        let (agent, events) = pending_agent(Arc::new(Notify::new()));
+        let contract = OutputContract::compile(&json!({ "type": "object" })).unwrap();
+        let error = registry
+            .insert(
+                reservation.root_session_id,
+                AgentDescriptor {
+                    id: reservation.id,
+                    session_id: agent.session_id().to_string(),
+                    role: "child".to_owned(),
+                    task: "work".to_owned(),
+                    parent: None,
+                },
+                agent,
+                forward_events(
+                    "root".to_owned(),
+                    reservation.id,
+                    events,
+                    oneshot::channel().1,
+                    Arc::downgrade(&registry),
+                    registry.updates.clone(),
+                ),
+                contract,
+            )
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("scope stopped"));
+    }
+
+    #[tokio::test]
+    async fn cancelled_batch_startup_closes_every_tracked_child() {
+        let (updates, _receiver) = mpsc::unbounded_channel();
+        let registry = Arc::new(Registry::new(updates, 2));
+        let mut startup = registry.batch_startup();
+        let mut ids = Vec::new();
+        for _ in 0..2 {
+            let reservation = registry.reserve("root").await.unwrap();
+            let (agent, events) = pending_agent(Arc::new(Notify::new()));
+            insert_runtime_session(&registry, &reservation, None, agent, events).await;
+            startup.track(&reservation.root_session_id, reservation.id);
+            ids.push(reservation.id);
+        }
+
+        drop(startup);
+        let mut revision = registry.revision.subscribe();
+        timeout(Duration::from_secs(5), async {
+            loop {
+                let all_closed = {
+                    let state = registry.state.lock().await;
+                    ids.iter()
+                        .all(|id| state.scopes["root"].sessions[id].status == AgentStatus::Closed)
+                };
+                if all_closed {
+                    break;
+                }
+                revision.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
     }
 
     async fn insert_runtime_session(

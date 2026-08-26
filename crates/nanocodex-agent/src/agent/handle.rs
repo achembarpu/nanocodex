@@ -81,6 +81,20 @@ impl AgentHandle {
         request_spawn(&commands, &self.shutdown, options).await
     }
 
+    /// Starts several clean agents in the order requested.
+    ///
+    /// Every child receives the containing driver's private configuration,
+    /// service factory, workspace policy, and per-agent tools factory. The
+    /// children do not inherit conversation history.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error after the containing driver has stopped.
+    pub async fn spawn_many(&self, count: usize) -> Result<Vec<(Nanocodex, AgentEvents)>> {
+        let commands = self.commands()?;
+        request_spawn_many(&commands, &self.shutdown, count).await
+    }
+
     /// Forks the containing agent's latest safe model boundary.
     ///
     /// # Errors
@@ -432,6 +446,19 @@ pub(super) async fn request_spawn(
 ) -> Result<(Nanocodex, AgentEvents)> {
     request_command(commands, shutdown, |result| Command::Spawn {
         options,
+        result,
+    })
+    .await
+}
+
+#[cfg(feature = "openai")]
+async fn request_spawn_many(
+    commands: &mpsc::Sender<Command>,
+    shutdown: &DriverShutdown,
+    count: usize,
+) -> Result<Vec<(Nanocodex, AgentEvents)>> {
+    request_command(commands, shutdown, |result| Command::SpawnBatch {
+        count,
         result,
     })
     .await

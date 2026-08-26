@@ -121,4 +121,26 @@ where
             },
         )
     }
+
+    pub(super) fn spawn_clean_many(
+        &self,
+        workspace: Option<Arc<str>>,
+        parent_session_id: &str,
+        model: Model,
+        thinking: Thinking,
+        fast_mode: bool,
+        count: usize,
+    ) -> Result<Vec<(Nanocodex, AgentEvents)>> {
+        (0..count)
+            .map(|_| {
+                self.spawn_clean(
+                    workspace.clone(),
+                    parent_session_id,
+                    model,
+                    thinking,
+                    fast_mode,
+                )
+            })
+            .collect()
+    }
 }

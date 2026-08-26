@@ -10,6 +10,7 @@ use super::{
     runtime::{AgentDirectoryEntry, AgentSummary, OutputContract, Registry, forward_events},
 };
 use async_trait::async_trait;
+use futures_util::future::join_all;
 use nanocodex_agent::{AgentHandle, Model, SpawnOptions, Thinking};
 use nanocodex_tools::{
     Tool, ToolContext, ToolDefinition, ToolInput, ToolOutput, ToolResult, Tools,
@@ -143,6 +144,116 @@ pub async fn start_agent(
     task: AgentTask,
 ) -> AgentToolResult<AgentStartReport> {
     start_agent_with(parent, registry, session_id, task, SpawnOptions::new()).await
+}
+
+/// Starts a stable, ordered batch of clean-room subagents.
+///
+/// Every task schema and every available turn slot is validated and reserved
+/// before any child is created or its initial turn is launched.
+///
+/// # Errors
+///
+/// Returns an error without launching a child when validation or reservation
+/// fails. If a later lifecycle step fails, already-created children are closed
+/// before returning that error where the runtime remains available.
+pub async fn start_agents(
+    parent: &AgentHandle,
+    registry: &Arc<Registry>,
+    session_id: &str,
+    tasks: Vec<AgentTask>,
+) -> AgentToolResult<Vec<AgentStartReport>> {
+    let prepared = prepare_batch(tasks)?;
+    let mut startup = registry.batch_startup();
+    let capacities = registry.reserve_turns(prepared.len())?;
+    let reservations = registry.reserve_many(session_id, prepared.len()).await?;
+    let children = parent.spawn_many(prepared.len()).await?;
+
+    let mut reports = Vec::with_capacity(prepared.len());
+    let mut launches = Vec::with_capacity(prepared.len());
+    let mut additions = Vec::with_capacity(prepared.len());
+    for (((reservation, (task, contract)), (child, events)), capacity) in reservations
+        .into_iter()
+        .zip(prepared)
+        .zip(children)
+        .zip(capacities)
+    {
+        let id = reservation.id;
+        let descriptor = AgentDescriptor {
+            id,
+            session_id: child.session_id().to_string(),
+            role: task.role.clone(),
+            task: task.task.clone(),
+            parent: reservation.parent,
+        };
+        let (start_events, events_ready) = oneshot::channel();
+        let event_task = forward_events(
+            reservation.root_session_id.clone(),
+            id,
+            events,
+            events_ready,
+            Arc::downgrade(registry),
+            registry.updates.clone(),
+        );
+        if let Err(error) = registry
+            .insert(
+                reservation.root_session_id.clone(),
+                descriptor.clone(),
+                child,
+                event_task,
+                contract,
+            )
+            .await
+        {
+            startup.rollback().await;
+            return Err(error.into());
+        }
+        startup.track(&reservation.root_session_id, id);
+        reports.push(AgentStartReport {
+            agent_id: id,
+            role: task.role,
+            status: AgentStatus::Running,
+        });
+        additions.push((
+            reservation.root_session_id.clone(),
+            descriptor,
+            start_events,
+        ));
+        launches.push((
+            reservation.root_session_id,
+            id,
+            agent_prompt(id, &task.task),
+            capacity,
+        ));
+    }
+
+    for (root_session_id, descriptor, start_events) in additions {
+        registry.send(&root_session_id, AgentUpdate::Added(descriptor));
+        let _ = start_events.send(());
+    }
+
+    let launches = launches
+        .into_iter()
+        .map(|(root_session_id, id, prompt, capacity)| async move {
+            registry
+                .launch_initial_turn(&root_session_id, id, prompt, capacity)
+                .await
+        });
+    if let Some(error) = join_all(launches).await.into_iter().find_map(Result::err) {
+        startup.rollback().await;
+        return Err(error.into());
+    }
+    startup.commit();
+    Ok(reports)
+}
+
+fn prepare_batch(tasks: Vec<AgentTask>) -> AgentToolResult<Vec<(AgentTask, OutputContract)>> {
+    tasks
+        .into_iter()
+        .map(|task| {
+            let contract = OutputContract::compile(&task.output_schema)?;
+            Ok((task, contract))
+        })
+        .collect()
 }
 
 pub async fn start_agent_with(
@@ -281,7 +392,7 @@ impl Tool for SubmitResult {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::function(
             SUBMIT_RESULT_TOOL,
-            "Submits the current subagent turn's final JSON output. Call exactly once with a value matching the output schema in the task prompt. Invalid values can be corrected and retried.",
+            "Submits the current child subagent turn's final JSON output. This tool is unavailable to the root agent; root agents return final output as assistant text. A child calls it exactly once with the turn_token and a value matching its task output schema. Invalid values can be corrected and retried.",
             json!({
                 "type": "object",
                 "properties": {
@@ -672,13 +783,36 @@ fn agent_status_schema() -> Value {
 #[cfg(test)]
 mod tests {
     use super::{
-        SendAgentMessage, SpawnAgentTask, SubmitResult, WaitAgent, spawn_agent_parameters,
+        AgentTask, SendAgentMessage, SpawnAgentTask, SubmitResult, WaitAgent, prepare_batch,
+        spawn_agent_parameters,
     };
     use crate::runtime::Registry;
     use nanocodex_agent::{Model, SpawnOptions, Thinking};
     use nanocodex_tools::Tool;
     use serde_json::json;
     use std::sync::Weak;
+
+    #[test]
+    fn batch_preparation_validates_every_schema_before_reservation() {
+        let error = prepare_batch(vec![
+            AgentTask {
+                role: "planner".to_owned(),
+                task: "plan".to_owned(),
+                output_schema: json!({ "type": "object" }),
+            },
+            AgentTask {
+                role: "reviewer".to_owned(),
+                task: "review".to_owned(),
+                output_schema: json!({ "type": 42 }),
+            },
+        ]);
+        let error = match error {
+            Ok(_) => panic!("invalid batch schema was accepted"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("invalid output_schema"));
+    }
 
     #[test]
     fn spawn_agent_exposes_optional_model_and_thinking_overrides() {
@@ -752,6 +886,11 @@ mod tests {
         assert_eq!(parameters["required"], json!(["turn_token", "output"]));
         assert_eq!(parameters["additionalProperties"], json!(false));
         assert_eq!(parameters["properties"].as_object().unwrap().len(), 2);
+        assert!(
+            definition
+                .description()
+                .contains("unavailable to the root agent")
+        );
     }
 
     #[test]

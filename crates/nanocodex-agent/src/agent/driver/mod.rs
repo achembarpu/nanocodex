@@ -590,7 +590,7 @@ where
                                     Some(Command::Steer { result, .. }) => {
                                         drop(result.send(Err(NanocodexError::TurnNotSteerable)));
                                     }
-                                    Some(command @ (Command::Fork { .. } | Command::Spawn { .. })) => {
+                                    Some(command @ (Command::Fork { .. } | Command::Spawn { .. } | Command::SpawnBatch { .. })) => {
                                         handle_idle_command(
                                             command,
                                             latest_fork_checkpoint.as_ref(),
@@ -1102,7 +1102,7 @@ where
                                 cancel_result = Some(cancellation);
                                 break execution.as_mut().await;
                             }
-                            Some(command @ (Command::Fork { .. } | Command::Spawn { .. })) => {
+                            Some(command @ (Command::Fork { .. } | Command::Spawn { .. } | Command::SpawnBatch { .. })) => {
                                 if let Some(snapshot) =
                                     fork_snapshot_rx.borrow_and_update().clone()
                                 {

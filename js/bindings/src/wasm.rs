@@ -46,7 +46,7 @@ use nanocodex_subagents::{
     AgentDirectoryEntry, AgentId as SubagentId, AgentStatus as SubagentStatus, AgentSummary,
     AgentTask, AgentUpdate as SubagentUpdate, MessageId as SubagentMessageId, MessagePriority,
     MessagePurpose, Registry as SubagentRegistry, ScopedAgentUpdate, SubagentControl,
-    start_agent_with,
+    start_agent_with, start_agents,
 };
 use nanocodex_voice_protocol::{
     BrowserVoiceEffects, BrowserVoiceProtocol, REALTIME_END_INSTRUCTIONS,
@@ -1420,6 +1420,55 @@ impl WasmNanocodex {
         Ok(Self::from_parts(inner, events, self.subagents.clone()))
     }
 
+    /// Starts an ordered batch of canonical subagents in the same task tree.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed tasks, agents without subagent tools, a stopped
+    /// parent, or a batch that cannot be reserved in full.
+    #[wasm_bindgen(js_name = spawnSubagents)]
+    pub async fn spawn_subagents(&self, tasks_json: &str) -> Result<String, JsValue> {
+        let tasks = serde_json::from_str::<Vec<WasmSubagentTask>>(tasks_json)
+            .map_err(|error| js_error(format!("invalid subagent tasks: {error}")))?;
+        if tasks
+            .iter()
+            .any(|task| task.model.is_some() || task.thinking.is_some())
+        {
+            return Err(js_error(
+                "batch subagent spawn does not accept model or thinking overrides",
+            ));
+        }
+        let tasks = tasks
+            .into_iter()
+            .map(|task| AgentTask {
+                role: task.role,
+                task: task.task,
+                output_schema: task.output_schema,
+            })
+            .collect();
+        let subagents = self
+            .subagents
+            .as_ref()
+            .ok_or_else(|| js_error("subagents are not configured for this Agent"))?;
+        let parents = match subagents.parents.lock() {
+            Ok(parents) => parents,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let parent = parents
+            .get(&self.inner.session_id().to_string())
+            .cloned()
+            .ok_or_else(|| js_error("subagent parent is not ready"))?;
+        drop(parents);
+        let reports = start_agents(
+            &parent,
+            &subagents.registry,
+            &self.inner.session_id().to_string(),
+            tasks,
+        )
+        .await
+        .map_err(js_error)?;
+        serde_json::to_string(&reports).map_err(js_error)
+    }
     /// Changes the reasoning effort for subsequently accepted turns.
     ///
     /// # Errors
@@ -2638,14 +2687,7 @@ fn forward_subagent_updates(
                 } => {
                     let session_id = sessions.borrow_mut().remove(&(root_session_id, id));
                     if let Some(session_id) = session_id {
-                        match parents.lock() {
-                            Ok(mut parents) => {
-                                parents.remove(&session_id);
-                            }
-                            Err(poisoned) => {
-                                poisoned.into_inner().remove(&session_id);
-                            }
-                        }
+                        remove_subagent_parent(&parents, &session_id);
                         host_release_subagent_session(&session_id);
                     }
                 }
@@ -2658,14 +2700,7 @@ fn forward_subagent_updates(
             .map(|(_, session_id)| session_id)
             .collect::<Vec<_>>();
         for session_id in session_ids {
-            match parents.lock() {
-                Ok(mut parents) => {
-                    parents.remove(&session_id);
-                }
-                Err(poisoned) => {
-                    poisoned.into_inner().remove(&session_id);
-                }
-            }
+            remove_subagent_parent(&parents, &session_id);
             host_release_subagent_session(&session_id);
         }
     });
@@ -2688,15 +2723,19 @@ fn release_subagent_scope(
             .collect::<Vec<_>>()
     };
     for session_id in session_ids {
-        match parents.lock() {
-            Ok(mut parents) => {
-                parents.remove(&session_id);
-            }
-            Err(poisoned) => {
-                poisoned.into_inner().remove(&session_id);
-            }
-        }
+        remove_subagent_parent(parents, &session_id);
         host_release_subagent_session(&session_id);
+    }
+}
+
+fn remove_subagent_parent(parents: &Arc<Mutex<HashMap<String, AgentHandle>>>, session_id: &str) {
+    match parents.lock() {
+        Ok(mut parents) => {
+            parents.remove(session_id);
+        }
+        Err(poisoned) => {
+            poisoned.into_inner().remove(session_id);
+        }
     }
 }
 

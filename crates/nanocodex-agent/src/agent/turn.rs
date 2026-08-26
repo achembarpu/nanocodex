@@ -393,6 +393,10 @@ pub(super) enum Command {
         options: SpawnOptions,
         result: oneshot::Sender<Result<(Nanocodex, AgentEvents)>>,
     },
+    SpawnBatch {
+        count: usize,
+        result: oneshot::Sender<Result<Vec<(Nanocodex, AgentEvents)>>>,
+    },
     SetThinking {
         thinking: Thinking,
         result: oneshot::Sender<Result<()>>,

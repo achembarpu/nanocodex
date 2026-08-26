@@ -35,6 +35,11 @@ export type SpawnOptions = Readonly<{
   thinking?: Thinking | undefined;
   outputSchema: JsonSchema;
 }>;
+export type BatchSpawnOptions = Readonly<{
+  role: string;
+  task: string;
+  outputSchema: JsonSchema;
+}>;
 export type SpawnReport = Readonly<{
   agent_id: AgentId;
   role: string;
@@ -82,6 +87,11 @@ export type MessageReceipt = Readonly<{
 export function create(options?: Options): Subagents;
 /** Directly invokes the canonical Rust spawn_agent handler. */
 export function spawn(agent: DefaultAgent, options: SpawnOptions): Promise<SpawnReport>;
+/** Atomically reserves and starts an ordered batch of canonical Rust subagents. */
+export function spawnMany(
+  agent: DefaultAgent,
+  options: readonly BatchSpawnOptions[],
+): Promise<readonly SpawnReport[]>;
 /** Directly invokes the canonical Rust wait_agent handler. */
 export function wait(agent: DefaultAgent, options: WaitOptions): Promise<WaitReport>;
 /** Directly invokes the canonical Rust list_agents handler. */

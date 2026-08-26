@@ -244,6 +244,9 @@ pub(super) async fn begin_shutdown(
             Command::Spawn { result, .. } => {
                 drop(result.send(Err(NanocodexError::AgentStopped)));
             }
+            Command::SpawnBatch { result, .. } => {
+                drop(result.send(Err(NanocodexError::AgentStopped)));
+            }
             Command::AppendDeveloperMessage { result, .. } => {
                 drop(result.send(Err(NanocodexError::AgentStopped)));
             }
@@ -303,6 +306,17 @@ pub(super) fn handle_idle_command<S>(
             let thinking = options.thinking.unwrap_or(defaults.thinking);
             let outcome =
                 spawner.spawn_clean(workspace, session_id, model, thinking, defaults.fast_mode);
+            drop(result.send(outcome));
+        }
+        Command::SpawnBatch { count, result } => {
+            let outcome = spawner.spawn_clean_many(
+                workspace,
+                session_id,
+                defaults.model,
+                defaults.thinking,
+                defaults.fast_mode,
+                count,
+            );
             drop(result.send(outcome));
         }
         Command::Steer { result, .. } => {

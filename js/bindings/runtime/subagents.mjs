@@ -4,6 +4,7 @@ import {
   listSubagents,
   sendSubagentMessage,
   spawnSubagent,
+  spawnSubagents,
   waitSubagents,
 } from "../internal.mjs";
 import {
@@ -26,6 +27,10 @@ export function create(options = {}) {
 
 export function spawn(agent, options) {
   return spawnSubagent(agent, options);
+}
+
+export function spawnMany(agent, options) {
+  return spawnSubagents(agent, options);
 }
 
 export function wait(agent, options) {

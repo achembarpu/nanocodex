@@ -170,6 +170,42 @@ async fn clean_spawn_reuses_the_root_cache_key_without_history() -> Result<()> {
 }
 
 #[tokio::test]
+async fn clean_batch_spawn_preserves_requested_order() -> Result<()> {
+    let (handles, mut received_handles) = tokio::sync::mpsc::unbounded_channel::<AgentHandle>();
+    let openai = OpenAi::builder("test-key")
+        .websocket_url("ws://127.0.0.1:1")
+        .build()?;
+    let (root, root_events) = Nanocodex::builder(openai)
+        .tools_factory(move |handle| {
+            drop(handles.send(handle));
+            Tools::builder().without_defaults().build()
+        })
+        .build()?;
+    let root_handle = received_handles
+        .recv()
+        .await
+        .ok_or_else(|| eyre!("root tool factory did not receive an agent handle"))?;
+
+    let children = root_handle.spawn_many(3).await?;
+    let child_session_ids = children
+        .iter()
+        .map(|(child, _)| child.session_id())
+        .collect::<Vec<_>>();
+    assert_eq!(child_session_ids.len(), 3);
+    assert_ne!(child_session_ids[0], child_session_ids[1]);
+    assert_ne!(child_session_ids[1], child_session_ids[2]);
+    for _ in 0..3 {
+        received_handles
+            .recv()
+            .await
+            .ok_or_else(|| eyre!("child tool factory did not receive an agent handle"))?;
+    }
+
+    drop((root, root_events, children));
+    Ok(())
+}
+
+#[tokio::test]
 async fn clean_spawn_can_override_model_and_thinking_without_mutating_parent() -> Result<()> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let endpoint = format!("ws://{}", listener.local_addr()?);

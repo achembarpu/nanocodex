@@ -49,6 +49,28 @@ impl Capacity {
         })
     }
 
+    pub(super) fn reserve_many(&self, count: usize) -> std::io::Result<Vec<TurnCapacity>> {
+        let mut state = self
+            .state
+            .lock()
+            .expect("subagent capacity lock should not be poisoned");
+        if count > state.limit.saturating_sub(state.active) {
+            return Err(std::io::Error::other(format!(
+                "sub-agent concurrency limit of {} has been reached; try delegation again later",
+                state.limit
+            )));
+        }
+        state.active += count;
+        drop(state);
+
+        Ok((0..count)
+            .map(|_| TurnCapacity {
+                state: Arc::clone(&self.state),
+                revision: self.revision.clone(),
+            })
+            .collect())
+    }
+
     pub(super) fn set_limit(&self, limit: usize) {
         self.state
             .lock()
