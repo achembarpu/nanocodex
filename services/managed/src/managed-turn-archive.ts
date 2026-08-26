@@ -159,6 +159,11 @@ export class ManagedTurnArchive {
         }
       }
       this.#storage.sql.exec(
+        `DELETE FROM managed_turn_dispatch_chunks
+         WHERE turn_id IN (${encoded.map(() => "?").join(",")})`,
+        ...encoded.map(({ receipt }) => receipt.id),
+      );
+      this.#storage.sql.exec(
         `DELETE FROM managed_turns WHERE id IN (${encoded.map(() => "?").join(",")})`,
         ...encoded.map(({ receipt }) => receipt.id),
       );

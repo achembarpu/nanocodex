@@ -1671,7 +1671,7 @@ async fn accept_idle_route(
         return Some(command);
     };
     if !execution.identifies_prompts() {
-        drop(route_result.send(Ok(PromptRouteKind::Started)));
+        drop(route_result.send(Ok(PromptRouteKind::Started { request_id: None })));
         return Some(Command::Prompt {
             key,
             prompt,
@@ -1690,7 +1690,12 @@ async fn accept_idle_route(
         .await;
     match admission {
         Ok((operation_id, AdmittedExecution::Execute)) => {
-            if route_result.send(Ok(PromptRouteKind::Started)).is_err() {
+            if route_result
+                .send(Ok(PromptRouteKind::Started {
+                    request_id: Some(operation_id.clone()),
+                }))
+                .is_err()
+            {
                 execution.release_claim(&operation_id).await;
                 return None;
             }
@@ -1707,7 +1712,12 @@ async fn accept_idle_route(
             })
         }
         Ok((operation_id, AdmittedExecution::Completed { output, snapshot })) => {
-            if route_result.send(Ok(PromptRouteKind::Started)).is_err() {
+            if route_result
+                .send(Ok(PromptRouteKind::Started {
+                    request_id: Some(operation_id.clone()),
+                }))
+                .is_err()
+            {
                 return None;
             }
             if let Err(error) = emit_replayed_terminal(
@@ -1728,8 +1738,13 @@ async fn accept_idle_route(
             })));
             None
         }
-        Ok((_, AdmittedExecution::Failed { error })) => {
-            if route_result.send(Ok(PromptRouteKind::Started)).is_err() {
+        Ok((operation_id, AdmittedExecution::Failed { error })) => {
+            if route_result
+                .send(Ok(PromptRouteKind::Started {
+                    request_id: Some(operation_id),
+                }))
+                .is_err()
+            {
                 return None;
             }
             if let Err(event_error) = emit_replayed_terminal(
@@ -1745,8 +1760,13 @@ async fn accept_idle_route(
             drop(turn_result.send(Err(NanocodexError::ReplayedExecutionFailed(error))));
             None
         }
-        Ok((_, AdmittedExecution::Cancelled)) => {
-            if route_result.send(Ok(PromptRouteKind::Started)).is_err() {
+        Ok((operation_id, AdmittedExecution::Cancelled)) => {
+            if route_result
+                .send(Ok(PromptRouteKind::Started {
+                    request_id: Some(operation_id),
+                }))
+                .is_err()
+            {
                 return None;
             }
             if let Err(error) = emit_replayed_terminal(

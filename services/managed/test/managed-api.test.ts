@@ -110,6 +110,35 @@ describe("managed agents REST and resumable SSE", () => {
     )).toMatchObject({ payload });
   }, 30_000);
 
+  it("chunks frozen dispatch input outside the managed turn row", async () => {
+    const agent = await createAgent();
+    const id = "turn-large-dispatch-input";
+    const input = `LARGE_DISPATCH ${"x".repeat(999_000)}`;
+    await submit(agent, id, input);
+    await waitForTurnState(agent, id, "completed");
+
+    const session = testEnv.NANOCODEX_SESSIONS.getByName(agent.agent_id);
+    const stored = await runInDurableObject(session, (_instance, state) => ({
+      chunks: state.storage.sql.exec<{ count: number }>(
+        "SELECT COUNT(*) AS count FROM managed_turn_dispatch_chunks WHERE turn_id = ?",
+        id,
+      ).one().count,
+      largestChunk: state.storage.sql.exec<{ bytes: number }>(
+        `SELECT COALESCE(MAX(LENGTH(CAST(input_json AS BLOB))), 0) AS bytes
+         FROM managed_turn_dispatch_chunks WHERE turn_id = ?`,
+        id,
+      ).one().bytes,
+      rawInputBytes: state.storage.sql.exec<{ bytes: number }>(
+        `SELECT LENGTH(CAST(input_json AS BLOB)) AS bytes
+         FROM managed_turns WHERE id = ?`,
+        id,
+      ).one().bytes,
+    }));
+    expect(stored.rawInputBytes).toBeGreaterThan(990_000);
+    expect(stored.chunks).toBeGreaterThan(1);
+    expect(stored.largestChunk).toBeLessThanOrEqual(256_000);
+  }, 30_000);
+
   it("attributes the private runtime session to its public managed turn", async () => {
     const agent = await createAgent();
     const turnId = "turn-runtime-attribution";
@@ -2497,8 +2526,14 @@ describe("managed agents REST and resumable SSE", () => {
     expect(await activeVoiceSession()).toBe("voice-order-first");
 
     await allowLeaseDeletion();
-    const replacement = await managedRealtime(agent, "start", {
+    const ambiguousReplacement = await managedRealtime(agent, "start", {
       operation_id: "voice-order-second-start",
+      voice_session_id: "voice-order-second",
+    });
+    expect(ambiguousReplacement.status).toBe(409);
+    expect(await ambiguousReplacement.json()).toMatchObject({ error: "operation_blocked" });
+    const replacement = await managedRealtime(agent, "start", {
+      operation_id: "voice-order-second-start-reconciled",
       voice_session_id: "voice-order-second",
     });
     expect(replacement.status).toBe(200);
@@ -2516,8 +2551,14 @@ describe("managed agents REST and resumable SSE", () => {
     expect(await activeVoiceSession()).toBe("voice-order-second");
 
     await allowLeaseDeletion();
-    const stopped = await managedRealtime(agent, "stop", {
+    const ambiguousStop = await managedRealtime(agent, "stop", {
       operation_id: "voice-order-stop",
+      voice_session_id: "voice-order-second",
+    });
+    expect(ambiguousStop.status).toBe(409);
+    expect(await ambiguousStop.json()).toMatchObject({ error: "operation_blocked" });
+    const stopped = await managedRealtime(agent, "stop", {
+      operation_id: "voice-order-stop-reconciled",
       voice_session_id: "voice-order-second",
     });
     expect(stopped.status).toBe(200);
@@ -2546,7 +2587,9 @@ describe("managed agents REST and resumable SSE", () => {
       route: "started",
       voice_session_id: "voice-delegation-session",
     });
-    expect(started.turn_id).toMatch(/^realtime:[0-9a-f]{48}$/);
+    expect(started.turn_id).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    );
 
     const second = await managedRealtime(agent, "delegate", {
       input: "Second realtime delegation steers the active work",
@@ -2588,6 +2631,82 @@ describe("managed agents REST and resumable SSE", () => {
     expect(conflict.status).toBe(409);
     expect(await conflict.json()).toMatchObject({ error: "idempotency_conflict" });
   });
+
+  it("freezes and recovers the raw input of a realtime-routed turn", async () => {
+    const agent = await createAgent();
+    const lifecycle = await managedRealtime(agent, "start", {
+      operation_id: "voice-raw-replay-start",
+      voice_session_id: "voice-raw-replay-session",
+    });
+    expect(lifecycle.status).toBe(200);
+    const input = "First routed input must remain byte-stable";
+    const delegated = await managedRealtime(agent, "delegate", {
+      input,
+      operation_id: "voice-raw-replay-delegate",
+      voice_session_id: "voice-raw-replay-session",
+    });
+    expect(delegated.status).toBe(202);
+    const routed = await delegated.json<ManagedRealtimeRouteResponse>();
+    expect(routed.route).toBe("started");
+    await within(
+      waitForTurnState(agent, routed.turn_id, "completed"),
+      "initial routed completion",
+      5_000,
+    );
+
+    const session = testEnv.NANOCODEX_SESSIONS.getByName(agent.agent_id);
+    const frozen = await runInDurableObject(session, (_instance, state) => ({
+      dispatchInputChunks: state.storage.sql.exec<{ dispatch_input_chunks: number }>(
+        "SELECT dispatch_input_chunks FROM managed_turns WHERE id = ?",
+        routed.turn_id,
+      ).one().dispatch_input_chunks,
+      dispatchInputJson: state.storage.sql.exec<{ input_json: string }>(
+        `SELECT input_json FROM managed_turn_dispatch_chunks
+         WHERE turn_id = ? ORDER BY chunk_index`,
+        routed.turn_id,
+      ).toArray().map(({ input_json }) => input_json).join(""),
+    }));
+    expect(frozen.dispatchInputChunks).toBe(1);
+    expect(frozen.dispatchInputJson).toBe(JSON.stringify(input));
+    const stopped = await managedRealtime(agent, "stop", {
+      operation_id: "voice-raw-replay-stop",
+      voice_session_id: "voice-raw-replay-session",
+    });
+    expect(stopped.status).toBe(200);
+
+    await runInDurableObject(session, (_instance, state) => {
+      state.storage.sql.exec(
+        `UPDATE managed_turns
+         SET state = 'retryable', terminal_json = NULL,
+             terminal_cursor = NULL, error = 'injected routed projection gap', retry_at = 0
+         WHERE id = ?`,
+        routed.turn_id,
+      );
+    });
+    await submit(agent, "turn-after-routed-recovery", "run after routed recovery");
+    let recoveredState: string | undefined;
+    for (let attempt = 0; attempt < 200; attempt += 1) {
+      const recovered = await runInDurableObject(session, (_instance, state) => ({
+        dispatchInputJson: state.storage.sql.exec<{ input_json: string }>(
+          `SELECT input_json FROM managed_turn_dispatch_chunks
+           WHERE turn_id = ? ORDER BY chunk_index`,
+          routed.turn_id,
+        ).toArray().map(({ input_json }) => input_json).join(""),
+        state: state.storage.sql.exec<{ state: string }>(
+          "SELECT state FROM managed_turns WHERE id = ?",
+          routed.turn_id,
+        ).one().state,
+      }));
+      recoveredState = recovered.state;
+      if (recovered.state === "completed") {
+        expect(recovered.dispatchInputJson).toBe(JSON.stringify(input));
+        break;
+      }
+      await scheduler.wait(10);
+    }
+    expect(recoveredState).toBe("completed");
+    await waitForTurnState(agent, "turn-after-routed-recovery", "completed");
+  }, 30_000);
 
   it("rejects an in-flight realtime identity conflict before joining its promise", async () => {
     const agent = await createAgent();
@@ -2658,6 +2777,51 @@ describe("managed agents REST and resumable SSE", () => {
     });
     expect(rejected.status).toBe(429);
     expect(await rejected.json()).toMatchObject({ error: "realtime_queue_full" });
+  });
+
+  it("quarantines interrupted realtime operations after eviction and admits new work", async () => {
+    const agent = await createAgent();
+    const session = testEnv.NANOCODEX_SESSIONS.getByName(agent.agent_id);
+    const pendingRequestHash = await testHash(JSON.stringify({
+      kind: "start",
+      operation_id: "operation-interrupted",
+      voice_session_id: "voice-interrupted",
+    }));
+    await runInDurableObject(session, (_instance, state) => {
+      for (let index = 0; index < 32; index += 1) {
+        state.storage.sql.exec(
+          `INSERT INTO managed_realtime_operations (
+             voice_session_id, operation_id, kind, request_hash, state,
+             response_json, created_at, updated_at
+           ) VALUES (?, ?, 'start', ?, 'pending', NULL, ?, ?)`,
+          index === 0 ? "voice-interrupted" : `voice-interrupted-${index}`,
+          index === 0 ? "operation-interrupted" : `operation-interrupted-${index}`,
+          index === 0 ? pendingRequestHash : "0".repeat(64),
+          Date.now(),
+          Date.now(),
+        );
+      }
+    });
+    await evictDurableObject(session);
+
+    const interrupted = await managedRealtime(agent, "start", {
+      operation_id: "operation-interrupted",
+      voice_session_id: "voice-interrupted",
+    });
+    expect(interrupted.status).toBe(409);
+    expect(await interrupted.json()).toMatchObject({ error: "operation_blocked" });
+
+    const advanced = await managedRealtime(agent, "start", {
+      operation_id: "operation-after-interruption",
+      voice_session_id: "voice-after-interruption",
+    });
+    expect(advanced.status).toBe(200);
+    expect(await runInDurableObject(
+      session,
+      (_instance, state) => state.storage.sql.exec<{ count: number }>(
+        "SELECT COUNT(*) AS count FROM managed_realtime_operations WHERE state = 'pending' AND blocked = 1",
+      ).one().count,
+    )).toBe(32);
   });
 
   it("fences stale managed voice sessions and never replays a pending mutation", async () => {
@@ -4794,14 +4958,88 @@ describe("managed agents REST and resumable SSE", () => {
     await evictDurableObject(session);
     expect((await SELF.fetch(`${turnsUrl}/legacy-unfinished-turn`)).status).toBe(200);
     expect(await runInDurableObject(session, (_instance, state) => ({
-      column: state.storage.sql.exec<{ name: string }>(
+      dispatchColumn: state.storage.sql.exec<{ name: string }>(
+        "PRAGMA table_info(managed_turns)",
+      ).toArray().some(({ name }) => name === "dispatch_input_chunks"),
+      dispatchTable: state.storage.sql.exec<{ count: number }>(
+        `SELECT COUNT(*) AS count FROM sqlite_master
+         WHERE type = 'table' AND name = 'managed_turn_dispatch_chunks'`,
+      ).one().count,
+      ownershipColumn: state.storage.sql.exec<{ name: string }>(
         "PRAGMA table_info(managed_turns)",
       ).toArray().some(({ name }) => name === "may_have_inner_operation"),
       marker: state.storage.sql.exec<{ may_have_inner_operation: number }>(
         "SELECT may_have_inner_operation FROM managed_turns WHERE id = 'legacy-unfinished-turn'",
       ).one().may_have_inner_operation,
-    }))).toEqual({ column: true, marker: 1 });
+    }))).toEqual({
+      dispatchColumn: true,
+      dispatchTable: 1,
+      marker: 1,
+      ownershipColumn: true,
+    });
   });
+
+  it("quarantines legacy realtime rows whose managed and durable identities diverged", async () => {
+    const agent = await createAgent();
+    const session = testEnv.NANOCODEX_SESSIONS.getByName(agent.agent_id);
+    const legacyId = `realtime:${"a".repeat(48)}`;
+    await runInDurableObject(session, (_instance, state) => {
+      state.storage.sql.exec("DROP TABLE managed_turns");
+      state.storage.sql.exec(`
+        CREATE TABLE managed_turns (
+          id TEXT PRIMARY KEY,
+          request_key TEXT,
+          request_hash TEXT NOT NULL,
+          input_json TEXT NOT NULL,
+          authorization_json TEXT NOT NULL,
+          state TEXT NOT NULL CHECK (
+            state IN ('accepted', 'cancelling', 'retryable', 'blocked', 'completed', 'cancelled', 'failed')
+          ),
+          accepted_cursor INTEGER NOT NULL,
+          terminal_json TEXT,
+          terminal_cursor INTEGER,
+          error TEXT,
+          may_have_inner_operation INTEGER NOT NULL DEFAULT 1,
+          attempt_count INTEGER NOT NULL DEFAULT 0,
+          retry_at INTEGER,
+          created_at INTEGER NOT NULL,
+          accepted_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
+        )
+      `);
+      state.storage.sql.exec(
+        `INSERT INTO managed_turns (
+           id, request_key, request_hash, input_json, authorization_json, state,
+           accepted_cursor, created_at, accepted_at, updated_at
+         ) VALUES (?, 'realtime:legacy-voice:legacy-operation', ?, ?, '{}',
+                   'accepted', 0, ?, ?, ?)`,
+        legacyId,
+        "legacy-request-hash",
+        JSON.stringify("legacy routed input"),
+        Date.now(),
+        Date.now(),
+        Date.now(),
+      );
+    });
+
+    await evictDurableObject(session);
+    expect(await runInDurableObject(session, (_instance, state) => ({
+      journalRows: state.storage.sql.exec<{ count: number }>(
+        `SELECT COUNT(*) AS count FROM sqlite_master
+         WHERE type = 'table' AND name = 'nanocodex_journals'`,
+      ).one().count,
+      row: state.storage.sql.exec<{ error: string; state: string }>(
+        "SELECT state, error FROM managed_turns WHERE id = ?",
+        legacyId,
+      ).one(),
+    }))).toEqual({
+      journalRows: 0,
+      row: {
+        error: "pre-upgrade realtime turn has an indeterminate durable operation identity",
+        state: "blocked",
+      },
+    });
+  }, 30_000);
 
   it("does not let an idempotent submission bypass a durable admission retry deadline", async () => {
     const agent = await createAgent();
@@ -4951,6 +5189,26 @@ describe("managed agents REST and resumable SSE", () => {
     ));
     const beforeReplay = BigInt((await managedHistory(agent)).latest_cursor);
     const session = testEnv.NANOCODEX_SESSIONS.getByName(agent.agent_id);
+    const frozen = await runInDurableObject(session, (_instance, state) => ({
+      completedTurns: state.storage.sql.exec<{ completed_turns: number }>(
+        "SELECT completed_turns FROM session_state WHERE singleton = 1",
+      ).one().completed_turns,
+      dispatchInputJson: state.storage.sql.exec<{ input_json: string }>(
+        `SELECT input_json FROM managed_turn_dispatch_chunks
+         WHERE turn_id = ? ORDER BY chunk_index`,
+        replayId,
+      ).toArray().map(({ input_json }) => input_json).join(""),
+      journalRevision: state.storage.sql.exec<{ revision: string }>(
+        "SELECT revision FROM nanocodex_journals",
+      ).one().revision,
+      terminalJson: state.storage.sql.exec<{ terminal_json: string }>(
+        "SELECT terminal_json FROM managed_turns WHERE id = ?",
+        replayId,
+      ).one().terminal_json,
+    }));
+    expect(frozen.completedTurns).toBe(1);
+    expect(frozen.dispatchInputJson).toContain("<account_info>");
+    expect(frozen.dispatchInputJson).not.toContain("<memory_review_checkpoint>");
     await runInDurableObject(session, (_instance, state) => {
       state.storage.sql.exec(
         `UPDATE managed_turns
@@ -4960,6 +5218,7 @@ describe("managed agents REST and resumable SSE", () => {
         replayId,
       );
     });
+    await evictDurableObject(session);
 
     const replay = await SELF.fetch(agent.events_url.replace(/\/events$/, "/turns"), {
       method: "POST",
@@ -4971,6 +5230,24 @@ describe("managed agents REST and resumable SSE", () => {
     });
     expect(replay.status).toBe(200);
     await waitForTurnState(agent, replayId, "completed");
+    expect(await runInDurableObject(session, (_instance, state) => ({
+      dispatchInputJson: state.storage.sql.exec<{ input_json: string }>(
+        `SELECT input_json FROM managed_turn_dispatch_chunks
+         WHERE turn_id = ? ORDER BY chunk_index`,
+        replayId,
+      ).toArray().map(({ input_json }) => input_json).join(""),
+      journalRevision: state.storage.sql.exec<{ revision: string }>(
+        "SELECT revision FROM nanocodex_journals",
+      ).one().revision,
+      terminalJson: state.storage.sql.exec<{ terminal_json: string }>(
+        "SELECT terminal_json FROM managed_turns WHERE id = ?",
+        replayId,
+      ).one().terminal_json,
+    }))).toEqual({
+      dispatchInputJson: frozen.dispatchInputJson,
+      journalRevision: frozen.journalRevision,
+      terminalJson: frozen.terminalJson,
+    });
     await submit(agent, "turn-after-raw-replay", "start only after replay attribution");
     await waitForTurnState(agent, "turn-after-raw-replay", "completed");
     await waitForHistoryEvent(agent, ({ cursor, event, turn_id }) => (
@@ -4982,15 +5259,72 @@ describe("managed agents REST and resumable SSE", () => {
     const replayWindow = (await managedHistory(agent)).data.filter(({ cursor }) => (
       BigInt(cursor) > beforeReplay
     ));
-    expect(replayWindow.find(({ event }) => event?.type === "run.completed")).toMatchObject({
-      turn_id: replayId,
-    });
-    expect(replayWindow.find(({ event, turn_id }) => (
+    const replayCompleted = replayWindow.filter(({ event, turn_id }) => (
+      event?.type === "run.completed" && turn_id === replayId
+    ));
+    expect(replayCompleted).toHaveLength(1);
+    const followingStarted = replayWindow.find(({ event, turn_id }) => (
       event?.type === "run.started" && turn_id === "turn-after-raw-replay"
-    ))).toBeTruthy();
-    expect(replayWindow.find(({ event, turn_id }) => (
+    ));
+    const followingCompleted = replayWindow.find(({ event, turn_id }) => (
       event?.type === "run.completed" && turn_id === "turn-after-raw-replay"
-    ))).toBeTruthy();
+    ));
+    expect(followingStarted).toBeTruthy();
+    expect(followingCompleted).toBeTruthy();
+    expect(BigInt(replayCompleted[0]!.cursor)).toBeLessThan(BigInt(followingStarted!.cursor));
+    expect(BigInt(followingStarted!.cursor)).toBeLessThan(BigInt(followingCompleted!.cursor));
+  });
+
+  it("recovers and freezes a pre-upgrade durable dispatch form", async () => {
+    const agent = await createAgent();
+    const id = "turn-legacy-dispatch-input";
+    const input = "retain the pre-upgrade dispatch input";
+    await submit(agent, id, input);
+    await waitForTurnState(agent, id, "completed");
+    const session = testEnv.NANOCODEX_SESSIONS.getByName(agent.agent_id);
+    const original = await runInDurableObject(session, (_instance, state) => (
+      state.storage.sql.exec<{ input_json: string }>(
+        `SELECT input_json FROM managed_turn_dispatch_chunks
+         WHERE turn_id = ? ORDER BY chunk_index`,
+        id,
+      ).toArray().map(({ input_json }) => input_json).join("")
+    ));
+    expect(original).not.toContain("<memory_review_checkpoint>");
+
+    await runInDurableObject(session, (_instance, state) => {
+      state.storage.transactionSync(() => {
+        state.storage.sql.exec(
+          "DELETE FROM managed_turn_dispatch_chunks WHERE turn_id = ?",
+          id,
+        );
+        state.storage.sql.exec(
+          `UPDATE managed_turns
+           SET dispatch_input_chunks = NULL, state = 'retryable', terminal_json = NULL,
+               terminal_cursor = NULL, error = 'injected pre-upgrade projection gap', retry_at = 0
+           WHERE id = ?`,
+          id,
+        );
+      });
+    });
+    await evictDurableObject(session);
+
+    const replay = await SELF.fetch(agent.events_url.replace(/\/events$/, "/turns"), {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "idempotency-key": `request-${id}`,
+      },
+      body: JSON.stringify({ id, input }),
+    });
+    expect(replay.status).toBe(200);
+    await waitForTurnState(agent, id, "completed");
+    expect(await runInDurableObject(session, (_instance, state) => (
+      state.storage.sql.exec<{ input_json: string }>(
+        `SELECT input_json FROM managed_turn_dispatch_chunks
+         WHERE turn_id = ? ORDER BY chunk_index`,
+        id,
+      ).toArray().map(({ input_json }) => input_json).join("")
+    ))).toBe(original);
   });
 
   it("persists cursors across eviction and tails strictly after the acknowledged cursor", async () => {

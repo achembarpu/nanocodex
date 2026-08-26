@@ -193,7 +193,9 @@ function turnCapacity(storage: DurableObjectStorage): ManagedCapacitySnapshot["t
   }
   return storage.sql.exec<TurnRow>(
     `SELECT COUNT(*) AS total_rows,
-            COALESCE(SUM(LENGTH(CAST(input_json AS BLOB))), 0) AS input_bytes,
+            COALESCE(SUM(LENGTH(CAST(input_json AS BLOB))), 0)
+              + (SELECT COALESCE(SUM(LENGTH(CAST(input_json AS BLOB))), 0)
+                 FROM managed_turn_dispatch_chunks) AS input_bytes,
             COALESCE(SUM(LENGTH(CAST(terminal_json AS BLOB))), 0) AS terminal_bytes,
             SUM(CASE WHEN state IN ('completed', 'cancelled', 'failed') THEN 1 ELSE 0 END)
               AS terminal_rows,

@@ -301,14 +301,16 @@ impl LifecycleBackend for LocalLifecycle {
                 return Err(shutdown.stopped_error().await);
             }
             match route_receiver.await {
-                Ok(Ok(PromptRouteKind::Started)) => Ok(BackendPromptRoute::Started(BackendTurn {
-                    request_id: None,
-                    result: Box::pin(async move {
-                        turn_receiver
-                            .await
-                            .map_err(|_| NanocodexError::TurnStopped)?
-                    }),
-                })),
+                Ok(Ok(PromptRouteKind::Started { request_id })) => {
+                    Ok(BackendPromptRoute::Started(BackendTurn {
+                        request_id,
+                        result: Box::pin(async move {
+                            turn_receiver
+                                .await
+                                .map_err(|_| NanocodexError::TurnStopped)?
+                        }),
+                    }))
+                }
                 Ok(Ok(PromptRouteKind::Steered)) => Ok(BackendPromptRoute::Steered),
                 Ok(Err(NanocodexError::AgentStopped)) | Err(_) => {
                     Err(shutdown.stopped_error().await)

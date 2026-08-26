@@ -1476,11 +1476,16 @@ async fn idle_routed_prompt_is_durably_admitted_and_checkpointed() -> Result<()>
         PromptRoute::Started(turn) => turn,
         PromptRoute::Steered => return Err(eyre!("idle durable input unexpectedly steered")),
     };
+    let accepted_request_id = turn
+        .request_id()
+        .ok_or_else(|| eyre!("routed durable turn is missing its request ID"))?
+        .to_owned();
     let result = turn.result().await?;
     assert_eq!(result.final_message(), "durably replayed");
     let request_id = result
         .request_id()
         .ok_or_else(|| eyre!("routed durable result is missing its request ID"))?;
+    assert_eq!(accepted_request_id, request_id);
     let state = journal_state.state().await?;
     assert!(
         state

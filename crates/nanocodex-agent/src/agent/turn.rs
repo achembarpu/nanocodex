@@ -438,10 +438,9 @@ impl ExecutionOperation {
     }
 }
 
-#[derive(Clone, Copy)]
 #[cfg(feature = "openai")]
 pub(super) enum PromptRouteKind {
-    Started,
+    Started { request_id: Option<String> },
     Steered,
 }
 

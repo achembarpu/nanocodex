@@ -154,6 +154,7 @@ const MAX_CLIENT_CONNECTIONS = 64;
 const MAX_REQUEST_BODY_BYTES = 1024 * 1024;
 const MAX_REALTIME_REQUEST_BYTES = 64 * 1024;
 const MAX_REALTIME_CONTEXT_BYTES = 1024 * 1024;
+const DISPATCH_INPUT_CHUNK_CODE_UNITS = 256_000;
 const MAX_PENDING_REALTIME_OPERATIONS = 32;
 const MAX_RETRY_DELAY_MS = 60_000;
 const UUID =
@@ -300,6 +301,7 @@ type ManagedTurnRow = {
   error: string | null;
   id: string;
   input_json: string;
+  dispatch_input_chunks: number | null;
   may_have_inner_operation: number;
   authorization_json: string;
   request_hash: string;
@@ -333,6 +335,7 @@ type ManagedTurnSubmission = {
 type ManagedRealtimeKind = "start" | "delegate" | "stop";
 
 type ManagedRealtimeOperationRow = {
+  blocked: number;
   kind: ManagedRealtimeKind;
   operation_id: string;
   request_hash: string;
@@ -954,6 +957,7 @@ export class NanocodexSession extends DurableComputerSession {
         request_key TEXT,
         request_hash TEXT NOT NULL,
         input_json TEXT NOT NULL,
+        dispatch_input_chunks INTEGER CHECK (dispatch_input_chunks IS NULL OR dispatch_input_chunks > 0),
         authorization_json TEXT NOT NULL,
         state TEXT NOT NULL CHECK (
           state IN ('accepted', 'cancelling', 'retryable', 'blocked', 'completed', 'cancelled', 'failed')
@@ -971,12 +975,20 @@ export class NanocodexSession extends DurableComputerSession {
       );
       CREATE UNIQUE INDEX IF NOT EXISTS managed_turns_request_key
         ON managed_turns(request_key) WHERE request_key IS NOT NULL;
+      CREATE TABLE IF NOT EXISTS managed_turn_dispatch_chunks (
+        turn_id TEXT NOT NULL,
+        chunk_index INTEGER NOT NULL,
+        input_json TEXT NOT NULL,
+        PRIMARY KEY (turn_id, chunk_index),
+        FOREIGN KEY (turn_id) REFERENCES managed_turns(id)
+      );
       CREATE TABLE IF NOT EXISTS managed_realtime_operations (
         voice_session_id TEXT NOT NULL,
         operation_id TEXT NOT NULL,
         kind TEXT NOT NULL CHECK (kind IN ('start', 'delegate', 'stop')),
         request_hash TEXT NOT NULL,
         state TEXT NOT NULL CHECK (state IN ('pending', 'completed')),
+        blocked INTEGER NOT NULL DEFAULT 0 CHECK (blocked IN (0, 1)),
         response_json TEXT,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL,
@@ -1120,6 +1132,45 @@ export class NanocodexSession extends DurableComputerSession {
         "ALTER TABLE managed_turns ADD COLUMN may_have_inner_operation INTEGER NOT NULL DEFAULT 1 CHECK (may_have_inner_operation IN (0, 1))",
       );
     }
+    if (!managedTurnColumns.has("dispatch_input_chunks")) {
+      this.ctx.storage.sql.exec(
+        "ALTER TABLE managed_turns ADD COLUMN dispatch_input_chunks INTEGER CHECK (dispatch_input_chunks IS NULL OR dispatch_input_chunks > 0)",
+      );
+    }
+    const realtimeOperationColumns = new Set(
+      this.ctx.storage.sql
+        .exec<{ name: string }>("PRAGMA table_info(managed_realtime_operations)")
+        .toArray()
+        .map((column) => column.name),
+    );
+    if (!realtimeOperationColumns.has("blocked")) {
+      this.ctx.storage.sql.exec(
+        "ALTER TABLE managed_realtime_operations ADD COLUMN blocked INTEGER NOT NULL DEFAULT 0 CHECK (blocked IN (0, 1))",
+      );
+    }
+    const migrationNow = Date.now();
+    this.ctx.storage.sql.exec(
+      `UPDATE managed_realtime_operations
+       SET blocked = 1, updated_at = ?
+       WHERE state = 'pending' AND blocked = 0`,
+      migrationNow,
+    );
+    // Older realtime routing persisted a synthetic managed ID while Rust
+    // admitted the operation under a different generated UUID. There is no
+    // retained authoritative mapping between them, so replay must fail closed
+    // instead of admitting duplicate work under the synthetic ID.
+    this.ctx.storage.sql.exec(
+      `UPDATE managed_turns
+       SET state = 'blocked', retry_at = NULL,
+           error = 'pre-upgrade realtime turn has an indeterminate durable operation identity',
+           updated_at = ?
+       WHERE request_key LIKE 'realtime:%'
+         AND length(id) = 57
+         AND substr(id, 1, 9) = 'realtime:'
+         AND substr(id, 10) NOT GLOB '*[^0-9a-f]*'
+         AND state IN ('accepted', 'cancelling', 'retryable')`,
+      migrationNow,
+    );
     this.#deleted = this.#initializationOwnership()?.state === "deleted";
     if (!managedTurnColumns.has("authorization_json")) {
       this.ctx.storage.sql.exec(
@@ -2408,6 +2459,13 @@ export class NanocodexSession extends DurableComputerSession {
     if (existing?.state === "completed" && existing.response_json !== null) {
       return JSON.parse(existing.response_json) as Result;
     }
+    if (existing?.state === "pending" && existing.blocked === 1) {
+      throw new ManagedRequestError(
+        409,
+        "operation_blocked",
+        "realtime operation outcome is ambiguous after interruption; inspect the active voice session and advance with a new operation identity",
+      );
+    }
     if (existing?.state === "pending") {
       throw new ManagedRequestError(
         409,
@@ -2416,7 +2474,7 @@ export class NanocodexSession extends DurableComputerSession {
       );
     }
     const pendingOperations = this.ctx.storage.sql.exec<{ count: number }>(
-      "SELECT COUNT(*) AS count FROM managed_realtime_operations WHERE state = 'pending'",
+      "SELECT COUNT(*) AS count FROM managed_realtime_operations WHERE state = 'pending' AND blocked = 0",
     ).one().count;
     if (pendingOperations >= MAX_PENDING_REALTIME_OPERATIONS) {
       throw new ManagedRequestError(
@@ -2429,8 +2487,9 @@ export class NanocodexSession extends DurableComputerSession {
     const now = Date.now();
     this.ctx.storage.sql.exec(
       `INSERT INTO managed_realtime_operations (
-         voice_session_id, operation_id, kind, request_hash, state, response_json, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, 'pending', NULL, ?, ?)
+         voice_session_id, operation_id, kind, request_hash, state, blocked,
+         response_json, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, 'pending', 0, NULL, ?, ?)
        ON CONFLICT (voice_session_id, operation_id) DO UPDATE SET updated_at = excluded.updated_at`,
       request.voiceSessionId,
       request.operationId,
@@ -2456,7 +2515,7 @@ export class NanocodexSession extends DurableComputerSession {
           }
           this.ctx.storage.sql.exec(
             `UPDATE managed_realtime_operations
-           SET state = 'completed', response_json = ?, updated_at = ?
+           SET state = 'completed', blocked = 0, response_json = ?, updated_at = ?
            WHERE voice_session_id = ? AND operation_id = ? AND request_hash = ?`,
             response,
             Date.now(),
@@ -2471,8 +2530,10 @@ export class NanocodexSession extends DurableComputerSession {
           return result;
         } catch (error) {
           this.ctx.storage.sql.exec(
-            `DELETE FROM managed_realtime_operations
-           WHERE voice_session_id = ? AND operation_id = ? AND state = 'pending'`,
+            `UPDATE managed_realtime_operations
+             SET blocked = 1, updated_at = ?
+             WHERE voice_session_id = ? AND operation_id = ? AND state = 'pending'`,
+            Date.now(),
             request.voiceSessionId,
             request.operationId,
           );
@@ -2517,7 +2578,6 @@ export class NanocodexSession extends DurableComputerSession {
     });
     await previous.catch(() => {});
     try {
-      const turnId = `realtime:${(await hashText(`${request.voiceSessionId}\n${request.operationId}`)).slice(0, 48)}`;
       this.#realtimeEventBuffer = [];
       let turn: Turn | undefined;
       try {
@@ -2546,7 +2606,13 @@ export class NanocodexSession extends DurableComputerSession {
         };
       }
 
+      let turnId: string;
       try {
+        const acceptedTurnId = await turn.accepted();
+        if (acceptedTurnId === undefined) {
+          throw new Error("durable routed turn did not return an operation id");
+        }
+        turnId = acceptedTurnId;
         await this.#acceptRoutedTurn(turnId, input, requestHash, request);
         this.#turns.set(turnId, turn);
         this.#turnInputs.set(turnId, input);
@@ -2714,6 +2780,10 @@ export class NanocodexSession extends DurableComputerSession {
       input,
       replayed: false,
     };
+    // CloudflareAgent.route has already admitted this exact raw input to Rust.
+    // Persist it with the managed adoption so cold recovery never derives a
+    // different account- or memory-enriched form for the routed operation.
+    const dispatchChunks = dispatchInputChunks(JSON.stringify(input));
     const firstPrompt = promptInputText(input);
     let event: DurableEvent<StreamMessage> | undefined;
     this.ctx.storage.transactionSync(() => {
@@ -2728,18 +2798,29 @@ export class NanocodexSession extends DurableComputerSession {
       this.ctx.storage.sql.exec(
         `INSERT INTO managed_turns (
            id, request_key, request_hash, input_json, authorization_json, state,
+           dispatch_input_chunks, may_have_inner_operation,
            accepted_cursor, created_at, accepted_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, 'accepted', CAST(? AS INTEGER), ?, ?, ?)`,
+         ) VALUES (?, ?, ?, ?, ?, 'accepted', ?, 1, CAST(? AS INTEGER), ?, ?, ?)`,
         id,
         requestKey,
         requestHash,
         JSON.stringify(input),
         JSON.stringify({ capabilities: [] } satisfies TurnAuthorization),
+        dispatchChunks.length,
         event.cursor,
         now,
         now,
         now,
       );
+      for (let index = 0; index < dispatchChunks.length; index += 1) {
+        this.ctx.storage.sql.exec(
+          `INSERT INTO managed_turn_dispatch_chunks (turn_id, chunk_index, input_json)
+           VALUES (?, ?, ?)`,
+          id,
+          index,
+          dispatchChunks[index],
+        );
+      }
       this.ctx.storage.sql.exec(
         `UPDATE session_state
          SET accepted_turns = accepted_turns + 1,
@@ -2996,14 +3077,27 @@ export class NanocodexSession extends DurableComputerSession {
     try {
       const agent = await this.#ensureAgent();
       if (this.#deleting || this.#agent !== agent) throw retryableError("agent became unavailable during admission");
-      const initialAccountContext = await this.#initialAccountContext();
-      const accountInput = initialAccountContext?.turn_id === row.id
-        ? withInitialAccountInfo(input, initialAccountContext.account)
-        : input;
-      const modelInput = initialAccountContext !== undefined
-        && initialAccountContext.turn_id !== row.id
-        ? appendMemoryReviewCheckpoint(accountInput)
-        : accountInput;
+      let dispatchInputJson = this.#managedDispatchInput(row);
+      let legacyDispatchCandidates: string[] | undefined;
+      if (dispatchInputJson === undefined) {
+        const initialAccountContext = await this.#initialAccountContext();
+        const accountInput = initialAccountContext?.turn_id === row.id
+          ? withInitialAccountInfo(input, initialAccountContext.account)
+          : input;
+        const plainInputJson = JSON.stringify(accountInput);
+        const checkpointInputJson = JSON.stringify(appendMemoryReviewCheckpoint(accountInput));
+        const checkpointed = initialAccountContext !== undefined
+          && initialAccountContext.turn_id !== row.id;
+        dispatchInputJson = checkpointed ? checkpointInputJson : plainInputJson;
+        if (row.may_have_inner_operation === 1) {
+          // Before dispatch freezing, ordinary turns used either enriched
+          // form. Rust's exact durable-input check selects the historical form
+          // that already owns this operation.
+          legacyDispatchCandidates = checkpointed
+            ? [checkpointInputJson, plainInputJson]
+            : [plainInputJson, checkpointInputJson];
+        }
+      }
       const dispatchable = this.#managedTurn(row.id);
       if (!dispatchable || isTerminalState(dispatchable.state) || dispatchable.state === "blocked") {
         this.#pendingTurnIds.delete(row.id);
@@ -3015,20 +3109,49 @@ export class NanocodexSession extends DurableComputerSession {
         this.#turnInputs.delete(row.id);
         return dispatchable;
       }
+      dispatchInputJson = this.#managedDispatchInput(dispatchable) ?? dispatchInputJson;
       this.#eventTurnQueue.push(row.id);
-      // This write must stay immediately before prompt dispatch with no await
-      // between them. A false positive is safely replayable; a false negative
-      // could orphan an accepted Rust journal operation.
-      this.ctx.storage.sql.exec(
-        `UPDATE managed_turns
-         SET may_have_inner_operation = 1, updated_at = ?
-         WHERE id = ? AND state IN ('accepted', 'retryable', 'cancelling')`,
-        Date.now(),
-        row.id,
-      );
-      turn = agent.turn.prompt({ id: row.id, input: modelInput });
-      this.#turns.set(row.id, turn);
-      const durableId = await turn.accepted();
+      if (legacyDispatchCandidates === undefined) {
+        // This transaction must stay immediately before prompt dispatch with
+        // no await between them. It freezes the exact Rust admission input
+        // before the operation can exist. A false positive is safely
+        // replayable; a false negative could orphan an accepted operation.
+        this.#freezeManagedDispatchInput(row.id, dispatchInputJson);
+      }
+      const candidates = legacyDispatchCandidates ?? [dispatchInputJson];
+      let durableId: string | undefined;
+      let acceptedInputJson: string | undefined;
+      for (let index = 0; index < candidates.length; index += 1) {
+        const candidate = candidates[index]!;
+        turn = agent.turn.prompt({
+          id: row.id,
+          input: JSON.parse(candidate) as PromptInput,
+        });
+        this.#turns.set(row.id, turn);
+        try {
+          durableId = await turn.accepted();
+          acceptedInputJson = candidate;
+          break;
+        } catch (error) {
+          if (legacyDispatchCandidates === undefined
+            || index === candidates.length - 1
+            || !isDurableInputConflict(error)) {
+            throw error;
+          }
+          if (this.#turns.get(row.id) === turn) this.#turns.delete(row.id);
+          turn.dispose();
+          turn = undefined;
+        }
+      }
+      if (acceptedInputJson === undefined || !turn) {
+        throw new Error(`durable admission did not settle turn ${row.id}`);
+      }
+      if (legacyDispatchCandidates !== undefined) {
+        // The operation predates this schema, so Rust is authoritative for
+        // which historical enrichment form was admitted. Freeze the exact
+        // candidate it accepted for every later replay.
+        this.#freezeManagedDispatchInput(row.id, acceptedInputJson);
+      }
       if (durableId !== undefined && durableId !== row.id) {
         throw new Error(`durable admission returned unexpected turn id ${durableId}`);
       }
@@ -3192,6 +3315,7 @@ export class NanocodexSession extends DurableComputerSession {
     this.#assertDeletionGeneration(generation);
     CloudflareAgent.destroy(this);
     this.ctx.storage.transactionSync(() => {
+      this.ctx.storage.sql.exec("DELETE FROM managed_turn_dispatch_chunks");
       this.ctx.storage.sql.exec("DELETE FROM managed_turns");
       this.ctx.storage.sql.exec("DELETE FROM history_projection_outbox");
       this.ctx.storage.sql.exec("DELETE FROM turn_history_citations");
@@ -4563,7 +4687,7 @@ export class NanocodexSession extends DurableComputerSession {
   ): ManagedRealtimeOperationRow | undefined {
     return this.ctx.storage.sql
       .exec<ManagedRealtimeOperationRow>(
-        `SELECT voice_session_id, operation_id, kind, request_hash, state, response_json
+        `SELECT voice_session_id, operation_id, kind, request_hash, state, blocked, response_json
        FROM managed_realtime_operations
        WHERE voice_session_id = ? AND operation_id = ?`,
         voiceSessionId,
@@ -4610,6 +4734,7 @@ export class NanocodexSession extends DurableComputerSession {
     return this.ctx.storage.sql
       .exec<ManagedTurnRow>(
         `SELECT id, request_key, request_hash, input_json, authorization_json, state,
+              dispatch_input_chunks,
               CAST(accepted_cursor AS TEXT) AS accepted_cursor,
               terminal_json, CAST(terminal_cursor AS TEXT) AS terminal_cursor,
               error, may_have_inner_operation, attempt_count, CAST(retry_at AS INTEGER) AS retry_at,
@@ -4617,6 +4742,57 @@ export class NanocodexSession extends DurableComputerSession {
        FROM managed_turns ${clause}`,
       ...args,
     ).toArray();
+  }
+
+  #managedDispatchInput(row: ManagedTurnRow): string | undefined {
+    if (row.dispatch_input_chunks === null) return undefined;
+    const chunks = this.ctx.storage.sql.exec<{ chunk_index: number; input_json: string }>(
+      `SELECT chunk_index, input_json
+       FROM managed_turn_dispatch_chunks
+       WHERE turn_id = ?
+       ORDER BY chunk_index`,
+      row.id,
+    ).toArray();
+    if (chunks.length !== row.dispatch_input_chunks
+      || chunks.some((chunk, index) => (
+        chunk.chunk_index !== index || typeof chunk.input_json !== "string"
+      ))) {
+      throw new Error(`managed turn ${row.id} has invalid dispatch input chunks`);
+    }
+    return chunks.map(({ input_json }) => input_json).join("");
+  }
+
+  #freezeManagedDispatchInput(id: string, inputJson: string): void {
+    const chunks = dispatchInputChunks(inputJson);
+    this.ctx.storage.transactionSync(() => {
+      const current = this.#managedTurn(id);
+      if (!current || isTerminalState(current.state) || current.state === "blocked") return;
+      const retained = this.#managedDispatchInput(current);
+      if (retained !== undefined) {
+        if (retained !== inputJson) {
+          throw new Error(`managed turn ${id} already has different dispatch input`);
+        }
+      } else {
+        for (let index = 0; index < chunks.length; index += 1) {
+          this.ctx.storage.sql.exec(
+            `INSERT INTO managed_turn_dispatch_chunks (turn_id, chunk_index, input_json)
+             VALUES (?, ?, ?)`,
+            id,
+            index,
+            chunks[index],
+          );
+        }
+      }
+      this.ctx.storage.sql.exec(
+        `UPDATE managed_turns
+         SET dispatch_input_chunks = COALESCE(dispatch_input_chunks, ?),
+             may_have_inner_operation = 1, updated_at = ?
+         WHERE id = ? AND state IN ('accepted', 'retryable', 'cancelling')`,
+        chunks.length,
+        Date.now(),
+        id,
+      );
+    });
   }
 
   #unfinishedTurnCount(): number {
@@ -4803,6 +4979,7 @@ class ManagedRequestError extends Error {
 function managedTurnRowFromReceipt(receipt: ManagedTurnReceipt): ManagedTurnRow {
   return {
     ...receipt,
+    dispatch_input_chunks: null,
     authorization_json: JSON.stringify({ capabilities: [] } satisfies TurnAuthorization),
   };
 }
@@ -4841,6 +5018,33 @@ function promptInputText(input: PromptInput): string {
 function appendMemoryReviewCheckpoint(input: PromptInput): PromptInput {
   if (typeof input === "string") return `${input}\n\n${MEMORY_REVIEW_CHECKPOINT}`;
   return [...input, { type: "text", text: MEMORY_REVIEW_CHECKPOINT }];
+}
+
+function dispatchInputChunks(input: string): string[] {
+  const chunks: string[] = [];
+  for (let offset = 0; offset < input.length;) {
+    let end = Math.min(offset + DISPATCH_INPUT_CHUNK_CODE_UNITS, input.length);
+    if (end < input.length
+      && isHighSurrogate(input.charCodeAt(end - 1))
+      && isLowSurrogate(input.charCodeAt(end))) {
+      end -= 1;
+    }
+    chunks.push(input.slice(offset, end));
+    offset = end;
+  }
+  return chunks;
+}
+
+function isDurableInputConflict(error: unknown): boolean {
+  return /durable operation `[^`]+` already has different input/.test(errorMessage(error));
+}
+
+function isHighSurrogate(codeUnit: number): boolean {
+  return codeUnit >= 0xd800 && codeUnit <= 0xdbff;
+}
+
+function isLowSurrogate(codeUnit: number): boolean {
+  return codeUnit >= 0xdc00 && codeUnit <= 0xdfff;
 }
 
 function conversationTitle(input: string): string {
