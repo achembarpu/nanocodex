@@ -5,8 +5,12 @@ use std::sync::Arc;
 use serde::Deserialize;
 use serde_json::{Value, value::RawValue};
 
-use crate::CostStatus;
-use crate::{AgentEventKind, EstimatedUsdCost, MessagePhase, ToolOutputBody, Usage};
+use super::stream::AgentEventKind;
+use crate::{
+    pricing::{CostStatus, EstimatedUsdCost},
+    responses::{MessagePhase, Usage},
+    tools::ToolOutputBody,
+};
 
 /// A normalized view of one event in the session-wide agent firehose.
 ///
@@ -17,6 +21,7 @@ use crate::{AgentEventKind, EstimatedUsdCost, MessagePhase, ToolOutputBody, Usag
 #[non_exhaustive]
 pub enum AgentEventData {
     /// One complete inbound or outbound `OpenAI` protocol frame.
+    #[cfg(feature = "client")]
     OpenAi(OpenAiEvent),
     /// Incremental or completed assistant output.
     Assistant(AssistantEvent),
@@ -41,6 +46,7 @@ pub enum AgentEventData {
 /// this firehose variant preserves every frame without forcing unknown
 /// provider additions through a JSON value tree.
 #[derive(Clone, Debug, Deserialize)]
+#[cfg(feature = "client")]
 pub struct OpenAiEvent {
     /// Whether the frame was sent or received.
     pub direction: String,

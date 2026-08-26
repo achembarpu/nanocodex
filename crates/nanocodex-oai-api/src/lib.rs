@@ -12,12 +12,11 @@ compile_error!(
 #[cfg(feature = "client")]
 pub mod auth;
 /// Complete typed lifecycle events emitted around Responses operations.
-#[cfg(feature = "client")]
+#[cfg(feature = "events")]
 pub mod events;
 #[cfg(feature = "client")]
 mod openai;
 /// Automatic model-specific USD estimates from provider token usage.
-#[cfg(feature = "client")]
 pub mod pricing;
 /// Bidirectional GPT Realtime audio sessions and typed conversation events.
 #[cfg(all(feature = "realtime", not(target_family = "wasm")))]
@@ -49,10 +48,7 @@ pub(crate) use auth::{OpenAiAuth, OpenAiAuthError, OpenAiAuthMode, OpenAiAuthSna
 #[cfg(feature = "client")]
 pub(crate) use events::stream::EventSink;
 #[cfg(feature = "client")]
-pub(crate) use events::{
-    AgentEventData, AgentEventKind, AssistantEvent, ContextEvent, EventError, ModelEvent,
-    ReasoningEvent, RunEvent, ToolEvent, TransportEvent, monotonic_now_ns,
-};
+pub(crate) use events::{AgentEventKind, EventError, monotonic_now_ns};
 #[cfg(feature = "client")]
 pub(crate) use openai::ModelConfig;
 #[cfg(feature = "client")]
@@ -71,8 +67,6 @@ pub use session::{
     CompletedResponse, Response, ResponseError, ResponseErrorKind, ResponseTurn, Session,
     SessionBuildError, SessionBuilder,
 };
-#[cfg(feature = "client")]
-pub(crate) use tools::ToolOutputBody;
 #[cfg(feature = "client")]
 pub(crate) use tower::attempt::{
     ResponsesAttempt, ResponsesAttemptFactory, ResponsesOutput, ResponsesServiceResponse,

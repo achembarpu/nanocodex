@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::UsdAmount;
-use crate::{Model, Usage};
+use crate::{Model, responses::Usage};
 
 // OpenAI publishes rates per one million tokens. All supported rates convert
 // exactly to nano-USD per token, avoiding floating point and division.
