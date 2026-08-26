@@ -334,7 +334,11 @@ test("one router-owned tool_search merges MCP and attached discovery", async () 
     structuredResult: [{
       type: "namespace",
       name: "mcp__docs__",
-      tools: [{ name: "lookup" }, { name: "not_admitted" }],
+      description: "Documentation tools.",
+      tools: [
+        contract("lookup", { output_schema: undefined }),
+        contract("not_admitted", { output_schema: undefined }),
+      ],
     }],
   });
   const router = new ToolRouter([
@@ -349,7 +353,34 @@ test("one router-owned tool_search merges MCP and attached discovery", async () 
   assert.deepEqual(found.structuredResult[0].tools.map(({ name }) => name).sort(), [
     "lookup",
   ]);
+  assert.deepEqual(found.structuredResult.map(({ type, name }) => ({ type, name })), [
+    { type: "namespace", name: "mcp__docs__" },
+    { type: "function", name: "device_lookup" },
+  ]);
+  assert.equal("output_schema" in found.structuredResult[1], false);
   assert.deepEqual(found.output.tools.map(({ name }) => name).sort(), ["device_lookup", "mcp__docs__lookup"]);
+});
+
+test("tool_search returns only provider-loadable definitions", async () => {
+  const router = new ToolRouter([
+    source("device", [{ definition: contract("accountInfo") }], {
+      kind: "attached",
+      mode: "attached-over-cloud",
+    }),
+  ]);
+  const context = { signal: new AbortController().signal };
+  const found = await router.execute("tool_search", { query: "account info" }, context);
+  assert.deepEqual(found.structuredResult, [{
+    type: "function",
+    name: "accountInfo",
+    description: "Call accountInfo.",
+    strict: true,
+    defer_loading: true,
+    parameters: { type: "object", properties: {}, additionalProperties: false },
+  }]);
+  const empty = await router.execute("tool_search", { query: "unrelated" }, context);
+  assert.deepEqual(empty.output.tools, []);
+  assert.deepEqual(empty.structuredResult, []);
 });
 
 test("createCodeRuntime adopts a branded createTools router and carries the pinned model context", async () => {

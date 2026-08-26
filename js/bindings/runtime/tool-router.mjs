@@ -384,17 +384,15 @@ async function searchSnapshot(input, context, entries, searches) {
     ...(entry.definition.output_schema !== undefined ? { output_schema: entry.definition.output_schema } : {}),
   }));
   const failures = {};
-  const structured = [];
+  const providerResults = [];
   let pending = 0;
   for (const { search } of searches) {
     const result = await search({ query, limit }, context);
     const body = result?.[TOOL_RESULT] ? result.output : result;
     if (result?.[TOOL_RESULT]) {
-      structured.push(...(Array.isArray(result.structuredResult)
+      providerResults.push(...(Array.isArray(result.structuredResult)
         ? result.structuredResult
-        : [result.structuredResult])
-        .map((value) => admittedStructuredResult(value, admittedNames))
-        .filter(Boolean));
+        : [result.structuredResult]));
     }
     const value = Array.isArray(body) ? body[0] : body;
     if (Array.isArray(value?.tools)) tools.push(...value.tools);
@@ -404,6 +402,16 @@ async function searchSnapshot(input, context, entries, searches) {
   const deduplicated = [...new Map(tools
     .filter((tool) => admittedNames.has(tool.name))
     .map((tool) => [tool.name, tool])).values()].slice(0, limit);
+  const selectedNames = new Set(deduplicated.map((tool) => tool.name));
+  const structured = providerResults
+    .map((value) => admittedStructuredResult(value, selectedNames))
+    .filter(Boolean);
+  const representedNames = new Set(structured.flatMap(structuredToolNames));
+  structured.push(...generic
+    .map(({ entry }) => entry)
+    .filter((entry) => selectedNames.has(entry.definition.name)
+      && !representedNames.has(entry.definition.name))
+    .map((entry) => providerToolDefinition(entry.definition)));
   const result = {
     tools: deduplicated,
     pending_sources: pending,
@@ -416,18 +424,55 @@ async function searchSnapshot(input, context, entries, searches) {
     [TOOL_RESULT]: true,
     metadata: null,
     output: result,
-    structuredResult: structured.length ? structured : [result],
+    structuredResult: structured,
     success: true,
     value: result,
   });
 }
 
 function admittedStructuredResult(value, admittedNames) {
-  if (!value || typeof value !== "object" || !Array.isArray(value.tools)) return value;
-  const prefix = value.type === "namespace" && typeof value.name === "string" ? value.name : "";
-  const tools = value.tools.filter((tool) => typeof tool?.name === "string"
-    && admittedNames.has(prefix ? `${prefix}${tool.name}` : tool.name));
-  return tools.length ? deepFreeze({ ...value, tools }) : undefined;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  if (value.type === "function" || value.type === "custom") {
+    return admittedNames.has(value.name) ? providerToolDefinition(value) : undefined;
+  }
+  if (value.type !== "namespace" || typeof value.name !== "string" || !Array.isArray(value.tools)) {
+    return undefined;
+  }
+  const tools = value.tools
+    .filter((tool) => typeof tool?.name === "string"
+      && admittedNames.has(`${value.name}${tool.name}`))
+    .map(providerToolDefinition);
+  return tools.length ? deepFreeze({
+    type: "namespace",
+    name: value.name,
+    description: typeof value.description === "string" ? value.description : "",
+    tools,
+  }) : undefined;
+}
+
+function structuredToolNames(value) {
+  if (value.type === "namespace") return value.tools.map((tool) => `${value.name}${tool.name}`);
+  return [value.name];
+}
+
+function providerToolDefinition(definition) {
+  if (definition.type === "custom") {
+    return deepFreeze({
+      type: "custom",
+      name: definition.name,
+      description: typeof definition.description === "string" ? definition.description : "",
+      defer_loading: true,
+      format: definition.format,
+    });
+  }
+  return deepFreeze({
+    type: "function",
+    name: definition.name,
+    description: typeof definition.description === "string" ? definition.description : "",
+    strict: definition.strict === true,
+    defer_loading: true,
+    parameters: definition.parameters,
+  });
 }
 
 function catalogSnapshot(snapshot, provider) {
