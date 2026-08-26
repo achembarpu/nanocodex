@@ -457,6 +457,27 @@ test("web-target WASM keeps remote MCP deferred behind tool_search and Code Mode
     send(socket, {
       type: "response.completed",
       response: {
+        id: "mcp-empty-search",
+        status: "completed",
+        output: [{
+          type: "tool_search_call",
+          call_id: "search-mcp-empty",
+          execution: "client",
+          arguments: { query: "what mcps do u got", limit: 8 },
+        }],
+        usage: null,
+      },
+    });
+
+    const emptySearched = await reader.next();
+    assert.equal(emptySearched.previous_response_id, "mcp-empty-search");
+    assert.equal(emptySearched.input.length, 1);
+    assert.equal(emptySearched.input[0].type, "tool_search_output");
+    assert.equal(emptySearched.input[0].call_id, "search-mcp-empty");
+    assert.deepEqual(emptySearched.input[0].tools, []);
+    send(socket, {
+      type: "response.completed",
+      response: {
         id: "mcp-exec",
         status: "completed",
         output: [{
