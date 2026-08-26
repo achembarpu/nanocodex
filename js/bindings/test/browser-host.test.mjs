@@ -233,6 +233,47 @@ test("browser host readiness installs deferred MCP without waiting for discovery
   }
 });
 
+test("browser host disposal closes MCP that resolves after disposal starts", async () => {
+  let aborted = false;
+  const host = createBrowserHost({
+    mcp: {
+      delayed: {
+        client: {
+          listTools(_params, { signal }) {
+            signal.addEventListener("abort", () => { aborted = true; }, { once: true });
+            return new Promise(() => {});
+          },
+        },
+      },
+    },
+  });
+  await host.dispose();
+  assert.equal(aborted, true);
+  assert.doesNotMatch(host.toolDefinitions(), /tool_search|mcp__delayed__/);
+});
+
+test("browser host closes MCP when provider admission collides", async () => {
+  let aborted = false;
+  const host = createBrowserHost({
+    tools: {
+      list_mcp_resources: { handler() {} },
+    },
+    mcp: {
+      colliding: {
+        client: {
+          listTools(_params, { signal }) {
+            signal.addEventListener("abort", () => { aborted = true; }, { once: true });
+            return new Promise(() => {});
+          },
+        },
+      },
+    },
+  });
+  await assert.rejects(host.ready(), /duplicate tool name/);
+  assert.equal(aborted, true);
+  await assert.rejects(host.dispose(), /duplicate tool name/);
+});
+
 test("browser host reports non-JSON tool results as failures", async () => {
   const host = createBrowserHost({
     tools: {

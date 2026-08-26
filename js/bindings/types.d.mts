@@ -417,7 +417,7 @@ export type Tool = {
   /** Releases state owned by one completed agent session. */
   releaseSession?(sessionId: string): void;
   /** Releases all retained tool state when the owning host shuts down. */
-  dispose?(): void;
+  dispose?(): void | Promise<void>;
 };
 
 export type ToolMap = Record<string, Tool>;

@@ -7,6 +7,7 @@ import packageMetadata from "../package.json" with { type: "json" };
 import { createCodeRuntime } from "../runtime/code-runtime.mjs";
 import { createMcpRuntime } from "../runtime/mcp-runtime.mjs";
 import {
+  settleCleanup,
   toolRouterBrand,
   toolRouterRuntime,
   toolRuntimeLifecycle,
@@ -53,7 +54,21 @@ export function createNodeHost(options = {}) {
   const mcp = options.mcpServers
     ? createMcpRuntime(options.mcpServers, { clientName: "nanocodex-node" })
     : undefined;
-  if (mcp) mcp.then((provider) => code.addProvider(provider, { id: "mcp", kind: "mcp" }), () => {});
+  let disposal;
+  const mcpInstalled = mcp?.then(async (provider) => {
+    if (disposal) {
+      await provider.close();
+      return;
+    }
+    try { code.addProvider(provider, { id: "mcp", kind: "mcp" }); }
+    catch (error) {
+      try { await provider.close(); }
+      catch (cleanupError) {
+        throw new AggregateError([error, cleanupError], "MCP installation and cleanup failed");
+      }
+      throw error;
+    }
+  });
   const onEvent = options.onEvent || (() => {});
   const connectTimeoutMs = options.connectTimeoutMs ?? 30_000;
   const sendTimeoutMs = options.sendTimeoutMs ?? 30_000;
@@ -62,7 +77,6 @@ export function createNodeHost(options = {}) {
   const maxFrameBytes = options.maxFrameBytes ?? DEFAULT_MAX_FRAME_BYTES;
   let nextHandle = 1;
   let references = 0;
-  let disposal;
 
   function connect(endpoint, apiKey, sessionId, metadata = {}) {
     if (options.mpp) return connectMpp(endpoint);
@@ -276,21 +290,21 @@ export function createNodeHost(options = {}) {
     connection.queuedBytes += bytes;
   }
 
-  async function dispose() {
+  function dispose() {
     if (disposal) return disposal;
-    disposal = (async () => {
-      for (const handle of [...connections.keys()]) close(handle);
-      code.reset();
-      await mcp?.then((provider) => provider.close(), () => {});
-      await toolsLifecycle?.close();
-      options.onDispose?.();
-    })();
+    disposal = Promise.resolve().then(() => settleCleanup([
+      ...[...connections.keys()].map((handle) => () => close(handle)),
+      () => code.reset(),
+      () => mcpInstalled,
+      () => toolsLifecycle?.close(),
+      () => options.onDispose?.(),
+    ], "Nanocodex host disposal failed", disposal));
     return disposal;
   }
 
   toolsLifecycle?.claim();
   return Object.freeze({
-    ready: async () => { await Promise.all([filesystem, mcp]); },
+    ready: async () => { await Promise.all([filesystem, mcpInstalled]); },
     retain() {
       if (disposal) throw new Error("Nanocodex host is already disposed");
       references += 1;

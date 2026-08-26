@@ -27,6 +27,7 @@ export class ToolRouter {
   #admissions = new AdmissionGate();
   #execution = new AsyncReadWriteGate();
   #permits = new AsyncSemaphore(MAX_CONCURRENT_CALLS);
+  #reset;
 
   constructor(sources = []) {
     for (const source of sources) this.addSource(source);
@@ -150,13 +151,30 @@ export class ToolRouter {
     for (const tool of this.#allTools()) tool.releaseSession?.(sessionId);
   }
 
-  reset() {
-    for (const tool of this.#allTools()) tool.dispose?.();
+  reset(reentrantPromise) {
+    if (this.#reset) return this.#reset;
+    const sources = [...this.#sources.values()];
+    let tools = [];
+    let enumerationError;
+    try { tools = [...this.#allTools(sources.filter((source) => typeof source.close !== "function"))]; }
+    catch (error) { enumerationError = error; }
+    this.#sources.clear();
+    const actions = [
+      ...(enumerationError ? [() => { throw enumerationError; }] : []),
+      ...tools.map((tool) => () => tool.dispose?.()),
+      ...sources.filter((source) => typeof source.close === "function").map((source) => () => source.close()),
+    ];
+    this.#reset = Promise.resolve().then(() => settleCleanup(
+      actions,
+      "tool router cleanup failed",
+      reentrantPromise,
+    ));
+    return this.#reset;
   }
 
-  #allTools() {
+  #allTools(sources = this.#sources.values()) {
     const tools = new Set();
-    for (const source of this.#sources.values()) {
+    for (const source of sources) {
       for (const definition of source.definitions()) {
         const name = definition.type === "tool_search" ? "tool_search" : definition.name;
         const tool = source.resolve(name);
@@ -261,6 +279,23 @@ export class ToolRouter {
 
 export function createToolRouter(sources) { return new ToolRouter(sources); }
 
+/** Runs every cleanup action before reporting failures in their original order. */
+export async function settleCleanup(actions, message, reentrantPromise) {
+  const pending = actions.map((action) => {
+    try {
+      const result = action();
+      return result === reentrantPromise ? Promise.resolve() : Promise.resolve(result);
+    }
+    catch (error) { return Promise.reject(error); }
+  });
+  const settled = await Promise.allSettled(pending);
+  const errors = settled
+    .filter((result) => result.status === "rejected")
+    .map((result) => result.reason);
+  if (errors.length === 1) throw errors[0];
+  if (errors.length > 1) throw new AggregateError(errors, message);
+}
+
 export function toolMapSource(id, configuration = {}, options = {}) {
   const tools = new Map();
   const definitions = [];
@@ -313,7 +348,7 @@ export function providerSource(id, provider, options = {}) {
     search: typeof provider.search === "function" ? (input, context) => provider.search(input, context) : undefined,
     deferred: options.deferred ?? provider.deferred,
     settled: () => provider.settled?.(),
-    close: () => provider.close?.(),
+    ...(typeof provider.close === "function" ? { close: () => provider.close() } : {}),
   });
 }
 

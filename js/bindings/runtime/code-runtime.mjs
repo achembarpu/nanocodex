@@ -12,7 +12,8 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
   const activeExecutions = new Set();
   const codeObservations = new Map();
   const stores = new Map();
-  const router = toolConfiguration?.[toolRouterBrand]
+  const ownsRouter = !toolConfiguration?.[toolRouterBrand];
+  const router = !ownsRouter
     ? (toolConfiguration[toolRouterRuntime] ?? toolConfiguration)
     : new ToolRouter();
   let nextSourceId = 1;
@@ -349,8 +350,8 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
       execution.controller.abort(new Error(CANCELLATION_MESSAGE));
     }
     stores.clear();
-    router.reset();
     closeCodeObservations();
+    return ownsRouter ? router.reset() : undefined;
   }
 
   return Object.freeze({

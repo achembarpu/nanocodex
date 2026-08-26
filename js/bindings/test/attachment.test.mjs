@@ -398,6 +398,23 @@ test("Tools.close owns live and not-yet-connected attachment connectors", async 
   assert.equal(live.socket.closed.code, 1000);
 });
 
+test("connector close does not wait for provider settlement", async () => {
+  let settle;
+  const settled = new Promise((resolve) => { settle = resolve; });
+  const router = new ToolRouter([providerSource("pending", {
+    definitions: () => [],
+    resolve: () => undefined,
+    settled: () => settled,
+  })]);
+  const owner = { [toolRouterBrand]: true, [toolRouterRuntime]: router };
+  const connector = createAttachment(owner, reverseTarget(async () => new FakeSocket()), { reconnect: false });
+  const connecting = connector.connect();
+  await connector.close();
+  settle();
+  await assert.rejects(connecting, /connector is closed/);
+  await router.reset();
+});
+
 test("detach exposes one repeatable boundary that waits for WebSocket retirement", async () => {
   const socket = new DelayedCloseSocket();
   const fixture = await readyAttachment({ handler: () => "ok" }, socket);

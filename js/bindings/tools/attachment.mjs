@@ -54,9 +54,10 @@ export function createAttachment(owner, target, options = {}) {
         resolveClosed();
         return closed;
       }
+      resolveClosed();
       void starting.then(
         (created) => created.public.close(),
-        () => resolveClosed(),
+        () => {},
       );
       return closed;
     },

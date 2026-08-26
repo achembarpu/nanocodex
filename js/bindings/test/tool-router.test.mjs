@@ -30,6 +30,95 @@ test("createTools rejects ambiguous and orphaned configuration", async () => {
   await assert.rejects(createTools({ tools: null }), /tools must be/);
 });
 
+test("createTools transfers caller tool ownership only after successful construction", async () => {
+  let disposals = 0;
+  const workspace = createWorkspace({ backend: {
+    async list() { return []; },
+    async readFile() { return new Uint8Array(); },
+    async writeFile() {},
+    async remove() {},
+    async mkdir() {},
+  } });
+  await assert.rejects(
+    createTools({
+      tools: {
+        read_file: {
+          handler() {},
+          dispose() { disposals++; },
+        },
+      },
+      workspace,
+    }),
+    /duplicate tool name/,
+  );
+  assert.equal(disposals, 0);
+});
+
+test("Tools close joins one exhaustive synchronous and asynchronous cleanup", async () => {
+  const events = [];
+  const tools = await createTools({ tools: {
+    first: {
+      handler() {},
+      dispose() { events.push("first"); throw new Error("first cleanup failed"); },
+    },
+    second: {
+      handler() {},
+      async dispose() { events.push("second"); throw new Error("second cleanup failed"); },
+    },
+    third: {
+      handler() {},
+      dispose() { events.push("third"); },
+    },
+  } });
+  const first = tools.close();
+  const second = tools.close();
+  assert.equal(first, second);
+  await assert.rejects(first, (error) => {
+    assert(error instanceof AggregateError);
+    assert.deepEqual(error.errors.map(({ message }) => message), [
+      "first cleanup failed",
+      "second cleanup failed",
+    ]);
+    return true;
+  });
+  assert.deepEqual(events, ["first", "second", "third"]);
+  assert.equal(tools.close(), first);
+});
+
+test("a cleanup callback may reenter its owning Tools close", async () => {
+  let tools;
+  tools = await createTools({ tools: { reentrant: {
+    handler() {},
+    dispose: () => tools.close(),
+  } } });
+  const closing = tools.close();
+  assert.equal(tools.close(), closing);
+  await closing;
+});
+
+test("a closeable provider owns its tools' cleanup exactly once", async () => {
+  const events = [];
+  const tool = {
+    name: "echo",
+    handler: () => "ok",
+    parallelSafe: true,
+    dispose: () => events.push("tool.dispose"),
+  };
+  const provider = {
+    definitions: () => [contract("echo")],
+    resolve: () => tool,
+    close() {
+      events.push("provider.close");
+      tool.dispose();
+    },
+  };
+  const router = new ToolRouter([providerSource("provider", provider)]);
+  const first = router.reset();
+  assert.equal(router.reset(), first);
+  await first;
+  assert.deepEqual(events, ["provider.close", "tool.dispose"]);
+});
+
 test("a forged structural Tools object is rejected instead of becoming a tool map", () => {
   const standalone = { defaultSubagents: false };
   assert.deepEqual(resolveTools(undefined, standalone), { tools: {}, subagents: undefined });
@@ -264,13 +353,24 @@ test("one router-owned tool_search merges MCP and attached discovery", async () 
 });
 
 test("createCodeRuntime adopts a branded createTools router and carries the pinned model context", async () => {
-  const tools = await createTools({ tools: { echo: { handler: ({ value }, context) => `${value}:${context.model}` } } });
+  let disposals = 0;
+  const tools = await createTools({ tools: { echo: {
+    handler: ({ value }, context) => `${value}:${context.model}`,
+    dispose: () => { disposals++; },
+  } } });
   const runtime = createCodeRuntime(tools);
   assert.equal(
     JSON.parse(await runtime.executeTool("echo", '{"value":"adopted"}', "session:1", "call:1", "gpt-5.6-luna")).output,
     "adopted:gpt-5.6-luna",
   );
+  await runtime.reset();
+  assert.equal(disposals, 0);
+  assert.equal(
+    JSON.parse(await runtime.executeTool("echo", '{"value":"still-owned"}', "session:1", "call:2", "gpt-5.6-luna")).output,
+    "still-owned:gpt-5.6-luna",
+  );
   await tools.close();
+  assert.equal(disposals, 1);
 });
 
 test("an empty attached source reserves byte-stable model tool_search before later catalogs", () => {

@@ -108,6 +108,75 @@ test("Node host owns one Tools lifecycle and validates Tools-owned MCP policy", 
   await workspaceTools.close();
 });
 
+test("Node host disposal completes later owners after a tool cleanup failure", async () => {
+  const events = [];
+  const tools = await createTools({ tools: { failing: {
+    handler() {},
+    async dispose() {
+      events.push("tool");
+      throw new Error("tool cleanup failed");
+    },
+  } } });
+  const host = createNodeHost({ tools, onDispose: () => events.push("host") });
+  await assert.rejects(host.dispose(), /tool cleanup failed/);
+  assert.deepEqual(events.sort(), ["host", "tool"]);
+});
+
+test("Node host disposal is one promise across reentrant onDispose", async () => {
+  let host;
+  host = createNodeHost({ onDispose: () => host.dispose() });
+  const closing = host.dispose();
+  assert.equal(host.dispose(), closing);
+  await closing;
+});
+
+test("Node host disposal closes MCP that resolves after disposal starts", async () => {
+  let aborted = false;
+  const host = createNodeHost({
+    mcpServers: {
+      delayed: {
+        client: {
+          listTools(_params, { signal }) {
+            signal.addEventListener("abort", () => { aborted = true; }, { once: true });
+            return new Promise(() => {});
+          },
+        },
+      },
+    },
+  });
+  await host.dispose();
+  assert.equal(aborted, true);
+  assert.doesNotMatch(host.toolDefinitions(), /tool_search|mcp__delayed__/);
+});
+
+test("Node host closes MCP when provider admission collides", async () => {
+  let aborted = false;
+  const host = createNodeHost({
+    tools: {
+      list_mcp_resources: { handler() {} },
+    },
+    mcpServers: {
+      colliding: {
+        client: {
+          listTools(_params, { signal }) {
+            signal.addEventListener("abort", () => { aborted = true; }, { once: true });
+            return new Promise(() => {});
+          },
+        },
+      },
+    },
+  });
+  await assert.rejects(host.ready(), /duplicate tool name/);
+  assert.equal(aborted, true);
+  await assert.rejects(host.dispose(), /duplicate tool name/);
+});
+
+test("Node host readiness preserves MCP construction failures", async () => {
+  const host = createNodeHost({ mcpServers: {} });
+  await assert.rejects(host.ready());
+  await assert.rejects(host.dispose());
+});
+
 test("Node host loads and calls deferred Mercator MCP tools", async () => {
   const calls = [];
   const host = createNodeHost({

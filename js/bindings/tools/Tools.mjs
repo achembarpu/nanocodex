@@ -2,6 +2,7 @@ import { resolveTools } from "../runtime/tool-configuration.mjs";
 import { tools as workspaceTools } from "../runtime/workspace.mjs";
 import {
   providerSource,
+  settleCleanup,
   ToolRouter,
   toolMapSource,
   toolRouterBrand,
@@ -23,24 +24,37 @@ export async function createTools(options = {}) {
   );
   if (resolved.subagents) throw new TypeError("createTools does not accept agent-relative extensions");
   const custom = resolved.tools;
-  if (Object.keys(custom).length) {
-    router.addSource(toolMapSource("custom", custom, { kind: "cloud" }));
-  }
-  if (options.workspace !== undefined) {
-    router.addSource(toolMapSource(
-      "workspace",
-      workspaceTools(options.workspace, options.workspaceOptions),
-      { kind: "cloud" },
-    ));
-  }
   let mcp;
-  const attachments = new Set();
-  if (options.mcp !== undefined && options.mcp !== false) {
-    const { createMcpRuntime } = await import("../runtime/mcp-runtime.mjs");
-    mcp = await createMcpRuntime(options.mcp, options.mcpOptions);
-    router.addSource(providerSource("mcp", mcp, { kind: "mcp" }));
+  try {
+    if (Object.keys(custom).length) {
+      router.addSource(toolMapSource("custom", custom, { kind: "cloud" }));
+    }
+    if (options.workspace !== undefined) {
+      router.addSource(toolMapSource(
+        "workspace",
+        workspaceTools(options.workspace, options.workspaceOptions),
+        { kind: "cloud" },
+      ));
+    }
+    if (options.mcp !== undefined && options.mcp !== false) {
+      const { createMcpRuntime } = await import("../runtime/mcp-runtime.mjs");
+      mcp = await createMcpRuntime(options.mcp, options.mcpOptions);
+      router.addSource(providerSource("mcp", mcp, { kind: "mcp" }));
+    }
+  } catch (error) {
+    if (!mcp) throw error;
+    try { await mcp.close(); }
+    catch (cleanupError) {
+      throw new AggregateError(
+        [error, cleanupError],
+        "Tools construction and MCP cleanup failed",
+      );
+    }
+    throw error;
   }
+  const attachments = new Set();
   let closed = false;
+  let closing;
   let claimed = false;
   let owner;
   const lifecycle = Object.freeze({
@@ -62,18 +76,37 @@ export async function createTools(options = {}) {
       if (closed) throw new Error("Tools runtime is closed");
       const attachment = createAttachment(owner, target, attachmentOptions);
       attachments.add(attachment);
+      void attachment.closed().then(() => attachments.delete(attachment));
       return attachment;
     },
-    async close() {
-      if (closed) return;
+    close() {
+      if (closing) return closing;
       closed = true;
-      await Promise.all([...attachments].map((attachment) => attachment.close()));
+      const ownedAttachments = [...attachments];
       attachments.clear();
-      router.reset();
-      await mcp?.close();
+      closing = Promise.resolve().then(async () => {
+        const errors = [];
+        try {
+          await settleCleanup(
+            ownedAttachments.map((attachment) => () => attachment.close()),
+            "tool attachment cleanup failed",
+          );
+        } catch (error) {
+          errors.push(...cleanupErrors(error));
+        }
+        try { await router.reset(closing); }
+        catch (error) { errors.push(...cleanupErrors(error)); }
+        if (errors.length === 1) throw errors[0];
+        if (errors.length > 1) throw new AggregateError(errors, "Tools cleanup failed");
+      });
+      return closing;
     },
   };
   return Object.freeze(owner);
+}
+
+function cleanupErrors(error) {
+  return error instanceof AggregateError ? error.errors : [error];
 }
 
 function validateOptions(options) {
@@ -91,4 +124,3 @@ function validateOptions(options) {
     throw new TypeError("mcpOptions requires mcp");
   }
 }
-

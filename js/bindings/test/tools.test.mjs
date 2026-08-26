@@ -181,7 +181,7 @@ test("view_image rejects unsupported and oversized workspace files", async () =>
   );
 });
 
-test("the code runtime forwards session and host lifecycle to stateful tools", () => {
+test("the code runtime forwards session and host lifecycle to stateful tools", async () => {
   const released = [];
   let disposals = 0;
   const runtime = createCodeRuntime({
@@ -193,7 +193,7 @@ test("the code runtime forwards session and host lifecycle to stateful tools", (
     },
   });
   runtime.releaseSession("session-1");
-  runtime.reset();
+  await runtime.reset();
   assert.deepEqual(released, ["session-1"]);
   assert.equal(disposals, 1);
 });

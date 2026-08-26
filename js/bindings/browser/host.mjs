@@ -93,8 +93,16 @@ export function createBrowserHost(options = {}) {
     ? import("../runtime/mcp-runtime.mjs").then(({ createMcpRuntime }) =>
         createMcpRuntime(options.mcp, { clientName: "nanocodex-browser" }))
     : undefined;
-  const mcpInstalled = mcp?.then((provider) => {
-    code.addProvider(provider, { id: "mcp", kind: "mcp" });
+  const mcpInstalled = mcp?.then(async (provider) => {
+    if (disposal) return provider.close();
+    try { code.addProvider(provider, { id: "mcp", kind: "mcp" }); }
+    catch (error) {
+      try { await provider.close(); }
+      catch (cleanupError) {
+        throw new AggregateError([error, cleanupError], "MCP installation and cleanup failed");
+      }
+      throw error;
+    }
     return provider;
   });
   const onEvent = options.onEvent || (() => {});
@@ -381,7 +389,7 @@ export function createBrowserHost(options = {}) {
       for (const handle of [...connections.keys()]) cleanup(() => close(handle));
       cleanup(() => closePreconnected(disposalError));
       cleanup(() => code.reset());
-      cleanup(() => mcpInstalled?.then((provider) => provider.close(), () => {}));
+      cleanup(() => mcpInstalled?.then(() => {}));
       cleanup(() => toolsLifecycle?.close());
       cleanup(() => options.onDispose?.());
       const settled = await Promise.allSettled(cleanups);
