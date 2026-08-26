@@ -207,7 +207,10 @@ async fn empty_recipe_has_one_exact_empty_catalog() {
     let catalog = prepared_catalog(&tools).await.unwrap();
     assert!(catalog.entries().is_empty());
     assert_eq!(catalog.canonical_json(), "[]");
-    assert_eq!(catalog.digest().len(), 64);
+    assert_eq!(
+        catalog.digest(),
+        "bda87d90bae5170ebc6b8abcbe486dc8e98b74a129e14c8bb797b0684099e3f0"
+    );
 }
 
 #[tokio::test]

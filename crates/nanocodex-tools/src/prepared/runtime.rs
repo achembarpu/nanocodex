@@ -10,7 +10,7 @@ use tracing::Instrument;
 use super::PreparedTools;
 use crate::{Tool, ToolContext, ToolDefinition, ToolInput, ToolOutput};
 
-const CATALOG_DIGEST_DOMAIN: &[u8] = b"nanocodex-tools-catalog-v1\0";
+const CATALOG_DIGEST_DOMAIN: &[u8] = b"nanocodex-hosted-tools-catalog-v1\0";
 const HOSTED_TOOL_CALL_TIMEOUT_MS: u64 = 120_000;
 
 enum PreparedToolHandler {
