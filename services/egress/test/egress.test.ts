@@ -851,8 +851,16 @@ describe("per-user credential broker", () => {
             },
           };
         } finally {
-          brokerEnv.ENVIRONMENT = originalEnvironment;
-          brokerEnv.LOCAL_CHATGPT_BOOTSTRAP = originalBootstrap;
+          if (originalEnvironment === undefined) {
+            delete brokerEnv.ENVIRONMENT;
+          } else {
+            brokerEnv.ENVIRONMENT = originalEnvironment;
+          }
+          if (originalBootstrap === undefined) {
+            delete brokerEnv.LOCAL_CHATGPT_BOOTSTRAP;
+          } else {
+            brokerEnv.LOCAL_CHATGPT_BOOTSTRAP = originalBootstrap;
+          }
         }
       },
     );
@@ -894,7 +902,11 @@ describe("per-user credential broker", () => {
             },
           };
         } finally {
-          brokerEnv.LOCAL_CHATGPT_BOOTSTRAP = originalBootstrap;
+          if (originalBootstrap === undefined) {
+            delete brokerEnv.LOCAL_CHATGPT_BOOTSTRAP;
+          } else {
+            brokerEnv.LOCAL_CHATGPT_BOOTSTRAP = originalBootstrap;
+          }
         }
       },
     );

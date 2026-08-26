@@ -2971,6 +2971,7 @@ struct ToolResultPayload {
     started_after_ns: Option<u64>,
     #[serde(default)]
     result: Option<Value>,
+    #[serde(default)]
     structured_result: Value,
 }
 
