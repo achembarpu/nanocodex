@@ -482,7 +482,7 @@ impl AgentEventPublisher {
     /// # Errors
     ///
     /// Returns an error when the protocol version or request identity differs,
-    /// or when the sequence does not advance this channel.
+    /// or when the sequence is not exactly the next expected value.
     pub fn publish(&self, event: AgentEvent) -> Result<(), EventError> {
         self.publish_timed(TimedAgentEvent {
             event,
@@ -534,7 +534,7 @@ impl AgentEventPublisher {
                 actual: Arc::clone(&event.request_id),
             });
         }
-        if event.seq < state.next_seq {
+        if event.seq != state.next_seq {
             return Err(EventError::SequenceMismatch {
                 expected: state.next_seq,
                 actual: event.seq,
@@ -617,6 +617,14 @@ impl EventSink {
     ) -> Result<u64, EventError> {
         {
             let mut state = lock_unpoisoned(&self.publisher.state);
+            let mut turn_terminal = self
+                .publisher
+                .turn_terminal
+                .as_ref()
+                .map(|terminal| lock_unpoisoned(terminal));
+            if turn_terminal.as_deref().is_some_and(|terminal| *terminal) {
+                return Err(EventError::TurnAlreadyTerminal);
+            }
             if state.session.is_closed()
                 && self
                     .publisher
@@ -626,6 +634,11 @@ impl EventSink {
             {
                 let seq = state.next_seq;
                 state.next_seq = seq.checked_add(1).ok_or(EventError::SequenceExhausted)?;
+                if kind.is_terminal()
+                    && let Some(terminal) = turn_terminal.as_deref_mut()
+                {
+                    *terminal = true;
+                }
                 return Ok(seq);
             }
         }
@@ -876,18 +889,47 @@ mod tests {
             publisher.publish(event(AGENT_EVENT_PROTOCOL_VERSION, "request-2", 1)),
             Err(EventError::RequestIdMismatch { .. })
         ));
-        publisher
-            .publish(event(AGENT_EVENT_PROTOCOL_VERSION, "request-1", 2))
-            .unwrap();
         assert!(matches!(
             publisher.publish(event(AGENT_EVENT_PROTOCOL_VERSION, "request-1", 2)),
             Err(EventError::SequenceMismatch {
-                expected: 3,
+                expected: 1,
                 actual: 2
             })
         ));
-        assert_eq!(events.receiver.try_recv().unwrap().event.seq, 2);
+        publisher
+            .publish(event(AGENT_EVENT_PROTOCOL_VERSION, "request-1", 1))
+            .unwrap();
+        assert_eq!(events.receiver.try_recv().unwrap().event.seq, 1);
         assert!(events.receiver.try_recv().is_err());
+    }
+
+    #[cfg(feature = "client")]
+    #[test]
+    fn closed_turn_stream_still_records_and_enforces_its_terminal_event() {
+        struct MustNotSerialize;
+
+        impl Serialize for MustNotSerialize {
+            fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: Serializer,
+            {
+                panic!("closed event streams must not serialize payloads")
+            }
+        }
+
+        let (events, session) = EventSink::channel("request-1".to_owned());
+        let (turn_events, turn) = events.mirrored_channel();
+        drop(session);
+        drop(turn);
+
+        turn_events
+            .emit(AgentEventKind::RunCompleted, MustNotSerialize)
+            .unwrap();
+        assert!(turn_events.publisher.turn_is_terminal());
+        assert!(matches!(
+            turn_events.emit(AgentEventKind::AssistantDelta, MustNotSerialize),
+            Err(EventError::TurnAlreadyTerminal)
+        ));
     }
 
     #[cfg(feature = "client")]
