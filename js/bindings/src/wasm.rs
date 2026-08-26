@@ -978,7 +978,12 @@ impl WasmSubagents {
     ) -> Self {
         let sessions = Rc::new(RefCell::new(HashMap::new()));
         let event_forwarders = Rc::new(Cell::new(0));
-        forward_subagent_updates(updates, Rc::clone(&sessions), Rc::clone(&event_forwarders));
+        forward_subagent_updates(
+            updates,
+            Rc::clone(&sessions),
+            Rc::clone(&event_forwarders),
+            Arc::clone(&parents),
+        );
         Self {
             registry,
             control,
@@ -998,6 +1003,13 @@ impl WasmSubagents {
         })
     }
 
+    fn remove_parent(&self, session_id: &str) -> bool {
+        match self.parents.lock() {
+            Ok(mut parents) => parents.remove(session_id).is_some(),
+            Err(poisoned) => poisoned.into_inner().remove(session_id).is_some(),
+        }
+    }
+
     fn set_event_forwarding(&self, enabled: bool) {
         let active = self.event_forwarders.get();
         self.event_forwarders.set(if enabled {
@@ -1010,14 +1022,7 @@ impl WasmSubagents {
     async fn close_all(&self, root_session_id: &str) -> std::io::Result<()> {
         self.control.close_all(root_session_id).await?;
         release_subagent_scope(&self.sessions, root_session_id);
-        match self.parents.lock() {
-            Ok(mut parents) => {
-                parents.remove(root_session_id);
-            }
-            Err(poisoned) => {
-                poisoned.into_inner().remove(root_session_id);
-            }
-        }
+        self.remove_parent(root_session_id);
         Ok(())
     }
 }
@@ -1572,6 +1577,15 @@ impl Drop for WasmNanocodex {
             && let Some(subagents) = &self.subagents
         {
             subagents.set_event_forwarding(false);
+        }
+        if let Some(subagents) = &self.subagents
+            && subagents.remove_parent(self.inner.session_id())
+        {
+            let subagents = subagents.clone();
+            let session_id = self.inner.session_id().to_owned();
+            spawn_local(async move {
+                drop(subagents.close_all(&session_id).await);
+            });
         }
     }
 }
@@ -2589,6 +2603,7 @@ fn forward_subagent_updates(
     mut updates: tokio::sync::mpsc::UnboundedReceiver<ScopedAgentUpdate>,
     sessions: Rc<RefCell<HashMap<(String, SubagentId), String>>>,
     event_forwarders: Rc<Cell<usize>>,
+    parents: Arc<Mutex<HashMap<String, AgentHandle>>>,
 ) {
     spawn_local(async move {
         while let Some(scoped) = updates.recv().await {
@@ -2617,6 +2632,14 @@ fn forward_subagent_updates(
                 } => {
                     let session_id = sessions.borrow_mut().remove(&(root_session_id, id));
                     if let Some(session_id) = session_id {
+                        match parents.lock() {
+                            Ok(mut parents) => {
+                                parents.remove(&session_id);
+                            }
+                            Err(poisoned) => {
+                                poisoned.into_inner().remove(&session_id);
+                            }
+                        }
                         host_release_subagent_session(&session_id);
                     }
                 }

@@ -615,8 +615,23 @@ test("Node host invokes canonical subagent handlers without a root model turn", 
     const siblingChildClosed = new Promise((resolve) => siblingChildSocket.once("close", resolve));
     await Subagents.close(nonRoot, siblingStarted.agent_id);
     await bounded(siblingChildClosed, "sibling child socket close");
-    await nonRoot.session.shutdown();
-    assert.equal(server.connections, 2);
+
+    const disposedChildConnection = new Promise((resolve) =>
+      server.websocketServer.once("connection", resolve));
+    const disposedChildStarted = Subagents.spawn(nonRoot, {
+      role: "dispose-cleanup-child",
+      task: "Remain active until the owning agent is disposed.",
+      outputSchema: true,
+    });
+    const disposedChildSocket = await bounded(disposedChildConnection, "disposed child connection");
+    const disposedChildReader = messageReader(disposedChildSocket);
+    await bounded(disposedChildReader.next(), "disposed child warmup");
+    sendWarmup(disposedChildSocket, "disposed-child-warmup");
+    await bounded(disposedChildStarted, "disposed child spawn");
+    const disposedChildClosed = new Promise((resolve) => disposedChildSocket.once("close", resolve));
+    nonRoot.dispose();
+    await bounded(disposedChildClosed, "disposed root child close");
+    assert.equal(server.connections, 3);
   } finally {
     await agent.session.shutdown();
     await server.close();
