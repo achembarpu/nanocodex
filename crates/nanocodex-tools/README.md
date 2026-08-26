@@ -57,8 +57,12 @@ changes model-visible exposure, not registration or dispatch behavior.
 `tool_with_exposure` can override one registered tool with `DirectOnly`,
 `CodeModeOnly`, `DirectAndCodeMode`, or `Hidden` while preserving the global
 default for the rest. Host-owned `exec`, `wait`, and `tool_search` names cannot
-be replaced, and the first tool registered for a normalized JavaScript name
-wins the nested Code Mode surface.
+be replaced, and colliding normalized JavaScript names are rejected when the
+recipe is built.
+
+`ToolsBuilder::add` composes the same recipe from either a fixed [`Tool`] or a
+[`WorkspaceTools`] value. A workspace source selects canonical local workspace
+tools rooted at its directory; adding a second workspace source is rejected.
 Namespaced Code Mode names such as `image_gen__imagegen` remain available to
 `exec`; normal Code Mode exposes the Codex-compatible `image_gen.imagegen`
 Responses namespace and routes its namespaced call to the same handler.

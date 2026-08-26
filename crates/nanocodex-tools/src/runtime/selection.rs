@@ -94,6 +94,40 @@ pub trait DynamicToolProvider: Send + Sync {
     ) -> Option<ToolOutput>;
 }
 
+mod source_sealed {
+    pub trait Sealed {}
+
+    impl<T: crate::Tool + 'static> Sealed for T {}
+
+    impl Sealed for crate::WorkspaceTools {}
+}
+
+/// One tool source accepted by [`ToolsBuilder::add`].
+///
+/// The sealed implementations cover fixed [`Tool`] values and canonical
+/// [`crate::WorkspaceTools`] recipes.
+pub trait ToolSource: source_sealed::Sealed + Sized {
+    #[doc(hidden)]
+    fn install(self, builder: ToolsBuilder) -> ToolsBuilder;
+}
+
+impl<T: Tool + 'static> ToolSource for T {
+    fn install(self, builder: ToolsBuilder) -> ToolsBuilder {
+        builder.tool(self)
+    }
+}
+
+impl ToolSource for crate::WorkspaceTools {
+    fn install(self, mut builder: ToolsBuilder) -> ToolsBuilder {
+        if builder.tools.workspace_tools.is_some() {
+            builder.duplicate_workspace = true;
+        }
+        builder.tools.workspace = true;
+        builder.tools.workspace_tools = Some(self);
+        builder
+    }
+}
+
 /// Declarative selection of the built-in tools installed for an agent.
 #[derive(Clone)]
 pub struct Tools {
@@ -108,6 +142,7 @@ pub struct Tools {
     pub(super) registered: Vec<RegisteredTool>,
     pub(super) provider_direct: Vec<Arc<dyn Tool>>,
     pub(super) providers: Vec<Arc<dyn DynamicToolProvider>>,
+    pub(crate) workspace_tools: Option<crate::WorkspaceTools>,
     pub(super) deferred_tools_guidance_enabled: bool,
 }
 
@@ -125,6 +160,7 @@ impl Default for Tools {
             registered: Vec::new(),
             provider_direct: Vec::new(),
             providers: Vec::new(),
+            workspace_tools: None,
             deferred_tools_guidance_enabled: false,
         }
     }
@@ -163,6 +199,10 @@ impl fmt::Debug for Tools {
                     .collect::<Vec<_>>(),
             )
             .field("provider_count", &self.providers.len())
+            .field(
+                "workspace_tools_configured",
+                &self.workspace_tools.is_some(),
+            )
             .finish()
     }
 }
@@ -178,7 +218,10 @@ impl Tools {
     /// registered tools, and dynamic providers.
     #[must_use]
     pub const fn into_builder(self) -> ToolsBuilder {
-        ToolsBuilder { tools: self }
+        ToolsBuilder {
+            tools: self,
+            duplicate_workspace: false,
+        }
     }
 
     /// Returns the model-visible tool exposure policy.
@@ -242,6 +285,7 @@ impl Tools {
 #[derive(Default)]
 pub struct ToolsBuilder {
     tools: Tools,
+    duplicate_workspace: bool,
 }
 
 /// Invalid declarative tool selection.
@@ -263,6 +307,10 @@ pub enum ToolsBuildError {
     #[error("tool name `{0}` is registered more than once")]
     DuplicateName(Box<str>),
 
+    /// A singleton tool source was added more than once.
+    #[error("tool source `{0}` is configured more than once")]
+    DuplicateSource(&'static str),
+
     /// A custom tool collides with an enabled built-in tool.
     #[error("tool name `{0}` conflicts with an enabled built-in tool")]
     BuiltInName(Box<str>),
@@ -270,9 +318,36 @@ pub enum ToolsBuildError {
     /// A custom tool collides with a host-owned routing tool.
     #[error("tool name `{0}` is reserved by the Code Mode host")]
     ReservedName(Box<str>),
+
+    /// A model-visible name does not match the Responses tool-name grammar.
+    #[error(
+        "invalid public tool name `{0}`; expected 1-128 ASCII bytes beginning with an alphanumeric and containing only alphanumerics, `.`, `_`, `:`, or `-`"
+    )]
+    InvalidPublicName(Box<str>),
+
+    /// Two Code Mode tools map to the same JavaScript identifier.
+    #[error("tool names `{first}` and `{second}` both normalize to Code Mode name `{normalized}`")]
+    NormalizedNameCollision {
+        /// First public tool name using the normalized identifier.
+        first: Box<str>,
+        /// Later public tool name using the normalized identifier.
+        second: Box<str>,
+        /// Conflicting JavaScript identifier.
+        normalized: Box<str>,
+    },
 }
 
 impl ToolsBuilder {
+    /// Adds one fixed tool or canonical workspace recipe.
+    #[must_use]
+    #[allow(
+        clippy::should_implement_trait,
+        reason = "builder composition is intentionally named add and is not arithmetic"
+    )]
+    pub fn add<S: ToolSource>(self, source: S) -> Self {
+        source.install(self)
+    }
+
     /// Selects whether registered tools are also exposed directly to the model.
     ///
     /// The default is [`ToolExposure::CodeModeOnly`]. This changes only the
@@ -295,8 +370,11 @@ impl ToolsBuilder {
 
     /// Enables or disables the standard command, patch, plan, and file tools.
     #[must_use]
-    pub const fn workspace(mut self, enabled: bool) -> Self {
+    pub fn workspace(mut self, enabled: bool) -> Self {
         self.tools.workspace = enabled;
+        if !enabled {
+            self.tools.workspace_tools = None;
+        }
         self
     }
 
@@ -392,6 +470,9 @@ impl ToolsBuilder {
     ///
     /// Returns an error for empty, duplicate, or enabled built-in tool names.
     pub fn build(mut self) -> Result<Tools, ToolsBuildError> {
+        if self.duplicate_workspace {
+            return Err(ToolsBuildError::DuplicateSource("workspace"));
+        }
         self.refresh_provider_direct();
         if self
             .tools
@@ -415,12 +496,16 @@ impl ToolsBuilder {
                 .len()
                 .saturating_add(self.tools.provider_direct.len()),
         );
+        let mut code_mode_names = HashMap::new();
+        if self.tools.exposure.is_available_in_code_mode() {
+            for name in enabled_built_in_names(&self.tools) {
+                insert_code_mode_name(&mut code_mode_names, name)?;
+            }
+        }
         for tool in &self.tools.registered {
             let definition = tool.handler.definition();
             let name = definition.name();
-            if name.is_empty() {
-                return Err(ToolsBuildError::EmptyName);
-            }
+            validate_registered_tool_name(name)?;
             if host_owned_name(name)
                 || (name == "tool_search"
                     && !matches!(definition, ToolDefinition::ToolSearch { .. }))
@@ -433,13 +518,19 @@ impl ToolsBuilder {
             if !names.insert(name.to_owned()) {
                 return Err(ToolsBuildError::DuplicateName(name.into()));
             }
+            if tool
+                .exposure
+                .unwrap_or_else(|| self.tools.exposure())
+                .is_available_in_code_mode()
+                && !matches!(definition, ToolDefinition::ToolSearch { .. })
+            {
+                insert_code_mode_name(&mut code_mode_names, name)?;
+            }
         }
         for tool in &self.tools.provider_direct {
             let definition = tool.definition();
             let name = definition.name();
-            if name.is_empty() {
-                return Err(ToolsBuildError::EmptyName);
-            }
+            validate_registered_tool_name(name)?;
             if host_owned_name(name) {
                 return Err(ToolsBuildError::ReservedName(name.into()));
             }
@@ -448,6 +539,32 @@ impl ToolsBuilder {
             }
             if !names.insert(name.to_owned()) {
                 return Err(ToolsBuildError::DuplicateName(name.into()));
+            }
+            if self.tools.exposure.is_available_in_code_mode()
+                && !matches!(definition, ToolDefinition::ToolSearch { .. })
+            {
+                insert_code_mode_name(&mut code_mode_names, name)?;
+            }
+        }
+        for provider in &self.tools.providers {
+            for definition in provider.available_definitions() {
+                let name = definition.name();
+                validate_registered_tool_name(name)?;
+                if host_owned_name(name)
+                    || (name == "tool_search"
+                        && !matches!(definition, ToolDefinition::ToolSearch { .. }))
+                {
+                    return Err(ToolsBuildError::ReservedName(name.into()));
+                }
+                if built_in_name(&self.tools, name) {
+                    return Err(ToolsBuildError::BuiltInName(name.into()));
+                }
+                if !names.insert(name.to_owned()) {
+                    return Err(ToolsBuildError::DuplicateName(name.into()));
+                }
+                if !matches!(definition, ToolDefinition::ToolSearch { .. }) {
+                    insert_code_mode_name(&mut code_mode_names, name)?;
+                }
             }
         }
         Ok(self.tools)
@@ -469,6 +586,106 @@ impl ToolsBuilder {
     }
 }
 
+#[allow(
+    dead_code,
+    reason = "the next catalog source consumes this validation seam"
+)]
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum PublicToolCatalogError {
+    #[error("invalid public tool name `{0}`")]
+    InvalidName(Box<str>),
+    #[error(
+        "public tool names `{first}` and `{second}` both normalize to Code Mode name `{normalized}`"
+    )]
+    NormalizedNameCollision {
+        first: Box<str>,
+        second: Box<str>,
+        normalized: Box<str>,
+    },
+}
+
+#[allow(
+    dead_code,
+    reason = "the next catalog source consumes this validation seam"
+)]
+pub(crate) fn validate_public_tool_catalog_names<'a>(
+    names: impl IntoIterator<Item = &'a str>,
+) -> Result<(), PublicToolCatalogError> {
+    let mut normalized_names = HashMap::new();
+    for name in names {
+        if !valid_public_tool_name(name) {
+            return Err(PublicToolCatalogError::InvalidName(name.into()));
+        }
+        let normalized = normalize_public_tool_name(name);
+        if let Some(first) = normalized_names.insert(normalized.clone(), name.to_owned()) {
+            return Err(PublicToolCatalogError::NormalizedNameCollision {
+                first: first.into(),
+                second: name.into(),
+                normalized: normalized.into(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_registered_tool_name(name: &str) -> Result<(), ToolsBuildError> {
+    if name.is_empty() {
+        return Err(ToolsBuildError::EmptyName);
+    }
+    if !valid_public_tool_name_grammar(name) {
+        return Err(ToolsBuildError::InvalidPublicName(name.into()));
+    }
+    Ok(())
+}
+
+#[allow(
+    dead_code,
+    reason = "the next catalog source consumes this validation seam"
+)]
+fn valid_public_tool_name(name: &str) -> bool {
+    valid_public_tool_name_grammar(name) && !matches!(name, "exec" | "tool_search" | "wait")
+}
+
+fn valid_public_tool_name_grammar(name: &str) -> bool {
+    name.len() <= 128
+        && name
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_alphanumeric)
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-'))
+}
+
+fn insert_code_mode_name(
+    names: &mut HashMap<String, String>,
+    name: &str,
+) -> Result<(), ToolsBuildError> {
+    let normalized = normalize_public_tool_name(name);
+    if let Some(first) = names.insert(normalized.clone(), name.to_owned()) {
+        return Err(ToolsBuildError::NormalizedNameCollision {
+            first: first.into(),
+            second: name.into(),
+            normalized: normalized.into(),
+        });
+    }
+    Ok(())
+}
+
+pub(crate) fn normalize_public_tool_name(name: &str) -> String {
+    name.chars()
+        .enumerate()
+        .map(|(index, character)| {
+            let valid = if index == 0 {
+                character == '_' || character == '$' || character.is_ascii_alphabetic()
+            } else {
+                character == '_' || character == '$' || character.is_ascii_alphanumeric()
+            };
+            if valid { character } else { '_' }
+        })
+        .collect()
+}
+
 fn built_in_name(tools: &Tools, name: &str) -> bool {
     (tools.workspace
         && matches!(
@@ -477,4 +694,18 @@ fn built_in_name(tools: &Tools, name: &str) -> bool {
         ))
         || (tools.web_search && name == "web__run")
         || (tools.image_generation && name == "image_gen__imagegen")
+}
+
+fn enabled_built_in_names(tools: &Tools) -> impl Iterator<Item = &'static str> {
+    [
+        (tools.workspace, "exec_command"),
+        (tools.workspace, "write_stdin"),
+        (tools.workspace, "update_plan"),
+        (tools.workspace, "apply_patch"),
+        (tools.workspace, "view_image"),
+        (tools.web_search, "web__run"),
+        (tools.image_generation, "image_gen__imagegen"),
+    ]
+    .into_iter()
+    .filter_map(|(enabled, name)| enabled.then_some(name))
 }

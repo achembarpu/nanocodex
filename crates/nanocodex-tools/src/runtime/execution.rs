@@ -51,6 +51,11 @@ impl ToolRuntime {
         image_generation: Option<ImageGenerationConfig>,
         tools: &Tools,
     ) -> Self {
+        let workspace = tools
+            .workspace_tools
+            .as_ref()
+            .map(|workspace| workspace.root.clone())
+            .unwrap_or_else(|| workspace.into());
         Self::new_inner(
             workspace,
             web_search,

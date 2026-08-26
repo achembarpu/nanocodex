@@ -9,8 +9,9 @@ use std::{
 use nanocodex_oai_api::{auth::OpenAiAuth, responses::JsonSchema, tools::ToolDefinition};
 use serde::Deserialize;
 use serde_json::{Value, json, value::to_raw_value};
+use tempfile::tempdir;
 
-use crate::{ToolOutputBody, ToolResult, contract::DEFAULT_TOOL_OUTPUT_TOKENS};
+use crate::{ToolOutputBody, ToolResult, WorkspaceTools, contract::DEFAULT_TOOL_OUTPUT_TOKENS};
 
 use super::{
     DynamicToolProvider, ImageGenerationConfig, Tool, ToolContext, ToolExposure, ToolInput,
@@ -414,8 +415,8 @@ fn runtime_construction_starts_providers_and_preserves_eager_prewarm() {
     assert_eq!(prewarmed_state.startups.load(Ordering::Relaxed), 1);
 }
 
-#[tokio::test]
-async fn parallel_safety_follows_direct_then_provider_dispatch_precedence() {
+#[test]
+fn fixed_and_provider_catalog_collisions_are_rejected() {
     let direct_collision = Tools::builder()
         .without_defaults()
         .tool(CollisionTool)
@@ -424,26 +425,11 @@ async fn parallel_safety_follows_direct_then_provider_dispatch_precedence() {
             parallel_safe: true,
             output: "provider",
         })
-        .build()
-        .unwrap();
-    let direct_collision = ToolRuntime::new_with_tools(".", None, None, &direct_collision);
-    assert!(direct_collision.contains("collision"));
-    assert!(!direct_collision.supports_parallel_tool_calls("collision"));
-    let context = ToolContext::new(
-        "test-model",
-        "test-session",
-        "test-call",
-        &[],
-        DEFAULT_TOOL_OUTPUT_TOKENS,
-    );
-    let direct = direct_collision
-        .execute_tool(
-            "collision",
-            ToolInput::Function(to_raw_value(&json!({})).unwrap()),
-            context,
-        )
-        .await;
-    assert_eq!(direct.structured_result(), json!("direct"));
+        .build();
+    assert!(matches!(
+        direct_collision,
+        Err(super::ToolsBuildError::DuplicateName(name)) if name.as_ref() == "collision"
+    ));
 
     let provider_collision = Tools::builder()
         .without_defaults()
@@ -457,19 +443,12 @@ async fn parallel_safety_follows_direct_then_provider_dispatch_precedence() {
             parallel_safe: true,
             output: "second",
         })
-        .build()
-        .unwrap();
-    let provider_collision = ToolRuntime::new_with_tools(".", None, None, &provider_collision);
-    assert!(provider_collision.contains("provider_collision"));
-    assert!(!provider_collision.supports_parallel_tool_calls("provider_collision"));
-    let provider = provider_collision
-        .execute_tool(
-            "provider_collision",
-            ToolInput::Function(to_raw_value(&json!({})).unwrap()),
-            context,
-        )
-        .await;
-    assert_eq!(provider.structured_result(), json!("first"));
+        .build();
+    assert!(matches!(
+        provider_collision,
+        Err(super::ToolsBuildError::DuplicateName(name))
+            if name.as_ref() == "provider_collision"
+    ));
 }
 
 #[test]
@@ -489,6 +468,70 @@ fn without_defaults_allows_replacing_a_standard_workspace_tool() {
         .collect::<Vec<_>>();
 
     assert_eq!(names, ["exec_command"]);
+}
+
+#[test]
+fn workspace_tool_source_is_a_singleton() {
+    let result = Tools::builder()
+        .without_defaults()
+        .add(WorkspaceTools::new("first"))
+        .add(WorkspaceTools::new("second"))
+        .build();
+
+    assert!(matches!(
+        result,
+        Err(super::ToolsBuildError::DuplicateSource("workspace"))
+    ));
+}
+
+#[tokio::test]
+async fn workspace_tool_source_overrides_the_runtime_root_and_retains_shell_sessions() {
+    let source_workspace = tempdir().unwrap();
+    let ignored_workspace = tempdir().unwrap();
+    let tools = Tools::builder()
+        .without_defaults()
+        .add(WorkspaceTools::new(source_workspace.path()))
+        .build()
+        .unwrap();
+    let runtime = ToolRuntime::new_with_tools(ignored_workspace.path(), None, None, &tools);
+
+    assert_eq!(
+        runtime.working_directory(),
+        source_workspace.path().to_str().unwrap()
+    );
+
+    let output = runtime
+        .execute_tool(
+            "exec_command",
+            ToolInput::Function(
+                to_raw_value(&json!({
+                    "cmd": "pwd; sleep 30",
+                    "yield_time_ms": 250,
+                }))
+                .unwrap(),
+            ),
+            ToolContext::new(
+                "test-model",
+                "test-session",
+                "test-call",
+                &[],
+                DEFAULT_TOOL_OUTPUT_TOKENS,
+            ),
+        )
+        .await;
+    assert!(output.success);
+    assert!(
+        output.structured_result()["output"]
+            .as_str()
+            .is_some_and(|stdout| stdout.contains(source_workspace.path().to_str().unwrap()))
+    );
+    let session_id = output
+        .process_trace()
+        .and_then(|process| process.session_id)
+        .expect("long-running workspace command should retain a shell session");
+    assert!(runtime.has_shell_session(session_id).await);
+
+    runtime.control().cancel().await;
 }
 
 #[test]
@@ -620,9 +663,9 @@ fn per_tool_exposure_selects_direct_and_code_mode_surfaces_independently() {
     );
 }
 
-#[tokio::test]
-async fn first_registered_normalized_code_mode_name_wins_consistently() {
-    let tools = Tools::builder()
+#[test]
+fn registered_normalized_code_mode_name_collisions_are_rejected() {
+    let result = Tools::builder()
         .without_defaults()
         .exposure(ToolExposure::DirectAndCodeMode)
         .tool(NamedTool {
@@ -633,28 +676,69 @@ async fn first_registered_normalized_code_mode_name_wins_consistently() {
             name: "normalized_alias",
             output: "second",
         })
-        .build()
-        .unwrap();
-    let runtime = ToolRuntime::new_with_tools(".", None, None, &tools);
+        .build();
 
-    assert_eq!(
-        runtime.model_contract("test-session").1,
-        [("normalized_alias".to_owned(), "normalized-alias".to_owned())]
+    assert!(matches!(
+        result,
+        Err(super::ToolsBuildError::NormalizedNameCollision {
+            first,
+            second,
+            normalized,
+        }) if first.as_ref() == "normalized-alias"
+            && second.as_ref() == "normalized_alias"
+            && normalized.as_ref() == "normalized_alias"
+    ));
+}
+
+#[test]
+fn registered_public_tool_names_match_the_wire_grammar() {
+    let too_long: &'static str = Box::leak("a".repeat(129).into_boxed_str());
+    for name in ["_starts_wrong", "has space", "unicodé", too_long] {
+        let result = Tools::builder()
+            .without_defaults()
+            .tool(NamedTool {
+                name,
+                output: "invalid",
+            })
+            .build();
+        assert!(matches!(
+            result,
+            Err(super::ToolsBuildError::InvalidPublicName(candidate)) if candidate.as_ref() == name
+        ));
+    }
+
+    assert!(
+        Tools::builder()
+            .without_defaults()
+            .tool(NamedTool {
+                name: "a.valid:tool-name_1",
+                output: "valid",
+            })
+            .build()
+            .is_ok()
     );
-    let execution = runtime
-        .execute_code(
-            "text(await tools.normalized_alias({}));",
-            ToolContext::new(
-                "test-model",
-                "test-session",
-                "test-call",
-                &[],
-                DEFAULT_TOOL_OUTPUT_TOKENS,
-            ),
-        )
-        .await;
-    assert!(execution.success);
-    assert_eq!(execution.nested_calls[0].name, "normalized-alias");
+}
+
+#[test]
+fn published_catalog_names_reject_invalid_and_normalized_collisions() {
+    assert!(matches!(
+        super::selection::validate_public_tool_catalog_names(["invalid name"]),
+        Err(super::selection::PublicToolCatalogError::InvalidName(name))
+            if name.as_ref() == "invalid name"
+    ));
+    assert!(matches!(
+        super::selection::validate_public_tool_catalog_names([
+            "mcp__docs__read-file",
+            "mcp__docs__read_file",
+        ]),
+        Err(super::selection::PublicToolCatalogError::NormalizedNameCollision {
+            first,
+            second,
+            normalized,
+        }) if first.as_ref() == "mcp__docs__read-file"
+            && second.as_ref() == "mcp__docs__read_file"
+            && normalized.as_ref() == "mcp__docs__read_file"
+    ));
 }
 
 #[test]

@@ -28,6 +28,28 @@ pub struct WorkspaceToolRuntime {
     sessions: Arc<ShellSessions>,
 }
 
+/// Canonical local workspace tools rooted at one directory.
+#[derive(Clone, Debug)]
+pub struct WorkspaceTools {
+    pub(crate) root: PathBuf,
+}
+
+impl WorkspaceTools {
+    /// Creates canonical workspace tools rooted at `workspace`.
+    #[must_use]
+    pub fn new(workspace: impl Into<PathBuf>) -> Self {
+        Self {
+            root: workspace.into(),
+        }
+    }
+
+    /// Returns the configured workspace root.
+    #[must_use]
+    pub fn root(&self) -> &std::path::Path {
+        &self.root
+    }
+}
+
 impl WorkspaceToolRuntime {
     /// Creates a runtime rooted at `workspace` with a sanitized guest process
     /// environment.

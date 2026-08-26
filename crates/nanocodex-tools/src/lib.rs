@@ -51,6 +51,8 @@ mod web_search;
 #[cfg(all(not(target_family = "wasm"), feature = "workspace-runtime"))]
 #[cfg_attr(docsrs, doc(cfg(not(target_family = "wasm"))))]
 pub mod workspace_runtime;
+#[cfg(all(not(target_family = "wasm"), feature = "workspace-runtime"))]
+pub use workspace_runtime::WorkspaceTools;
 
 /// Model-visible tool definitions, inputs, outputs, and execution contracts.
 pub mod contract {
@@ -113,7 +115,7 @@ pub use runtime::Tools;
 pub(crate) use runtime::{DynamicToolProvider, ImageGenerationConfig, WebSearchConfig};
 #[cfg(all(not(target_family = "wasm"), feature = "native"))]
 #[cfg_attr(docsrs, doc(cfg(not(target_family = "wasm"))))]
-pub use runtime::{ToolsBuildError, ToolsBuilder};
+pub use runtime::{ToolSource, ToolsBuildError, ToolsBuilder};
 #[cfg(all(not(target_family = "wasm"), feature = "native"))]
 #[cfg_attr(docsrs, doc(cfg(all(not(target_family = "wasm"), feature = "native"))))]
 pub use shell::ambient_sensitive_environment;
