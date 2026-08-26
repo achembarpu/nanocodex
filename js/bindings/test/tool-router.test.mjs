@@ -390,7 +390,10 @@ test("search providers own namespaced ranking and duplicate loading", async () =
     type: "namespace",
     name: "mcp__fixture__",
     description: "Fixture tools.",
-    tools: [contract("ranked", { output_schema: undefined })],
+    tools: [
+      contract("ranked", { output_schema: undefined }),
+      contract("ranked", { output_schema: undefined }),
+    ],
   };
   const router = new ToolRouter([source("mcp", [
     { definition: { type: "tool_search", execution: "client", description: "Search MCP.", parameters: {} } },

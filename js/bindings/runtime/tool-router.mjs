@@ -446,10 +446,17 @@ function admittedStructuredResult(value, admittedNames, representedNames) {
   if (value.type !== "namespace" || typeof value.name !== "string" || !Array.isArray(value.tools)) {
     return undefined;
   }
+  const namespaceNames = new Set();
   const tools = value.tools
-    .filter((tool) => typeof tool?.name === "string"
-      && admittedNames.has(`${value.name}${tool.name}`)
-      && !representedNames.has(`${value.name}${tool.name}`))
+    .filter((tool) => {
+      if (typeof tool?.name !== "string") return false;
+      const name = `${value.name}${tool.name}`;
+      if (!admittedNames.has(name) || representedNames.has(name) || namespaceNames.has(name)) {
+        return false;
+      }
+      namespaceNames.add(name);
+      return true;
+    })
     .map(providerToolDefinition);
   return tools.length ? deepFreeze({
     type: "namespace",
