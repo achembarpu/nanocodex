@@ -472,7 +472,7 @@ function terminalResult(turnId, terminal, cursor) {
       turnId,
       finalMessage: terminal.final_message,
       usage: terminal.usage ?? null,
-      citations: managedCitations(terminal.citations ?? []),
+      citations: managedCitations(terminal.citations),
       ...(typeof terminal.usage_error === "string" ? { usageError: terminal.usage_error } : {}),
       ...(typeof cursor === "string" ? { cursor } : {}),
     });
