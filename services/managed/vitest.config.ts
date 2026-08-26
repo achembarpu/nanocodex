@@ -6,19 +6,28 @@ const subjects = new Set();
 const connectors = new Map();
 let heldSubject;
 let holdSubjectBind = false;
+let heldSubjectBinds = 0;
 let heldSubjectUnbinds = 0;
+let heldSubjectResponses = 0;
 export default {
   async fetch(request) {
     const url = new URL(request.url);
     if (url.pathname === "/test/hold-subject-bind") {
       if (request.method === "POST") {
         heldSubject = undefined;
+        heldSubjectBinds = 0;
         heldSubjectUnbinds = 0;
+        heldSubjectResponses = 0;
         holdSubjectBind = true;
         return new Response(null, { status: 204 });
       }
       if (request.method === "GET") {
-        return Response.json({ subject: heldSubject, unbinds: heldSubjectUnbinds });
+        return Response.json({
+          binds: heldSubjectBinds,
+          responses: heldSubjectResponses,
+          subject: heldSubject,
+          unbinds: heldSubjectUnbinds,
+        });
       }
       if (request.method === "DELETE") {
         holdSubjectBind = false;
@@ -74,6 +83,7 @@ export default {
         return Response.json({ error: "invalid_request" }, { status: 400 });
       }
       if (holdSubjectBind) {
+        heldSubjectBinds += 1;
         heldSubject = subjectRoute[1];
         while (holdSubjectBind) await scheduler.wait(1);
       }
@@ -216,6 +226,7 @@ export default {
       return Response.json({ error: "test_broker_denied" }, { status: 403 });
     }
     const pair = new WebSocketPair();
+    if (subject === heldSubject) heldSubjectResponses += 1;
     const [client, server] = Object.values(pair);
     server.accept();
     let pendingResponse;

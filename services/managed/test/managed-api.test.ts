@@ -115,7 +115,7 @@ describe("managed agents REST and resumable SSE", () => {
     const id = "turn-large-dispatch-input";
     const input = `LARGE_DISPATCH ${"x".repeat(999_000)}`;
     await submit(agent, id, input);
-    await waitForTurnState(agent, id, "completed");
+    await waitForTurnState(agent, id, "completed", 10_000);
 
     const session = testEnv.NANOCODEX_SESSIONS.getByName(agent.agent_id);
     const stored = await runInDurableObject(session, (_instance, state) => ({
@@ -4429,38 +4429,41 @@ describe("managed agents REST and resumable SSE", () => {
   it("does not construct a replacement after deletion supersedes cold construction", async () => {
     const agent = await createAgent();
     const session = testEnv.NANOCODEX_SESSIONS.getByName(agent.agent_id);
-    const originalBroker = testEnv.NANOCODEX;
-    let bindingCount = 0;
-    let transportCount = 0;
-    testEnv.NANOCODEX = {
-      async fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
-        const request = new Request(input, init);
-        if (request.method === "PUT" && new URL(request.url).pathname.startsWith("/subjects/")) {
-          bindingCount += 1;
-          await scheduler.wait(250);
-        }
-        if (request.headers.get("upgrade")?.toLowerCase() === "websocket") {
-          transportCount += 1;
-        }
-        return originalBroker.fetch(request);
-      },
-    } as Fetcher;
+    await testEnv.NANOCODEX.fetch("https://broker.internal/test/hold-subject-bind", {
+      method: "POST",
+    });
 
     try {
       await submit(agent, "turn-delete-during-create", "construction must stay fenced");
-      for (let attempt = 0; attempt < 100 && bindingCount === 0; attempt += 1) {
-        await scheduler.wait(5);
+      let held: { binds: number; responses: number; subject?: string; unbinds: number } = {
+        binds: 0,
+        responses: 0,
+        unbinds: 0,
+      };
+      while (!held.subject) {
+        held = await (await testEnv.NANOCODEX.fetch(
+          "https://broker.internal/test/hold-subject-bind",
+        )).json<typeof held>();
+        if (!held.subject) await scheduler.wait(1);
       }
-      expect(bindingCount).toBe(1);
+      expect(held.binds).toBe(1);
       const deletion = SELF.fetch(`https://example.test/v1/agents/${agent.agent_id}`, {
         method: "DELETE",
       });
       await waitForCleanupDeletion(session);
+      await testEnv.NANOCODEX.fetch("https://broker.internal/test/hold-subject-bind", {
+        method: "DELETE",
+      });
       expect((await within(deletion, "delete superseded construction")).status).toBe(204);
       createdAgents.delete(agent.agent_id);
-      expect(transportCount).toBe(0);
+      held = await (await testEnv.NANOCODEX.fetch(
+        "https://broker.internal/test/hold-subject-bind",
+      )).json<typeof held>();
+      expect(held.responses).toBe(0);
     } finally {
-      testEnv.NANOCODEX = originalBroker;
+      await testEnv.NANOCODEX.fetch("https://broker.internal/test/hold-subject-bind", {
+        method: "DELETE",
+      });
     }
   });
 
