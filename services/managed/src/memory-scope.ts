@@ -93,14 +93,46 @@ type AiOutboxRow = {
   retry_at: number;
 };
 
-type DisposableAiSearchItem = AiSearchItem & Disposable;
+type DisposableAiSearchObject<T extends object> = T & Disposable;
+
+type AiSearchItemState = Pick<AiSearchItemInfo, "id" | "status">;
+
+const copyAiSearchItemState = (item: AiSearchItemInfo): AiSearchItemState => ({
+  id: item.id,
+  status: item.status,
+});
+
+export async function withAiSearchItems<T>(
+  instance: Pick<AiSearchInstance, "items">,
+  operation: (items: AiSearchItems) => Promise<T>,
+): Promise<T> {
+  const items = instance.items as AiSearchItems & Partial<Disposable>;
+  try {
+    return await operation(items);
+  } finally {
+    const dispose = items[Symbol.dispose];
+    if (typeof dispose === "function") dispose.call(items);
+  }
+}
+
+export async function withAiSearchResult<T extends object, R>(
+  result: Promise<T>,
+  operation: (value: T) => R | Promise<R>,
+): Promise<R> {
+  const value = await result as DisposableAiSearchObject<T>;
+  try {
+    return await operation(value);
+  } finally {
+    value[Symbol.dispose]();
+  }
+}
 
 export async function withAiSearchItem<T>(
   items: Pick<AiSearchItems, "get">,
   itemId: string,
   operation: (item: AiSearchItem) => Promise<T>,
 ): Promise<T> {
-  const item = items.get(itemId) as DisposableAiSearchItem;
+  const item = items.get(itemId) as DisposableAiSearchObject<AiSearchItem>;
   try {
     return await operation(item);
   } finally {
@@ -521,38 +553,40 @@ export class MemoryScope extends DurableObject<MemoryScopeEnv> {
   ): Promise<RankedMemoryTurnRow[]> {
     const organizationId = this.#organizationId();
     if (organizationId === undefined) return [];
-    const searched = await this.env.HISTORY_AI_SEARCH!.search({
-      query,
-      ai_search_options: {
-        retrieval: historyVectorRetrieval(organizationId, teamId, limit),
-        query_rewrite: { enabled: false },
-        // Vector similarity is the broad candidate generator. The reranker is
-        // necessary for near-neighbor histories that share most nouns but
-        // differ on one decisive actor, location, or value.
-        reranking: {
-          enabled: true,
-          model: "@cf/baai/bge-reranker-base",
-          // Retrieval already rejects weak vector matches. Reranker scores are
-          // model-specific ordering signals, so its default 0.4 cutoff can
-          // incorrectly discard every otherwise valid candidate.
-          match_threshold: 0,
+    const candidates = await withAiSearchResult(
+      this.env.HISTORY_AI_SEARCH!.search({
+        query,
+        ai_search_options: {
+          retrieval: historyVectorRetrieval(organizationId, teamId, limit),
+          query_rewrite: { enabled: false },
+          // Vector similarity is the broad candidate generator. The reranker is
+          // necessary for near-neighbor histories that share most nouns but
+          // differ on one decisive actor, location, or value.
+          reranking: {
+            enabled: true,
+            model: "@cf/baai/bge-reranker-base",
+            // Retrieval already rejects weak vector matches. Reranker scores are
+            // model-specific ordering signals, so its default 0.4 cutoff can
+            // incorrectly discard every otherwise valid candidate.
+            match_threshold: 0,
+          },
+          // Memory is mutable and AI Search may accept an item before its
+          // filtered vector view is complete. Caching that early result makes a
+          // newly projected turn invisible for subsequent identical queries.
+          cache: { enabled: false },
         },
-        // Memory is mutable and AI Search may accept an item before its
-        // filtered vector view is complete. Caching that early result makes a
-        // newly projected turn invisible for subsequent identical queries.
-        cache: { enabled: false },
-      },
-    });
-    const candidates = searched.chunks.flatMap((chunk) => {
-      const segmentId = chunk.item.metadata?.segment_id;
-      const score = chunk.scoring_details?.reranking_score
-        ?? chunk.scoring_details?.vector_score
-        ?? chunk.score;
-      return typeof segmentId === "string"
-        && Number.isFinite(score)
-        ? [{ segmentId, score }]
-        : [];
-    });
+      }),
+      (searched) => searched.chunks.flatMap((chunk) => {
+        const segmentId = chunk.item.metadata?.segment_id;
+        const score = chunk.scoring_details?.reranking_score
+          ?? chunk.scoring_details?.vector_score
+          ?? chunk.score;
+        return typeof segmentId === "string"
+          && Number.isFinite(score)
+          ? [{ segmentId, score }]
+          : [];
+      }),
+    );
     const bySegment = new Map<string, { segmentId: string; score: number }>();
     for (const candidate of candidates) {
       const current = bySegment.get(candidate.segmentId);
@@ -873,12 +907,18 @@ export class MemoryScope extends DurableObject<MemoryScopeEnv> {
                 continue;
               }
             } else {
-              let item: AiSearchItemInfo;
+              let item: AiSearchItemState;
               if (current.ai_item_id === null) {
-                item = await this.env.HISTORY_AI_SEARCH.items.upload(
-                  payload.name,
-                  payload.content,
-                  { metadata: payload.metadata },
+                item = await withAiSearchItems(
+                  this.env.HISTORY_AI_SEARCH,
+                  (items) => withAiSearchResult(
+                    items.upload(
+                      payload.name,
+                      payload.content,
+                      { metadata: payload.metadata },
+                    ),
+                    copyAiSearchItemState,
+                  ),
                 );
                 this.ctx.storage.sql.exec(
                   "UPDATE memory_turns SET ai_item_id = ? WHERE segment_id = ?",
@@ -887,10 +927,16 @@ export class MemoryScope extends DurableObject<MemoryScopeEnv> {
                 );
               } else {
                 try {
-                  item = await withAiSearchItem(
-                    this.env.HISTORY_AI_SEARCH.items,
-                    current.ai_item_id,
-                    (currentItem) => currentItem.info(),
+                  item = await withAiSearchItems(
+                    this.env.HISTORY_AI_SEARCH,
+                    (items) => withAiSearchItem(
+                      items,
+                      current.ai_item_id!,
+                      (currentItem) => withAiSearchResult(
+                        currentItem.info(),
+                        copyAiSearchItemState,
+                      ),
+                    ),
                   );
                 } catch (error) {
                   if (!isAiSearchNotFound(error)) throw error;
@@ -904,10 +950,16 @@ export class MemoryScope extends DurableObject<MemoryScopeEnv> {
               }
               if (item.status !== "completed") {
                 if (item.status === "error" || item.status === "skipped" || item.status === "outdated") {
-                  await withAiSearchItem(
-                    this.env.HISTORY_AI_SEARCH.items,
-                    item.id,
-                    (currentItem) => currentItem.sync(),
+                  await withAiSearchItems(
+                    this.env.HISTORY_AI_SEARCH,
+                    (items) => withAiSearchItem(
+                      items,
+                      item.id,
+                      (currentItem) => withAiSearchResult(
+                        currentItem.sync(),
+                        () => undefined,
+                      ),
+                    ),
                   );
                 }
                 this.#deferAiOperation(row);
@@ -931,13 +983,18 @@ export class MemoryScope extends DurableObject<MemoryScopeEnv> {
   async #deleteAiItem(row: AiOutboxRow, key = `${row.segment_id}.md`): Promise<boolean> {
     // Built-in item keys are unique within their source. Exact key filtering
     // avoids treating colon-bearing segment filenames as search patterns.
-    const listed = await this.env.HISTORY_AI_SEARCH!.items.list({
-      key,
-      source: "builtin",
-      per_page: 50,
-    } as AiSearchListItemsParams & { key: string });
-    const ids = new Set(
-      listed.result.filter((item) => item.key === key).map((item) => item.id),
+    const ids = await withAiSearchItems(
+      this.env.HISTORY_AI_SEARCH!,
+      (items) => withAiSearchResult(
+        items.list({
+          key,
+          source: "builtin",
+          per_page: 50,
+        } as AiSearchListItemsParams & { key: string }),
+        (listed) => new Set(
+          listed.result.filter((item) => item.key === key).map((item) => item.id),
+        ),
+      ),
     );
     if (row.ai_item_id !== null) ids.add(row.ai_item_id);
     if (ids.size === 0) {
@@ -945,13 +1002,15 @@ export class MemoryScope extends DurableObject<MemoryScopeEnv> {
       // Require several empty reconciliations before retiring that tombstone.
       return row.attempt_count >= 3;
     }
-    await Promise.all([...ids].map(async (id) => {
-      try {
-        await this.env.HISTORY_AI_SEARCH!.items.delete(id);
-      } catch (error) {
-        if (!isAiSearchNotFound(error)) throw error;
-      }
-    }));
+    await withAiSearchItems(this.env.HISTORY_AI_SEARCH!, async (items) => {
+      await Promise.all([...ids].map(async (id) => {
+        try {
+          await items.delete(id);
+        } catch (error) {
+          if (!isAiSearchNotFound(error)) throw error;
+        }
+      }));
+    });
     this.ctx.storage.sql.exec(
       "UPDATE memory_ai_outbox SET ai_item_id = NULL WHERE operation_id = ?",
       row.operation_id,
