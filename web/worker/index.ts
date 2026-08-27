@@ -45,7 +45,7 @@ import {
   fetchManagedRealtimeCall,
   managedModelAccess,
   managedModelActorId,
-  managedModelReady,
+  managedModelStatus,
   openManagedResponsesWebSocket,
   openManagedRealtimeSideband,
   type ManagedModelAccess,
@@ -163,10 +163,11 @@ export default {
       const managed = managedAccess(request, env);
       if (managed instanceof Response) return managed;
       if (managed) {
-        const ready = await managedModelReady(managed);
+        const model = await managedModelStatus(managed);
         return json({
-          agent_configured: ready,
-          credential_source: ready ? "brokered" : null,
+          agent_configured: model.ready,
+          credential_source: model.ready ? "brokered" : null,
+          voice_enabled: model.voiceEnabled,
           deployment_sha: GIT_SHA_PATTERN.test(env.DEPLOYMENT_SHA ?? "")
             ? env.DEPLOYMENT_SHA
             : null,
@@ -185,6 +186,7 @@ export default {
       return json({
         agent_configured: Boolean(credential),
         credential_source: credential?.source ?? null,
+        voice_enabled: credential?.kind === "chatgpt",
         deployment_sha: GIT_SHA_PATTERN.test(env.DEPLOYMENT_SHA ?? "")
           ? env.DEPLOYMENT_SHA
           : null,

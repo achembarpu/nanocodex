@@ -1,15 +1,17 @@
-export type DeploymentCredentialSource = "brokered" | null;
+export type DeploymentCredentialSource = "brokered" | "user" | null;
 
 export type DeploymentHealth = Readonly<{
   agentConfigured: boolean;
   credentialSource: DeploymentCredentialSource;
   deploymentSha: string | undefined;
+  voiceEnabled: boolean;
 }>;
 
 type HealthPayload = {
   agent_configured?: unknown;
   credential_source?: unknown;
   deployment_sha?: unknown;
+  voice_enabled?: unknown;
 };
 
 /** One app-owned, single-flight view of the Worker health boundary. */
@@ -31,14 +33,18 @@ export function createDeploymentHealthResource(
         throw new Error(`Could not check the agent session (HTTP ${response.status})`);
       }
       const payload = await response.json() as HealthPayload;
-      const credentialSource = payload.agent_configured === true
-        && payload.credential_source === "brokered" ? "brokered" : null;
+      const credentialSource = payload.agent_configured !== true
+        ? null
+        : payload.credential_source === "brokered" || payload.credential_source === "subscription"
+          ? "brokered"
+          : payload.credential_source === "user" ? "user" : null;
       return Object.freeze({
         agentConfigured: credentialSource !== null,
         credentialSource,
         deploymentSha: typeof payload.deployment_sha === "string"
           ? payload.deployment_sha
           : undefined,
+        voiceEnabled: credentialSource === "brokered" && payload.voice_enabled === true,
       });
     });
     inFlight = current;

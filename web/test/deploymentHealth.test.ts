@@ -7,6 +7,7 @@ const deployment = (deploymentSha?: string) => Object.freeze({
   agentConfigured: true,
   credentialSource: "brokered" as const,
   deploymentSha,
+  voiceEnabled: true,
 });
 
 test("deployment rollover coalesces matching live-generation checks", async () => {
@@ -85,6 +86,7 @@ test("deployment health is single-flight and cached across shell consumers", asy
       agent_configured: true,
       credential_source: "brokered",
       deployment_sha: "a".repeat(40),
+      voice_enabled: true,
     });
   });
 
@@ -105,10 +107,12 @@ test("deployment health refreshes after invalidation and rejects malformed crede
       agent_configured: true,
       credential_source: "unexpected",
       deployment_sha: null,
+      voice_enabled: true,
     } : {
       agent_configured: true,
       credential_source: "brokered",
       deployment_sha: "b".repeat(40),
+      voice_enabled: true,
     });
   });
 
@@ -116,6 +120,7 @@ test("deployment health refreshes after invalidation and rejects malformed crede
     agentConfigured: false,
     credentialSource: null,
     deploymentSha: undefined,
+    voiceEnabled: false,
   });
   resource.invalidate();
   assert.equal((await resource.refresh()).credentialSource, "brokered");
@@ -132,6 +137,7 @@ test("invalidation detaches an obsolete in-flight health request", async () => {
     return Response.json({
       agent_configured: true,
       credential_source: "brokered",
+      voice_enabled: true,
     });
   });
 
@@ -151,13 +157,38 @@ test("brokered health naturally reports whether the account has a connection", a
   const resource = createDeploymentHealthResource(async () => Response.json({
     agent_configured: ready,
     credential_source: ready ? "brokered" : null,
+    voice_enabled: ready,
   }));
   assert.deepEqual(await resource.read(), {
     agentConfigured: false,
     credentialSource: null,
     deploymentSha: undefined,
+    voiceEnabled: false,
   });
   ready = true;
   resource.invalidate();
   assert.equal((await resource.refresh()).credentialSource, "brokered");
+});
+
+test("OpenAI API-key health keeps text ready but never enables voice", async () => {
+  const resource = createDeploymentHealthResource(async () => Response.json({
+    agent_configured: true,
+    credential_source: "user",
+    voice_enabled: true,
+  }));
+  assert.deepEqual(await resource.read(), {
+    agentConfigured: true,
+    credentialSource: "user",
+    deploymentSha: undefined,
+    voiceEnabled: false,
+  });
+});
+
+test("legacy direct ChatGPT health is treated as brokered voice access", async () => {
+  const resource = createDeploymentHealthResource(async () => Response.json({
+    agent_configured: true,
+    credential_source: "subscription",
+    voice_enabled: true,
+  }));
+  assert.equal((await resource.read()).voiceEnabled, true);
 });

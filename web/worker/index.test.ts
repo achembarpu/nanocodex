@@ -169,6 +169,7 @@ test("brokered website access stays credentialless and disables legacy browser s
   assert.deepEqual(await health.json(), {
     agent_configured: true,
     credential_source: "brokered",
+    voice_enabled: true,
     deployment_sha: null,
     interactive_auth: false,
     service: "nanocodex",
@@ -444,6 +445,7 @@ test("BYOK sessions keep the key behind an opaque HttpOnly cookie", async () => 
   assert.deepEqual(await health.json(), {
     agent_configured: true,
     credential_source: "user",
+    voice_enabled: false,
     deployment_sha: null,
     service: "nanocodex",
     runtime: "cloudflare-workers",
@@ -687,6 +689,7 @@ test("production health remains unauthenticated without a user session", async (
   assert.deepEqual(await response.json(), {
     agent_configured: false,
     credential_source: null,
+    voice_enabled: false,
     deployment_sha: null,
     service: "nanocodex",
     runtime: "cloudflare-workers",
@@ -754,6 +757,7 @@ test("ChatGPT login exposes only device state while subscription credentials sta
   assert.deepEqual(await health.json(), {
     agent_configured: true,
     credential_source: "subscription",
+    voice_enabled: true,
     deployment_sha: null,
     service: "nanocodex",
     runtime: "cloudflare-workers",

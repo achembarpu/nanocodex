@@ -5,10 +5,10 @@ import type { AgentStatus } from "./agentTerminalTypes";
 import { clientFailureMessage } from "./clientFailure";
 import { deploymentHealth } from "./deploymentHealth";
 
-export type CredentialSource = "brokered" | null;
+export type CredentialSource = "brokered" | "user" | null;
 export type ModelSessionStatus =
   | { state: "signed_out" }
-  | { state: "ready"; ready: boolean }
+  | { state: "ready"; ready: boolean; voiceEnabled: boolean }
   | { state: "error"; error: string };
 
 export type SessionPresentation = {
@@ -151,8 +151,11 @@ export function useModelSession({
           ? deploymentHealth.refresh()
           : deploymentHealth.read());
         if (generation.current !== current) return;
-        publish({ state: "ready", ready: health.agentConfigured },
-          health.agentConfigured ? "brokered" : null);
+        publish({
+          state: "ready",
+          ready: health.agentConfigured,
+          voiceEnabled: health.voiceEnabled,
+        }, health.credentialSource);
       } catch (cause) {
         if (generation.current !== current) return;
         publish({

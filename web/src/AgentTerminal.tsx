@@ -35,6 +35,7 @@ export const AgentTerminal = memo(function AgentTerminal({
   onStateChange,
   source,
   threadId,
+  voiceEnabled,
   welcome,
 }: {
   authStatus: ModelSessionStatus | undefined;
@@ -44,6 +45,7 @@ export const AgentTerminal = memo(function AgentTerminal({
   onStateChange(state: AgentTerminalState): void;
   source: Exclude<CredentialSource, null>;
   threadId: string;
+  voiceEnabled: boolean;
   welcome?: string;
 }) {
   const agentConfig = useMemo(() => createConfig({
@@ -76,7 +78,7 @@ export const AgentTerminal = memo(function AgentTerminal({
       onConversationActivity={onConversationActivity}
       onStateChange={onStateChange}
       retryAgent={retryAgent}
-      voice
+      voice={voiceEnabled}
       voiceOptions={{ beforeAgentTurn: beforeLocalTurn }}
       welcome={welcome}
       accessory={({ agentReady, submit }) => (
@@ -96,6 +98,7 @@ export const ManagedAgentTerminal = memo(function ManagedAgentTerminal({
   onConversationActivity,
   onStateChange,
   source,
+  voiceEnabled,
 }: {
   agentId: string;
   authStatus: ModelSessionStatus | undefined;
@@ -103,6 +106,7 @@ export const ManagedAgentTerminal = memo(function ManagedAgentTerminal({
   onConversationActivity(input: string): void;
   onStateChange(state: AgentTerminalState): void;
   source: Exclude<CredentialSource, null>;
+  voiceEnabled: boolean;
 }) {
   const managed = useMemo(() => openManagedAgent(agentId), [agentId]);
   const agent = useMemo(() => managedTerminalAgent(managed), [managed]);
@@ -123,7 +127,7 @@ export const ManagedAgentTerminal = memo(function ManagedAgentTerminal({
       onConversationActivity={onConversationActivity}
       onStateChange={onStateChange}
       retryAgent={retryAgent}
-      voice
+      voice={voiceEnabled}
       accessory={({ agentReady, submit }) => (
         <ArtifactDock
           agentReady={agentReady}

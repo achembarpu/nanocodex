@@ -6,6 +6,7 @@ import {
   fetchManagedRealtimeCall,
   managedModelAccess,
   managedModelReady,
+  managedModelStatus,
   openManagedRealtimeSideband,
   openManagedResponsesWebSocket,
 } from "./managedModel.ts";
@@ -34,6 +35,7 @@ test("broker health is structural and provider-neutral", async () => {
     }),
   })!;
   assert.equal(await managedModelReady(access), true);
+  assert.deepEqual(await managedModelStatus(access), { ready: true, voiceEnabled: true });
   assert.equal(requests[0]?.url, "https://managed.internal/v1/credentials");
   assert.equal(requests[0]?.method, "GET");
 
@@ -43,6 +45,16 @@ test("broker health is structural and provider-neutral", async () => {
     })),
   })!;
   assert.equal(await managedModelReady(providerLeaking), false);
+  assert.deepEqual(await managedModelStatus(providerLeaking), { ready: false, voiceEnabled: false });
+});
+
+test("broker health disables voice for an OpenAI API-key runtime while retaining text readiness", async () => {
+  const access = managedModelAccess(browserRequest(), {
+    NANOCODEX_BACKEND: binding(async () => Response.json({ ready: true, active: "openai" }, {
+      headers: { "cache-control": "no-store" },
+    })),
+  })!;
+  assert.deepEqual(await managedModelStatus(access), { ready: true, voiceEnabled: false });
 });
 
 test("brokered tools send one fixed operation and placeholder", async () => {

@@ -44,7 +44,8 @@ export const AgentExperience = memo(function AgentExperience({
   const [managedError, setManagedError] = useState<string>();
   const [managedAttempt, setManagedAttempt] = useState(0);
   const [conversationPending, setConversationPending] = useState(false);
-  const hasCredential = credentialSource === "brokered";
+  const hasCredential = credentialSource === "brokered" || credentialSource === "user";
+  const voiceEnabled = authStatus?.state === "ready" && authStatus.voiceEnabled === true;
 
   useEffect(() => {
     if (!landing || deploymentCurrent || authStatus?.state !== "ready") return;
@@ -80,7 +81,9 @@ export const AgentExperience = memo(function AgentExperience({
   }, [account.account?.id, account.status, hasCredential, landing, managedAttempt]);
 
   const changeCredentialSource = useCallback((source: CredentialSource) => {
-    if (credentialSourceRef.current === "brokered" && source !== "brokered") setRuntimeState(undefined);
+    if (credentialSourceRef.current !== undefined && credentialSourceRef.current !== source) {
+      setRuntimeState(undefined);
+    }
     credentialSourceRef.current = source;
     setCredentialSource(source);
   }, []);
@@ -148,6 +151,7 @@ export const AgentExperience = memo(function AgentExperience({
               authStatus={authStatus} beforeLocalTurn={beforeLocalTurn}
               mode={mode} onConversationActivity={NO_CONVERSATION_ACTIVITY}
               onStateChange={setRuntimeState} source={credentialSource} threadId={ephemeralThreadId}
+              voiceEnabled={voiceEnabled}
               welcome={HOME_TERMINAL_WELCOME}
             />
             : <ReservedTerminal message={inactiveMessage} mode={mode} welcome={HOME_TERMINAL_WELCOME} />
@@ -156,6 +160,7 @@ export const AgentExperience = memo(function AgentExperience({
               key={managedConversationId} agentId={managedConversationId!} authStatus={authStatus}
               mode={mode} onConversationActivity={recordActivity} onStateChange={setRuntimeState}
               source={credentialSource}
+              voiceEnabled={voiceEnabled}
             />
             : <ReservedTerminal message={inactiveMessage} mode={mode} />}
       </div>

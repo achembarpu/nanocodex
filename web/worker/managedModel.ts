@@ -8,6 +8,11 @@ export type ManagedModelAccess = Readonly<{
   binding: Fetcher;
 }>;
 
+export type ManagedModelStatus = Readonly<{
+  ready: boolean;
+  voiceEnabled: boolean;
+}>;
+
 export type ManagedRealtimeIdentity = Readonly<{
   openAiAlpha: "quicksilver=v2";
   realtimeSessionId: string;
@@ -49,23 +54,29 @@ export function managedModelAccess(
 
 /** Checks broker policy/credential availability without opening a provider connection. */
 export async function managedModelReady(access: ManagedModelAccess): Promise<boolean> {
+  return (await managedModelStatus(access)).ready;
+}
+
+/** Checks broker readiness and the provider capability needed by Realtime voice. */
+export async function managedModelStatus(access: ManagedModelAccess): Promise<ManagedModelStatus> {
   try {
     const response = await access.binding.fetch(new Request(CREDENTIAL_STATUS_URL));
     if (response.status !== 200
       || response.headers.get("cache-control") !== "no-store"
       || !response.headers.get("content-type")?.toLowerCase().startsWith("application/json")) {
       await response.body?.cancel();
-      return false;
+      return { ready: false, voiceEnabled: false };
     }
     const encoded = await response.text();
-    if (encoded.length > 1_024) return false;
+    if (encoded.length > 1_024) return { ready: false, voiceEnabled: false };
     const value = JSON.parse(encoded) as Record<string, unknown>;
-    return value !== null
+    const ready = value !== null
       && !Array.isArray(value)
       && value.ready === true
       && (value.active === "chatgpt" || value.active === "openai");
+    return { ready, voiceEnabled: ready && value.active === "chatgpt" };
   } catch {
-    return false;
+    return { ready: false, voiceEnabled: false };
   }
 }
 

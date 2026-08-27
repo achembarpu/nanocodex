@@ -41,6 +41,9 @@ test("the landing terminal is ephemeral while the Agent demo is managed-durable 
   assert.match(declaration, /durability: false/);
   assert.doesNotMatch(declaration, /localTerminalAgent|\bdurable\b/);
   assert.match(experience, /activeCapabilityError = landing \? capabilityError : undefined/);
+  assert.match(experience, /credentialSource === "brokered" \|\| credentialSource === "user"/);
+  assert.match(experience, /authStatus\?\.state === "ready" && authStatus\.voiceEnabled === true/);
+  assert.match(terminal, /voice=\{voiceEnabled\}/);
   assert.match(experience, /landing[\s\S]*?\? hasCredential[\s\S]*?<AgentTerminal[\s\S]*?: hasCredential && managedConversationId[\s\S]*?<ManagedAgentTerminal/);
   assert.match(experience, /runtime="managed"/);
   assert.doesNotMatch(experience, /activeRuntime|agent-runtime-switch|Local browser|Managed durable|localConversations/);

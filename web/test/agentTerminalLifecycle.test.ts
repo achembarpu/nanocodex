@@ -55,6 +55,8 @@ test("credential presence is distinct from agent readiness and failures are manu
 
 test("signed-out runtimes wait for the account-owned model connection", () => {
   assert.match(experience, /credentialSource === "brokered"/);
+  assert.match(experience, /voiceEnabled/);
+  assert.match(terminal, /voice=\{voiceEnabled\}/);
   assert.match(experience, /landing[\s\S]*?hasCredential && !activeCapabilityError && deploymentCurrent/);
   assert.match(experience, /hasCredential && managedConversationId[\s\S]*?<ManagedAgentTerminal/);
   assert.match(session, /Sign in with a passkey to start the \$\{agent\}/);
