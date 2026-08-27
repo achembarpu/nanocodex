@@ -163,7 +163,7 @@
   grid-template-columns: minmax(0, 1fr) auto;
   min-height: 44px;
   align-items: end;
-  overflow: hidden;
+  overflow: visible;
   background: var(--terminal-background, #fff);
   border: 0;
   border-left: 1px solid var(--terminal-muted, #6b6b6b);
@@ -221,6 +221,7 @@
 .agent-touch-actions button svg { width: 17px; height: 17px; stroke-width: 2; }
 .agent-touch-actions .agent-voice-button svg { fill: currentColor; }
 .agent-touch-actions .agent-voice-button[aria-pressed="true"] { color: var(--terminal-foreground, #111); background: var(--terminal-hover, #f4f4f4); }
+.agent-touch-actions .agent-voice-cancel-button svg { width: 17px; height: 17px; }
 .agent-touch-actions button:focus-visible { background: var(--terminal-hover, #f4f4f4); outline: 1px solid var(--terminal-border, #ddd); outline-offset: -2px; }
 .agent-touch-actions button:disabled { color: var(--terminal-muted, #6b6b6b); background: transparent; cursor: default; }
 .agent-touch-composer.is-running .agent-touch-actions button { color: var(--terminal-muted, #6b6b6b); }
@@ -237,18 +238,26 @@
   border: 0;
 }
 
-.agent-voice-error {
+.agent-voice-feedback {
   position: absolute;
   right: 0;
   bottom: calc(100% + 9px);
   width: max-content;
   max-width: min(280px, calc(100vw - 24px));
+  display: grid;
+  gap: 5px;
+}
+
+.agent-voice-status,
+.agent-voice-error {
   padding: 7px 9px;
-  color: var(--terminal-negative, #b42318);
   font: 11px/1.35 var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace);
   background: var(--terminal-background, #fff);
   border: 1px solid var(--terminal-border, #ddd);
 }
+
+.agent-voice-status { color: var(--terminal-muted, #6b6b6b); }
+.agent-voice-error { color: var(--terminal-negative, #b42318); }
 
 @media (pointer: coarse), (any-pointer: coarse) {
   .agent-terminal-shell {
@@ -277,7 +286,7 @@
     grid-template-columns: minmax(0, 1fr) auto;
     align-items: end;
     min-height: 44px;
-    overflow: hidden;
+    overflow: visible;
     background: var(--terminal-background, #fff);
     border: 0;
     border-left: 1px solid var(--terminal-muted, #6b6b6b);

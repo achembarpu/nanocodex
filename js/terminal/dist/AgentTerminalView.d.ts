@@ -1,6 +1,6 @@
 import { type ReactNode } from "react";
 import { type Agent, type AgentControllerEvent } from "nanocodex-react/agent";
-import { type UseVoiceParameters } from "nanocodex-react";
+import { type UseVoiceParameters, type UseVoiceReturnType } from "nanocodex-react";
 import type { AgentStatus, AgentTerminalMode, AgentTerminalState } from "./types.js";
 export type AgentTerminalAccessory = Readonly<{
     agentReady: boolean;
@@ -28,4 +28,8 @@ export declare function AgentTerminalView({ accessory, agent, agentError, contro
     voice?: boolean;
     voiceOptions?: Omit<UseVoiceParameters, "enabled">;
     welcome?: string;
+}): import("react").JSX.Element;
+export declare function VoiceControl({ agentReady, voice, }: {
+    agentReady: boolean;
+    voice: UseVoiceReturnType;
 }): import("react").JSX.Element;

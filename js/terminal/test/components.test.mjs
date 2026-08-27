@@ -10,6 +10,7 @@ import {
   interleaveTranscriptEntries,
   terminalComposerAction,
 } from "../dist/index.js";
+import { VoiceControl } from "../dist/AgentTerminalView.js";
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 globalThis.ResizeObserver = class {
@@ -57,6 +58,100 @@ test("controller-backed terminal remains caller-owned when no Agent is attached"
     voice: true,
   })));
   assert.equal(renderer.root.findByProps({ "aria-label": "Start voice" }).props.disabled, true);
+  await act(async () => renderer.unmount());
+});
+
+function voiceSnapshot(overrides = {}) {
+  return {
+    error: undefined,
+    status: "idle",
+    statusText: undefined,
+    transcripts: [],
+    voice: undefined,
+    isActive: false,
+    isConnecting: false,
+    isError: false,
+    isIdle: true,
+    cancel: async () => false,
+    start: async () => {},
+    stop: async () => {},
+    toggle: async () => {},
+    ...overrides,
+  };
+}
+
+test("ready voice control separates transport, coding-turn cancel, status, and failure actions", async () => {
+  const calls = [];
+  let renderer;
+  const idle = voiceSnapshot({
+    toggle: async () => { calls.push("start"); },
+  });
+  await act(async () => {
+    renderer = TestRenderer.create(React.createElement(VoiceControl, {
+      agentReady: true,
+      voice: idle,
+    }));
+  });
+  assert.deepEqual(
+    renderer.root.findAllByType("button").map((button) => button.props["aria-label"]),
+    ["Start voice"],
+  );
+  await act(async () => renderer.root.findByProps({ "aria-label": "Start voice" }).props.onClick());
+  assert.deepEqual(calls, ["start"]);
+
+  const connecting = voiceSnapshot({
+    status: "connecting",
+    isConnecting: true,
+    isIdle: false,
+    toggle: async () => { calls.push("stop"); },
+  });
+  await act(async () => renderer.update(React.createElement(VoiceControl, {
+    agentReady: true,
+    voice: connecting,
+  })));
+  assert.equal(renderer.root.findByProps({ "aria-label": "Stop voice" }).props["aria-pressed"], true);
+  assert.equal(renderer.root.findAllByProps({ "aria-label": "Cancel voice turn" }).length, 0);
+
+  let cancelled = 0;
+  const active = voiceSnapshot({
+    status: "active",
+    statusText: "Voice connected — tap once to enable speaker audio",
+    voice: "cove",
+    isActive: true,
+    isIdle: false,
+    toggle: async () => { calls.push("stop"); },
+    cancel: async () => { cancelled += 1; return true; },
+  });
+  await act(async () => renderer.update(React.createElement(VoiceControl, {
+    agentReady: true,
+    voice: active,
+  })));
+  assert.equal(renderer.root.findByProps({ "aria-label": "Stop voice" }).props["aria-pressed"], true);
+  await act(async () => renderer.root.findByProps({ "aria-label": "Stop voice" }).props.onClick());
+  await act(async () => renderer.root.findByProps({ "aria-label": "Cancel voice turn" }).props.onClick());
+  assert.deepEqual(calls, ["start", "stop"]);
+  assert.equal(cancelled, 1);
+  assert.equal(renderer.root.findByProps({ role: "status" }).children.join(""), active.statusText);
+
+  const error = new Error("Microphone permission denied — allow access and retry");
+  await act(async () => renderer.update(React.createElement(VoiceControl, {
+    agentReady: true,
+    voice: voiceSnapshot({
+      status: "error",
+      statusText: error.message,
+      error,
+      isError: true,
+    }),
+  })));
+  assert.equal(renderer.root.findByProps({ role: "alert" }).children.join(""), error.message);
+  assert.equal(renderer.root.findByProps({ "aria-label": "Start voice" }).props.disabled, false);
+
+  await act(async () => renderer.update(React.createElement(VoiceControl, {
+    agentReady: true,
+    voice: voiceSnapshot(),
+  })));
+  assert.equal(renderer.root.findAllByProps({ role: "status" }).length, 0);
+  assert.equal(renderer.root.findAllByProps({ role: "alert" }).length, 0);
   await act(async () => renderer.unmount());
 });
 

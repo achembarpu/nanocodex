@@ -17,6 +17,7 @@ import {
   type UseVoiceParameters,
   type UseVoiceReturnType,
 } from "nanocodex-react";
+import { X } from "lucide-react";
 import { TerminalComposer } from "./TerminalComposer.js";
 import { TerminalTranscriptSurface } from "./TerminalTranscriptSurface.js";
 import type { VoiceTerminalEntry } from "./TerminalTranscriptSurface.js";
@@ -260,7 +261,7 @@ export function AgentTerminalView({
   ) : terminal;
 }
 
-function VoiceControl({
+export function VoiceControl({
   agentReady,
   voice,
 }: {
@@ -268,6 +269,7 @@ function VoiceControl({
   voice: UseVoiceReturnType;
 }) {
   const engaged = voice.isActive || voice.isConnecting;
+  const statusText = voice.statusText ?? (voice.isActive ? voice.voice : undefined);
   return <>
     <button
       className="agent-voice-button"
@@ -283,12 +285,28 @@ function VoiceControl({
       <span className="agent-terminal-sr-only">Voice</span>
     </button>
     {voice.isActive ? (
-      <span className="agent-terminal-sr-only" role="status">{voice.voice}</span>
+      <button
+        className="agent-voice-cancel-button"
+        type="button"
+        aria-label="Cancel voice turn"
+        onClick={() => { void voice.cancel().catch(() => {}); }}
+      >
+        <X aria-hidden="true" />
+      </button>
     ) : null}
-    {voice.isError ? (
-      <span className="agent-voice-error" role="alert">
-        {voice.error?.message ?? "Voice failed. Check microphone access and retry."}
-      </span>
+    {statusText || voice.isError ? (
+      <div className="agent-voice-feedback">
+        {statusText ? (
+          <span className="agent-voice-status" role="status" aria-live="polite">
+            {statusText}
+          </span>
+        ) : null}
+        {voice.isError ? (
+          <span className="agent-voice-error" role="alert">
+            {voice.error?.message ?? "Voice failed. Check microphone access and retry."}
+          </span>
+        ) : null}
+      </div>
     ) : null}
   </>;
 }

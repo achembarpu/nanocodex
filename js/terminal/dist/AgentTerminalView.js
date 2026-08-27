@@ -3,6 +3,7 @@ import { jsx as _jsx, Fragment as _Fragment, jsxs as _jsxs } from "react/jsx-run
 import { useCallback, useEffect, useRef, useState, } from "react";
 import { useAgentController, } from "nanocodex-react/agent";
 import { useVoice, } from "nanocodex-react";
+import { X } from "lucide-react";
 import { TerminalComposer } from "./TerminalComposer.js";
 import { TerminalTranscriptSurface } from "./TerminalTranscriptSurface.js";
 /** Shared website terminal presentation. Runtime and authorization policy stay with its consumer. */
@@ -138,9 +139,10 @@ export function AgentTerminalView({ accessory, agent, agentError, controls, inac
             }, onSubmit: submitTouchPrompt })), canLoadOlder: controller.canLoadOlder, entries: controller.entries, followTailRequest: followTailRequest, inactiveMessage: unavailableMessage ?? "", isLoadingOlder: controller.isLoadingOlder, mode: mode, showToolCalls: showToolCalls, status: agentStatus, voiceEntries: voiceEntries, welcome: welcome, onLoadOlder: controller.loadOlder }));
     return mode === "full" ? (_jsxs("div", { className: "agent-terminal-workspace", children: [terminal, accessory?.({ agentReady: agentStatus === "ready", submit: submitAccessoryPrompt })] })) : terminal;
 }
-function VoiceControl({ agentReady, voice, }) {
+export function VoiceControl({ agentReady, voice, }) {
     const engaged = voice.isActive || voice.isConnecting;
-    return _jsxs(_Fragment, { children: [_jsxs("button", { className: "agent-voice-button", type: "button", "aria-label": engaged ? "Stop voice" : "Start voice", "aria-pressed": engaged, disabled: !agentReady, onClick: () => { void voice.toggle().catch(() => { }); }, children: [_jsx("svg", { "aria-hidden": "true", viewBox: "0 0 24 24", children: _jsx("path", { d: "M12 15a3 3 0 0 0 3-3V6a3 3 0 1 0-6 0v6a3 3 0 0 0 3 3Zm-7-3a1 1 0 1 1 2 0 5 5 0 0 0 10 0 1 1 0 1 1 2 0 7 7 0 0 1-6 6.92V21h3a1 1 0 1 1 0 2H8a1 1 0 1 1 0-2h3v-2.08A7 7 0 0 1 5 12Z" }) }), _jsx("span", { className: "agent-terminal-sr-only", children: "Voice" })] }), voice.isActive ? (_jsx("span", { className: "agent-terminal-sr-only", role: "status", children: voice.voice })) : null, voice.isError ? (_jsx("span", { className: "agent-voice-error", role: "alert", children: voice.error?.message ?? "Voice failed. Check microphone access and retry." })) : null] });
+    const statusText = voice.statusText ?? (voice.isActive ? voice.voice : undefined);
+    return _jsxs(_Fragment, { children: [_jsxs("button", { className: "agent-voice-button", type: "button", "aria-label": engaged ? "Stop voice" : "Start voice", "aria-pressed": engaged, disabled: !agentReady, onClick: () => { void voice.toggle().catch(() => { }); }, children: [_jsx("svg", { "aria-hidden": "true", viewBox: "0 0 24 24", children: _jsx("path", { d: "M12 15a3 3 0 0 0 3-3V6a3 3 0 1 0-6 0v6a3 3 0 0 0 3 3Zm-7-3a1 1 0 1 1 2 0 5 5 0 0 0 10 0 1 1 0 1 1 2 0 7 7 0 0 1-6 6.92V21h3a1 1 0 1 1 0 2H8a1 1 0 1 1 0-2h3v-2.08A7 7 0 0 1 5 12Z" }) }), _jsx("span", { className: "agent-terminal-sr-only", children: "Voice" })] }), voice.isActive ? (_jsx("button", { className: "agent-voice-cancel-button", type: "button", "aria-label": "Cancel voice turn", onClick: () => { void voice.cancel().catch(() => { }); }, children: _jsx(X, { "aria-hidden": "true" }) })) : null, statusText || voice.isError ? (_jsxs("div", { className: "agent-voice-feedback", children: [statusText ? (_jsx("span", { className: "agent-voice-status", role: "status", "aria-live": "polite", children: statusText })) : null, voice.isError ? (_jsx("span", { className: "agent-voice-error", role: "alert", children: voice.error?.message ?? "Voice failed. Check microphone access and retry." })) : null] })) : null] });
 }
 function submitPrompt(controller, submittedPrompts, input, submittedAt, intent) {
     retainSubmittedPrompt(submittedPrompts, input, submittedAt);
