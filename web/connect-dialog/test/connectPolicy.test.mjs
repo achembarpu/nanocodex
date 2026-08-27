@@ -15,6 +15,7 @@ import {
   focusedMcpConnection,
   mcpConnectionApprovalDisposition,
   mcpConnectionsFromWire,
+  parseConnectPolicy,
   productionConnectApiOrigin,
   registeredApp,
   restoreMcpCallbackContinuation,
@@ -53,6 +54,47 @@ const playground = "https://nanocodex-connect-playground.gakonst.workers.dev";
 const chromeExtension = "chrome-extension://jpkimkgbgbpcaldbnhlhbkbadmpeffle";
 const productionDialog = "https://nanocodex.gakonst.workers.dev/connect-dialog/?mode=iframe";
 const cli = "https://cli.nanocodex.xyz";
+const chatGptCredentialImport = `urn:nanocodex:credential-import:chatgpt:codex-auth-v1:sha256:${"a".repeat(43)}`;
+
+test("an exact ChatGPT Codex auth resource defers the signed ChatGPT connector", () => {
+  assert.deepEqual(parseConnectPolicy([
+    "urn:nanocodex:connector:chatgpt",
+    chatGptCredentialImport,
+  ]), { chatGptCredentialImport: true });
+  assert.deepEqual(parseConnectPolicy([
+    "urn:nanocodex:connectors:github,chatgpt",
+    chatGptCredentialImport,
+  ]), { chatGptCredentialImport: true });
+  assert.deepEqual(parseConnectPolicy([
+    "urn:nanocodex:connector:chatgpt",
+  ]), { chatGptCredentialImport: false });
+});
+
+test("malformed ChatGPT credential import resources are rejected", () => {
+  for (const resource of [
+    "urn:nanocodex:credential-import:chatgpt:codex-auth-v1:sha256:short",
+    `urn:nanocodex:credential-import:chatgpt:codex-auth-v1:sha256:${"a".repeat(43)}=`,
+    `urn:nanocodex:credential-import:chatgpt:other:sha256:${"a".repeat(43)}`,
+    `urn:nanocodex:credential-import:github:codex-auth-v1:sha256:${"a".repeat(43)}`,
+  ]) {
+    assert.throws(() => parseConnectPolicy([
+      "urn:nanocodex:connector:chatgpt",
+      resource,
+    ]), /credential import resource is invalid/);
+  }
+});
+
+test("duplicate and orphan ChatGPT credential import resources are rejected", () => {
+  assert.throws(() => parseConnectPolicy([
+    "urn:nanocodex:connector:chatgpt",
+    chatGptCredentialImport,
+    chatGptCredentialImport,
+  ]), /credential import resource is invalid/);
+  assert.throws(() => parseConnectPolicy([
+    "urn:nanocodex:connector:github",
+    chatGptCredentialImport,
+  ]), /no ChatGPT connector request/);
+});
 
 test("existing-account login targets only credentials retained by this dialog", () => {
   assert.deepEqual(accountLoginCapabilities([

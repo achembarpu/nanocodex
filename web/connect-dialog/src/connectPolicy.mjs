@@ -3,6 +3,8 @@ export const productionConnectApiOrigin = "https://nanocodex-connect-api.gakonst
 const appResourcePrefix = "urn:nanocodex:app:";
 const appOriginResourcePrefix = "urn:nanocodex:origin:";
 const connectorFocusResourcePrefix = "urn:nanocodex:connector-focus:";
+const credentialImportResourcePrefix = "urn:nanocodex:credential-import:";
+const chatGptCredentialImportResource = /^urn:nanocodex:credential-import:chatgpt:codex-auth-v1:sha256:[A-Za-z0-9_-]{43}$/;
 const connectorIds = new Set(["chatgpt", "github", "gmail", "gdrive", "x"]);
 const mcpConnectionId = /^[A-Za-z0-9_-]{43}$/;
 const mcpConnectionStatuses = new Set([
@@ -122,6 +124,35 @@ export function signedAppResources(resources, app) {
     throw new Error("The signed application resources do not match this Connect dialog.");
   }
   return resources;
+}
+
+export function parseConnectPolicy(resources) {
+  if (!Array.isArray(resources)) {
+    throw new Error("Nanocodex Connect received invalid signed resources.");
+  }
+  const signedResources = resources.filter((resource) => typeof resource === "string");
+  const credentialImports = signedResources.filter((resource) =>
+    resource.startsWith(credentialImportResourcePrefix));
+  if (credentialImports.length === 0) {
+    return Object.freeze({ chatGptCredentialImport: false });
+  }
+  if (credentialImports.length !== 1
+    || !chatGptCredentialImportResource.test(credentialImports[0])) {
+    throw new Error("The signed credential import resource is invalid.");
+  }
+  const requestedConnectors = signedResources.flatMap((resource) => {
+    if (resource.startsWith("urn:nanocodex:connector:")) {
+      return [resource.slice("urn:nanocodex:connector:".length)];
+    }
+    if (resource.startsWith("urn:nanocodex:connectors:")) {
+      return resource.slice("urn:nanocodex:connectors:".length).split(",");
+    }
+    return [];
+  });
+  if (!requestedConnectors.includes("chatgpt")) {
+    throw new Error("The signed ChatGPT credential import has no ChatGPT connector request.");
+  }
+  return Object.freeze({ chatGptCredentialImport: true });
 }
 
 export function connectApiOrigin(auth, dialogOrigin) {

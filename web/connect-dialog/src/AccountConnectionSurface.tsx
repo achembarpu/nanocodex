@@ -1,5 +1,11 @@
 import type { ReactNode } from "react";
 
+import { ConnectionLogo } from "./ConnectionLogo";
+
+export const chatGptCredentialImportAction = "Will import from Codex";
+export const chatGptCredentialImportHelper = "After you approve, the Nanocodex CLI will send the ChatGPT sign-in already stored by Codex directly to Nanocodex. This page cannot access it.";
+export const chatGptCredentialImportApproved = "Approved. Return to the terminal while Nanocodex finishes the import.";
+
 export function AccountConnectionSurface({
   children,
   confirmationCode,
@@ -97,4 +103,21 @@ export function AccountConnectionCard({
       </button>
     </div>
   );
+}
+
+export function DeferredChatGptImportCard() {
+  return (
+    <AccountConnectionCard
+      action={chatGptCredentialImportAction}
+      detail={chatGptCredentialImportHelper}
+      disabled
+      logo={<ConnectionLogo id="chatgpt" />}
+      onClick={() => undefined}
+      title="ChatGPT"
+    />
+  );
+}
+
+export function DeferredChatGptImportStatus({ approved }: Readonly<{ approved: boolean }>) {
+  return <>{approved ? chatGptCredentialImportApproved : chatGptCredentialImportHelper}</>;
 }

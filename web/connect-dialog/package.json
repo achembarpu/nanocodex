@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "tsc --noEmit && vite build",
-    "test": "node --test",
+    "test": "node --test test/*.test.mjs && vitest run test/*.test.tsx",
     "preview": "vite preview --host 127.0.0.1",
     "deploy": "npm run build && wrangler deploy --autoconfig=false --config ./wrangler.jsonc"
   },
@@ -27,6 +27,7 @@
     "@vitejs/plugin-react": "6.0.2",
     "typescript": "5.9.3",
     "vite": "8.1.5",
+    "vitest": "^4.0.18",
     "wrangler": "4.123.0"
   }
 }

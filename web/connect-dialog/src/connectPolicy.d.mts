@@ -15,6 +15,8 @@ export function registeredApp(
 ): RegisteredApp;
 export function isPopupPresentation(dialogUrl: string, isTopLevel: boolean): boolean;
 export function signedAppResources(resources: unknown, app: RegisteredApp): readonly unknown[];
+export type ConnectPolicy = Readonly<{ chatGptCredentialImport: boolean }>;
+export function parseConnectPolicy(resources: unknown): ConnectPolicy;
 export function connectApiOrigin(auth: unknown, dialogOrigin: string): string;
 export function sanitizeWalletResult(result: unknown): Readonly<{
   accounts: readonly Readonly<{

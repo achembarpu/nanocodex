@@ -14,6 +14,8 @@ import {
   AccountConnectionGrid,
   AccountConnectionSection,
   AccountConnectionSurface,
+  DeferredChatGptImportCard,
+  DeferredChatGptImportStatus,
 } from "./AccountConnectionSurface";
 import { ConnectionLogo } from "./ConnectionLogo";
 import {
@@ -37,6 +39,7 @@ import {
   isLocalDevelopmentOrigin,
   mcpConnectionApprovalDisposition,
   mcpConnectionsFromWire,
+  parseConnectPolicy,
   registeredApp,
   restoreMcpCallbackContinuation,
   sanitizeCliWalletResult,
@@ -83,6 +86,7 @@ type ConnectorStatuses = Partial<Record<ConnectorId, ConnectorStatus>>;
 type PendingApproval = Readonly<{
   accountAddress: `0x${string}`;
   apiUrl: string;
+  deferredChatGptImport: boolean;
   result: unknown;
   requestId: string;
   requestedConnectors: readonly ConnectorId[];
@@ -256,6 +260,7 @@ export function ConnectOnboarding({
       const approval: PendingApproval = {
         accountAddress: restored.accountAddress,
         apiUrl: restored.apiUrl,
+        deferredChatGptImport: view.connectPolicy.chatGptCredentialImport,
         result: restored.result,
         requestId: restored.requestId,
         requestedConnectors: restored.requestedConnectors,
@@ -507,6 +512,7 @@ export function ConnectOnboarding({
           const next: PendingApproval = {
             accountAddress: account.address,
             apiUrl: connectApiUrl(activeRequest),
+            deferredChatGptImport: walletView(activeRequest).connectPolicy.chatGptCredentialImport,
             result: sanitizeCliWalletResult({
               accounts: [{
                 address: account.address,
@@ -541,6 +547,7 @@ export function ConnectOnboarding({
         const next: PendingApproval = {
           accountAddress: account.address,
           apiUrl: connectApiUrl(activeRequest),
+          deferredChatGptImport: walletView(activeRequest).connectPolicy.chatGptCredentialImport,
           result: activeRequest.confirmationCode
             ? sanitizeCliWalletResult(result)
             : sanitizeWalletResult(result),
@@ -751,7 +758,9 @@ export function ConnectOnboarding({
     statuses: ConnectorStatuses,
     id: ConnectorId,
   ) {
-    if (activeConnector.current || statuses[id]?.connected) return;
+    if (activeConnector.current
+      || statuses[id]?.connected
+      || (id === "chatgpt" && approval.deferredChatGptImport)) return;
     setFailure(undefined);
     setConnectorAction(id);
     try {
@@ -870,6 +879,7 @@ export function ConnectOnboarding({
       || connectorAction
       || !connectorStatuses
       || connectorStatuses[id]?.connected
+      || (id === "chatgpt" && pendingApproval.deferredChatGptImport)
     ) return;
     if (wizard) {
       await connectDeviceConnector(pendingApproval, connectorStatuses, id);
@@ -902,6 +912,7 @@ export function ConnectOnboarding({
     if (
       activeConnector.current
       || statuses[id]?.connected
+      || (id === "chatgpt" && approval.deferredChatGptImport)
       || (id !== "chatgpt" && (!popup || popup.closed))
     ) {
       popup?.close();
@@ -1160,6 +1171,7 @@ function RevocationApproval({ request }: Readonly<{ request: WalletRequest }>) {
 type ConnectionView = Omit<Dialog.ConnectionRequest, "auth" | "accessKey"> & Readonly<{
   auth: Readonly<{ message?: string; resources: readonly string[] }>;
   accessKey?: Omit<Dialog.ConnectionRequest["accessKey"], "witness"> & Readonly<{ witness?: `0x${string}` }>;
+  connectPolicy: ReturnType<typeof parseConnectPolicy>;
   focusConnector?: ConnectorId | undefined;
   focusMcpConnection?: string | undefined;
   mcpConnections: readonly McpConnection[];
@@ -1274,6 +1286,7 @@ function ConnectionWizard({
   const focusedMcp = request.focusMcpConnection
     ? request.mcpConnections.find(({ id }) => id === request.focusMcpConnection)
     : undefined;
+  const deferredChatGptImport = request.connectPolicy.chatGptCredentialImport;
   const requester = presentation === "wizard" ? "Nanocodex CLI" : request.app.name;
   if (!connectorStatuses && !accountAddress) {
     return (
@@ -1299,12 +1312,16 @@ function ConnectionWizard({
   return (
     <AccountConnectionSurface
       confirmationCode={confirmationCode}
-      description={<>{accountAddress
+      description={completed && deferredChatGptImport
+        ? <DeferredChatGptImportStatus approved />
+        : <>{accountAddress
             ? `Signed in as ${shortAddress(accountAddress)}. `
             : selectedAccount
               ? `${selectedAccount.mode === "register" ? "Create" : "Use"} ${selectedAccount.label}. `
             : ""}{focused
-                ? connectorStatuses?.[focused.id]?.connected
+                ? focused.id === "chatgpt" && deferredChatGptImport
+                  ? <DeferredChatGptImportStatus approved={false} />
+                  : connectorStatuses?.[focused.id]?.connected
                   ? `${focused.name} is connected. You can return to ${requester}.`
                   : connectorAction === focused.id
                   ? `Continue in ${focused.name}. You’ll return here when it is connected.`
@@ -1423,6 +1440,9 @@ function WizardConnectorList({ connectorAction, connectorStatuses, disabled, onC
     <AccountConnectionGrid>
       {connectors.map((connector) => {
         const id = connector.id as ConnectorId;
+        if (id === "chatgpt" && request.connectPolicy.chatGptCredentialImport) {
+          return <DeferredChatGptImportCard key={id} />;
+        }
         const status = connectorStatuses?.[id];
         const resolved = connectorStatuses !== undefined;
         const actionDisabled = disabled || connectorAction !== undefined || !resolved || status?.connected === true;
@@ -1919,7 +1939,7 @@ async function prepareRegistrationSession() {
 function walletView(request: WalletRequest): ConnectionView {
   const params = record(firstParam(request.rpc.params));
   const capabilities = record(params.capabilities);
-  const { app, resources } = walletConnectContext(request);
+  const { app, connectPolicy, resources } = walletConnectContext(request);
   const requestedConnectors = requestedConnectorIdsFromResources(resources);
   const focusConnector = focusedConnectorFromResources(resources, requestedConnectors);
   const mcpRequest = requestedMcpConnectionsFromRequest(request, resources);
@@ -1965,6 +1985,7 @@ function walletView(request: WalletRequest): ConnectionView {
     auth: {
       resources,
     },
+    connectPolicy,
     permission: {
       id: "agent.run",
       title: "Use your Nanocodex agent",
@@ -2081,9 +2102,10 @@ function walletConnectContext(request: WalletRequest) {
     window.parent === window,
   );
   signedAppResources(resources, app);
+  const connectPolicy = parseConnectPolicy(resources);
   focusedConnectorFromResources(resources, requestedConnectorIdsFromResources(resources));
   requestedMcpConnectionsFromRequest(request, resources);
-  return { app, resources };
+  return { app, connectPolicy, resources };
 }
 
 function isConnectorCompletion(value: unknown): value is Readonly<{
@@ -2157,7 +2179,10 @@ function approvalReady(
   connectors: ConnectorStatuses,
   mcpConnections: readonly McpConnection[],
 ): boolean {
-  return connectorApprovalDisposition(approval.requestedConnectors, connectors) === "respond"
+  const requiredConnectors = approval.deferredChatGptImport
+    ? approval.requestedConnectors.filter((connector) => connector !== "chatgpt")
+    : approval.requestedConnectors;
+  return connectorApprovalDisposition(requiredConnectors, connectors) === "respond"
     && mcpConnectionApprovalDisposition(approval.requestedMcpConnections, mcpConnections) === "respond";
 }
 
