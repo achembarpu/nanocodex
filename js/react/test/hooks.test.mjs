@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createElement, useLayoutEffect } from "react";
+import { createElement, StrictMode, useLayoutEffect } from "react";
 import { act, create } from "react-test-renderer";
 
+import { agentActions } from "../../bindings/actions/index.mjs";
 import { createAgentConfig } from "../../bindings/browser/config.mjs";
+import { createAgentClient, defineRuntime } from "../../bindings/internal.mjs";
 import {
   NanocodexProvider,
   useNanocodex,
@@ -44,6 +46,40 @@ test("useVoice is a thin idle resource until its Agent is ready", async () => {
   });
   assert.equal(voice.status, "idle");
   await act(async () => root.unmount());
+});
+
+test("useVoice creates a live resource after StrictMode's simulated cleanup", async () => {
+  let captureCalls = 0;
+  let startError;
+  const agent = await createStartPathAgent();
+  const captureMicrophone = () => {
+    captureCalls += 1;
+    throw new Error("capture start reached");
+  };
+
+  function Consumer() {
+    const voice = useVoice(agent, { captureMicrophone });
+    return createElement("button", {
+      onClick() {
+        void voice.start().catch((error) => { startError = error; });
+      },
+    }, "Start");
+  }
+
+  let root;
+  await act(async () => {
+    root = create(createElement(StrictMode, null, createElement(Consumer)));
+  });
+  await act(async () => {
+    root.root.findByType("button").props.onClick();
+    await waitFor(() => startError !== undefined);
+  });
+
+  assert.equal(captureCalls, 1);
+  assert.match(startError.message, /capture start reached/);
+  assert.doesNotMatch(startError.message, /destroyed/);
+  await act(async () => root.unmount());
+  agent.dispose();
 });
 
 test("useNanocodex follows the vanilla external store without duplicating Agent ownership", async () => {
@@ -388,6 +424,21 @@ function createVoiceAgent() {
     },
     turn: { prompt() { throw new Error("disabled voice must not prompt"); } },
   };
+}
+
+async function createStartPathAgent() {
+  const raw = {
+    sessionId: "voice-agent",
+    browserVoice: async () => ({ free() {} }),
+    free() {},
+    prompt() { throw new Error("voice must not prompt the Agent"); },
+  };
+  const runtime = defineRuntime({
+    create: async () => raw,
+    decorate: (agent) => agent.extend(agentActions()),
+    subscribe() { return () => {}; },
+  });
+  return createAgentClient(runtime);
 }
 
 function LayoutEmitter({ emit }) {

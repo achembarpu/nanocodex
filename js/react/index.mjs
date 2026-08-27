@@ -127,7 +127,7 @@ export function useVoice(agent, parameters = {}) {
     ],
   );
   useEffect(() => () => {
-    void resource?.destroy();
+    void resource?.stop();
   }, [resource]);
   const subscribe = useCallback(
     (listener) => resource?.subscribe(listener) ?? (() => {}),
