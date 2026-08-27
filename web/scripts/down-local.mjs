@@ -16,8 +16,16 @@ const webRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const repositoryRoot = resolve(webRoot, "..");
 const developmentScriptPath = resolve(webRoot, "scripts/dev-local.mjs");
 
-export function assertLocalDevelopmentOwner(command, expectedScript = developmentScriptPath) {
-  if (typeof command !== "string" || !command.includes(expectedScript)) {
+export function assertLocalDevelopmentOwner(
+  command,
+  expectedIdentity = developmentScriptPath,
+) {
+  const marker = typeof expectedIdentity === "string"
+    && /^ncdx:[A-Za-z0-9_-]{16}$/.test(expectedIdentity);
+  const matches = typeof command === "string" && (marker
+    ? command.trim() === expectedIdentity
+    : command.includes(expectedIdentity));
+  if (!matches) {
     throw new Error(
       "the local development lease points at a different live process; refusing to signal a reused PID",
     );
@@ -45,7 +53,10 @@ export async function stopLocalDevelopment(statePath, {
     return { status: "not-running" };
   }
 
-  assertLocalDevelopmentOwner(commandForPid(lease.pid));
+  assertLocalDevelopmentOwner(
+    commandForPid(lease.pid),
+    typeof lease.processTitle === "string" ? lease.processTitle : developmentScriptPath,
+  );
   kill(lease.pid, "SIGTERM");
   const deadline = Date.now() + timeoutMs;
   while (isProcessAlive(lease.pid)) {

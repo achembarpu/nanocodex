@@ -1085,6 +1085,9 @@ test("each instance state admits one owner without blocking another instance", a
       currentPid: 202,
       isProcessAlive: () => false,
     });
+    assert.match(first.processTitle, /^ncdx:[A-Za-z0-9_-]{16}$/);
+    assert.match(independent.processTitle, /^ncdx:[A-Za-z0-9_-]{16}$/);
+    assert.notEqual(first.processTitle, independent.processTitle);
     assert.equal((await stat(firstPath)).mode & 0o777, 0o700);
     await assert.rejects(
       acquireLocalDevelopmentLease(firstPath, {

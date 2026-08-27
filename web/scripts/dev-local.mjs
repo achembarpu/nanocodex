@@ -364,6 +364,7 @@ async function main() {
     );
     const statePath = localDevelopmentStatePath(homedir(), instance.id);
     developmentLease = await acquireLocalDevelopmentLease(statePath);
+    process.title = developmentLease.processTitle;
     await assertLocalDevelopmentPortAvailable(origin.hostname, origin.port);
     const toolEnvironment = buildChildEnvironment(environment);
     const oauthRelayKey = localOAuthRelayKey(environment);
@@ -543,13 +544,18 @@ export async function acquireLocalDevelopmentLease(
   await chmod(statePath, 0o700);
   const path = resolve(statePath, "development.lock");
   const token = randomBytes(32).toString("base64url");
+  const processTitle = `ncdx:${createHash("sha256")
+    .update(token)
+    .digest("base64url")
+    .slice(0, 16)}`;
   for (let attempt = 0; attempt < 2; attempt += 1) {
     let handle;
     try {
       handle = await open(path, "wx", 0o600);
-      await handle.writeFile(`${JSON.stringify({ pid: currentPid, token })}\n`);
+      await handle.writeFile(`${JSON.stringify({ pid: currentPid, processTitle, token })}\n`);
       await handle.close();
       return Object.freeze({
+        processTitle,
         async release() {
           const retained = await readLocalDevelopmentLease(path);
           if (retained?.token === token) await unlink(path).catch((error) => {

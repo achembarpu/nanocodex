@@ -13,7 +13,7 @@ test("local down refuses to signal a reused live PID", async () => {
   const statePath = await mkdtemp(resolve(tmpdir(), "nanocodex-down-test-"));
   await writeFile(
     resolve(statePath, "development.lock"),
-    `${JSON.stringify({ pid: 42, token: "lease" })}\n`,
+    `${JSON.stringify({ pid: 42, processTitle: "ncdx:abcdefghijklmnop", token: "lease" })}\n`,
   );
   let signalled = false;
 
@@ -33,12 +33,12 @@ test("local down signals the owning development process and waits for exit", asy
   const statePath = await mkdtemp(resolve(tmpdir(), "nanocodex-down-test-"));
   await writeFile(
     resolve(statePath, "development.lock"),
-    `${JSON.stringify({ pid: 43, token: "lease" })}\n`,
+    `${JSON.stringify({ pid: 43, processTitle: "ncdx:abcdefghijklmnop", token: "lease" })}\n`,
   );
   let alive = true;
   const signals = [];
   const result = await stopLocalDevelopment(statePath, {
-    commandForPid: () => `${process.execPath} ${resolve("web/scripts/dev-local.mjs")}`,
+    commandForPid: () => "ncdx:abcdefghijklmnop",
     isProcessAlive: () => alive,
     kill: (pid, signal) => {
       signals.push([pid, signal]);
@@ -70,6 +70,17 @@ test("local down removes a stale dead lease without signalling", async () => {
 test("owner validation accepts only the exact Nanocodex development script", () => {
   const expected = resolve("web/scripts/dev-local.mjs");
   assert.doesNotThrow(() => assertLocalDevelopmentOwner(`node ${expected}`, expected));
+  assert.doesNotThrow(() => assertLocalDevelopmentOwner(
+    "ncdx:abcdefghijklmnop",
+    "ncdx:abcdefghijklmnop",
+  ));
+  assert.throws(
+    () => assertLocalDevelopmentOwner(
+      "ncdx:qrstuvwxyzABCDEF",
+      "ncdx:abcdefghijklmnop",
+    ),
+    /reused PID/,
+  );
   assert.throws(
     () => assertLocalDevelopmentOwner("node /tmp/dev-local.mjs", expected),
     /reused PID/,
