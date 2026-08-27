@@ -17,6 +17,33 @@
 - Builders expose deliberate policy. Queue capacities, socket tasks, mutable
   run state, replay bookkeeping, and similar mechanics stay private.
 
+## Hosted accounts and connections
+
+- The Account surface is the general form of the hosted Connect flow. Account
+  and Connect must import and render the same identity, passkey, connection,
+  and connector components; a scoped Connect request may only add request
+  context, filtering, authorization hooks, and completion behavior. Do not
+  maintain visually similar forks of this interface.
+- A new CLI login creates or resumes the hosted account and lands directly on
+  the connector call to action. ChatGPT history import is optional and must not
+  run automatically during account creation.
+- A hosted account is the entitlement boundary for agent capabilities. Once an
+  operator enables hosted memory, thread lookup, or account-scoped MCP tools,
+  every Nanocodex client authenticated as that account receives them without a
+  second client-side credential or setup flow.
+- Account selection must show every remembered passkey account. Give the
+  currently usable passkey its own one-action shortcut, keep an explicit row
+  for choosing any other passkey available on the device, and keep account
+  creation as a separate action. Never replace this chooser with a generic
+  “continue” hint that hides the available identities.
+- Signing out ends the browser session but does not erase the local remembered
+  account catalog. An expired persistent/passkey session must lead back to
+  explicit passkey sign-in; it must not silently become a new anonymous account.
+- Connector actions from the Account surface update the connector card in
+  place. A request-scoped Connect flow may show its completion state and return
+  the caller to the requesting app, but shared connector state and visuals stay
+  owned by the common library.
+
 ## Workflow
 
 - Stop a workflow as soon as there is sufficient evidence that it is
@@ -39,6 +66,36 @@
   or Suspense placeholders. Preserve the last complete interface when possible;
   otherwise render nothing until the boundary is ready. Show explicit,
   actionable failure states only after an operation actually fails.
+- Keep long-lived development processes and their logs observable. Before
+  deleting a large log, identify and stop or reopen its writer: deleting an open
+  file does not reclaim its blocks. In particular, bound and rotate retained
+  `.nanocodex/logs/tui.log` output rather than allowing an unattended TUI to
+  consume the development disk.
+
+## Managed web deployment
+
+- During an explicitly requested direct deployment iteration, deploy with the
+  checked-in Wrangler version and the owning Worker configuration. Do not wait
+  for, repair, or treat CI as a deployment gate unless the user asks for CI.
+- Deploy from a clean worktree at the exact intended commit, attach that commit
+  SHA to the deployment, and verify the live Worker rather than inferring
+  production state from a successful asset build. Preserve unrelated changes in
+  the primary checkout.
+- A managed web rollout is complete only after the root Worker, its service
+  bindings, container image when configured, routes/triggers, and required
+  secrets are live. A healthy static page alone is not evidence that hosted
+  agents or OAuth-backed connectors are configured.
+- Treat an explicitly authorized complete Cloudflare reset as a topology reset,
+  not merely a Worker redeploy: remove Workers and versions, Durable Object
+  namespaces, R2 objects and buckets, D1 databases, indexes, and Worker secrets.
+  Recreate resources in dependency order, commit new generated resource IDs,
+  and reseed secrets; deleted secret values cannot be recovered from Wrangler or
+  a replacement Durable Object.
+- After every direct production deploy, exercise the canonical URL in the real
+  browser and inspect console errors and failed network requests. Authentication
+  work must include a fresh account ceremony and a returning-passkey ceremony;
+  connector work must prove both the in-place Account behavior and the scoped
+  Connect-dialog behavior.
 
 ## Browser verification
 
