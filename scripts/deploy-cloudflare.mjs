@@ -37,7 +37,7 @@ const INSTALL_DIRECTORIES = Object.freeze([
   "services/egress",
   "services/managed",
   "web",
-  "web/connect-api",
+  "services/connect-api",
   "web/connect-dialog",
   "web/connect-playground",
 ]);
@@ -46,7 +46,7 @@ const WRANGLER_DIRECTORIES = Object.freeze([
   "services/egress",
   "services/managed",
   "web",
-  "web/connect-api",
+  "services/connect-api",
   "web/connect-dialog",
   "web/connect-playground",
 ]);
@@ -288,7 +288,7 @@ async function main(environment = process.env) {
     "connect-api": () => deployConfiguredWorker({
       component: "connect-api",
       config: "wrangler.jsonc",
-      directory: "web/connect-api",
+      directory: "services/connect-api",
       environment: childEnvironment,
       redactions,
       revision: target,
@@ -388,12 +388,12 @@ async function buildProductionArtifacts(environment) {
   await runLocal("npm", [
     "exec",
     "--prefix",
-    "web/connect-api",
+    "services/connect-api",
     "--",
     "tsc",
     "--noEmit",
     "--project",
-    "web/connect-api/tsconfig.json",
+    "services/connect-api/tsconfig.json",
   ], {
     environment: child,
     label: "type-check Connect API",
