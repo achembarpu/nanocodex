@@ -34,13 +34,14 @@ function deferred<T>() {
 
 test("maps every Nanocodex surface to a stable application route", () => {
   assert.deepEqual(
-    ["home", "agent", "multiplayer", "world", "changelog", "docs", "code", "commits", "requests", "evals"].map((surface) => [
+    ["home", "agent", "tools", "multiplayer", "world", "changelog", "docs", "code", "commits", "requests", "evals"].map((surface) => [
       surface,
       pathForSurface(surface as Parameters<typeof pathForSurface>[0]),
     ]),
     [
       ["home", "/"],
       ["agent", "/agent"],
+      ["tools", "/agent?demo=attached-tools"],
       ["multiplayer", "/multiplayer"],
       ["world", "/world"],
       ["changelog", "/changelog"],
@@ -62,6 +63,7 @@ test("resolves direct routes and legacy view links", () => {
   assert.equal(surfaceFromUrl(new URL("https://nanocodex.test/code/")), "code");
   assert.equal(surfaceFromUrl(new URL("https://nanocodex.test/changelog")), "changelog");
   assert.equal(surfaceFromUrl(new URL("https://nanocodex.test/agent?thread=demo")), "agent");
+  assert.equal(surfaceFromUrl(new URL("https://nanocodex.test/agent?demo=attached-tools")), "tools");
   assert.equal(surfaceFromUrl(new URL("https://nanocodex.test/multiplayer?room=demo")), "multiplayer");
   assert.equal(surfaceFromUrl(new URL("https://nanocodex.test/world?thread=demo")), "world");
   assert.equal(surfaceFromUrl(new URL("https://nanocodex.test/docs/core/owned-agent")), "docs");
@@ -99,7 +101,7 @@ test("the shared shell presents Source without changing the stable Code route", 
 test("navigation does not capture global letter keys and browser Find remains native", () => {
   assert.deepEqual(
     [...demoNavigation, ...primaryNavigation, ...gitNavigation].map(({ label, description }) => [label, description]),
-    [["Durable Agent", "Managed durable agent"], ["Multiplayer", "Shared room"], ["World", "Agent world"], ["Docs", "Reference"], ["Evals", "Benchmarks"], ["Changelog", "Releases"], ["Commits", "History"], ["Source", "Repository"]],
+    [["Durable Agent", "Managed durable agent"], ["Attached Tools", "Browser tool host"], ["Multiplayer", "Shared room"], ["World", "Agent world"], ["Docs", "Reference"], ["Evals", "Benchmarks"], ["Changelog", "Releases"], ["Commits", "History"], ["Source", "Repository"]],
   );
   assert.doesNotMatch(application, /item\.shortcut|shortcut<\/small>|const nextSurface =\s*key/);
   assert.match(
@@ -113,7 +115,7 @@ test("navigation does not capture global letter keys and browser Find remains na
 });
 
 test("the product navigation exposes the deliberate Demos and Git hierarchy", () => {
-  assert.deepEqual(demoNavigation.map(({ label }) => label), ["Durable Agent", "Multiplayer", "World"]);
+  assert.deepEqual(demoNavigation.map(({ label }) => label), ["Durable Agent", "Attached Tools", "Multiplayer", "World"]);
   assert.deepEqual(primaryNavigation.map(({ label }) => label), ["Docs", "Evals"]);
   assert.deepEqual(gitNavigation.map(({ label }) => label), ["Changelog", "Commits", "Source"]);
   assert.equal(connectDemoUrl, "https://nanocodex-connect-playground.gakonst.workers.dev");
@@ -165,6 +167,7 @@ test("Vite owns one static application graph", () => {
     "CommitCodeStream",
     "Docs",
     "Evals",
+    "HostedToolsDemo",
     "MonsterWorld",
     "Multiplayer",
     "PierreWorkerProvider",

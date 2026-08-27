@@ -37,6 +37,7 @@ import {
   DropdownMenuTrigger,
 } from "./DropdownMenu";
 import { Evals, preloadEvalOverview } from "./Evals";
+import { HostedToolsDemo } from "./HostedToolsDemo";
 import { MonsterWorld } from "./MonsterWorld";
 import { lockDocumentScroll, useModalBoundary } from "./modalBoundary";
 import { Multiplayer } from "./Multiplayer";
@@ -698,7 +699,9 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
         ? "Source"
         : surface === "connect"
           ? "Account"
-          : `${surface[0].toUpperCase()}${surface.slice(1)}`} · Nanocodex`;
+          : surface === "tools"
+            ? "Attached Tools"
+            : `${surface[0].toUpperCase()}${surface.slice(1)}`} · Nanocodex`;
   }, [surface]);
 
   useLayoutEffect(() => {
@@ -714,9 +717,11 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
     (nextSurface: Surface) =>
       nextSurface === "home"
         ? pathForSurface("home")
-        : threadId
-        ? `${pathForSurface(nextSurface)}?thread=${threadId}`
-        : pathForSurface(nextSurface),
+        : nextSurface === "tools"
+          ? pathForSurface("tools")
+          : threadId
+            ? `${pathForSurface(nextSurface)}?thread=${threadId}`
+            : pathForSurface(nextSurface),
     [threadId],
   );
 
@@ -818,6 +823,13 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
     }
     if (nextSurface === "home") {
       const destination = pathForSurface("home");
+      if (`${location.pathname}${location.search}` === destination) return;
+      repositoryRequestId.current++;
+      startTransition(() => navigate(destination));
+      return;
+    }
+    if (nextSurface === "tools") {
+      const destination = pathForSurface("tools");
       if (`${location.pathname}${location.search}` === destination) return;
       repositoryRequestId.current++;
       startTransition(() => navigate(destination));
@@ -1385,6 +1397,8 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
           >
           {surface === "connect" ? (
             <DeviceConnect />
+          ) : surface === "tools" ? (
+            <HostedToolsDemo />
           ) : surface === "multiplayer" ? (
             <Multiplayer />
           ) : surface === "world" ? (

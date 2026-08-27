@@ -1,6 +1,7 @@
 export type Surface =
   | "home"
   | "agent"
+  | "tools"
   | "multiplayer"
   | "world"
   | "changelog"
@@ -27,6 +28,7 @@ export const accountNavigation = {
 
 export const demoNavigation = [
   { surface: "agent", label: "Durable Agent", description: "Managed durable agent" },
+  { surface: "tools", label: "Attached Tools", description: "Browser tool host" },
   { surface: "multiplayer", label: "Multiplayer", description: "Shared room" },
   { surface: "world", label: "World", description: "Agent world" },
 ] as const satisfies ReadonlyArray<ProductNavigationItem>;
@@ -45,6 +47,7 @@ export const gitNavigation = [
 const surfacePaths: Record<Surface, string> = {
   home: "/",
   agent: "/agent",
+  tools: "/agent?demo=attached-tools",
   multiplayer: "/multiplayer",
   world: "/world",
   changelog: "/changelog",
@@ -73,6 +76,7 @@ export function surfaceFromUrl(url: Pick<URL, "pathname" | "searchParams">): Sur
 
   if (pathname === "/evals" || pathname.startsWith("/evals/")) return "evals";
   if (pathname === "/docs" || pathname.startsWith("/docs/")) return "docs";
+  if (pathname === "/agent" && url.searchParams.get("demo") === "attached-tools") return "tools";
   if (pathname === "/connect/device") return "connect";
 
   const pathMatch = (Object.entries(surfacePaths) as Array<[Surface, string]>).find(
