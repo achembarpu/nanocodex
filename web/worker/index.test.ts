@@ -222,16 +222,17 @@ test("brokered website access stays credentialless and disables legacy browser s
   assert.equal(realtimeBody.sdp, "v=0\r\na=offer\r\n");
   assert.deepEqual((realtimeBody.session as Record<string, unknown>).delegation, { type: "client" });
 
-  const managedAgentId = "019d2f5d-7491-7000-8000-000000000001";
+  const managedAgentId = "019d2f5d-7491-8000-8000-000000000001";
+  const managedVoiceSessionId = "019d2f5d-7491-7000-8000-000000000002";
   const managedRealtime = await worker.fetch(new Request("https://demo.test/api/realtime/calls", {
     method: "POST",
     headers: { "content-type": "application/json", origin: "https://demo.test" },
-    body: browserRealtimeCall(managedAgentId, undefined, {}, managedAgentId),
+    body: browserRealtimeCall(managedVoiceSessionId, undefined, {}, managedAgentId),
   }), env);
   assert.equal(managedRealtime.status, 200);
   const managedUpstream = egressRequests.filter((request) => request.url.endsWith("/v1/realtime/calls")).at(-1);
   assert.equal(managedUpstream?.headers.get("x-nanocodex-agent-id"), managedAgentId);
-  assert.equal(managedUpstream?.headers.get("x-session-id"), managedAgentId);
+  assert.equal(managedUpstream?.headers.get("x-session-id"), managedVoiceSessionId);
 
   const mismatched = await worker.fetch(new Request("https://demo.test/api/realtime/calls", {
     method: "POST",

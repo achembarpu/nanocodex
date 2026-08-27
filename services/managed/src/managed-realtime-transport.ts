@@ -8,6 +8,8 @@ import { bindAgentCredential } from "./credentials";
 import { fetchResponseWithDeadline } from "./deadline";
 
 const AGENT_ID =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[78][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const VOICE_SESSION_ID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const CALL_ID = /^(?:rtc_[A-Za-z0-9._:-]{1,196}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
 const MAX_CALL_BODY_BYTES = 64 * 1024;
@@ -54,16 +56,17 @@ export async function routeManagedRealtimeTransport(
 
   let callBody: string | undefined;
   let callId: string | undefined;
+  let voiceSessionId: string | undefined;
   if (resource === "calls") {
     const validated = await validatedCallBody(request, url);
     if (validated instanceof Response) return validated;
     callBody = validated;
+    voiceSessionId = request.headers.get("x-nanocodex-voice-session-id") ?? undefined;
   } else {
     const validated = validatedSideband(request, url);
     if (validated instanceof Response) return validated;
-    callId = validated;
+    ({ callId, voiceSessionId } = validated);
   }
-
   const durableId = env.NANOCODEX_SESSIONS.idFromName(agentId);
   const subject = durableId.toString();
   const ownershipHeaders = new Headers();
@@ -82,6 +85,9 @@ export async function routeManagedRealtimeTransport(
     return json({ error: "agent_ownership_unavailable" }, 503);
   }
   if (!owned) return json({ error: "not_found" }, 404);
+  if (!voiceSessionId || !VOICE_SESSION_ID.test(voiceSessionId)) {
+    return json({ error: "invalid_voice_session" }, 400);
+  }
 
   try {
     // Creation installs this mapping. Rebinding here also repairs broker state
@@ -91,8 +97,8 @@ export async function routeManagedRealtimeTransport(
     return json({ error: "credential_broker_unavailable" }, 503);
   }
 
-  if (resource === "calls") return realtimeCall(callBody!, env, agentId, subject);
-  return realtimeSideband(callId!, env, agentId, subject);
+  if (resource === "calls") return realtimeCall(callBody!, env, agentId, voiceSessionId, subject);
+  return realtimeSideband(callId!, env, agentId, voiceSessionId, subject);
 }
 
 async function validatedCallBody(request: Request, url: URL): Promise<string | Response> {
@@ -122,13 +128,14 @@ async function realtimeCall(
   body: string,
   env: ManagedRealtimeTransportEnv,
   agentId: string,
+  voiceSessionId: string,
   subject: string,
 ): Promise<Response> {
   const response = await env.NANOCODEX.fetch(new Request(
     "https://nanocodex.internal/v1/realtime/calls",
     {
       method: "POST",
-      headers: internalHeaders(agentId, subject, false),
+      headers: internalHeaders(agentId, voiceSessionId, subject, false),
       body,
     },
   ));
@@ -149,36 +156,43 @@ async function realtimeCall(
 function validatedSideband(
   request: Request,
   url: URL,
-): string | Response {
+): { callId: string; voiceSessionId?: string } | Response {
   if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
     return new Response("Expected WebSocket upgrade", { status: 426 });
   }
   const keys = [...url.searchParams.keys()];
   const callIds = url.searchParams.getAll("call_id");
-  if (keys.some((key) => key !== "call_id")
+  const voiceSessionIds = url.searchParams.getAll("voice_session_id");
+  if (keys.some((key) => key !== "call_id" && key !== "voice_session_id")
     || callIds.length !== 1
+    || voiceSessionIds.length > 1
     || !CALL_ID.test(callIds[0]!)) {
     return json({ error: "invalid_request" }, 400);
   }
-  return callIds[0]!;
+  return {
+    callId: callIds[0]!,
+    ...(voiceSessionIds[0] === undefined ? {} : { voiceSessionId: voiceSessionIds[0] }),
+  };
 }
 
 function realtimeSideband(
   callId: string,
   env: ManagedRealtimeTransportEnv,
   agentId: string,
+  voiceSessionId: string,
   subject: string,
 ): Promise<Response> {
   // Return the binding response itself: reconstructing a 101 Response severs
   // Cloudflare's upgraded WebSocket from its provider peer.
   return env.NANOCODEX.fetch(new Request(
     "https://nanocodex.internal/v1/realtime/sideband",
-    { headers: internalHeaders(agentId, subject, true, callId) },
+    { headers: internalHeaders(agentId, voiceSessionId, subject, true, callId) },
   ));
 }
 
 function internalHeaders(
   agentId: string,
+  voiceSessionId: string,
   subject: string,
   websocket: boolean,
   callId?: string,
@@ -186,12 +200,12 @@ function internalHeaders(
   const headers = new Headers({
     authorization: PROVIDER_PLACEHOLDER,
     "openai-alpha": "quicksilver=v2",
-    "session-id": agentId,
-    "thread-id": agentId,
+    "session-id": voiceSessionId,
+    "thread-id": voiceSessionId,
     "user-agent": "nanocodex-managed/0.1.0",
     "x-nanocodex-agent-id": agentId,
     "x-nanocodex-subject": subject,
-    "x-session-id": agentId,
+    "x-session-id": voiceSessionId,
   });
   if (websocket) {
     headers.set("upgrade", "websocket");

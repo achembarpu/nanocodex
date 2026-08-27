@@ -46,6 +46,10 @@ test("local Connect routing owns device, auth, and authenticated onboarding rout
     new Request("http://nanocodex.localhost:5173/v1/connectors/github/callback"),
     "/v1/connectors/github/callback",
   ), false);
+  assert.equal(isConnectApiRequest(
+    new Request(`http://nanocodex.localhost:5173/v1/connectors/github/callback?state=connect.${"a".repeat(43)}`),
+    "/v1/connectors/github/callback",
+  ), true);
 });
 
 test("local Connect proxy preserves the canonical HTTPS request origin", async () => {
@@ -84,7 +88,7 @@ test("local Connect readiness maps to the auxiliary Worker health route", async 
   assert.deepEqual(await response?.json(), { mode: "live", status: "ok" });
 });
 
-test("production never projects the local Connect binding", async () => {
+test("production projects Connect through the canonical Nanocodex origin", async () => {
   let called = false;
   const response = await routeConnectApi(
     new Request("https://nanocodex.example/v1/device/register"),
@@ -97,6 +101,6 @@ test("production never projects the local Connect binding", async () => {
     },
     new URL("https://nanocodex.example/v1/device/register"),
   );
-  assert.equal(response, undefined);
-  assert.equal(called, false);
+  assert.equal(response?.status, 200);
+  assert.equal(called, true);
 });

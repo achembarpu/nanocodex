@@ -567,14 +567,6 @@
   font-size: 8px;
 }
 
-.mcp-connection-identifier {
-  overflow: hidden;
-  font-family: monospace;
-  letter-spacing: 0.02em;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .mcp-connection-actions {
   display: grid;
   justify-items: end;

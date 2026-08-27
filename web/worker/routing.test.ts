@@ -40,6 +40,10 @@ test("Cloudflare routes preview documents, images, and protocol endpoints throug
       binding: "NANOCODEX_CONNECT_DIALOG",
       service: "nanocodex-connect-dialog",
     },
+    {
+      binding: "NANOCODEX_CONNECT_API",
+      service: "nanocodex-connect-api",
+    },
   ]);
   assert.deepEqual(config.env.development.services, [
     {

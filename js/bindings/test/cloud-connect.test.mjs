@@ -238,24 +238,31 @@ test("Connect opens its grant-provisioned durable agent without a redundant stat
     sdp: "v=offer",
     session: { delegation: { type: "client" } },
   });
+  const voiceSessionId = "019fc927-b280-7aa7-8445-1b9996ad2fb1";
   const call = await voiceTransport.call(JSON.stringify({
     call_body: providerCall,
     managed_agent_id: agentId,
     openai_alpha: "quicksilver=v2",
-    realtime_session_id: agentId,
-    session_id: agentId,
-    thread_id: agentId,
+    realtime_session_id: voiceSessionId,
+    session_id: voiceSessionId,
+    thread_id: voiceSessionId,
   }));
   assert.equal(await call.text(), "v=answer");
   assert.equal(new URL(requests[0].url).pathname, `/v1/grants/${connection.grant.id}/agents/${agentId}/realtime/calls`);
   assert.equal(requests[0].headers.get("authorization"), "Bearer grant-session-test");
+  assert.equal(requests[0].headers.get("x-nanocodex-voice-session-id"), voiceSessionId);
   assert.equal(await requests[0].text(), providerCall);
   const sideband = await voiceTransport.sidebandUrl("rtc_connect");
   assert.equal(sideband.protocol, "wss:");
   assert.equal(sideband.searchParams.get("call_id"), "rtc_connect");
   assert.equal(sideband.searchParams.get("ticket"), "one-use-ticket");
+  assert.equal(sideband.searchParams.get("voice_session_id"), voiceSessionId);
   assert.equal(new URL(requests[1].url).pathname, `/v1/grants/${connection.grant.id}/agents/${agentId}/realtime/ticket`);
   assert.equal(requests[1].headers.get("authorization"), "Bearer grant-session-test");
+  assert.deepEqual(await requests[1].json(), {
+    call_id: "rtc_connect",
+    voice_session_id: voiceSessionId,
+  });
   await assert.rejects(
     client.agent.create({ connection, sessionId: "browser-local" }),
     /do not accept app-local sessionId/,

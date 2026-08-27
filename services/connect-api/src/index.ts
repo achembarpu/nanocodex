@@ -29,6 +29,10 @@ import {
   wrapLocalMcpAuthorizationState,
 } from "../../../web/localConnectorCallback";
 import {
+  scopedConnectConnectorState,
+  unscopedConnectConnectorState,
+} from "../../../web/connectConnectorCallback.mjs";
+import {
   canonicalRemoteMcpTarget,
   isMcpConnectionId,
   validateMcpResources,
@@ -313,6 +317,7 @@ type RealtimeTicket = Readonly<{
   agentId: string;
   callId: string;
   grantId: `0x${string}`;
+  voiceSessionId: string;
 }>;
 type ToolHostTicket = Readonly<{
   appId: string;
@@ -1824,7 +1829,7 @@ async function proxyManagedAgent(
     "https://nanocodex.internal",
   );
   const headers = new Headers(managedGrantHeaders(managedGrantAssertion(grant)));
-  for (const name of ["accept", "content-type", "idempotency-key"]) {
+  for (const name of ["accept", "content-type", "idempotency-key", "x-nanocodex-voice-session-id"]) {
     const value = request.headers.get(name);
     if (value) headers.set(name, value);
   }
@@ -2471,6 +2476,7 @@ async function issueRealtimeTicket(
     throw new ApiFailure(403, "agent_output_not_granted", "Voice requires access to final agent replies.");
   }
   const callId = realtimeCallId(body.call_id);
+  const voiceSessionId = voiceSessionIdentifier(body.voice_session_id);
   const ticket = randomSubject();
   if (!store.create || !await store.create(`realtime-ticket:${ticket}`, {
     appId: grant.appId,
@@ -2478,6 +2484,7 @@ async function issueRealtimeTicket(
     agentId: grant.agentId,
     callId,
     grantId: grant.id,
+    voiceSessionId,
   } satisfies RealtimeTicket, { ttl: REALTIME_TICKET_TTL })) {
     throw new ApiFailure(500, "realtime_ticket_unavailable", "The voice connection could not be reserved.");
   }
@@ -2585,12 +2592,14 @@ async function openGrantRealtimeWebSocket(
     throw new ApiFailure(426, "websocket_required", "The voice sideband requires a WebSocket upgrade.");
   }
   const keys = [...url.searchParams.keys()];
-  if (keys.some((key) => key !== "call_id" && key !== "ticket")
+  if (keys.some((key) => key !== "call_id" && key !== "ticket" && key !== "voice_session_id")
     || url.searchParams.getAll("call_id").length !== 1
-    || url.searchParams.getAll("ticket").length !== 1) {
+    || url.searchParams.getAll("ticket").length !== 1
+    || url.searchParams.getAll("voice_session_id").length !== 1) {
     throw new ApiFailure(400, "invalid_realtime_request", "The voice sideband query is invalid.");
   }
   const callId = realtimeCallId(url.searchParams.get("call_id"));
+  const voiceSessionId = voiceSessionIdentifier(url.searchParams.get("voice_session_id"));
   const ticketValue = boundedIdentifier(url.searchParams.get("ticket"), "ticket", 64);
   const grant = await store.get<GrantRecord>(`grant:${grantId}`);
   if (!isGrantRecord(grant)
@@ -2609,12 +2618,13 @@ async function openGrantRealtimeWebSocket(
     || ticket.appOrigin !== grant.appOrigin
     || ticket.grantId.toLowerCase() !== grantId.toLowerCase()
     || ticket.agentId !== agentId
-    || ticket.callId !== callId) {
+    || ticket.callId !== callId
+    || ticket.voiceSessionId !== voiceSessionId) {
     throw new ApiFailure(403, "invalid_realtime_ticket", "The one-time voice ticket is invalid or expired.");
   }
   requireGrantAppOrigin(request, grant, ticket);
   const target = new URL(
-    `/v1/agents/${encodeURIComponent(agentId)}/realtime/sideband?call_id=${encodeURIComponent(callId)}`,
+    `/v1/agents/${encodeURIComponent(agentId)}/realtime/sideband?call_id=${encodeURIComponent(callId)}&voice_session_id=${encodeURIComponent(voiceSessionId)}`,
     "https://nanocodex.internal",
   );
   const response = await env.ACCOUNTS.fetch(new Request(target, {
@@ -2792,7 +2802,9 @@ function isRealtimeTicket(value: unknown): value is RealtimeTicket {
     && typeof value.agentId === "string"
     && value.agentId.length > 0
     && typeof value.callId === "string"
-    && validRealtimeCallId(value.callId);
+    && validRealtimeCallId(value.callId)
+    && typeof value.voiceSessionId === "string"
+    && isVoiceSessionIdentifier(value.voiceSessionId);
 }
 
 function isToolHostTicket(value: unknown): value is ToolHostTicket {
@@ -2814,6 +2826,17 @@ function realtimeCallId(value: unknown): string {
 function validRealtimeCallId(value: string): boolean {
   return /^rtc_[A-Za-z0-9._:-]{1,196}$/.test(value)
     || /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
+}
+
+function voiceSessionIdentifier(value: unknown): string {
+  if (typeof value !== "string" || !isVoiceSessionIdentifier(value)) {
+    throw new ApiFailure(400, "invalid_voice_session", "The voice session identifier is invalid.");
+  }
+  return value;
+}
+
+function isVoiceSessionIdentifier(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
 }
 
 async function revokeGrant(
@@ -3156,6 +3179,10 @@ async function startConnector(
   if (!state || state.length > 512) {
     throw new ApiFailure(502, "connector_broker_invalid", "The connector broker returned an invalid authorization state.");
   }
+  const callbackState = local || requestOrigin !== DIALOG_ORIGIN
+    ? state
+    : scopedConnectConnectorState(state);
+  if (callbackState !== state) authorizationUrl.searchParams.set("state", callbackState);
   if (local) {
     try {
       await wrapLocalConnectorAuthorizationState(
@@ -3170,7 +3197,7 @@ async function startConnector(
   if (!store.create) {
     throw new ApiFailure(500, "connector_state_unavailable", "Atomic connector state storage is unavailable.");
   }
-  const created = await store.create(`connector-state:${state}`, {
+  const created = await store.create(`connector-state:${callbackState}`, {
     accountAddress,
     brokerUserId,
     dialogOrigin,
@@ -3407,6 +3434,7 @@ async function completeConnectorCallback(
     }
     callback[name] = value;
   }
+  callback.state = unscopedConnectConnectorState(state) ?? state;
   let response: Response;
   try {
     response = await brokerFetch(
@@ -4874,7 +4902,7 @@ function connectApiRequestOrigin(request: Request): string {
   const publicOrigin = localDevelopmentPublicOrigin(request);
   if (publicOrigin) return publicOrigin;
   const origin = new URL(request.url).origin;
-  if (origin === API_ORIGIN || isLocalDevelopmentOrigin(origin)) {
+  if (origin === API_ORIGIN || origin === DIALOG_ORIGIN || isLocalDevelopmentOrigin(origin)) {
     return origin;
   }
   throw new ApiFailure(403, "origin_denied", "The Connect API origin is not allowed.");

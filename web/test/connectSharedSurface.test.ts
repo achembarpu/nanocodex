@@ -36,16 +36,15 @@ test("scoped Connect filters signed request context and retains approval return 
   assert.match(app, /host\.reject\(new Error\("The request was not approved\."\)\)/);
 });
 
-test("Account and filtered Connect reuse the shared MCP card with exact identifier copy", () => {
+test("Account and filtered Connect reuse the shared MCP card without exposing opaque IDs", () => {
   assert.match(app, /McpConnectionCard/);
   assert.match(profileConnectors, /McpConnectionCard/);
   const sharedSurface = source("../connect-dialog/src/AccountConnectionSurface.tsx");
   assert.match(sharedSurface, /export function McpConnectionAddCard/);
   assert.match(sharedSurface, /Linear shorthand or a public HTTPS endpoint/);
   assert.doesNotMatch(sharedSurface, /canonicalRemoteMcpTarget|private.*host|localhost/);
-  assert.match(sharedSurface, /navigator\.clipboard\.writeText\(connection\.id\)/);
-  assert.match(sharedSurface, /shortMcpConnectionIdentifier\(connection\.id\)/);
-  assert.match(sharedSurface, /Copied identifier/);
+  assert.doesNotMatch(sharedSurface, /navigator\.clipboard\.writeText\(connection\.id\)/);
+  assert.doesNotMatch(sharedSurface, /shortMcpConnectionIdentifier|Copy identifier/);
   assert.doesNotMatch(profileConnectors, /mcpConnections\?\.map[\s\S]*?className={`connection-card connector-row mcp-connector-row/);
 });
 

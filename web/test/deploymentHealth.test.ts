@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createDeploymentHealthResource } from "../src/deploymentHealth.ts";
+import { invalidateModelHealthForAccountTransition } from "../src/modelHealthAccount.ts";
 import { createDeploymentRolloverGuard } from "../src/useDeploymentRollover.ts";
 
 const deployment = (deploymentSha?: string) => Object.freeze({
@@ -150,6 +151,73 @@ test("invalidation detaches an obsolete in-flight health request", async () => {
   releases[1]?.();
   assert.equal((await current).credentialSource, "brokered");
   assert.equal((await resource.read()).credentialSource, "brokered");
+});
+
+test("first passkey sign-in detaches signed-out health and reads the account's voice entitlement", async () => {
+  const releases: Array<() => void> = [];
+  let calls = 0;
+  const resource = createDeploymentHealthResource(async () => {
+    calls += 1;
+    const call = calls;
+    await new Promise<void>((resolve) => releases.push(resolve));
+    return Response.json(call === 1 ? {
+      agent_configured: false,
+      credential_source: null,
+      voice_enabled: false,
+    } : {
+      agent_configured: true,
+      credential_source: "brokered",
+      voice_enabled: true,
+    });
+  });
+
+  const signedOutRollover = resource.refresh();
+  assert.equal(
+    invalidateModelHealthForAccountTransition(undefined, "remembered-account", resource),
+    true,
+  );
+  const signedIn = resource.refresh();
+  assert.equal(calls, 2, "sign-in does not coalesce with the pre-auth health request");
+
+  releases[0]?.();
+  assert.equal((await signedOutRollover).voiceEnabled, false);
+  releases[1]?.();
+  assert.deepEqual(await signedIn, {
+    agentConfigured: true,
+    credentialSource: "brokered",
+    deploymentSha: undefined,
+    voiceEnabled: true,
+  });
+  assert.equal((await resource.read()).voiceEnabled, true);
+});
+
+test("account switching cannot reuse another account's cached voice entitlement", async () => {
+  let account = "voice";
+  let calls = 0;
+  const resource = createDeploymentHealthResource(async () => {
+    calls += 1;
+    const voiceEnabled = account === "voice";
+    return Response.json({
+      agent_configured: voiceEnabled,
+      credential_source: voiceEnabled ? "brokered" : null,
+      voice_enabled: voiceEnabled,
+    });
+  });
+
+  assert.equal((await resource.read()).voiceEnabled, true);
+  account = "no-voice";
+  assert.equal(
+    invalidateModelHealthForAccountTransition("voice-account", "no-voice-account", resource),
+    true,
+  );
+  assert.equal((await resource.refresh()).voiceEnabled, false);
+  assert.equal(calls, 2);
+  assert.equal(
+    invalidateModelHealthForAccountTransition("no-voice-account", "no-voice-account", resource),
+    false,
+  );
+  assert.equal((await resource.read()).voiceEnabled, false);
+  assert.equal(calls, 2, "stable account renders retain the current account's cache");
 });
 
 test("brokered health naturally reports whether the account has a connection", async () => {

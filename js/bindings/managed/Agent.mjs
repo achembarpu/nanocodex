@@ -206,6 +206,7 @@ function agentHandle(client, id, summary) {
 function managedVoiceTransport(client, agentId) {
   const origin = new URL(client.baseUrl).origin;
   const realtimePath = `${agentPath(agentId)}/realtime`;
+  let voiceSessionId;
   return Object.freeze({
     origin,
     sameOrigin: true,
@@ -215,19 +216,24 @@ function managedVoiceTransport(client, agentId) {
       catch { throw new TypeError("managed voice call body is invalid"); }
       if (!envelope || typeof envelope !== "object" || Array.isArray(envelope)
         || envelope.managed_agent_id !== agentId
-        || typeof envelope.call_body !== "string") {
+        || typeof envelope.call_body !== "string"
+        || typeof envelope.realtime_session_id !== "string") {
         throw new TypeError("managed voice call body is invalid");
       }
+      voiceSessionId = envelope.realtime_session_id;
       return client.response(`${realtimePath}/calls`, {
         method: "POST",
+        voiceSessionId,
         body: envelope.call_body,
         signal,
       });
     },
     sidebandUrl(callId) {
+      if (!voiceSessionId) throw new Error("managed voice call must open before its sideband");
       const url = new URL(`${realtimePath}/sideband`, client.baseUrl);
       url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
       url.searchParams.set("call_id", callId);
+      url.searchParams.set("voice_session_id", voiceSessionId);
       return url;
     },
   });
@@ -1260,6 +1266,7 @@ function managedClient(options) {
     if (init.body !== undefined) headers.set("content-type", "application/json");
     if (init.accept) headers.set("accept", init.accept);
     if (init.idempotencyKey) headers.set("idempotency-key", init.idempotencyKey);
+    if (init.voiceSessionId) headers.set("x-nanocodex-voice-session-id", init.voiceSessionId);
     if (apiKey) headers.set("authorization", `Bearer ${apiKey}`);
     try {
       return await fetchImpl(new URL(path, baseUrl), {

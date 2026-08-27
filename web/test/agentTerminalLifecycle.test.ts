@@ -12,6 +12,7 @@ const session = source("../src/modelSession.tsx");
 const accountSession = source("../src/AccountSession.tsx");
 const accountMenu = source("../src/AccountMenu.tsx");
 const health = source("../src/deploymentHealth.ts");
+const healthAccount = source("../src/modelHealthAccount.ts");
 const localCredential = source("../src/localDevelopmentCredential.ts");
 const terminalCss = [
   source("../src/AgentTerminal.css"),
@@ -24,7 +25,9 @@ test("account authentication naturally selects the private broker", () => {
   assert.match(session, /if \(accountSession\.status !== "ready"\) \{\s*generation\.current\+\+;\s*return;/);
   assert.match(health, /payload\.credential_source === "brokered"/);
   assert.match(session, /fresh\s*\? deploymentHealth\.refresh\(\)\s*:\s*deploymentHealth\.read\(\)/);
-  assert.match(session, /previousAccountId !== undefined && previousAccountId !== account\.id/);
+  assert.match(session, /invalidateModelHealthForAccountTransition\(\s*previousAccountId,\s*accountId,/);
+  assert.match(session, /void readStatus\(accountChanged\)/);
+  assert.match(healthAccount, /if \(previousAccountId === accountId\) return false;\s*resource\.invalidate\(\)/);
   assert.match(session, /try \{ await readStatus\(true\); \} finally/);
   assert.match(session, /window\.addEventListener\("focus", refreshAfterInactivity\)/);
   assert.match(session, /if \(!event\.persisted\) return/);

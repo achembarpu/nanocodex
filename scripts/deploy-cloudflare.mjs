@@ -74,6 +74,7 @@ const PRODUCTION_SERVICE_BINDINGS = Object.freeze({
   "managed-agent": Object.freeze([["NANOCODEX", "nanocodex-egress"]]),
   website: Object.freeze([
     ["NANOCODEX_BACKEND", "nanocodex-durable-agent"],
+    ["NANOCODEX_CONNECT_API", "nanocodex-connect-api"],
     ["NANOCODEX_CONNECT_DIALOG", "nanocodex-connect-dialog"],
   ]),
 });

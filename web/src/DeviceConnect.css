@@ -532,17 +532,6 @@
   color: var(--positive);
 }
 
-.account-inline .mcp-connection-identifier,
-.connect-wizard .mcp-connection-identifier {
-  overflow: hidden;
-  color: var(--faint);
-  font-family: monospace;
-  font-size: 8px;
-  letter-spacing: 0.02em;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .account-inline .mcp-connection-actions,
 .connect-wizard .mcp-connection-actions {
   display: flex;

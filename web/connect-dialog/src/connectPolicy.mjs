@@ -1,4 +1,4 @@
-export const productionConnectApiOrigin = "https://nanocodex-connect-api.gakonst.workers.dev";
+export const productionConnectApiOrigin = "https://nanocodex.gakonst.workers.dev";
 
 const appResourcePrefix = "urn:nanocodex:app:";
 const appOriginResourcePrefix = "urn:nanocodex:origin:";

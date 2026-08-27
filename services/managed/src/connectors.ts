@@ -217,11 +217,10 @@ async function finishCallback(
     });
   }
   if (!isRecord(value) || typeof value.return_to !== "string") {
-    return redirectResult(requestUrl, "/", connector, "failed");
+    return connectorCompletionPage(requestUrl, connector, "failed");
   }
-  return redirectResult(
+  return connectorCompletionPage(
     requestUrl,
-    safeReturnTo(value.return_to, requestUrl) ?? "/",
     connector,
     response.ok ? value.connected === true ? "connected" : "cancelled" : "failed",
   );
@@ -245,21 +244,35 @@ function safeReturnTo(value: string, requestUrl: URL): string | undefined {
   return resolved.origin === requestUrl.origin ? `${resolved.pathname}${resolved.search}` : undefined;
 }
 
-function redirectResult(
+function connectorCompletionPage(
   requestUrl: URL,
-  returnTo: string,
   connector: ConnectorId,
   result: "connected" | "cancelled" | "failed",
 ): Response {
-  const destination = new URL(returnTo, requestUrl.origin);
-  destination.searchParams.set("connector", connector);
-  destination.searchParams.set("connector_result", result);
-  return new Response(null, {
-    status: 303,
+  const completion = JSON.stringify(result === "connected" ? {
+    type: "nanocodex:connector-complete",
+    connector,
+    result: "success",
+  } : {
+    type: "nanocodex:connector-complete",
+    connector,
+    result: "error",
+    error: result === "cancelled"
+      ? "connector_authorization_cancelled"
+      : "connector_authorization_failed",
+    message: result === "cancelled"
+      ? "The account authorization was cancelled. Connect again when you are ready."
+      : "The account provider could not complete authorization. Try connecting again.",
+  });
+  const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Nanocodex connector</title></head><body><p>Connection flow complete. This window can be closed.</p><script>window.opener?.postMessage(${completion},${JSON.stringify(requestUrl.origin)});window.close();</script></body></html>`;
+  return new Response(html, {
     headers: {
       "cache-control": "no-store",
-      location: destination.href,
+      "content-security-policy": "default-src 'none'; script-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'",
+      "content-type": "text/html; charset=utf-8",
+      "cross-origin-opener-policy": "unsafe-none",
       "referrer-policy": "no-referrer",
+      "x-content-type-options": "nosniff",
     },
   });
 }

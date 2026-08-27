@@ -1,4 +1,4 @@
-import { useEffect, useId, useState, type FormEvent, type ReactNode } from "react";
+import { useId, useState, type FormEvent, type ReactNode } from "react";
 
 import { ConnectionLogo } from "./ConnectionLogo";
 import type { McpConnection, McpConnectionStatus } from "./connectTypes";
@@ -161,8 +161,6 @@ export function McpConnectionAddCard({
   );
 }
 
-type McpCopyState = "idle" | "copied" | "failed";
-
 export function McpConnectionCard({
   action,
   actionDisabled = false,
@@ -180,20 +178,8 @@ export function McpConnectionCard({
   onAction?: (() => void) | undefined;
   presentation?: "account" | "connect" | undefined;
 }>) {
-  const [copyState, setCopyState] = useState<McpCopyState>("idle");
   const connected = connection.status === "connected";
   const status = mcpConnectionStatusLabel(connection.status);
-
-  useEffect(() => setCopyState("idle"), [connection.id]);
-
-  const copyIdentifier = async () => {
-    try {
-      await navigator.clipboard.writeText(connection.id);
-      setCopyState("copied");
-    } catch {
-      setCopyState("failed");
-    }
-  };
 
   const account = presentation === "account";
   return (
@@ -210,22 +196,8 @@ export function McpConnectionCard({
         <strong>{connection.name}</strong>
         <span>{status}</span>
         {error ? <small className="mcp-connection-error" role="alert">{error}</small> : null}
-        <small className="mcp-connection-identifier">
-          ID {shortMcpConnectionIdentifier(connection.id)}
-        </small>
       </span>
       <span className="mcp-connection-actions">
-        <button
-          aria-label={`Copy identifier for ${connection.name}`}
-          aria-live="polite"
-          className="mcp-copy-identifier"
-          onClick={() => void copyIdentifier()}
-          type="button"
-        >
-          {copyState === "copied"
-            ? "Copied identifier"
-            : copyState === "failed" ? "Copy failed" : "Copy identifier"}
-        </button>
         {action && onAction ? (
           <button disabled={actionDisabled} onClick={onAction} type="button">{action}</button>
         ) : (
@@ -236,11 +208,6 @@ export function McpConnectionCard({
       </span>
     </div>
   );
-}
-
-export function shortMcpConnectionIdentifier(identifier: string): string {
-  if (identifier.length <= 17) return identifier;
-  return `${identifier.slice(0, 9)}…${identifier.slice(-7)}`;
 }
 
 export function mcpConnectionStatusLabel(status: McpConnectionStatus): string {

@@ -236,6 +236,12 @@ export function buildWebProductionConfig(baseConfig, {
   if (connectDialog?.length !== 1 || connectDialog[0].service !== "nanocodex-connect-dialog") {
     throw new Error("production website requires NANOCODEX_CONNECT_DIALOG bound to nanocodex-connect-dialog");
   }
+  const connectApi = baseConfig.services?.filter(
+    (candidate) => candidate?.binding === "NANOCODEX_CONNECT_API",
+  );
+  if (connectApi?.length !== 1 || connectApi[0].service !== "nanocodex-connect-api") {
+    throw new Error("production website requires NANOCODEX_CONNECT_API bound to nanocodex-connect-api");
+  }
   if (baseConfig.keep_vars !== true) {
     throw new Error("production website must retain its unrelated server-side bindings");
   }
@@ -258,6 +264,7 @@ export function buildWebProductionConfig(baseConfig, {
     ...portable,
     services: [
       { binding: "NANOCODEX_BACKEND", service: MANAGED_NAME },
+      { binding: "NANOCODEX_CONNECT_API", service: "nanocodex-connect-api" },
       { binding: "NANOCODEX_CONNECT_DIALOG", service: "nanocodex-connect-dialog" },
     ],
     main: resolve(configDirectory, baseConfig.main),

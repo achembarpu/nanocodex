@@ -4,7 +4,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   McpConnectionAddCard,
   McpConnectionCard,
-  shortMcpConnectionIdentifier,
 } from "../src/AccountConnectionSurface";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean })
@@ -20,9 +19,7 @@ const connection = {
 afterEach(() => vi.unstubAllGlobals());
 
 describe("shared MCP connection card", () => {
-  it("shows a shortened ID and copies the exact secret-free identifier with on-page confirmation", async () => {
-    const writeText = vi.fn().mockResolvedValue(undefined);
-    vi.stubGlobal("navigator", { clipboard: { writeText } });
+  it("shows only the MCP name and readiness while keeping its opaque ID internal", async () => {
     let renderer!: ReactTestRenderer;
 
     await act(async () => {
@@ -30,22 +27,13 @@ describe("shared MCP connection card", () => {
     });
 
     const initial = JSON.stringify(renderer.toJSON());
-    expect(initial).toContain(shortMcpConnectionIdentifier(connectionId));
+    expect(initial).toContain("Linear workspace");
+    expect(initial).toContain("Connected");
     expect(initial).not.toContain(connectionId);
-
-    await act(async () => {
-      renderer.root.findByProps({ className: "mcp-copy-identifier" }).props.onClick();
-    });
-
-    expect(writeText).toHaveBeenCalledOnce();
-    expect(writeText).toHaveBeenCalledWith(connectionId);
-    expect(JSON.stringify(renderer.toJSON())).toContain("Copied identifier");
   });
 
-  it("keeps the Account card action independent and reports clipboard failure in place", async () => {
-    const writeText = vi.fn().mockRejectedValue(new Error("clipboard unavailable"));
+  it("keeps the Account card action independent from connection metadata", async () => {
     const onAction = vi.fn();
-    vi.stubGlobal("navigator", { clipboard: { writeText } });
     let renderer!: ReactTestRenderer;
 
     await act(async () => {
@@ -64,13 +52,9 @@ describe("shared MCP connection card", () => {
     expect(card.props.className).toContain("connection-card");
     expect(JSON.stringify(renderer.toJSON())).toContain("The MCP provider could not complete authorization.");
     const buttons = renderer.root.findAllByType("button");
-    expect(buttons).toHaveLength(2);
+    expect(buttons).toHaveLength(1);
 
     await act(async () => buttons[0]?.props.onClick());
-    expect(JSON.stringify(renderer.toJSON())).toContain("Copy failed");
-    expect(onAction).not.toHaveBeenCalled();
-
-    await act(async () => buttons[1]?.props.onClick());
     expect(onAction).toHaveBeenCalledOnce();
   });
 

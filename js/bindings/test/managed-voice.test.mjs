@@ -7,9 +7,10 @@ import { createManagedBrowserVoice } from "../managed/Voice.mjs";
 import { managedBrowserVoiceTransport } from "../managed/internal.mjs";
 import { Voice } from "../browser/index.mjs";
 
-const AGENT_ID = "019d2f5d-7491-7000-8000-000000000001";
+const AGENT_ID = "019d2f5d-7491-8000-8000-000000000001";
+const UUID_V7 = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
-test("managed browser voice keeps protocol in Rust and routes the selected durable Agent", async () => {
+test("managed browser voice gives a UUIDv8 durable Agent a distinct UUIDv7 realtime session", async () => {
   const wasm = await readFile(new URL("../pkg-web/nanocodex_bg.wasm", import.meta.url));
   const module = await WebAssembly.compile(wasm);
   const requests = [];
@@ -49,10 +50,16 @@ test("managed browser voice keeps protocol in Rust and routes the selected durab
   const call = JSON.parse(voice.callBody("v=managed-offer"));
   const provider = JSON.parse(call.call_body);
   assert.equal(call.managed_agent_id, AGENT_ID);
-  assert.equal(call.session_id, AGENT_ID);
+  assert.match(call.session_id, UUID_V7);
+  assert.equal(call.realtime_session_id, call.session_id);
+  assert.equal(call.thread_id, call.session_id);
   assert.equal(provider.session.model, "gpt-live-1-codex");
   assert.match(provider.session.instructions, /continue the durable chat/);
-  assert.match(voice.sidebandUrl("rtc_managed"), new RegExp(`managed_agent_id=${AGENT_ID}`));
+  const sideband = new URL(voice.sidebandUrl("rtc_managed"), "https://managed.example");
+  assert.equal(sideband.searchParams.get("managed_agent_id"), AGENT_ID);
+  assert.equal(sideband.searchParams.get("realtime_session_id"), call.session_id);
+  assert.equal(sideband.searchParams.get("session_id"), call.session_id);
+  assert.equal(sideband.searchParams.get("thread_id"), call.session_id);
 
   const delegation = JSON.stringify({
     type: "delegation.created",
@@ -80,7 +87,7 @@ test("managed browser voice keeps protocol in Rust and routes the selected durab
     ["POST", `/v1/agents/${AGENT_ID}/realtime/stop`],
   ]);
   assert.match(requests[1].body.input, /<realtime_delegation>/);
-  assert.equal(typeof requests[1].body.voice_session_id, "string");
+  assert.equal(requests[1].body.voice_session_id, call.session_id);
   assert.equal(typeof requests[1].body.operation_id, "string");
   assert.equal(typeof requests[0].body.operation_id, "string");
   assert.equal(typeof requests[4].body.operation_id, "string");
@@ -91,26 +98,30 @@ test("managed Agent voice uses its configured same-origin realtime routes", asyn
   const agent = Agent.open(AGENT_ID, {
     baseUrl: "https://managed.example",
     fetch: async (input, init) => {
-      requests.push({ input: String(input), init });
+      requests.push({ request: new Request(input, init), init });
       return new Response("v=answer", {
         headers: { "x-nanocodex-realtime-location": "/v1/realtime/calls/rtc_managed" },
       });
     },
   });
   const transport = managedBrowserVoiceTransport(agent);
+  const voiceSessionId = "019d2f5d-7491-7000-8000-000000000003";
   const providerBody = JSON.stringify({ sdp: "v=offer", session: { delegation: { type: "client" } } });
   const response = await transport.call(JSON.stringify({
     call_body: providerBody,
     managed_agent_id: AGENT_ID,
+    realtime_session_id: voiceSessionId,
   }));
   assert.equal(await response.text(), "v=answer");
-  assert.equal(new URL(requests[0].input).origin, "https://managed.example");
-  assert.equal(new URL(requests[0].input).pathname, `/v1/agents/${AGENT_ID}/realtime/calls`);
+  assert.equal(new URL(requests[0].request.url).origin, "https://managed.example");
+  assert.equal(new URL(requests[0].request.url).pathname, `/v1/agents/${AGENT_ID}/realtime/calls`);
   assert.equal(requests[0].init.body, providerBody);
+  assert.equal(requests[0].request.headers.get("x-nanocodex-voice-session-id"), voiceSessionId);
   const sideband = transport.sidebandUrl("rtc_managed");
   assert.equal(sideband.origin, "wss://managed.example");
   assert.equal(sideband.pathname, `/v1/agents/${AGENT_ID}/realtime/sideband`);
   assert.equal(sideband.searchParams.get("call_id"), "rtc_managed");
+  assert.equal(sideband.searchParams.get("voice_session_id"), voiceSessionId);
 });
 
 test("Voice.create refuses an ordinary managed Agent hosted on another browser origin", () => {

@@ -4,6 +4,7 @@ import { GenerationRequestOwner } from "./agentTerminalLifecycle";
 import type { AgentStatus } from "./agentTerminalTypes";
 import { clientFailureMessage } from "./clientFailure";
 import { deploymentHealth } from "./deploymentHealth";
+import { invalidateModelHealthForAccountTransition } from "./modelHealthAccount";
 
 export type CredentialSource = "brokered" | "user" | null;
 export type ModelSessionStatus =
@@ -171,16 +172,20 @@ export function useModelSession({
       generation.current++;
       return;
     }
+    const previousAccountId = observedAccountId.current;
+    const accountId = account?.id;
+    observedAccountId.current = accountId;
+    const accountChanged = invalidateModelHealthForAccountTransition(
+      previousAccountId,
+      accountId,
+      deploymentHealth,
+    );
     if (!account) {
       generation.current++;
       publish({ state: "signed_out" }, null);
       return;
     }
-    const previousAccountId = observedAccountId.current;
-    observedAccountId.current = account.id;
-    void readStatus(
-      previousAccountId !== undefined && previousAccountId !== account.id,
-    );
+    void readStatus(accountChanged);
   }, [account, accountSession.status, publish, readStatus]);
   useEffect(() => {
     let inactive = false;

@@ -11,11 +11,11 @@ import {
   useFund,
   useLogoutAccount,
   useRevokeGrant,
-  type HostedMcpConnectionRequest,
 } from "nanocodex-react/connect";
 
 import { config } from "./config";
 import { ConnectAgentExperience, type AppObservation } from "./ConnectAgentExperience";
+import { presentGrantCapabilities } from "./grantPresentation.mjs";
 
 type AuditEvent = Readonly<{
   id: number;
@@ -38,14 +38,11 @@ type VisibilityRequest = Readonly<{
 
 type ConnectRequest = Readonly<{
   connectors: Readonly<Partial<Record<CloudAccount, true>>>;
-  focusMcpConnectionId?: string | undefined;
-  mcpConnections: readonly HostedMcpConnectionRequest[];
   visibility: VisibilityRequest;
 }>;
 
 const DEFAULT_REQUEST: ConnectRequest = {
   connectors: { github: true, gmail: true, gdrive: true, x: true, chatgpt: true },
-  mcpConnections: [],
   visibility: {
     finalMessages: true,
     actionSummaries: true,
@@ -117,10 +114,6 @@ export function App() {
           agent: request.visibility,
           cloudAccounts: request.connectors,
         },
-        ...(request.focusMcpConnectionId
-          ? { focusMcpConnectionId: request.focusMcpConnectionId }
-          : {}),
-        mcpConnections: request.mcpConnections,
         permission: "agent.run",
       },
       {
@@ -128,7 +121,7 @@ export function App() {
           setObservation(EMPTY_OBSERVATION);
           record(
             "Agent instantiated",
-            `${nextConnection.grant.capabilities.join(" + ")} approved; ChatGPT is the model and MPP is reserved for BOOST.`,
+            `${presentGrantCapabilities(nextConnection.grant.capabilities).join(" + ")} approved; ChatGPT is the model and MPP is reserved for BOOST.`,
           );
         },
         onError(reason: Error) {
@@ -381,8 +374,6 @@ function PermissionBuilder({ disabled, onChange, request }: Readonly<{
   onChange(value: ConnectRequest): void;
   request: ConnectRequest;
 }>) {
-  const [mcpId, setMcpId] = useState("");
-  const [mcpName, setMcpName] = useState("");
   const connectors: readonly Readonly<{ id: CloudAccount; label: string; required?: boolean }>[] = [
     { id: "github", label: "GitHub" },
     { id: "gmail", label: "Gmail" },
@@ -407,24 +398,6 @@ function PermissionBuilder({ disabled, onChange, request }: Readonly<{
       next.rawTraces = false;
     }
     onChange({ ...request, visibility: next });
-  }
-
-  const normalizedMcpId = mcpId.trim();
-  const normalizedMcpName = mcpName.trim();
-  const mcpIdValid = /^[A-Za-z0-9_-]{43}$/.test(normalizedMcpId);
-  const mcpDuplicate = request.mcpConnections.some(({ id }) => id === normalizedMcpId);
-  const mcpLimitReached = request.mcpConnections.length >= 16;
-  const canAddMcp = mcpIdValid && normalizedMcpName.length > 0
-    && normalizedMcpName.length <= 256 && !mcpDuplicate && !mcpLimitReached;
-
-  function addMcpConnection() {
-    if (!canAddMcp) return;
-    onChange({
-      ...request,
-      mcpConnections: [...request.mcpConnections, { id: normalizedMcpId, name: normalizedMcpName }],
-    });
-    setMcpId("");
-    setMcpName("");
   }
 
   return (
@@ -465,106 +438,6 @@ function PermissionBuilder({ disabled, onChange, request }: Readonly<{
             </label>
           ))}
         </div>
-      </fieldset>
-      <fieldset className="mcp-connections-fieldset">
-        <legend>Hosted MCP connections</legend>
-        <p className="mcp-help" id="hosted-mcp-help">
-          Existing account connections only. Copy the exact ID and display name from Nanocodex Account.
-          Endpoint registration and provider credentials stay there and are never sent to Atlas.
-        </p>
-        <div className="mcp-inputs">
-          <label>
-            <span>Display name</span>
-            <input
-              aria-describedby="hosted-mcp-help"
-              autoComplete="off"
-              disabled={disabled}
-              maxLength={256}
-              onChange={(event) => setMcpName(event.target.value)}
-              placeholder="Linear workspace"
-              type="text"
-              value={mcpName}
-            />
-          </label>
-          <label>
-            <span>43-character connection ID</span>
-            <input
-              aria-describedby="hosted-mcp-help hosted-mcp-id-status"
-              autoCapitalize="none"
-              autoComplete="off"
-              disabled={disabled}
-              maxLength={43}
-              minLength={43}
-              onChange={(event) => setMcpId(event.target.value)}
-              pattern="[A-Za-z0-9_-]{43}"
-              placeholder="Account-owned opaque ID"
-              spellCheck={false}
-              type="text"
-              value={mcpId}
-            />
-          </label>
-          <button
-            className="secondary-button mcp-add-button"
-            disabled={disabled || !canAddMcp}
-            onClick={addMcpConnection}
-            type="button"
-          >
-            Add MCP
-          </button>
-        </div>
-        <p className="mcp-id-status" id="hosted-mcp-id-status" aria-live="polite">
-          {mcpLimitReached
-            ? "A Connect grant can request at most 16 hosted MCP connections."
-            : mcpDuplicate
-            ? "That connection is already requested."
-            : normalizedMcpId.length > 0 && !mcpIdValid
-              ? "Use exactly 43 letters, numbers, underscores, or hyphens."
-              : ""}
-        </p>
-        {request.mcpConnections.length > 0 ? (
-          <>
-            <ul className="mcp-request-list" aria-label="Requested hosted MCP connections">
-              {request.mcpConnections.map((connection) => (
-                <li key={connection.id}>
-                  <span>
-                    <strong>{connection.name}</strong>
-                    <code title={connection.id}>{shortOpaqueId(connection.id)}</code>
-                  </span>
-                  <button
-                    aria-label={`Remove ${connection.name}`}
-                    disabled={disabled}
-                    onClick={() => onChange({
-                      ...request,
-                      ...(request.focusMcpConnectionId === connection.id
-                        ? { focusMcpConnectionId: undefined }
-                        : {}),
-                      mcpConnections: request.mcpConnections.filter(({ id }) => id !== connection.id),
-                    })}
-                    type="button"
-                  >
-                    Remove
-                  </button>
-                </li>
-              ))}
-            </ul>
-            <label className="mcp-focus-label">
-              <span>Foreground in Connect dialog</span>
-              <select
-                disabled={disabled}
-                onChange={(event) => onChange({
-                  ...request,
-                  focusMcpConnectionId: event.target.value || undefined,
-                })}
-                value={request.focusMcpConnectionId ?? ""}
-              >
-                <option value="">No focused connection</option>
-                {request.mcpConnections.map(({ id, name }) => (
-                  <option key={id} value={id}>{name}</option>
-                ))}
-              </select>
-            </label>
-          </>
-        ) : null}
       </fieldset>
     </div>
   );
@@ -690,7 +563,7 @@ function ConnectionWorkspace({
         <dl className="details">
           <Detail label="Account" testId="account-address" value={connection.accountAddress} />
           <Detail label="Grant" testId="grant-id" value={connection.grant.id} />
-          <Detail label="Capabilities" value={connection.grant.capabilities.join(" · ")} />
+          <Detail label="Capabilities" value={presentGrantCapabilities(connection.grant.capabilities).join(" · ")} />
           {mppReady ? <Detail
             label="Model settlement"
             value={`${formatMachineUsd(connection.mpp.settlementBalance)} ${connection.mpp.settlementSymbol}`}
@@ -752,10 +625,6 @@ function formatMachineUsd(value: bigint) {
 
 function shortHex(value: string) {
   return value.length > 14 ? `${value.slice(0, 8)}…${value.slice(-5)}` : value;
-}
-
-function shortOpaqueId(value: string) {
-  return `${value.slice(0, 7)}…${value.slice(-6)}`;
 }
 
 function errorMessage(reason: unknown) {

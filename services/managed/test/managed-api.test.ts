@@ -1738,6 +1738,7 @@ describe("managed agents REST and resumable SSE", () => {
     });
     expect(created.status).toBe(201);
     const agent = await created.json<AgentReceipt>();
+    const voiceSessionId = "019d2f5d-7491-7000-8000-000000000042";
     const managed = await RAW_SELF.fetch("https://nanocodex.internal/v1/realtime/calls", {
       method: "POST",
       headers: {
@@ -1746,9 +1747,9 @@ describe("managed agents REST and resumable SSE", () => {
         "content-type": "application/json",
         origin: "https://example.test",
         "x-nanocodex-agent-id": agent.agent_id,
-        "x-session-id": agent.agent_id,
-        "session-id": agent.agent_id,
-        "thread-id": agent.agent_id,
+        "x-session-id": voiceSessionId,
+        "session-id": voiceSessionId,
+        "thread-id": voiceSessionId,
       },
       body,
     });
@@ -1771,8 +1772,8 @@ describe("managed agents REST and resumable SSE", () => {
         origin: "https://example.test",
         "x-nanocodex-agent-id": agent.agent_id,
         "x-session-id": "wrong-session",
-        "session-id": agent.agent_id,
-        "thread-id": agent.agent_id,
+        "session-id": voiceSessionId,
+        "thread-id": voiceSessionId,
       },
       body,
     });
@@ -1820,7 +1821,15 @@ describe("managed agents REST and resumable SSE", () => {
   });
 
   it("opens agent-scoped Realtime calls and sidebands with an account API key", async () => {
-    const agent = await createAgent();
+    const created = await SELF.fetch("https://example.test/v1/agents", {
+      method: "POST",
+      headers: { "idempotency-key": "voice-uuidv8-agent" },
+    });
+    expect(created.status).toBe(201);
+    const agent = await created.json<AgentReceipt>();
+    createdAgents.add(agent.agent_id);
+    expect(agent.agent_id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-8/);
+    const voiceSessionId = "019d2f5d-7491-7000-8000-000000000043";
     const route = agent.events_url.replace(/\/events$/, "/realtime");
     const callBody = publicRealtimeCallBody("v=0\r\no=mobile");
     const subject = testEnv.NANOCODEX_SESSIONS.idFromName(agent.agent_id).toString();
@@ -1833,6 +1842,7 @@ describe("managed agents REST and resumable SSE", () => {
       method: "POST",
       headers: {
         "content-type": "application/json",
+        "x-nanocodex-voice-session-id": voiceSessionId,
         "session-id": "caller-chosen-session",
         "thread-id": "caller-chosen-thread",
         "x-nanocodex-agent-id": "caller-chosen-agent",
@@ -1853,15 +1863,15 @@ describe("managed agents REST and resumable SSE", () => {
       agent: agent.agent_id,
       body: callBody,
       cookie: null,
-      lifecycleSession: agent.agent_id,
+      lifecycleSession: voiceSessionId,
       openAiAlpha: "quicksilver=v2",
       origin: null,
-      session: agent.agent_id,
+      session: voiceSessionId,
       subject,
-      thread: agent.agent_id,
+      thread: voiceSessionId,
     });
 
-    const sideband = await SELF.fetch(`${route}/sideband?call_id=rtc_mobile`, {
+    const sideband = await SELF.fetch(`${route}/sideband?call_id=rtc_mobile&voice_session_id=${voiceSessionId}`, {
       headers: {
         upgrade: "websocket",
         "session-id": "caller-chosen-session",
@@ -1881,11 +1891,11 @@ describe("managed agents REST and resumable SSE", () => {
       agent: agent.agent_id,
       callId: "rtc_mobile",
       cookie: null,
-      lifecycleSession: agent.agent_id,
+      lifecycleSession: voiceSessionId,
       openAiAlpha: "quicksilver=v2",
-      session: agent.agent_id,
+      session: voiceSessionId,
       subject,
-      thread: agent.agent_id,
+      thread: voiceSessionId,
     });
     expect(JSON.stringify(forwarded)).not.toContain(API_KEY);
   });
@@ -2022,11 +2032,16 @@ describe("managed agents REST and resumable SSE", () => {
 
     const browserCall = await RAW_SELF.fetch(`${route}/calls`, {
       method: "POST",
-      headers: { cookie, "content-type": "application/json", origin: "https://example.test" },
+      headers: {
+        cookie,
+        "content-type": "application/json",
+        origin: "https://example.test",
+        "x-nanocodex-voice-session-id": "019d2f5d-7491-7000-8000-000000000044",
+      },
       body: publicRealtimeCallBody(),
     });
     expect(browserCall.status).toBe(200);
-    const browserSideband = await RAW_SELF.fetch(`${route}/sideband?call_id=rtc_browser`, {
+    const browserSideband = await RAW_SELF.fetch(`${route}/sideband?call_id=rtc_browser&voice_session_id=019d2f5d-7491-7000-8000-000000000044`, {
       headers: { cookie, origin: "https://example.test", upgrade: "websocket" },
     });
     expect(browserSideband.status).toBe(101);

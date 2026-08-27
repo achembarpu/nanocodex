@@ -138,7 +138,11 @@ async function ownedRealtimeSubject(
     request.headers.get("session-id"),
     request.headers.get("thread-id"),
   ];
-  if (!UUID.test(agentId) || identities.some((identity) => identity !== agentId)) {
+  const voiceSessionId = identities[0];
+  if (!UUID.test(agentId)
+    || !voiceSessionId
+    || !UUID_V7.test(voiceSessionId)
+    || identities.some((identity) => identity !== voiceSessionId)) {
     return Response.json({ error: "not_found" }, { status: 404 });
   }
   const durableId = env.NANOCODEX_SESSIONS.idFromName(agentId);
@@ -153,3 +157,4 @@ async function ownedRealtimeSubject(
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const UUID_V7 = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;

@@ -685,12 +685,15 @@ function managedRealtimeAgentId(
 ): string | undefined {
   if (value === undefined || value === null) return undefined;
   if (typeof value !== "string" || !isUuid(value) || !identity) return undefined;
-  return identity.realtimeSessionId === value
-    && identity.sessionId === value
-    && identity.threadId === value
+  const voiceSessionId = identity.realtimeSessionId;
+  return UUID_V7.test(voiceSessionId)
+    && identity.sessionId === voiceSessionId
+    && identity.threadId === voiceSessionId
     ? value
     : undefined;
 }
+
+const UUID_V7 = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function realtimeHeaders(
   credential: SubscriptionCredential,

@@ -1,3 +1,5 @@
+import { isScopedConnectConnectorState } from "../connectConnectorCallback.mjs";
+
 export type ConnectApiProxyEnv = {
   ENVIRONMENT?: string;
   NANOCODEX_CONNECT_API?: Fetcher;
@@ -7,24 +9,22 @@ const CLI_APP_ID = "nanocodex-cli";
 const CONNECT_BROWSER_CLIENTS = new Set(["device", "onboarding"]);
 const CONNECT_BROWSER_ROUTE = /^(?:\/v1\/device(?:\/.*)?|\/v1\/connect\/auth(?:\/.*)?|\/v1\/hosted-authorizations|\/v1\/account-link|\/v1\/connections(?:\/.*)?|\/v1\/access-keys(?:\/.*)?|\/v1\/grants(?:\/.*)?)$/;
 const CONNECTOR_ROUTE = /^\/v1\/connectors(?:\/.*)?$/;
+const CONNECTOR_CALLBACK = /^\/v1\/connectors\/(?:github|gmail|gdrive|x)\/callback$/;
 const MCP_CONNECTION_ROUTE = /^\/v1\/mcp-connections(?:\/.*)?$/;
 const MCP_CONNECTION_CALLBACK = /^\/v1\/mcp-connections\/[A-Za-z0-9_-]{43}\/callback$/;
 
 /**
- * Projects the local Connect Worker onto the canonical per-instance localhost origin.
+ * Projects the Connect Worker onto the canonical Nanocodex browser origin.
  *
- * Production keeps its separate Connect API origin. The binding exists only in
- * the local multi-Worker topology, so a missing binding means this router does
- * not own the request. Overlapping managed routes are selected only by an
- * explicit onboarding marker or the CLI's signed app identity.
+ * Overlapping managed routes are selected only by an explicit onboarding
+ * marker, a Connect-scoped OAuth state, or the CLI's signed app identity.
  */
 export async function routeConnectApi(
   request: Request,
   env: ConnectApiProxyEnv,
   url: URL,
 ): Promise<Response | undefined> {
-  if (env.ENVIRONMENT !== "development"
-    || !env.NANOCODEX_CONNECT_API
+  if (!env.NANOCODEX_CONNECT_API
     || !isConnectApiRequest(request, url.pathname)) {
     return undefined;
   }
@@ -57,6 +57,8 @@ export function isConnectApiRequest(
   if (isConnectApiBrowserRoutePath(pathname)) return true;
   if (CONNECTOR_ROUTE.test(pathname)
     && CONNECT_BROWSER_CLIENTS.has(request.headers.get("x-nanocodex-connect-client") ?? "")) return true;
+  if (CONNECTOR_CALLBACK.test(pathname)
+    && isScopedConnectConnectorState(new URL(request.url).searchParams.get("state"))) return true;
   if (MCP_CONNECTION_CALLBACK.test(pathname)) return true;
   if (MCP_CONNECTION_ROUTE.test(pathname)
     && CONNECT_BROWSER_CLIENTS.has(request.headers.get("x-nanocodex-connect-client") ?? "")) return true;

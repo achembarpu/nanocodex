@@ -11,7 +11,7 @@ import {
 export async function createManagedBrowserVoice(agent, voice, options = {}) {
   await initializeBrowserEngine(options);
   const raw = new ManagedBrowserVoice(voice);
-  const voiceSessionId = crypto.randomUUID();
+  const voiceSessionId = uuidV7();
   const startOperationId = crypto.randomUUID();
   const stopOperationId = crypto.randomUUID();
   const tailOperationId = crypto.randomUUID();
@@ -46,13 +46,13 @@ export async function createManagedBrowserVoice(agent, voice, options = {}) {
       raw.start(JSON.stringify(started.context));
     },
     callBody(sdp) {
-      const envelope = JSON.parse(raw.callBody(sdp, agent.id));
+      const envelope = JSON.parse(raw.callBody(sdp, voiceSessionId));
       envelope.managed_agent_id = agent.id;
       return JSON.stringify(envelope);
     },
     completeCall: (body, location) => raw.completeCall(body, location),
     sidebandUrl(callId) {
-      const path = raw.sidebandUrl(callId, agent.id);
+      const path = raw.sidebandUrl(callId, voiceSessionId);
       const url = new URL(path, globalThis.location?.href ?? "http://localhost");
       url.searchParams.set("managed_agent_id", agent.id);
       return `${url.pathname}${url.search}`;
@@ -133,6 +133,22 @@ export async function createManagedBrowserVoice(agent, voice, options = {}) {
     preferredPhysicalInput: (current, labels) => raw.preferredPhysicalInput(current, labels),
     free: () => raw.free(),
   };
+}
+
+function uuidV7() {
+  if (typeof globalThis.crypto?.getRandomValues !== "function") {
+    throw new Error("managed browser voice requires crypto.getRandomValues()");
+  }
+  const bytes = globalThis.crypto.getRandomValues(new Uint8Array(16));
+  let timestamp = Date.now();
+  for (let index = 5; index >= 0; index -= 1) {
+    bytes[index] = timestamp % 256;
+    timestamp = Math.floor(timestamp / 256);
+  }
+  bytes[6] = (bytes[6] & 0x0f) | 0x70;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const encoded = [...bytes].map((byte) => byte.toString(16).padStart(2, "0"));
+  return `${encoded.slice(0, 4).join("")}-${encoded.slice(4, 6).join("")}-${encoded.slice(6, 8).join("")}-${encoded.slice(8, 10).join("")}-${encoded.slice(10).join("")}`;
 }
 
 function managedDelegationId(payload) {
