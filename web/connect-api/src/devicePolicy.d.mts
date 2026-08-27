@@ -32,7 +32,6 @@ export function managedMemoryCapability(
   path: string,
   operation?: unknown,
 ): "history:read" | "memory:read" | "memory:write" | undefined;
-export function deviceRegistrationClientKey(request: Request): string;
 export function requestedConnectorsSatisfied(
   connected: readonly string[],
   requested: readonly string[],

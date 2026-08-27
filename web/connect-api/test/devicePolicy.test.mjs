@@ -8,7 +8,6 @@ import {
   parseCliRegisterBody,
   sanitizeCliWalletResult,
   managedMemoryCapability,
-  deviceRegistrationClientKey,
   requestedConnectorsSatisfied,
 } from "../src/devicePolicy.mjs";
 
@@ -257,19 +256,6 @@ test("hosted history and memory paths map to narrow grant capabilities", () => {
   assert.strictEqual(managedMemoryCapability("/v1/memory", "delete"), "memory:write");
   assert.strictEqual(managedMemoryCapability("/v1/memory", "admin"), undefined);
   assert.strictEqual(managedMemoryCapability("/v1/agents/other", "read"), undefined);
-});
-
-test("device registration quota keys use trusted addresses and a local fallback", () => {
-  const trusted = new Request("https://api.example/v1/device/register", {
-    headers: { "cf-connecting-ip": "203.0.113.7" },
-  });
-  assert.strictEqual(deviceRegistrationClientKey(trusted), "ip:203.0.113.7");
-  const spoofed = new Request("https://api.example/v1/device/register", {
-    headers: { "cf-connecting-ip": "not-an-ip" },
-  });
-  assert.strictEqual(deviceRegistrationClientKey(spoofed), "unknown");
-  const loopback = new Request("http://[::1]:8787/v1/device/register");
-  assert.strictEqual(deviceRegistrationClientKey(loopback), "loopback");
 });
 
 test("connector grants require an exact live requested set", () => {

@@ -9,7 +9,6 @@ import {
   parseCliWalletRequest,
   sanitizeCliWalletResult,
   managedMemoryCapability,
-  deviceRegistrationClientKey,
   requestedConnectorsSatisfied,
 } from "./devicePolicy.mjs";
 import {
@@ -128,7 +127,6 @@ const MAX_MANAGED_MEMORY_RESPONSE_BYTES = 1024 * 1024;
 const MAX_PINNED_RUNTIME_RESPONSE_BYTES = 32 * 1024 * 1024;
 const MAX_ACCOUNT_AUTHORIZATIONS = 64;
 const MAX_DEVICE_REGISTER_BYTES = 64 * 1024;
-const DEVICE_REGISTER_QUOTA_TTL = 30;
 const EGRESS_SUBJECT = /^[A-Za-z0-9_-]{43,128}$/;
 const CONNECTOR_METHODS = new Set(["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"]);
 const CONNECTOR_REQUEST_HEADERS = new Set([
@@ -320,9 +318,6 @@ export default {
           } catch (cause) {
             if (cause instanceof ApiFailure) throw cause;
             throw new ApiFailure(400, "invalid_device_request", errorText(cause));
-          }
-          if (!isLocalDeviceOrigin(new URL(request.url).origin)) {
-            await reserveDeviceRegistration(store, request);
           }
         }
         if (request.method === "POST" && url.pathname === "/v1/device/verify") {
@@ -582,17 +577,6 @@ export default {
     }
   },
 };
-
-async function reserveDeviceRegistration(store: Kv.Kv, request: Request): Promise<void> {
-  if (!store.create) {
-    throw new ApiFailure(503, "device_registration_unavailable", "Device registration quota is unavailable.");
-  }
-  const clientKey = deviceRegistrationClientKey(request);
-  const key = `device-register-quota:${await digestHex(clientKey)}`;
-  if (!await store.create(key, true, { ttl: DEVICE_REGISTER_QUOTA_TTL })) {
-    throw new ApiFailure(429, "device_registration_rate_limited", "A device registration was recently started from this client. Retry shortly.");
-  }
-}
 
 async function handleManagedMemoryRoute(
   request: Request,

@@ -299,18 +299,6 @@ export function managedMemoryCapability(path, operation) {
   return undefined;
 }
 
-export function deviceRegistrationClientKey(request) {
-  const forwarded = request.headers.get("cf-connecting-ip")?.trim();
-  if (forwarded && isIpAddress(forwarded)) return `ip:${forwarded.toLowerCase()}`;
-  let url;
-  try { url = new URL(request.url); } catch { return "unknown"; }
-  if ((url.protocol === "http:" || url.protocol === "https:")
-    && ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname.toLowerCase())) {
-    return "loopback";
-  }
-  return "unknown";
-}
-
 export function requestedConnectorsSatisfied(connected, requested) {
   if (!Array.isArray(connected) || !Array.isArray(requested)) return false;
   const actual = new Set(connected);
