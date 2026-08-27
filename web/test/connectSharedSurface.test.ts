@@ -6,6 +6,7 @@ const app = source("../connect-dialog/src/App.tsx");
 const chooser = source("../connect-dialog/src/AccountChooser.tsx");
 const accountMenu = source("../src/AccountMenu.tsx");
 const profileConnectors = source("../src/ProfileConnectors.tsx");
+const connectorCompletion = source("../connect-dialog/src/connectorCompletion.ts");
 
 test("Account and embedded Connect render the same identity and connection components", () => {
   assert.match(app, /from "\.\/AccountChooser"/);
@@ -33,6 +34,19 @@ test("scoped Connect filters signed request context and retains approval return 
   assert.match(app, /request\.auth\.resources\.map/);
   assert.match(app, /await host\.respond\(result\)/);
   assert.match(app, /host\.reject\(new Error\("The request was not approved\."\)\)/);
+});
+
+test("Account and embedded Connect share strict in-place OAuth completion", () => {
+  assert.match(app, /connectorCompletionFor\(event/);
+  assert.match(profileConnectors, /from "@nanocodex-connect\/connectorCompletion"/);
+  assert.match(profileConnectors, /window\.open\([\s\S]*?"about:blank"[\s\S]*?popup\.location\.href = authorizationUrl\.href/);
+  assert.match(profileConnectors, /connectorCompletionFor\(event,[\s\S]*?origin: window\.location\.origin[\s\S]*?source: attempt\.popup/);
+  assert.match(profileConnectors, /refreshConnectors\(attempt\.abort\.signal\)[\s\S]*?statuses\[attempt\.connector\]\.connected/);
+  assert.match(profileConnectors, /window\.opener\.postMessage\(connectorCompletion\(id as ConnectorId, result\), window\.location\.origin\)/);
+  assert.match(profileConnectors, /authorization popup was blocked[\s\S]*?authorization popup was closed before it completed/);
+  assert.doesNotMatch(profileConnectors, /window\.location\.assign\(authorizationUrl\.href\)/);
+  assert.doesNotMatch(profileConnectors, /localStorage|sessionStorage/);
+  assert.match(connectorCompletion, /event\.origin === expected\.origin[\s\S]*?event\.source === expected\.source[\s\S]*?event\.data\.connector === expected\.connector/);
 });
 
 function source(path: string): string {

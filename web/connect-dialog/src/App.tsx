@@ -18,6 +18,7 @@ import {
   DeferredChatGptImportStatus,
 } from "./AccountConnectionSurface";
 import { ConnectionLogo } from "./ConnectionLogo";
+import { connectorCompletionFor } from "./connectorCompletion";
 import {
   BrowserAccountReauthenticationRequiredError,
   logoutBrowserAccountSession,
@@ -281,19 +282,18 @@ export function ConnectOnboarding({
     if (!pendingApproval) return;
     const onMessage = (event: MessageEvent<unknown>) => {
       const attempt = activeConnector.current;
-      if (
-        !attempt
-        || attempt.connector === "chatgpt"
-        || event.origin !== pendingApproval.apiUrl
-        || event.source !== attempt.popup
-        || !isConnectorCompletion(event.data)
-        || event.data.connector !== attempt.connector
-      ) return;
-      if (event.data.result !== "success") {
+      if (!attempt || attempt.connector === "chatgpt") return;
+      const completion = connectorCompletionFor(event, {
+        connector: attempt.connector,
+        origin: pendingApproval.apiUrl,
+        source: attempt.popup,
+      });
+      if (!completion) return;
+      if (completion.result !== "success") {
         if (finishConnectorAttempt(attempt)) {
           setFailure({
             id: attempt.requestId,
-            message: event.data.error ?? event.data.message ?? "The account provider did not complete the connection.",
+            message: completion.error ?? completion.message ?? "The account provider did not complete the connection.",
           });
         }
         return;
@@ -2106,22 +2106,6 @@ function walletConnectContext(request: WalletRequest) {
   focusedConnectorFromResources(resources, requestedConnectorIdsFromResources(resources));
   requestedMcpConnectionsFromRequest(request, resources);
   return { app, connectPolicy, resources };
-}
-
-function isConnectorCompletion(value: unknown): value is Readonly<{
-  type: "nanocodex:connector-complete";
-  connector: ConnectorId;
-  result: "success" | "error";
-  error?: string | undefined;
-  message?: string | undefined;
-}> {
-  return isRecord(value)
-    && value.type === "nanocodex:connector-complete"
-    && typeof value.connector === "string"
-    && isConnectorId(value.connector)
-    && (value.result === "success" || value.result === "error")
-    && (value.error === undefined || typeof value.error === "string")
-    && (value.message === undefined || typeof value.message === "string");
 }
 
 function walletRequestPolicyError(request: ConnectRequest | undefined) {

@@ -6,6 +6,10 @@ import {
 import { isRecord, responseFailure } from "./AccountSession";
 import { clientFailureMessage } from "./clientFailure";
 import { ConnectionLogo } from "@nanocodex-connect/ConnectionLogo";
+import {
+  connectorCompletion,
+  connectorCompletionFor,
+} from "@nanocodex-connect/connectorCompletion";
 
 type ConnectorId = "github" | "gmail" | "gdrive" | "x";
 type ConnectorStatus = Readonly<{
@@ -25,6 +29,13 @@ type McpConnection = Readonly<{
   name: string;
   status: McpConnectionStatus;
 }>;
+type ConnectorAttempt = {
+  abort: AbortController;
+  connector: ConnectorId;
+  popup: Window;
+  popupCheck: number;
+  popupClosed?: number | undefined;
+};
 
 const mcpConnectionId = /^[A-Za-z0-9_-]{43}$/;
 const mcpConnectionName = /^[^\u0000-\u001f\u007f]{1,256}$/u;
@@ -69,22 +80,40 @@ export function ProfileConnectors({
   const [operation, setOperation] = useState<string | null>(null);
   const request = useRef<Promise<void> | undefined>(undefined);
   const mcpRequest = useRef<Promise<void> | undefined>(undefined);
+  const activeConnector = useRef<ConnectorAttempt | undefined>(undefined);
   const [result] = useState(readConnectorResult);
+
+  const finishConnectorAttempt = useCallback((attempt: ConnectorAttempt, closePopup = true) => {
+    if (activeConnector.current !== attempt) return false;
+    activeConnector.current = undefined;
+    attempt.abort.abort();
+    window.clearInterval(attempt.popupCheck);
+    if (attempt.popupClosed !== undefined) window.clearTimeout(attempt.popupClosed);
+    if (closePopup && !attempt.popup.closed) attempt.popup.close();
+    setOperation(null);
+    return true;
+  }, []);
+
+  const refreshConnectors = useCallback(async (signal?: AbortSignal) => {
+    const response = await connectorRequest("/v1/connectors", { signal });
+    if (response.status === 401) {
+      await response.body?.cancel();
+      await refreshSession();
+      return undefined;
+    }
+    if (!response.ok) throw await responseFailure(response, "Couldn’t load connectors.");
+    const statuses = decodeConnectorStatus(await response.json());
+    setConnectors(statuses);
+    setError(null);
+    return statuses;
+  }, [refreshSession]);
 
   const load = useCallback((): Promise<void> => {
     if (request.current) return request.current;
     let current!: Promise<void>;
     current = (async () => {
       try {
-        const response = await connectorRequest("/v1/connectors");
-        if (response.status === 401) {
-          await response.body?.cancel();
-          await refreshSession();
-          return;
-        }
-        if (!response.ok) throw await responseFailure(response, "Couldn’t load connectors.");
-        setConnectors(decodeConnectorStatus(await response.json()));
-        setError(null);
+        await refreshConnectors();
       } catch (cause) {
         const message = failureMessage(cause, "Couldn’t load connectors.");
         setConnectors(unavailableConnectorStatuses(message));
@@ -95,7 +124,7 @@ export function ProfileConnectors({
     });
     request.current = current;
     return current;
-  }, [refreshSession]);
+  }, [refreshConnectors]);
 
   const loadMcpConnections = useCallback((): Promise<void> => {
     if (mcpRequest.current) return mcpRequest.current;
@@ -122,6 +151,8 @@ export function ProfileConnectors({
   }, [refreshSession]);
 
   useEffect(() => {
+    const previous = activeConnector.current;
+    if (previous) finishConnectorAttempt(previous);
     setConnectors(null);
     setMcpConnections(null);
     setMcpError(null);
@@ -129,10 +160,81 @@ export function ProfileConnectors({
     if (requiresLogin) return;
     void load();
     void loadMcpConnections();
-  }, [accountId, load, loadMcpConnections, requiresLogin]);
+  }, [accountId, finishConnectorAttempt, load, loadMcpConnections, requiresLogin]);
+
+  useEffect(() => () => {
+    const attempt = activeConnector.current;
+    if (!attempt) return;
+    activeConnector.current = undefined;
+    attempt.abort.abort();
+    window.clearInterval(attempt.popupCheck);
+    if (attempt.popupClosed !== undefined) window.clearTimeout(attempt.popupClosed);
+    if (!attempt.popup.closed) attempt.popup.close();
+  }, []);
+
+  useEffect(() => {
+    const onMessage = (event: MessageEvent<unknown>) => {
+      const attempt = activeConnector.current;
+      if (!attempt) return;
+      const completion = connectorCompletionFor(event, {
+        connector: attempt.connector,
+        origin: window.location.origin,
+        source: attempt.popup,
+      });
+      if (!completion) return;
+      if (completion.result !== "success") {
+        if (finishConnectorAttempt(attempt)) {
+          setError(completion.message ?? "The account provider did not complete the connection. Try again.");
+        }
+        return;
+      }
+      window.clearInterval(attempt.popupCheck);
+      if (attempt.popupClosed !== undefined) window.clearTimeout(attempt.popupClosed);
+      void refreshConnectors(attempt.abort.signal).then((statuses) => {
+        if (activeConnector.current !== attempt) return;
+        if (!statuses) {
+          throw new Error("Your account session expired. Sign in again and retry the connection.");
+        }
+        if (!statuses[attempt.connector].connected) {
+          throw new Error("The account provider completed without connecting the requested account.");
+        }
+        finishConnectorAttempt(attempt);
+      }).catch((cause) => {
+        if (finishConnectorAttempt(attempt)) {
+          setError(failureMessage(cause, `Couldn’t connect ${connectorLabel(attempt.connector)}.`));
+        }
+      });
+    };
+    window.addEventListener("message", onMessage);
+    return () => window.removeEventListener("message", onMessage);
+  }, [finishConnectorAttempt, refreshConnectors]);
 
   const connect = async (id: ConnectorId) => {
-    if (operation) return;
+    if (operation || activeConnector.current) return;
+    const popup = window.open(
+      "about:blank",
+      "nanocodex-account-connector",
+      "popup,width=520,height=720",
+    );
+    if (!popup) {
+      setError("The account authorization popup was blocked. Allow popups and try again.");
+      return;
+    }
+    const attempt: ConnectorAttempt = {
+      abort: new AbortController(),
+      connector: id,
+      popup,
+      popupCheck: window.setInterval(() => {
+        if (activeConnector.current !== attempt || !popup.closed) return;
+        window.clearInterval(attempt.popupCheck);
+        attempt.popupClosed = window.setTimeout(() => {
+          if (finishConnectorAttempt(attempt, false)) {
+            setError("The account authorization popup was closed before it completed. Connect again when you are ready.");
+          }
+        }, 750);
+      }, 300),
+    };
+    activeConnector.current = attempt;
     setOperation(id);
     setError(null);
     try {
@@ -140,7 +242,9 @@ export function ProfileConnectors({
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ return_to: connectorReturnTo() }),
+        signal: attempt.abort.signal,
       });
+      if (activeConnector.current !== attempt) return;
       if (!response.ok) throw await responseFailure(response, `Couldn’t connect ${connectorLabel(id)}.`);
       const body: unknown = await response.json();
       if (!isRecord(body) || typeof body.authorization_url !== "string") {
@@ -148,10 +252,12 @@ export function ProfileConnectors({
       }
       const authorizationUrl = new URL(body.authorization_url);
       if (authorizationUrl.protocol !== "https:") throw new Error("Invalid connector authorization URL.");
-      window.location.assign(authorizationUrl.href);
+      if (popup.closed) throw new Error("The account authorization popup was closed before it started.");
+      popup.location.href = authorizationUrl.href;
     } catch (cause) {
-      setError(failureMessage(cause, `Couldn’t connect ${connectorLabel(id)}.`));
-      setOperation(null);
+      if (finishConnectorAttempt(attempt) && !isAbortError(cause)) {
+        setError(failureMessage(cause, `Couldn’t connect ${connectorLabel(id)}.`));
+      }
     }
   };
 
@@ -465,6 +571,11 @@ function readConnectorResult(): { id: ConnectorId; result: "connected" | "cancel
   const result = url.searchParams.get("connector_result");
   if (!connectorDefinitions.some((candidate) => candidate.id === id)
     || (result !== "connected" && result !== "cancelled" && result !== "failed")) return null;
+  if (window.opener && window.opener !== window) {
+    window.opener.postMessage(connectorCompletion(id as ConnectorId, result), window.location.origin);
+    window.close();
+    return null;
+  }
   url.searchParams.delete("connector");
   url.searchParams.delete("connector_result");
   window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${url.hash}`);
@@ -484,4 +595,8 @@ function connectorLabel(id: ConnectorId): string {
 
 function failureMessage(cause: unknown, fallback: string): string {
   return clientFailureMessage(cause, fallback);
+}
+
+function isAbortError(cause: unknown): boolean {
+  return cause instanceof DOMException && cause.name === "AbortError";
 }
