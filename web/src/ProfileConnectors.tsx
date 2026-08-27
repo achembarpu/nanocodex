@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 import {
   AccountConnectionCard,
   AccountConnectionGrid,
+  McpConnectionCard,
 } from "@nanocodex-connect/AccountConnectionSurface";
 import { isRecord, responseFailure } from "./AccountSession";
 import { clientFailureMessage } from "./clientFailure";
@@ -376,15 +377,13 @@ export function ProfileConnectors({
           /> : null}
           {mcpConnections?.map((connection) => {
             const connected = connection.status === "connected";
-            return <AccountConnectionCard
-              action={connected ? "Disconnect" : mcpConnectionStatusLabel(connection.status)}
-              connected={connected}
-              detail={mcpConnectionStatusLabel(connection.status)}
-              disabled={operation !== null || !connected}
+            return <McpConnectionCard
+              action={connected ? "Disconnect" : undefined}
+              actionDisabled={operation !== null}
+              connection={connection}
               key={connection.id}
-              logo={<ConnectionLogo id="mcp" />}
-              onClick={() => void disconnectMcp(connection)}
-              title={connection.name}
+              onAction={connected ? () => void disconnectMcp(connection) : undefined}
+              presentation="account"
             />;
           })}
         </AccountConnectionGrid>
@@ -465,22 +464,15 @@ export function ProfileConnectors({
       {mcpConnections?.map((connection) => {
         const connected = connection.status === "connected";
         return (
-          <button
-            className={`connection-card connector-row mcp-connector-row${connected ? " is-connected" : ""}`}
-            disabled={operation !== null || !connected}
+          <McpConnectionCard
+            action={connected ? "Disconnect" : undefined}
+            actionDisabled={operation !== null}
+            connection={connection}
             key={connection.id}
-            onClick={() => void disconnectMcp(connection)}
-            type="button"
-          >
-            <ConnectionLogo id="mcp" />
-            <span className="connection-card-copy">
-              <strong>{connection.name}</strong>
-              <span>{mcpConnectionStatusLabel(connection.status)}</span>
-            </span>
-            <span className="connection-card-action">
-              {connected ? "Disconnect" : mcpConnectionStatusLabel(connection.status)}
-            </span>
-          </button>
+            listItem={false}
+            onAction={connected ? () => void disconnectMcp(connection) : undefined}
+            presentation="account"
+          />
         );
       })}
       {after}
@@ -548,14 +540,6 @@ function decodeMcpConnections(value: unknown): readonly McpConnection[] {
       status: candidate.status as McpConnectionStatus,
     };
   }).filter(({ status }) => status !== "revoked");
-}
-
-function mcpConnectionStatusLabel(status: McpConnectionStatus): string {
-  if (status === "connected") return "Connected";
-  if (status === "authorization_required") return "Authorization required";
-  if (status === "reauthorization_required") return "Reconnect required";
-  if (status === "disabled") return "Disabled";
-  return "Revoked";
 }
 
 function connectorReturnTo(): string {

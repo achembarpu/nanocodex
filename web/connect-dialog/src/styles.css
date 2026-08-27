@@ -560,10 +560,25 @@
   white-space: nowrap;
 }
 
+.mcp-connection-copy > span,
 .mcp-connection-copy small,
 .mcp-connection-state {
   color: var(--muted);
   font-size: 8px;
+}
+
+.mcp-connection-identifier {
+  overflow: hidden;
+  font-family: monospace;
+  letter-spacing: 0.02em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mcp-connection-actions {
+  display: grid;
+  justify-items: end;
+  gap: 5px;
 }
 
 .mcp-connection-card.is-connected .mcp-connection-state {
@@ -1351,7 +1366,8 @@ dd {
 @media (pointer: coarse) {
   .account-mode button,
   .capability-action,
-  .dialog-actions button {
+  .dialog-actions button,
+  .mcp-connection-card button {
     min-height: 44px;
   }
 

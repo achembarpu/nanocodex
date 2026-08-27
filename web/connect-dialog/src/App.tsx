@@ -16,6 +16,7 @@ import {
   AccountConnectionSurface,
   DeferredChatGptImportCard,
   DeferredChatGptImportStatus,
+  McpConnectionCard,
 } from "./AccountConnectionSurface";
 import { ConnectionLogo } from "./ConnectionLogo";
 import { connectorCompletionFor } from "./connectorCompletion";
@@ -1482,29 +1483,19 @@ function McpConnectionList({ action, connections, disabled, focusedId, onConnect
   return (
     <div className="mcp-connections" role="list" aria-label="MCP connections">
       {visible.map((connection) => {
-        const connected = connection.status === "connected";
         const canConnect = mcpConnectionCanAuthorize(connection.status);
         return (
-          <div className={`mcp-connection-card${connected ? " is-connected" : ""}`} key={connection.id} role="listitem">
-            <span className="mcp-connection-logo" aria-hidden="true">M</span>
-            <span className="mcp-connection-copy">
-              <strong>{connection.name}</strong>
-              <small>{mcpConnectionStatusLabel(connection.status)}</small>
-            </span>
-            {canConnect ? (
-              <button
-                disabled={disabled || action !== undefined}
-                onClick={() => onConnect(connection.id)}
-                type="button"
-              >
-                {action === connection.id
-                  ? "Connecting…"
-                  : connection.status === "reauthorization_required" ? "Reconnect" : "Connect"}
-              </button>
-            ) : (
-              <span className="mcp-connection-state">{connected ? "Connected" : mcpConnectionStatusLabel(connection.status)}</span>
-            )}
-          </div>
+          <McpConnectionCard
+            action={canConnect
+              ? action === connection.id
+                ? "Connecting…"
+                : connection.status === "reauthorization_required" ? "Reconnect" : "Connect"
+              : undefined}
+            actionDisabled={disabled || action !== undefined}
+            connection={connection}
+            key={connection.id}
+            onAction={canConnect ? () => onConnect(connection.id) : undefined}
+          />
         );
       })}
     </div>
@@ -2195,14 +2186,6 @@ function mcpConnectionCanAuthorize(status: McpConnection["status"]): boolean {
 
 function deviceReturnPath(): string {
   return deviceMcpReturnPath(window.location.href);
-}
-
-function mcpConnectionStatusLabel(status: McpConnection["status"]): string {
-  if (status === "connected") return "Connected";
-  if (status === "authorization_required") return "Authorization required";
-  if (status === "reauthorization_required") return "Reconnect required";
-  if (status === "disabled") return "Disabled";
-  return "Revoked";
 }
 
 function abortableDelay(milliseconds: number, signal: AbortSignal) {

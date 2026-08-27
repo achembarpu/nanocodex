@@ -36,6 +36,16 @@ test("scoped Connect filters signed request context and retains approval return 
   assert.match(app, /host\.reject\(new Error\("The request was not approved\."\)\)/);
 });
 
+test("Account and filtered Connect reuse the shared MCP card with exact identifier copy", () => {
+  assert.match(app, /McpConnectionCard/);
+  assert.match(profileConnectors, /McpConnectionCard/);
+  const sharedSurface = source("../connect-dialog/src/AccountConnectionSurface.tsx");
+  assert.match(sharedSurface, /navigator\.clipboard\.writeText\(connection\.id\)/);
+  assert.match(sharedSurface, /shortMcpConnectionIdentifier\(connection\.id\)/);
+  assert.match(sharedSurface, /Copied identifier/);
+  assert.doesNotMatch(profileConnectors, /mcpConnections\?\.map[\s\S]*?className={`connection-card connector-row mcp-connector-row/);
+});
+
 test("Account and embedded Connect share strict in-place OAuth completion", () => {
   assert.match(app, /connectorCompletionFor\(event/);
   assert.match(profileConnectors, /from "@nanocodex-connect\/connectorCompletion"/);

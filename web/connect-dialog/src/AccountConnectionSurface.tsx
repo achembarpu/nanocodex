@@ -1,6 +1,7 @@
-import type { ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 
 import { ConnectionLogo } from "./ConnectionLogo";
+import type { McpConnection, McpConnectionStatus } from "./connectTypes";
 
 export const chatGptCredentialImportAction = "Will import from Codex";
 export const chatGptCredentialImportHelper = "After you approve, the Nanocodex CLI will send the ChatGPT sign-in already stored by Codex directly to Nanocodex. This page cannot access it.";
@@ -103,6 +104,93 @@ export function AccountConnectionCard({
       </button>
     </div>
   );
+}
+
+type McpCopyState = "idle" | "copied" | "failed";
+
+export function McpConnectionCard({
+  action,
+  actionDisabled = false,
+  connection,
+  listItem = true,
+  onAction,
+  presentation = "connect",
+}: Readonly<{
+  action?: string | undefined;
+  actionDisabled?: boolean | undefined;
+  connection: McpConnection;
+  listItem?: boolean | undefined;
+  onAction?: (() => void) | undefined;
+  presentation?: "account" | "connect" | undefined;
+}>) {
+  const [copyState, setCopyState] = useState<McpCopyState>("idle");
+  const connected = connection.status === "connected";
+  const status = mcpConnectionStatusLabel(connection.status);
+
+  useEffect(() => setCopyState("idle"), [connection.id]);
+
+  const copyIdentifier = async () => {
+    try {
+      await navigator.clipboard.writeText(connection.id);
+      setCopyState("copied");
+    } catch {
+      setCopyState("failed");
+    }
+  };
+
+  const account = presentation === "account";
+  return (
+    <div
+      className={account
+        ? `connection-card connector-row mcp-connector-row${connected ? " is-connected" : ""}`
+        : `mcp-connection-card${connected ? " is-connected" : ""}`}
+      role={listItem ? "listitem" : undefined}
+    >
+      {account ? <ConnectionLogo id="mcp" /> : (
+        <span className="mcp-connection-logo" aria-hidden="true">M</span>
+      )}
+      <span className={account ? "connection-card-copy" : "mcp-connection-copy"}>
+        <strong>{connection.name}</strong>
+        <span>{status}</span>
+        <small className="mcp-connection-identifier">
+          ID {shortMcpConnectionIdentifier(connection.id)}
+        </small>
+      </span>
+      <span className="mcp-connection-actions">
+        <button
+          aria-label={`Copy identifier for ${connection.name}`}
+          aria-live="polite"
+          className="mcp-copy-identifier"
+          onClick={() => void copyIdentifier()}
+          type="button"
+        >
+          {copyState === "copied"
+            ? "Copied identifier"
+            : copyState === "failed" ? "Copy failed" : "Copy identifier"}
+        </button>
+        {action && onAction ? (
+          <button disabled={actionDisabled} onClick={onAction} type="button">{action}</button>
+        ) : (
+          <span className={account ? "connection-card-action" : "mcp-connection-state"}>
+            {action ?? status}
+          </span>
+        )}
+      </span>
+    </div>
+  );
+}
+
+export function shortMcpConnectionIdentifier(identifier: string): string {
+  if (identifier.length <= 17) return identifier;
+  return `${identifier.slice(0, 9)}…${identifier.slice(-7)}`;
+}
+
+export function mcpConnectionStatusLabel(status: McpConnectionStatus): string {
+  if (status === "connected") return "Connected";
+  if (status === "authorization_required") return "Authorization required";
+  if (status === "reauthorization_required") return "Reconnect required";
+  if (status === "disabled") return "Disabled";
+  return "Revoked";
 }
 
 export function DeferredChatGptImportCard() {
