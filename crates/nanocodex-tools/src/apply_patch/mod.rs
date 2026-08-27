@@ -254,6 +254,7 @@ fn parse(patch: &str) -> Result<Vec<Hunk>, String> {
     Ok(hunks.into_iter().map(normalize_hunk_paths).collect())
 }
 
+#[cfg(not(target_family = "wasm"))]
 fn validate_unique_targets(
     hunks: &[Hunk],
     mut resolve: impl FnMut(&Path) -> PathBuf,
