@@ -1334,8 +1334,8 @@ test("development WASM preflight always delegates freshness to the canonical bui
 
   assert.equal(inspections, 2);
   assert.equal(executions.length, 1);
-  assert.equal(executions[0][0], "just");
-  assert.deepEqual(executions[0][1], ["build-wasm"]);
+  assert.equal(executions[0][0], "./scripts/build-js-package.sh");
+  assert.deepEqual(executions[0][1], []);
   assert.equal(
     executions[0][2],
     fileURLToPath(new URL("../..", import.meta.url)).replace(/\/$/, ""),
@@ -1361,7 +1361,7 @@ test("development WASM preflight invalidates partial output before repair", asyn
   });
 
   assert.equal(invalidations, 1);
-  assert.deepEqual(executions.map(([command]) => command), ["npm", "just"]);
+  assert.deepEqual(executions.map(([command]) => command), ["npm", "./scripts/build-js-package.sh"]);
 });
 
 test("development WASM preflight fails if canonical repair stays incomplete", async () => {

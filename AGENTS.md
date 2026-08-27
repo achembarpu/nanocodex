@@ -5,13 +5,13 @@ customer-driven tracks.
 
 ## Commands
 
-- `just dev` starts one complete instance-isolated local platform.
-- `just deploy` builds, deploys, and verifies the complete production topology.
-- `just down` stops only the local platform owned by this checkout.
+- `npm run dev --prefix web` starts one complete instance-isolated local platform.
+- `node scripts/deploy-cloudflare.mjs` builds, deploys, and verifies the complete production topology.
+- `node web/scripts/down-local.mjs` stops only the local platform owned by this checkout.
 
 These are the operator interface. Package-local builds, Wrangler calls,
 migrations, resource creation, and probes stay inside them. For a requested
-direct production rollout, use `just deploy`; do not wait for or repair CI unless
+direct production rollout, use `node scripts/deploy-cloudflare.mjs`; do not wait for or repair CI unless
 the user asks.
 
 ## Product boundary

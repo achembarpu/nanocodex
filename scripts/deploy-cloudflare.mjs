@@ -901,7 +901,7 @@ async function resolveCloudflareAccountEnvironment(environment) {
 
 async function buildProductionArtifacts(environment) {
   const child = buildEnvironment(environment);
-  await runLocal("just", ["build-wasm"], {
+  await runLocal("./scripts/build-js-package.sh", [], {
     environment: child,
     label: "build production WASM",
     timeoutMs: 30 * 60_000,

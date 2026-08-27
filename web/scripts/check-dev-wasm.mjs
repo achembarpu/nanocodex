@@ -51,7 +51,7 @@ export async function prepareDevWasm({
   // Cargo owns source/build-script/cfg freshness. The canonical builder then
   // compares its exact source/tool output fingerprint with the bindgen stamp.
   // An incremental Cargo no-op is the only trustworthy cheap current check.
-  await execute("just", ["build-wasm"], repositoryDirectory);
+  await execute("./scripts/build-js-package.sh", [], repositoryDirectory);
 
   const remainingProblems = await inspect(packageUrl);
   if (remainingProblems.length > 0) {

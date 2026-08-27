@@ -9,7 +9,7 @@
   "scripts": {
     "sync": "node scripts/sync-nanocodex.mjs",
     "publish:repository": "node scripts/publish-repository.mjs",
-    "wasm": "cd .. && just build-wasm",
+    "wasm": "cd .. && ./scripts/build-js-package.sh",
     "dev:wasm": "npm run wasm",
     "dev:bootstrap": "npm ci --prefix ../js/bindings && npm ci --prefix ../js/terminal && npm run build --prefix ../js/terminal && npm ci --prefix ../services/egress && npm ci --prefix ../services/managed && npm run dev:wasm",
     "dev:rebuild": "npm run dev",

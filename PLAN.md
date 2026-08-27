@@ -36,9 +36,9 @@ every possible client surface.
 
 The normal operator interface is deliberately small:
 
-- `just dev` starts one complete, instance-isolated local platform.
-- `just deploy` builds, deploys, and verifies one coherent production platform.
-- `just down` stops only the local platform owned by the current checkout.
+- `npm run dev --prefix web` starts one complete, instance-isolated local platform.
+- `node scripts/deploy-cloudflare.mjs` builds, deploys, and verifies one coherent production platform.
+- `node web/scripts/down-local.mjs` stops only the local platform owned by the current checkout.
 
 Package builds, pinned Wrangler calls, storage provisioning, migrations, Worker
 ordering, container rollout, and health probes are implementation details of
@@ -127,7 +127,7 @@ browser storage, or browser network payloads.
 
 ### One-command production topology
 
-`just deploy` must recreate or advance the complete Cloudflare topology from an
+`node scripts/deploy-cloudflare.mjs` must recreate or advance the complete Cloudflare topology from an
 exact clean `origin/master` revision:
 
 1. load the canonical deployment environment without printing secrets;
@@ -231,7 +231,7 @@ requests, WebSocket/event continuity, CSP/framing, and provider-secret absence.
 
 ### Phase 1 exit and Codex alignment
 
-Phase 1 exits only when `just deploy` succeeds from a clean checkout and the
+Phase 1 exits only when `node scripts/deploy-cloudflare.mjs` succeeds from a clean checkout and the
 complete supported behavior matrix passes against the exact deployed SHA. Any
 failure produces a focused fix, commit, redeploy, and rerun of the affected row
 plus its owning boundary.
