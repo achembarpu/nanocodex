@@ -123,6 +123,50 @@ describe("HostedToolsBroker socket-owned protocol", () => {
     expect(fixture.broker.provider().resolve("fixture__lookup")).toBeDefined();
   });
 
+  it("accepts only exact MCP provider IDs carried by a Connect tool-host grant", async () => {
+    const mcpId = "m".repeat(43);
+    const allowed = createFixture();
+    const allowedHost = allowed.socket([mcpId]);
+    await allowed.broker.message(allowedHost.webSocket, JSON.stringify({
+      type: "catalog",
+      tools: [{ ...entry(), provider: `mcp:${mcpId}` }],
+    }));
+    expect(allowedHost.sent).toEqual([{ type: "ready" }]);
+
+    for (const provider of ["javascript", `mcp:${"x".repeat(43)}`]) {
+      const denied = createFixture();
+      const deniedHost = denied.socket([mcpId]);
+      await denied.broker.message(deniedHost.webSocket, JSON.stringify({
+        type: "catalog",
+        tools: [{ ...entry(), provider }],
+      }));
+      expect(deniedHost.closed).toMatchObject({
+        code: 1008,
+        reason: expect.stringContaining("provider "),
+      });
+      expect(denied.broker.provider().definitions()).toEqual([]);
+    }
+  });
+
+  it("projects a retained catalog and blocks a stale tool when the active grant changes", async () => {
+    let allowed = true;
+    const fixture = createFixture((provider) => allowed && provider === "fixture");
+    const host = fixture.socket();
+    await catalog(fixture.broker, host);
+    const selected = fixture.broker.provider().resolve("fixture__lookup")!;
+    expect(fixture.broker.provider().definitions()).toHaveLength(1);
+
+    allowed = false;
+    expect(fixture.broker.provider().definitions()).toEqual([]);
+    expect(fixture.broker.provider().resolve("fixture__lookup")).toBeUndefined();
+    await expect(selected.handler({}, { sessionId: "session:1", callId: "source:1" }))
+      .resolves.toMatchObject({
+        success: false,
+        structuredResult: { status: "unavailable" },
+      });
+    expect(host.sent.some((frame) => frame.type === "call")).toBe(false);
+  });
+
   it("marks dispatched calls ambiguous after unexpected transport loss", async () => {
     const fixture = createFixture();
     const host = fixture.socket();
@@ -182,7 +226,7 @@ describe("HostedToolsBroker socket-owned protocol", () => {
   });
 });
 
-function createFixture() {
+function createFixture(providerAllowed?: (provider: string) => boolean) {
   const persistence = new MemoryPersistence();
   const sockets: FakeSocket[] = [];
   const ids = [...IDS];
@@ -194,14 +238,19 @@ function createFixture() {
   const broker = new HostedToolsBroker(context, {
     persistence,
     now: () => NOW,
+    ...(providerAllowed === undefined ? {} : { providerAllowed }),
     randomUUID: () => ids.shift() ?? crypto.randomUUID(),
   });
   return {
     broker,
     persistence,
-    socket() {
+    socket(allowedMcpIds?: readonly string[]) {
       const socket = new FakeSocket();
-      socket.serializeAttachment({ kind: "hosted-tools", sessionId: "session:route" });
+      socket.serializeAttachment({
+        kind: "hosted-tools",
+        sessionId: "session:route",
+        ...(allowedMcpIds === undefined ? {} : { allowedMcpIds }),
+      });
       sockets.push(socket);
       return socket;
     },

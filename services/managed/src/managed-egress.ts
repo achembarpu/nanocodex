@@ -20,10 +20,10 @@ const BLOCKED_RESPONSE_HEADERS = new Set([
   "x-nanocodex-subject",
 ]);
 
-type ConnectorId = "github" | "gmail" | "gdrive" | "x";
+export type ManagedEgressConnectorId = "github" | "gmail" | "gdrive" | "x";
 
 type ProviderPolicy = Readonly<{
-  connector: ConnectorId;
+  connector: ManagedEgressConnectorId;
   path: (pathname: string) => boolean;
 }>;
 
@@ -64,6 +64,7 @@ export async function handleManagedEgress(
   request: Request,
   binding: Fetcher,
   subject?: string,
+  connectorAllowed: (connector: ManagedEgressConnectorId) => boolean = () => true,
 ): Promise<Response> {
   const method = request.method.toUpperCase();
   if (!ORDINARY_METHODS.has(method)) return failure(403, "method_denied");
@@ -75,6 +76,7 @@ export async function handleManagedEgress(
   const provider = providerFor(url);
   if (!provider && PROVIDERS.has(url.hostname)) return failure(403, "destination_denied");
   if (provider) {
+    if (!connectorAllowed(provider.connector)) return failure(403, "connector_forbidden");
     if (!subject || !SUBJECT.test(subject)) return failure(403, "requires_login");
     if (!canonicalProviderPath(provider, url.pathname) || !provider.path(url.pathname)) {
       return failure(403, "connector_path_denied");

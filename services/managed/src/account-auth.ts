@@ -21,6 +21,10 @@ const BASE64_URL = /^[A-Za-z0-9_-]+$/;
 const DEFAULT_OWNERSHIP_IO_TIMEOUT_MS = 10_000;
 const CONNECT_SERVICE_ORIGIN = "https://nanocodex.internal";
 const CONNECT_USER_HEADER = "x-nanocodex-connect-user";
+const CONNECT_GRANT_ID_HEADER = "x-nanocodex-connect-grant-id";
+const CONNECT_CAPABILITIES_HEADER = "x-nanocodex-connect-capabilities";
+const CONNECT_CONNECTORS_HEADER = "x-nanocodex-connect-connectors";
+const CONNECT_MCP_IDS_HEADER = "x-nanocodex-connect-mcp-ids";
 const SESSION_OWNER_ASSERTION = "x-nanocodex-owner-id";
 const SESSION_ORGANIZATION_ASSERTION = "x-nanocodex-session-organization-id";
 const SESSION_TEAM_ASSERTION = "x-nanocodex-session-team-id";
@@ -56,6 +60,14 @@ export type OrganizationCapability =
   | "organization:read"
   | "organization:write";
 
+export type ConnectConnectorId = "github" | "gmail" | "gdrive" | "x" | "chatgpt";
+
+export type ConnectGrantSlice = Readonly<{
+  grantId: string;
+  connectors: readonly ConnectConnectorId[];
+  mcpIds: readonly string[];
+}>;
+
 const OWNER_CAPABILITIES = [
   "agents:read",
   "agents:write",
@@ -79,6 +91,7 @@ export type Principal = Readonly<{
   credentialId: string;
   authorizationEpoch: number;
   capabilities: readonly OrganizationCapability[];
+  connectGrant?: ConnectGrantSlice;
 }>;
 
 export function forwardPrincipalAssertions(headers: Headers, principal: Principal): void {
@@ -87,6 +100,20 @@ export function forwardPrincipalAssertions(headers: Headers, principal: Principa
   headers.set(SESSION_TEAM_ASSERTION, principal.teamId);
   headers.set(SESSION_AUTHORIZATION_EPOCH_ASSERTION, String(principal.authorizationEpoch));
   headers.set(SESSION_CAPABILITIES_ASSERTION, JSON.stringify(principal.capabilities));
+  for (const name of [
+    CONNECT_USER_HEADER,
+    CONNECT_GRANT_ID_HEADER,
+    CONNECT_CAPABILITIES_HEADER,
+    CONNECT_CONNECTORS_HEADER,
+    CONNECT_MCP_IDS_HEADER,
+  ]) {
+    headers.delete(name);
+  }
+  if (principal.connectGrant) {
+    headers.set(CONNECT_GRANT_ID_HEADER, principal.connectGrant.grantId);
+    headers.set(CONNECT_CONNECTORS_HEADER, JSON.stringify(principal.connectGrant.connectors));
+    headers.set(CONNECT_MCP_IDS_HEADER, JSON.stringify(principal.connectGrant.mcpIds));
+  }
 }
 
 type UserRecord = Readonly<{
@@ -355,12 +382,23 @@ export async function authenticate(
 ): Promise<Principal | undefined> {
   const connectUser = request.headers.get(CONNECT_USER_HEADER);
   if (url.origin === CONNECT_SERVICE_ORIGIN && isUserId(connectUser)) {
+    const grant = parseConnectGrantAssertions(request.headers);
+    if (!grant) return undefined;
     const principal = await resolveUserPrincipal(
       env,
       connectUser,
-      `connect_grant:${connectUser}`,
+      `connect_grant:${grant.slice.grantId}`,
     );
-    return principal ? { ...principal, kind: "connect_grant" } : undefined;
+    if (!principal || grant.capabilities.some((capability) => (
+      !principal.capabilities.includes(capability)
+    ))) return undefined;
+    return {
+      ...principal,
+      kind: "connect_grant",
+      credentialId: grant.slice.grantId,
+      capabilities: grant.capabilities,
+      connectGrant: grant.slice,
+    };
   }
   const cookie = cookieValue(request, ACCOUNT_COOKIE);
   if (cookie && ANONYMOUS_SESSION_TOKEN.test(cookie)) {
@@ -1688,6 +1726,61 @@ export function isOrganizationCapabilities(value: unknown): value is readonly Or
     || capability === "organization:read"
     || capability === "organization:write"
   );
+}
+
+const CONNECT_CAPABILITIES = new Set<OrganizationCapability>([
+  "agents:read",
+  "agents:write",
+  "history:read",
+  "memory:read",
+  "memory:write",
+  "tools:use",
+]);
+const CONNECT_CONNECTORS = new Set<ConnectConnectorId>([
+  "github",
+  "gmail",
+  "gdrive",
+  "x",
+  "chatgpt",
+]);
+const CONNECT_GRANT_ID = /^0x[0-9a-fA-F]{64}$/;
+const CONNECT_MCP_ID = /^[A-Za-z0-9_-]{43}$/;
+
+function parseConnectGrantAssertions(headers: Headers): Readonly<{
+  capabilities: readonly OrganizationCapability[];
+  slice: ConnectGrantSlice;
+}> | undefined {
+  const grantId = headers.get(CONNECT_GRANT_ID_HEADER);
+  const capabilities = parseUniqueJsonArray(headers.get(CONNECT_CAPABILITIES_HEADER));
+  const connectors = parseUniqueJsonArray(headers.get(CONNECT_CONNECTORS_HEADER));
+  const mcpIds = parseUniqueJsonArray(headers.get(CONNECT_MCP_IDS_HEADER));
+  if (!grantId || !CONNECT_GRANT_ID.test(grantId)
+    || !capabilities || !capabilities.every((value): value is OrganizationCapability => (
+      CONNECT_CAPABILITIES.has(value as OrganizationCapability)
+    ))
+    || !connectors || !connectors.every((value): value is ConnectConnectorId => (
+      CONNECT_CONNECTORS.has(value as ConnectConnectorId)
+    ))
+    || !mcpIds || mcpIds.length > 16 || !mcpIds.every((value) => CONNECT_MCP_ID.test(value))) {
+    return undefined;
+  }
+  return {
+    capabilities,
+    slice: {
+      grantId: grantId.toLowerCase(),
+      connectors,
+      mcpIds,
+    },
+  };
+}
+
+function parseUniqueJsonArray(encoded: string | null): string[] | undefined {
+  if (encoded === null) return undefined;
+  let value: unknown;
+  try { value = JSON.parse(encoded); } catch { return undefined; }
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string")
+    || new Set(value).size !== value.length) return undefined;
+  return value as string[];
 }
 
 function isOrganizationGrant(value: unknown): value is OrganizationGrant {

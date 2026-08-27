@@ -1,4 +1,5 @@
 import { handleManagedEgress } from "./managed-egress";
+import type { ManagedEgressConnectorId } from "./managed-egress";
 
 type ShellFetchOptions = Readonly<{
   method?: string | undefined;
@@ -23,7 +24,11 @@ export type ManagedShellFetch = (
 const REPOSITORY = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 
 /** One credential-free fetch capability shared by curl and app-owned shell commands. */
-export function createManagedShellFetch(binding: Fetcher, subject?: string): ManagedShellFetch {
+export function createManagedShellFetch(
+  binding: Fetcher,
+  subject?: string,
+  connectorAllowed?: (connector: ManagedEgressConnectorId) => boolean,
+): ManagedShellFetch {
   return async (url, options = {}) => {
     const method = (options.method ?? "GET").toUpperCase();
     const request = new Request(url, {
@@ -34,7 +39,7 @@ export function createManagedShellFetch(binding: Fetcher, subject?: string): Man
         : { body: options.body }),
       signal: options.signal,
     });
-    const response = await handleManagedEgress(request, binding, subject);
+    const response = await handleManagedEgress(request, binding, subject, connectorAllowed);
     const headers: Record<string, string> = Object.create(null) as Record<string, string>;
     response.headers.forEach((value, name) => { headers[name] = value; });
     return {

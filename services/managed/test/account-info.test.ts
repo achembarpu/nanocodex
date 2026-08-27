@@ -42,6 +42,22 @@ describe("account info", () => {
     });
   });
 
+  it("omits authenticated connector identities outside a Connect grant projection", async () => {
+    const info = await accountInfo({
+      fetch: async () => Response.json({
+        connectors: {
+          github: { connected: true, label: "Allowed GitHub" },
+          gmail: { connected: true, label: "Private Gmail" },
+          gdrive: { connected: true, label: "Private Drive" },
+        },
+      }),
+    }, "user", true, ["github"]);
+
+    expect(info.authenticated).toEqual(["github"]);
+    expect(info.accounts).toEqual({ github: "Allowed GitHub" });
+    expect(JSON.stringify(info)).not.toMatch(/Private Gmail|Private Drive|gmail|gdrive/);
+  });
+
   it("does not query account connectors for shared rooms", async () => {
     const fetch = vi.fn(async () => Response.json({}));
     expect(await accountInfo({ fetch }, "owner", false)).toEqual({

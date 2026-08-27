@@ -20,6 +20,7 @@ export async function accountInfo(
   binding: BrokerBinding,
   userId: string,
   enabled: boolean,
+  allowedConnectors?: readonly ConnectorId[],
 ): Promise<AccountInfo> {
   if (!enabled) return emptyInfo("disabled");
   try {
@@ -36,7 +37,9 @@ export async function accountInfo(
     }
     const connectors = value.connectors;
     const accounts: Partial<Record<ConnectorId, string>> = {};
+    const allowed = allowedConnectors === undefined ? undefined : new Set(allowedConnectors);
     const authenticated = CONNECTOR_IDS.filter((id) => {
+      if (allowed && !allowed.has(id)) return false;
       const connector = connectors[id];
       if (!isRecord(connector) || connector.connected !== true) return false;
       if (typeof connector.label === "string" && connector.label.trim()) {
@@ -44,17 +47,32 @@ export async function accountInfo(
       }
       return true;
     });
-    return {
+    return projectAccountInfo({
       status: "ready",
       authenticated,
       accounts,
       identity: {},
       stablecoins: [],
       authorizations: [],
-    };
+    }, allowedConnectors);
   } catch {
     return emptyInfo("unavailable");
   }
+}
+
+export function projectAccountInfo(
+  info: AccountInfo,
+  allowedConnectors?: readonly ConnectorId[],
+): AccountInfo {
+  if (allowedConnectors === undefined) return info;
+  const allowed = new Set(allowedConnectors);
+  return {
+    ...info,
+    authenticated: info.authenticated.filter((id) => allowed.has(id)),
+    accounts: Object.fromEntries(Object.entries(info.accounts).filter(([id]) => (
+      allowed.has(id as ConnectorId)
+    ))),
+  };
 }
 
 export function withInitialAccountInfo(input: PromptInput, info: AccountInfo): PromptInput {

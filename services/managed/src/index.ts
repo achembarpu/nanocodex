@@ -31,6 +31,7 @@ import {
   createManagedGhCommand,
   createManagedShellFetch,
 } from "./computer-shell";
+import type { ManagedEgressConnectorId } from "./managed-egress";
 import {
   DurableEventLog,
   EventLogCapacityError,
@@ -103,7 +104,12 @@ import {
   unbindAgentCredential,
 } from "./credentials";
 import { routeBrowserEgress } from "./browser-egress";
-import { accountInfo, type AccountInfo, withInitialAccountInfo } from "./account-info";
+import {
+  accountInfo,
+  projectAccountInfo,
+  type AccountInfo,
+  withInitialAccountInfo,
+} from "./account-info";
 import { routeConnectorRequest } from "./connectors";
 import {
   attachAgent,
@@ -117,6 +123,7 @@ import {
   requireSameOriginMutation,
   routeAccountRequest,
   type AccountAuthEnv,
+  type ConnectGrantSlice,
   type OrganizationCapability,
   type Principal,
 } from "./account-auth";
@@ -185,6 +192,9 @@ const SESSION_ORGANIZATION_ASSERTION = "x-nanocodex-session-organization-id";
 const SESSION_TEAM_ASSERTION = "x-nanocodex-session-team-id";
 const SESSION_AUTHORIZATION_EPOCH_ASSERTION = "x-nanocodex-authorization-epoch";
 const SESSION_CAPABILITIES_ASSERTION = "x-nanocodex-capabilities";
+const CONNECT_GRANT_ID_ASSERTION = "x-nanocodex-connect-grant-id";
+const CONNECT_CONNECTORS_ASSERTION = "x-nanocodex-connect-connectors";
+const CONNECT_MCP_IDS_ASSERTION = "x-nanocodex-connect-mcp-ids";
 const MEMORY_ORGANIZATION_ASSERTION = "x-nanocodex-organization-id";
 const MEMORY_TEAM_ASSERTION = "x-nanocodex-team-id";
 const MEMORY_SUBJECT_ASSERTION = "x-nanocodex-subject-id";
@@ -352,6 +362,7 @@ type ManagedRealtimeRequest = {
 
 type ManagedRealtimeSessionRow = {
   voice_session_id: string;
+  authorization_json: string;
 };
 
 type ManagedRealtimeRouteResult = Readonly<{
@@ -366,6 +377,7 @@ type ManagedTransition =
 
 type TurnAuthorization = Readonly<{
   capabilities: readonly OrganizationCapability[];
+  connectGrant?: ConnectGrantSlice;
 }>;
 
 type SessionSocketAttachment = Readonly<{
@@ -441,9 +453,22 @@ function forwardedPrincipal(headers: Headers): Readonly<{
   if (!Number.isSafeInteger(authorizationEpoch) || authorizationEpoch < 1) return undefined;
   let authorization: TurnAuthorization;
   try {
-    authorization = parseTurnAuthorization(
-      JSON.stringify({ capabilities: JSON.parse(encodedCapabilities) }),
-    );
+    const grantId = headers.get(CONNECT_GRANT_ID_ASSERTION);
+    const encodedConnectors = headers.get(CONNECT_CONNECTORS_ASSERTION);
+    const encodedMcpIds = headers.get(CONNECT_MCP_IDS_ASSERTION);
+    const connectAssertions = [grantId, encodedConnectors, encodedMcpIds];
+    if (connectAssertions.some((value) => value !== null)
+      && connectAssertions.some((value) => value === null)) return undefined;
+    authorization = parseTurnAuthorization(JSON.stringify({
+      capabilities: JSON.parse(encodedCapabilities),
+      ...(grantId === null ? {} : {
+        connectGrant: {
+          grantId,
+          connectors: JSON.parse(encodedConnectors!),
+          mcpIds: JSON.parse(encodedMcpIds!),
+        },
+      }),
+    }));
   } catch {
     return undefined;
   }
@@ -453,11 +478,47 @@ function forwardedPrincipal(headers: Headers): Readonly<{
 function parseTurnAuthorization(encoded: string): TurnAuthorization {
   const value = JSON.parse(encoded) as unknown;
   if (!value || typeof value !== "object" || Array.isArray(value)
-    || Object.keys(value).some((key) => key !== "capabilities")
+    || Object.keys(value).some((key) => key !== "capabilities" && key !== "connectGrant")
     || !isOrganizationCapabilities((value as { capabilities?: unknown }).capabilities)) {
     throw new Error("invalid turn authorization");
   }
-  return { capabilities: (value as { capabilities: OrganizationCapability[] }).capabilities };
+  const parsed = value as {
+    capabilities: OrganizationCapability[];
+    connectGrant?: unknown;
+  };
+  if (parsed.connectGrant === undefined) return { capabilities: parsed.capabilities };
+  if (!isConnectGrantSlice(parsed.connectGrant)) throw new Error("invalid turn authorization");
+  return { capabilities: parsed.capabilities, connectGrant: parsed.connectGrant };
+}
+
+function isConnectGrantSlice(value: unknown): value is ConnectGrantSlice {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const grant = value as Partial<ConnectGrantSlice>;
+  return Object.keys(value).every((key) => (
+    key === "grantId" || key === "connectors" || key === "mcpIds"
+  ))
+    && typeof grant.grantId === "string" && /^0x[0-9a-f]{64}$/.test(grant.grantId)
+    && isUniqueStringArray(grant.connectors)
+    && grant.connectors.every((connector) => (
+      connector === "github" || connector === "gmail" || connector === "gdrive"
+      || connector === "x" || connector === "chatgpt"
+    ))
+    && isUniqueStringArray(grant.mcpIds) && grant.mcpIds.length <= 16
+    && grant.mcpIds.every((id) => /^[A-Za-z0-9_-]{43}$/.test(id));
+}
+
+function isUniqueStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === "string")
+    && new Set(value).size === value.length;
+}
+
+function accountConnectorProjection(
+  authorization: TurnAuthorization,
+): readonly ManagedEgressConnectorId[] | undefined {
+  if (!authorization.connectGrant) return undefined;
+  return authorization.connectGrant.connectors.filter(
+    (connector): connector is ManagedEgressConnectorId => connector !== "chatgpt",
+  );
 }
 
 export default {
@@ -714,6 +775,11 @@ export default {
         || !principal.capabilities.includes("tools:use")) {
         return json({ error: "forbidden" }, { status: 403 });
       }
+      if ((resource === "ws" || resource === "tool-host")
+        && principal.connectGrant
+        && !principal.connectGrant.connectors.includes("chatgpt")) {
+        return json({ error: "connector_forbidden" }, { status: 403 });
+      }
       if (request.headers.get("origin") !== url.origin) {
         return json({ error: "forbidden_origin" }, { status: 403 });
       }
@@ -740,6 +806,10 @@ export default {
       if (!principal.capabilities.includes("agents:write")
         || !principal.capabilities.includes("tools:use")) {
         return json({ error: "forbidden" }, { status: 403 });
+      }
+      if (principal.connectGrant
+        && !principal.connectGrant.connectors.includes("chatgpt")) {
+        return json({ error: "connector_forbidden" }, { status: 403 });
       }
       const originFailure = requireSameOriginMutation(request, url, principal);
       if (originFailure) return originFailure;
@@ -800,6 +870,14 @@ export default {
         return json({ error: "method_not_allowed" }, { status: 405 });
       if (url.search !== "")
         return json({ error: "invalid_request" }, { status: 400 });
+      if (!principal.capabilities.includes("agents:write")
+        || !principal.capabilities.includes("tools:use")) {
+        return json({ error: "forbidden" }, { status: 403 });
+      }
+      if (principal.connectGrant
+        && !principal.connectGrant.connectors.includes("chatgpt")) {
+        return json({ error: "connector_forbidden" }, { status: 403 });
+      }
       const originFailure = requireSameOriginMutation(request, url, principal);
       if (originFailure) return originFailure;
       return stub.fetch(
@@ -997,6 +1075,7 @@ export class NanocodexSession extends DurableComputerSession {
       CREATE TABLE IF NOT EXISTS managed_realtime_session (
         singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
         voice_session_id TEXT NOT NULL,
+        authorization_json TEXT NOT NULL DEFAULT '{"capabilities":[]}',
         updated_at INTEGER NOT NULL
       );
       CREATE TABLE IF NOT EXISTS device_host_state (
@@ -1035,7 +1114,9 @@ export class NanocodexSession extends DurableComputerSession {
         citations_json TEXT NOT NULL
       );
     `);
-    this.#hostedTools = new HostedToolsBroker(this.ctx);
+    this.#hostedTools = new HostedToolsBroker(this.ctx, {
+      providerAllowed: (provider) => this.#activeTurnHostedProviderAllowed(provider),
+    });
     this.#eventLog = new DurableEventLog<StreamMessage>(this.ctx.storage);
     this.#eventArchive = new ManagedEventArchive<StreamMessage>(
       this.ctx.storage,
@@ -1146,6 +1227,18 @@ export class NanocodexSession extends DurableComputerSession {
     if (!realtimeOperationColumns.has("blocked")) {
       this.ctx.storage.sql.exec(
         "ALTER TABLE managed_realtime_operations ADD COLUMN blocked INTEGER NOT NULL DEFAULT 0 CHECK (blocked IN (0, 1))",
+      );
+    }
+    const realtimeSessionColumns = new Set(
+      this.ctx.storage.sql
+        .exec<{ name: string }>("PRAGMA table_info(managed_realtime_session)")
+        .toArray()
+        .map((column) => column.name),
+    );
+    if (!realtimeSessionColumns.has("authorization_json")) {
+      this.ctx.storage.sql.exec(
+        `ALTER TABLE managed_realtime_session ADD COLUMN authorization_json TEXT NOT NULL
+         DEFAULT '{"capabilities":[]}'`,
       );
     }
     const migrationNow = Date.now();
@@ -1461,6 +1554,10 @@ export class NanocodexSession extends DurableComputerSession {
       if (session.runtime_profile !== "managed") {
         return new Response("Hosted Tools is unavailable for multiplayer agents", { status: 409 });
       }
+      if (turnAuthorization.connectGrant
+        && !turnAuthorization.connectGrant.connectors.includes("chatgpt")) {
+        return json({ error: "connector_forbidden" }, { status: 403 });
+      }
       // Catalog acknowledgement must follow installation of the owning router's
       // exact attached/cloud contract validator.
       try {
@@ -1469,7 +1566,10 @@ export class NanocodexSession extends DurableComputerSession {
         console.error("managed tool router startup failed", errorMessage(error));
         return json({ error: "tool_router_unavailable" }, { status: 503 });
       }
-      return this.#hostedTools.upgrade(session.session_id);
+      return this.#hostedTools.upgrade(
+        session.session_id,
+        turnAuthorization.connectGrant?.mcpIds,
+      );
     }
     if (request.method === "GET" && url.pathname === "/device-host")
       return this.#upgradeDeviceHost();
@@ -1484,6 +1584,7 @@ export class NanocodexSession extends DurableComputerSession {
       return this.#managedRealtime(
         realtimeRoute[1] as ManagedRealtimeKind,
         request,
+        turnAuthorization,
       );
     }
     if (request.method === "GET" && url.pathname === "/events") {
@@ -1780,6 +1881,10 @@ export class NanocodexSession extends DurableComputerSession {
     if (this.#deleting) return new Response("Agent is being deleted", { status: 409 });
     const session = this.#sessionStatus();
     if (!session) return new Response("Unknown session", { status: 404 });
+    if (authorization.connectGrant
+      && !authorization.connectGrant.connectors.includes("chatgpt")) {
+      return json({ error: "connector_forbidden" }, { status: 403 });
+    }
     if (this.ctx.getWebSockets("client").length >= MAX_CLIENT_CONNECTIONS) {
       return new Response("Session client limit reached", { status: 429 });
     }
@@ -2142,6 +2247,10 @@ export class NanocodexSession extends DurableComputerSession {
     authorization: TurnAuthorization,
   ): Promise<Response> {
     if (this.#deleting) return json({ error: "agent_deleting" }, { status: 409 });
+    if (authorization.connectGrant
+      && !authorization.connectGrant.connectors.includes("chatgpt")) {
+      return json({ error: "connector_forbidden" }, { status: 403 });
+    }
     let encoded: string;
     try {
       encoded = await readBoundedRequestText(request, MAX_REQUEST_BODY_BYTES);
@@ -2244,9 +2353,14 @@ export class NanocodexSession extends DurableComputerSession {
   async #managedRealtime(
     kind: ManagedRealtimeKind,
     request: Request,
+    authorization: TurnAuthorization,
   ): Promise<Response> {
     if (this.#deleting || this.#deleted) {
       return json({ error: "agent_deleting" }, { status: 409 });
+    }
+    if (authorization.connectGrant
+      && !authorization.connectGrant.connectors.includes("chatgpt")) {
+      return json({ error: "connector_forbidden" }, { status: 403 });
     }
     let encoded: string;
     try {
@@ -2362,12 +2476,15 @@ export class NanocodexSession extends DurableComputerSession {
             const context = await agent.session.realtime.start();
             assertBoundedRealtimeContext(context);
             this.ctx.storage.sql.exec(
-              `INSERT INTO managed_realtime_session (singleton, voice_session_id, updated_at)
-               VALUES (1, ?, ?)
+              `INSERT INTO managed_realtime_session (
+                 singleton, voice_session_id, authorization_json, updated_at
+               ) VALUES (1, ?, ?, ?)
                ON CONFLICT (singleton) DO UPDATE SET
                  voice_session_id = excluded.voice_session_id,
+                 authorization_json = excluded.authorization_json,
                  updated_at = excluded.updated_at`,
               parsed.voiceSessionId,
+              JSON.stringify(authorization),
               Date.now(),
             );
             return {
@@ -2387,6 +2504,7 @@ export class NanocodexSession extends DurableComputerSession {
                 voice_session_id: parsed.voiceSessionId,
               };
             }
+            this.#requireRealtimeAuthorization(active, authorization);
             const context = await this.#endManagedRealtimeSession(
               agent,
               parsed.voiceSessionId,
@@ -2405,7 +2523,8 @@ export class NanocodexSession extends DurableComputerSession {
               "realtime delegation does not own the active voice session",
             );
           }
-          return this.#routeRealtimeDelegation(agent, parsed, requestHash);
+          this.#requireRealtimeAuthorization(this.#managedRealtimeSession()!, authorization);
+          return this.#routeRealtimeDelegation(agent, parsed, requestHash, authorization);
         },
       );
       return json(result, { status: kind === "delegate" ? 202 : 200 });
@@ -2568,6 +2687,7 @@ export class NanocodexSession extends DurableComputerSession {
     agent: CloudflareAgent.Agent,
     request: ManagedRealtimeRequest,
     requestHash: string,
+    authorization: TurnAuthorization,
   ): Promise<ManagedRealtimeRouteResult> {
     const input = request.input!;
     this.#assertRealtimeRouteAvailable();
@@ -2613,7 +2733,7 @@ export class NanocodexSession extends DurableComputerSession {
           throw new Error("durable routed turn did not return an operation id");
         }
         turnId = acceptedTurnId;
-        await this.#acceptRoutedTurn(turnId, input, requestHash, request);
+        await this.#acceptRoutedTurn(turnId, input, requestHash, request, authorization);
         this.#turns.set(turnId, turn);
         this.#turnInputs.set(turnId, input);
         this.#eventTurnQueue.push(turnId);
@@ -2759,6 +2879,7 @@ export class NanocodexSession extends DurableComputerSession {
     input: PromptInput,
     requestHash: string,
     request: ManagedRealtimeRequest,
+    authorization: TurnAuthorization,
   ): Promise<ManagedTurnRow> {
     this.#assertRealtimeRouteAvailable();
     const requestKey = `realtime:${request.voiceSessionId}:${request.operationId}`;
@@ -2805,7 +2926,7 @@ export class NanocodexSession extends DurableComputerSession {
         requestKey,
         requestHash,
         JSON.stringify(input),
-        JSON.stringify({ capabilities: [] } satisfies TurnAuthorization),
+        JSON.stringify(authorization),
         dispatchChunks.length,
         event.cursor,
         now,
@@ -3616,19 +3737,36 @@ export class NanocodexSession extends DurableComputerSession {
   }
 
   async #loadInitialAccountContext(): Promise<InitialAccountContext | undefined> {
+    const session = this.#session();
+    if (!session || session.runtime_profile === "multiplayer") return undefined;
+    const first = this.ctx.storage.sql.exec<{ id: string; authorization_json: string }>(
+      `SELECT id, authorization_json
+       FROM managed_turns ORDER BY created_at, id LIMIT 1`,
+    ).toArray()[0];
+    if (!first) return undefined;
+    let allowedConnectors: readonly ManagedEgressConnectorId[] = [];
+    try {
+      allowedConnectors = accountConnectorProjection(
+        parseTurnAuthorization(first.authorization_json),
+      ) ?? ["github", "gmail", "gdrive", "x"];
+    } catch { /* Malformed authorization fails closed. */ }
     const retained = await this.ctx.storage.get<InitialAccountContext>(
       INITIAL_ACCOUNT_CONTEXT_KEY,
     );
-    if (retained) return retained;
-    const session = this.#session();
-    if (!session || session.runtime_profile === "multiplayer") return undefined;
-    const first = this.ctx.storage.sql.exec<{ id: string }>(
-      "SELECT id FROM managed_turns ORDER BY created_at, id LIMIT 1",
-    ).toArray()[0];
-    if (!first) return undefined;
+    if (retained) {
+      return {
+        ...retained,
+        account: projectAccountInfo(retained.account, allowedConnectors),
+      };
+    }
     const prepared = {
       turn_id: first.id,
-      account: await accountInfo(this.env.NANOCODEX, session.owner_id, true),
+      account: await accountInfo(
+        this.env.NANOCODEX,
+        session.owner_id,
+        true,
+        allowedConnectors,
+      ),
     } satisfies InitialAccountContext;
     await this.ctx.storage.put(INITIAL_ACCOUNT_CONTEXT_KEY, prepared);
     return prepared;
@@ -3754,6 +3892,7 @@ export class NanocodexSession extends DurableComputerSession {
     const shellFetch = createManagedShellFetch(
       this.env.NANOCODEX,
       multiplayer ? undefined : this.ctx.id.toString(),
+      (connector) => this.#activeTurnConnectorAllowed(connector),
     );
     const shell = await justBash({
       filesystem: sourceFilesystem,
@@ -3763,11 +3902,15 @@ export class NanocodexSession extends DurableComputerSession {
       customCommands: [createManagedGhCommand(shellFetch)],
     });
     const execCommand = Object.freeze({ ...shell.tool, dispose: disposeWorkspace });
-    const currentAccountInfo = () => accountInfo(
-      this.env.NANOCODEX,
-      session.owner_id,
-      !multiplayer,
-    );
+    const currentAccountInfo = () => {
+      const authorization = this.#activeTurnAuthorization();
+      return accountInfo(
+        this.env.NANOCODEX,
+        session.owner_id,
+        !multiplayer,
+        authorization === undefined ? [] : accountConnectorProjection(authorization),
+      );
+    };
     const internalRuntime = Symbol.for("nanocodex.cloudflare.internalRuntime");
     const hostedProvider = multiplayer ? undefined : this.#hostedTools.provider();
     const hostedRuntime = hostedProvider === undefined ? undefined : {
@@ -4074,15 +4217,32 @@ export class NanocodexSession extends DurableComputerSession {
   }
 
   #requireActiveTurnCapability(capability: OrganizationCapability): void {
-    const turnId = this.#eventTurnId;
-    const row = turnId === undefined ? undefined : this.#managedTurn(turnId);
-    let authorization: TurnAuthorization | undefined;
-    try {
-      authorization = row ? parseTurnAuthorization(row.authorization_json) : undefined;
-    } catch { /* Fail closed for malformed durable authorization state. */ }
+    const authorization = this.#activeTurnAuthorization();
     if (!authorization?.capabilities.includes(capability)) {
       throw new ManagedRequestError(403, "forbidden", `turn lacks ${capability} capability`);
     }
+  }
+
+  #activeTurnAuthorization(): TurnAuthorization | undefined {
+    const turnId = this.#eventTurnId;
+    const row = turnId === undefined ? undefined : this.#managedTurn(turnId);
+    try { return row ? parseTurnAuthorization(row.authorization_json) : undefined; }
+    catch { return undefined; }
+  }
+
+  #activeTurnConnectorAllowed(connector: ManagedEgressConnectorId): boolean {
+    const authorization = this.#activeTurnAuthorization();
+    return authorization !== undefined
+      && (authorization.connectGrant === undefined
+        || authorization.connectGrant.connectors.includes(connector));
+  }
+
+  #activeTurnHostedProviderAllowed(provider: string): boolean {
+    const authorization = this.#activeTurnAuthorization();
+    if (!authorization) return false;
+    if (!authorization.connectGrant) return true;
+    const match = /^mcp:([A-Za-z0-9_-]{43})$/.exec(provider);
+    return match !== null && authorization.connectGrant.mcpIds.includes(match[1]!);
   }
 
   #historyCitations(turnId: string): HistoryCitation[] {
@@ -4735,9 +4895,26 @@ export class NanocodexSession extends DurableComputerSession {
   #managedRealtimeSession(): ManagedRealtimeSessionRow | undefined {
     return this.ctx.storage.sql
       .exec<ManagedRealtimeSessionRow>(
-        "SELECT voice_session_id FROM managed_realtime_session WHERE singleton = 1",
+        `SELECT voice_session_id, authorization_json
+         FROM managed_realtime_session WHERE singleton = 1`,
       )
       .toArray()[0];
+  }
+
+  #requireRealtimeAuthorization(
+    active: ManagedRealtimeSessionRow,
+    authorization: TurnAuthorization,
+  ): void {
+    let retained: TurnAuthorization;
+    try { retained = parseTurnAuthorization(active.authorization_json); }
+    catch {
+      throw new ManagedRequestError(403, "forbidden", "voice session authorization is invalid");
+    }
+    if (retained.connectGrant || authorization.connectGrant) {
+      if (JSON.stringify(retained) !== JSON.stringify(authorization)) {
+        throw new ManagedRequestError(403, "forbidden", "voice session belongs to another grant");
+      }
+    }
   }
 
   async #endManagedRealtimeSession(

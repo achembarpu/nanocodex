@@ -35,6 +35,7 @@ const OWNER_CAPABILITIES = [
   "organization:write",
 ] as const satisfies readonly OrganizationCapability[];
 const createdAgents = new Set<string>();
+const CONNECT_GRANT_ID = `0x${"a".repeat(64)}`;
 const SELF = { fetch: managedFetch };
 
 beforeAll(async () => {
@@ -2105,7 +2106,7 @@ describe("managed agents REST and resumable SSE", () => {
 
     const created = await RAW_SELF.fetch("https://nanocodex.internal/v1/agents", {
       method: "POST",
-      headers: { "x-nanocodex-connect-user": USER_ID },
+      headers: connectGrantHeaders(["github", "chatgpt"]),
     });
     expect(created.status).toBe(201);
     const receipt = await created.json<AgentReceipt>();
@@ -2113,15 +2114,82 @@ describe("managed agents REST and resumable SSE", () => {
 
     const state = await RAW_SELF.fetch(
       `https://nanocodex.internal/v1/agents/${receipt.agent_id}`,
-      { headers: { "x-nanocodex-connect-user": USER_ID } },
+      { headers: connectGrantHeaders(["github", "chatgpt"]) },
     );
     expect(state.status).toBe(200);
 
+    const turn = await RAW_SELF.fetch(
+      `https://nanocodex.internal/v1/agents/${receipt.agent_id}/turns`,
+      {
+        method: "POST",
+        headers: new Headers({
+          ...Object.fromEntries(connectGrantHeaders(["github", "chatgpt"])),
+          "content-type": "application/json",
+        }),
+        body: JSON.stringify({ id: "connect-projected-turn", input: "project this grant" }),
+      },
+    );
+    expect(turn.status).toBe(202);
+    const storedAuthorization = await runInDurableObject(
+      testEnv.NANOCODEX_SESSIONS.getByName(receipt.agent_id),
+      (_instance, durableState) => durableState.storage.sql.exec<{ authorization_json: string }>(
+        "SELECT authorization_json FROM managed_turns WHERE id = ?",
+        "connect-projected-turn",
+      ).one().authorization_json,
+    );
+    expect(JSON.parse(storedAuthorization)).toEqual({
+      capabilities: ["agents:read", "agents:write", "tools:use"],
+      connectGrant: {
+        grantId: CONNECT_GRANT_ID,
+        connectors: ["github", "chatgpt"],
+        mcpIds: ["m".repeat(43)],
+      },
+    });
+
     const otherAccount = await RAW_SELF.fetch(
       `https://nanocodex.internal/v1/agents/${receipt.agent_id}`,
-      { headers: { "x-nanocodex-connect-user": OTHER_USER_ID } },
+      { headers: connectGrantHeaders(["github", "chatgpt"], OTHER_USER_ID) },
     );
     expect(otherAccount.status).toBe(404);
+  });
+
+  it("rejects Connect text and voice admission without the chatgpt connector", async () => {
+    const headers = connectGrantHeaders(["github"]);
+    const created = await RAW_SELF.fetch("https://nanocodex.internal/v1/agents", {
+      method: "POST",
+      headers,
+    });
+    expect(created.status).toBe(201);
+    const receipt = await created.json<AgentReceipt>();
+    createdAgents.add(receipt.agent_id);
+
+    const turn = await RAW_SELF.fetch(
+      `https://nanocodex.internal/v1/agents/${receipt.agent_id}/turns`,
+      {
+        method: "POST",
+        headers: new Headers({
+          ...Object.fromEntries(headers),
+          "content-type": "application/json",
+        }),
+        body: JSON.stringify({ id: "connect-no-chatgpt", input: "must not run" }),
+      },
+    );
+    expect(turn.status).toBe(403);
+    expect(await turn.json()).toEqual({ error: "connector_forbidden" });
+
+    const realtime = await RAW_SELF.fetch(
+      `https://nanocodex.internal/v1/agents/${receipt.agent_id}/realtime/start`,
+      {
+        method: "POST",
+        headers: new Headers({
+          ...Object.fromEntries(headers),
+          "content-type": "application/json",
+        }),
+        body: JSON.stringify({ voice_session_id: "connect-voice", operation_id: "start" }),
+      },
+    );
+    expect(realtime.status).toBe(403);
+    expect(await realtime.json()).toEqual({ error: "connector_forbidden" });
   });
 
   it("runs the default network tools inside a managed durable agent", async () => {
@@ -5699,6 +5767,23 @@ async function managedFetch(input: RequestInfo | URL, init?: RequestInit): Promi
   const headers = new Headers(request.headers);
   headers.set("authorization", `Bearer ${API_KEY}`);
   return RAW_SELF.fetch(new Request(request, { headers }));
+}
+
+function connectGrantHeaders(
+  connectors: readonly string[],
+  userId = USER_ID,
+): Headers {
+  return new Headers({
+    "x-nanocodex-connect-user": userId,
+    "x-nanocodex-connect-grant-id": CONNECT_GRANT_ID,
+    "x-nanocodex-connect-capabilities": JSON.stringify([
+      "agents:read",
+      "agents:write",
+      "tools:use",
+    ]),
+    "x-nanocodex-connect-connectors": JSON.stringify(connectors),
+    "x-nanocodex-connect-mcp-ids": JSON.stringify(["m".repeat(43)]),
+  });
 }
 
 async function seedApiKey(

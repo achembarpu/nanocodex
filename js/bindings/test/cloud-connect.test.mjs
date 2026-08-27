@@ -262,6 +262,211 @@ test("Connect opens its grant-provisioned durable agent without a redundant stat
   );
 });
 
+test("ConnectAgent installs only signed hosted MCPs through the grant proxy and ticketed tool host", async () => {
+  const firstMcpId = "abcdefghijklmnopqrstuvwxyz0123456789_-ABCDE";
+  const secondMcpId = "ZYXWVUTSRQPONMLKJIHGFEDCBA9876543210_-abcde";
+  const accountWideMcpId = "0123456789abcdefghijklmnopqrstuvwxyz_-ABCDE";
+  const agentId = "019fc927-b280-79a7-8445-1b9996ad2fb0";
+  const expiry = Math.floor(Date.now() / 1_000) + 3_600;
+  const requests = [];
+  const sockets = [];
+  const client = Client.create({
+    appId: "grant-mcp-workspace",
+    dialog: Dialog.memory(),
+    provider: { request() { throw new Error("wallet should not be used"); } },
+    transport: Transport.from({
+      key: "grant-mcp",
+      name: "grant-mcp",
+      type: "grant-mcp",
+      setup() {
+        return {
+          baseUrl: "https://connect.example",
+          async fetch(input, init) {
+            const request = new Request(input, init);
+            requests.push(request);
+            const path = new URL(request.url).pathname;
+            if (path.endsWith("/tool-host/ticket")) {
+              return Response.json({ ticket: "one-use-tool-ticket", expires_in: 30 });
+            }
+            const connectionId = path.split("/").at(-1);
+            if (path.includes("/mcp/")
+              && (connectionId === firstMcpId || connectionId === secondMcpId)) {
+              const message = await request.clone().json();
+              if (message.method === "initialize") {
+                return Response.json({
+                  jsonrpc: "2.0",
+                  id: message.id,
+                  result: {
+                    protocolVersion: message.params.protocolVersion,
+                    capabilities: { tools: {} },
+                    serverInfo: { name: connectionId, version: "1.0.0" },
+                  },
+                });
+              }
+              if (message.method === "tools/list") {
+                return Response.json({
+                  jsonrpc: "2.0",
+                  id: message.id,
+                  result: {
+                    tools: [{
+                      name: connectionId === firstMcpId ? "search_issues" : "read_document",
+                      description: `Tool from ${connectionId}`,
+                      inputSchema: { type: "object", properties: {} },
+                    }],
+                  },
+                });
+              }
+              if (message.method === "notifications/initialized") {
+                return new Response(null, { status: 202 });
+              }
+            }
+            return Response.json({ error: { message: "unexpected request" } }, { status: 404 });
+          },
+          async request() { throw new Error("control-plane request was unexpected"); },
+        };
+      },
+    }),
+  });
+  client._setSessionToken("grant-session-test");
+  const connection = connectionFromWire(testConnectionWire({
+    agentId,
+    expiry,
+    keyId: "0x1111111111111111111111111111111111111111",
+    capabilities: [
+      "nanocodex.agent",
+      "agent.output.final",
+      "chatgpt",
+      `mcp:${firstMcpId}`,
+      `mcp:${secondMcpId}`,
+    ],
+    mcpConnections: [
+      { id: firstMcpId, name: "Issue tracker" },
+      { id: secondMcpId, name: "Documents" },
+    ],
+  }));
+  const OriginalWebSocket = globalThis.WebSocket;
+  globalThis.WebSocket = class {
+    readyState = 1;
+    frames = [];
+    listeners = new Map();
+
+    constructor(url, protocols) {
+      this.url = String(url);
+      this.protocols = protocols;
+      sockets.push(this);
+    }
+
+    addEventListener(type, listener) {
+      const listeners = this.listeners.get(type) ?? [];
+      listeners.push(listener);
+      this.listeners.set(type, listeners);
+    }
+
+    send(encoded) {
+      const frame = JSON.parse(encoded);
+      this.frames.push(frame);
+      if (frame.type === "catalog") queueMicrotask(() => this.receive({ type: "ready" }));
+      if (frame.type === "drain") queueMicrotask(() => this.receive({ type: "draining" }));
+    }
+
+    receive(frame) {
+      for (const listener of this.listeners.get("message") ?? []) {
+        listener({ data: JSON.stringify(frame) });
+      }
+    }
+
+    close(code, reason) {
+      this.readyState = 3;
+      this.closed = { code, reason };
+      for (const listener of this.listeners.get("close") ?? []) listener({ code, reason });
+    }
+  };
+
+  let agent;
+  try {
+    agent = await client.agent.create({ connection });
+    await waitForConnect(() => sockets[0]?.frames.some(({ type }) => type === "catalog"));
+    const socketUrl = new URL(sockets[0].url);
+    assert.equal(socketUrl.pathname, `/v1/grants/${connection.grant.id}/agents/${agentId}/tool-host`);
+    assert.equal(socketUrl.searchParams.get("ticket"), "one-use-tool-ticket");
+    assert.equal(socketUrl.searchParams.has("authorization"), false);
+    assert.equal(sockets[0].protocols, undefined);
+    assert.equal(JSON.stringify({ url: sockets[0].url, protocols: sockets[0].protocols })
+      .includes("grant-session-test"), false);
+
+    const catalog = sockets[0].frames.find(({ type }) => type === "catalog").tools;
+    assert.deepEqual(catalog.map(({ provider, remote_name }) => [provider, remote_name]), [
+      [`mcp:${firstMcpId}`, "search_issues"],
+      [`mcp:${secondMcpId}`, "read_document"],
+    ]);
+    assert.equal(catalog.some(({ provider }) => provider === `mcp:${accountWideMcpId}`), false);
+    assert.equal(catalog.some(({ provider }) => provider === "javascript"), false);
+
+    const mcpRequests = requests.filter((request) => new URL(request.url).pathname.includes("/mcp/"));
+    assert.deepEqual([...new Set(mcpRequests.map((request) => new URL(request.url).pathname))], [
+      `/v1/grants/${connection.grant.id}/mcp/${firstMcpId}`,
+      `/v1/grants/${connection.grant.id}/mcp/${secondMcpId}`,
+    ]);
+    assert.equal(mcpRequests.every((request) => (
+      request.headers.get("authorization") === "Bearer grant-session-test"
+    )), true);
+    assert.equal(requests.some((request) => request.url.includes(accountWideMcpId)), false);
+    const ticketRequest = requests.find((request) => new URL(request.url).pathname.endsWith("/tool-host/ticket"));
+    assert.equal(ticketRequest.method, "POST");
+    assert.equal(ticketRequest.headers.get("authorization"), "Bearer grant-session-test");
+  } finally {
+    await agent?.session.shutdown();
+    globalThis.WebSocket = OriginalWebSocket;
+  }
+  assert.equal(sockets[0].closed.code, 1000);
+});
+
+test("ConnectAgent with an empty signed MCP list creates no MCP runtime or tool-host socket", async () => {
+  const agentId = "019fc927-b280-79a7-8445-1b9996ad2fb0";
+  const expiry = Math.floor(Date.now() / 1_000) + 3_600;
+  let fetches = 0;
+  let sockets = 0;
+  const client = Client.create({
+    appId: "empty-mcp-workspace",
+    dialog: Dialog.memory(),
+    provider: { request() { throw new Error("wallet should not be used"); } },
+    transport: Transport.from({
+      key: "empty-mcp",
+      name: "empty-mcp",
+      type: "empty-mcp",
+      setup() {
+        return {
+          baseUrl: "https://connect.example",
+          async fetch() {
+            fetches += 1;
+            throw new Error("empty MCP grants must not fetch during Agent creation");
+          },
+        };
+      },
+    }),
+  });
+  client._setSessionToken("grant-session-test");
+  const connection = connectionFromWire(testConnectionWire({
+    agentId,
+    expiry,
+    keyId: "0x1111111111111111111111111111111111111111",
+    capabilities: ["nanocodex.agent", "agent.output.final", "chatgpt"],
+    mcpConnections: [],
+  }));
+  const OriginalWebSocket = globalThis.WebSocket;
+  globalThis.WebSocket = class {
+    constructor() { sockets += 1; }
+  };
+  try {
+    const agent = await client.agent.create({ connection });
+    await agent.session.shutdown();
+  } finally {
+    globalThis.WebSocket = OriginalWebSocket;
+  }
+  assert.equal(fetches, 0);
+  assert.equal(sockets, 0);
+});
+
 test("Connect binds normalized cloud accounts into auth resources and the connection request", async () => {
   const requests = [];
   const fetches = [];
@@ -1285,4 +1490,12 @@ function memoryStorage() {
     setItem(key, value) { values.set(key, String(value)); },
     removeItem(key) { values.delete(key); },
   };
+}
+
+async function waitForConnect(predicate, timeoutMs = 2_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error("timed out waiting for Connect state");
+    await new Promise((resolve) => setImmediate(resolve));
+  }
 }

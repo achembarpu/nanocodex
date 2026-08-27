@@ -67,6 +67,7 @@ type HostedToolsCallRow = {
 type HostedToolsSocketAttachment = {
   kind: typeof SOCKET_TAG;
   sessionId: string;
+  allowedMcpIds?: readonly string[];
   leaseId?: string;
   generation?: number;
   active?: true;
@@ -174,6 +175,7 @@ export type HostedToolsBrokerOptions = Readonly<{
   maxCallsPerGeneration?: number;
   persistence?: HostedToolsBrokerPersistence;
   onCatalogChanged?: (definitions: readonly HostedToolsProviderDefinition[]) => void;
+  providerAllowed?: (provider: string) => boolean;
 }>;
 
 /** Owns the reverse tool attachment for one agent Durable Object. */
@@ -186,6 +188,7 @@ export class HostedToolsBroker {
   readonly #maxCallsPerGeneration: number;
   readonly #persistence: HostedToolsBrokerPersistence;
   readonly #onCatalogChanged?: (definitions: readonly HostedToolsProviderDefinition[]) => void;
+  readonly #providerAllowed: (provider: string) => boolean;
   #catalogValidator?: HostedToolsCatalogValidator;
   #nextCandidateGeneration: number;
 
@@ -207,6 +210,7 @@ export class HostedToolsBroker {
     }
     this.#persistence = options.persistence ?? new SqlHostedToolsPersistence(context.storage);
     this.#onCatalogChanged = options.onCatalogChanged;
+    this.#providerAllowed = options.providerAllowed ?? (() => true);
     const retired = this.#persistence.initialize(this.#now());
     this.#nextCandidateGeneration = this.#persistence.state().generation;
     for (const socket of this.context.getWebSockets(SOCKET_TAG)) {
@@ -225,13 +229,15 @@ export class HostedToolsBroker {
       // ToolRouter owns the one aggregate tool_search. This provider exposes
       // only the current attached definitions, which stay deferred and can be
       // overlaid onto exact cloud contracts by that router.
-      definitions: () => this.#definitions().map((binding) => Object.freeze({
+      definitions: () => this.#definitions()
+        .filter((binding) => this.#providerAllowed(binding.provider))
+        .map((binding) => Object.freeze({
         ...binding.definition,
         defer_loading: true as const,
       })),
       resolve: (name: string) => {
         const prepared = this.#resolve(name);
-        if (!prepared) return undefined;
+        if (!prepared || !this.#providerAllowed(prepared.entry.provider)) return undefined;
         return Object.freeze({
           name,
           parallelSafe: prepared.entry.parallel_safe,
@@ -243,6 +249,12 @@ export class HostedToolsBroker {
             input: unknown,
             context: { sessionId: string; callId: string; model?: string; signal?: AbortSignal },
           ) => {
+            if (!this.#providerAllowed(prepared.entry.provider)) {
+              return toolResult("Hosted tool provider is outside the active grant", {
+                status: "unavailable",
+                message: "Hosted tool provider is outside the active grant",
+              }, false, null);
+            }
             const outcome = await prepared.invoke({
               sessionId: context.sessionId,
               callId: context.callId,
@@ -288,10 +300,14 @@ export class HostedToolsBroker {
 
   provider(): HostedToolsDynamicProvider { return this.#provider; }
 
-  upgrade(sessionId: string): Response {
+  upgrade(sessionId: string, allowedMcpIds?: readonly string[]): Response {
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair);
-    server.serializeAttachment({ kind: SOCKET_TAG, sessionId } satisfies HostedToolsSocketAttachment);
+    server.serializeAttachment({
+      kind: SOCKET_TAG,
+      sessionId,
+      ...(allowedMcpIds === undefined ? {} : { allowedMcpIds: [...allowedMcpIds] }),
+    } satisfies HostedToolsSocketAttachment);
     this.context.acceptWebSocket(server, [SOCKET_TAG]);
     return new Response(null, { status: 101, webSocket: client });
   }
@@ -431,6 +447,16 @@ export class HostedToolsBroker {
       }),
     }));
     try {
+      if (initial.allowedMcpIds !== undefined) {
+        const allowed = new Set(initial.allowedMcpIds);
+        const forbidden = frame.tools.find(({ provider }) => {
+          const match = /^mcp:([A-Za-z0-9_-]{43})$/.exec(provider);
+          return match === null || !allowed.has(match[1]!);
+        });
+        if (forbidden) {
+          throw new Error(`provider ${forbidden.provider} is not authorized by the MCP grant`);
+        }
+      }
       const validator = this.#catalogValidator;
       if (validator !== undefined && validator(candidateDefinitions) !== true) {
         throw new Error("ToolRouter rejected the candidate catalog");

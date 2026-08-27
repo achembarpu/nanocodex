@@ -80,6 +80,23 @@ describe("Nanocodex managed Just Bash commands", () => {
     expect(binding.fetch).not.toHaveBeenCalled();
   });
 
+  it("enforces the active turn connector projection at actual provider egress", async () => {
+    const binding = { fetch: vi.fn(async () => Response.json({ ok: true })) } as unknown as Fetcher;
+    const fetch = createManagedShellFetch(
+      binding,
+      SUBJECT,
+      (connector) => connector === "github",
+    );
+
+    expect((await fetch("https://api.github.com/user")).status).toBe(200);
+    const denied = await fetch("https://www.googleapis.com/drive/v3/files");
+    expect(denied.status).toBe(403);
+    expect(JSON.parse(new TextDecoder().decode(denied.body))).toEqual({
+      error: "connector_forbidden",
+    });
+    expect(binding.fetch).toHaveBeenCalledTimes(1);
+  });
+
   it("implements the useful read/write gh compatibility surface", async () => {
     const fetch = vi.fn(async (url: string) => response(url.endsWith("/user")
       ? { login: "gakonst" }

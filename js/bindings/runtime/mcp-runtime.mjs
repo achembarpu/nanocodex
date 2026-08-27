@@ -13,6 +13,9 @@ const SEARCH_DESCRIPTION_PREFIX = "# Tool discovery\n\nSearches over deferred to
 
 export async function createMcpRuntime(configuration, options = {}) {
   const servers = normalizeServers(configuration);
+  if (options.catalogProvider !== undefined && typeof options.catalogProvider !== "function") {
+    throw new TypeError("MCP catalogProvider must be a function");
+  }
   const jsonSchemaValidator = options.jsonSchemaValidator
     ?? new CfWorkerJsonSchemaValidator();
   const entries = [];
@@ -39,7 +42,12 @@ export async function createMcpRuntime(configuration, options = {}) {
       }
       const nextEntries = tools
         .filter((tool) => includesTool(server, tool.name))
-        .map((tool) => createEntry(server, connection.client, tool));
+        .map((tool) => createEntry(
+          server,
+          connection.client,
+          tool,
+          options.catalogProvider?.(server.name),
+        ));
       for (const entry of nextEntries) {
         const existing = byName.get(entry.canonicalName);
         if (existing) {
@@ -110,6 +118,10 @@ export async function createMcpRuntime(configuration, options = {}) {
       return {
         name,
         parallelSafe: entry.parallelSafe,
+        ...(entry.catalogProvider === undefined ? {} : {
+          provider: entry.catalogProvider,
+          remoteName: entry.remoteName,
+        }),
         handler: (input, context) => callRemoteTool(entry, input, context),
       };
     },
@@ -277,13 +289,18 @@ function isStringArray(value) {
   return Array.isArray(value) && value.every((item) => typeof item === "string");
 }
 
-function createEntry(server, client, tool) {
+function createEntry(server, client, tool, catalogProvider) {
+  if (catalogProvider !== undefined
+    && (typeof catalogProvider !== "string" || !catalogProvider.trim())) {
+    throw new TypeError(`MCP server ${server.name} catalog provider must be a non-empty string`);
+  }
   const remoteName = tool.name;
   const canonicalName = `${canonicalNamespace(server.name)}${normalizeName(remoteName)}`;
   const inputSchema = normalizeInputSchema(tool.inputSchema);
   const description = tool.description ?? "";
   return {
     canonicalName,
+    ...(catalogProvider === undefined ? {} : { catalogProvider }),
     client,
     definition: Object.freeze({
       type: "function",

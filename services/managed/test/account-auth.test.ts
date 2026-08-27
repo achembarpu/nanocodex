@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  authenticate,
   ensureAccount,
   routeAccountRequest,
   type AccountAuthEnv,
@@ -16,6 +17,48 @@ const SECOND_CREDENTIAL_ID = "c2Vjb25kLXBvcnRhYmxlLWNyZWRlbnRpYWw";
 const PUBLIC_KEY = "0x01020304";
 const SECOND_PUBLIC_KEY = "0x05060708";
 const LOCAL_PASSKEY_COOKIE = "nanocodex_local_passkey";
+const CONNECT_GRANT_ID = `0x${"a".repeat(64)}`;
+const CONNECT_MCP_ID = "m".repeat(43);
+
+describe("Connect grant assertions", () => {
+  it("projects the trusted assertion to the exact live capability and tool slice", async () => {
+    const { env } = portableEnv();
+    const principal = await authenticate(new Request("https://nanocodex.internal/v1/agents", {
+      headers: connectHeaders({
+        capabilities: ["agents:read", "agents:write", "tools:use", "memory:read"],
+        connectors: ["github", "chatgpt"],
+        mcpIds: [CONNECT_MCP_ID],
+      }),
+    }), env);
+
+    expect(principal).toMatchObject({
+      kind: "connect_grant",
+      credentialId: CONNECT_GRANT_ID,
+      capabilities: ["agents:read", "agents:write", "tools:use", "memory:read"],
+      connectGrant: {
+        grantId: CONNECT_GRANT_ID,
+        connectors: ["github", "chatgpt"],
+        mcpIds: [CONNECT_MCP_ID],
+      },
+    });
+  });
+
+  it("rejects incomplete, malformed, duplicate, or account-widening assertions", async () => {
+    const { env } = portableEnv();
+    const request = (headers: HeadersInit) => authenticate(new Request(
+      "https://nanocodex.internal/v1/agents",
+      { headers },
+    ), env);
+
+    await expect(request({ "x-nanocodex-connect-user": USER_ID })).resolves.toBeUndefined();
+    await expect(request(connectHeaders({ connectors: ["github", "github"] })))
+      .resolves.toBeUndefined();
+    await expect(request(connectHeaders({ capabilities: ["organization:write"] })))
+      .resolves.toBeUndefined();
+    await expect(request(connectHeaders({ mcpIds: ["short"] })))
+      .resolves.toBeUndefined();
+  });
+});
 
 describe("account provisioning", () => {
   it("accepts a matching persistent account after a create conflict", async () => {
@@ -410,6 +453,22 @@ function accountEnv(fetch: (request: Request) => Promise<Response>): AccountAuth
       },
     },
   } as unknown as AccountAuthEnv;
+}
+
+function connectHeaders(overrides: Readonly<{
+  capabilities?: readonly string[];
+  connectors?: readonly string[];
+  mcpIds?: readonly string[];
+}> = {}): Headers {
+  return new Headers({
+    "x-nanocodex-connect-user": USER_ID,
+    "x-nanocodex-connect-grant-id": CONNECT_GRANT_ID,
+    "x-nanocodex-connect-capabilities": JSON.stringify(
+      overrides.capabilities ?? ["agents:read", "agents:write", "tools:use"],
+    ),
+    "x-nanocodex-connect-connectors": JSON.stringify(overrides.connectors ?? []),
+    "x-nanocodex-connect-mcp-ids": JSON.stringify(overrides.mcpIds ?? []),
+  });
 }
 
 function localPasskeySetCookie(headers: Headers): string | undefined {

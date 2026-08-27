@@ -242,6 +242,35 @@ test("remote MCP failures are reported by tool_search without breaking agent cre
   });
 });
 
+test("MCP catalog identity can bind each resolved tool to its exact hosted provider", async () => {
+  const connectionId = "abcdefghijklmnopqrstuvwxyz0123456789_-ABCDE";
+  const mcp = await createMcpRuntime({
+    [connectionId]: {
+      client: {
+        async listTools() {
+          return { tools: [{ name: "lookup", inputSchema: { type: "object" } }] };
+        },
+        async callTool() { return { content: [] }; },
+      },
+    },
+  }, {
+    catalogProvider: (serverName) => `mcp:${serverName}`,
+  });
+  await mcp.settled();
+
+  const tool = mcp.resolve(`mcp__${connectionId}__lookup`);
+  assert.equal(tool.provider, `mcp:${connectionId}`);
+  assert.equal(tool.remoteName, "lookup");
+  await mcp.close();
+
+  await assert.rejects(
+    createMcpRuntime({ fixture: { client: { async listTools() { return { tools: [] }; } } } }, {
+      catalogProvider: "mcp:fixture",
+    }),
+    /catalogProvider must be a function/,
+  );
+});
+
 test("MCP discovery runs behind agent readiness and reports pending catalogs", async () => {
   let finishDiscovery;
   const discovery = new Promise((resolve) => { finishDiscovery = resolve; });

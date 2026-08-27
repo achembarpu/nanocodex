@@ -1,7 +1,12 @@
 import { Agent as ManagedAgent } from "../../managed/index.mjs";
 import { registerManagedAgentAlias } from "../../managed/internal.mjs";
+import { reportError } from "../../internal.mjs";
+import { createTools } from "../../tools/Tools.mjs";
+import { AttachmentRejectedError } from "../../tools/attachment.mjs";
 
 const PROVIDER_NAME = "ChatGPT · Nanocodex Connect";
+const MCP_CONNECTION_ID = /^[A-Za-z0-9_-]{43}$/;
+const ATTACHMENT_BACKOFF_MS = [250, 500, 1_000, 2_000, 5_000];
 
 /** Opens the durable Nanocodex agent provisioned by a signed Connect approval. */
 export async function create(client, options) {
@@ -22,6 +27,14 @@ export async function create(client, options) {
 
   const grantSession = client._captureSession?.();
   if (!grantSession) throw new Error("The Connect authorization session is unavailable.");
+  const transport = {
+    baseUrl: client.transport.baseUrl,
+    grantSession,
+  };
+  let tools;
+  if (connection.grant.mcpConnections.length > 0) {
+    tools = await createGrantMcpTools(transport, connection.grant.id, connection.grant.mcpConnections);
+  }
   const managedOptions = {
     baseUrl: client.transport.baseUrl,
     fetch: managedGrantFetch(
@@ -30,16 +43,26 @@ export async function create(client, options) {
       connection.grant.id,
       connection.agentId,
     ),
+    ...(tools === undefined ? {} : {
+      toolsTransport: connectToolsTransport(
+        transport,
+        connection.grant.id,
+        connection.agentId,
+      ),
+    }),
   };
-  const managed = ManagedAgent.open(connection.agentId, managedOptions);
-  return connectAgent(managed, connection, {
-    baseUrl: client.transport.baseUrl,
-    grantSession,
-  });
+  try {
+    const managed = ManagedAgent.open(connection.agentId, managedOptions);
+    return connectAgent(managed, connection, transport, tools);
+  } catch (error) {
+    await tools?.close();
+    throw error;
+  }
 }
 
-function connectAgent(managed, connection, transport) {
+function connectAgent(managed, connection, transport, tools) {
   const visibility = connection.grant.visibility;
+  const toolState = tools === undefined ? undefined : startToolAttachment(managed, tools);
   const agent = {
     id: managed.id,
     sessionId: managed.id,
@@ -95,13 +118,127 @@ function connectAgent(managed, connection, transport) {
       },
     }),
     session: Object.freeze({
-      async shutdown() {},
+      shutdown: () => shutdownToolAttachment(toolState),
     }),
   };
   registerManagedAgentAlias(agent, managed, {
     voiceTransport: connectVoiceTransport(transport, connection.grant.id, connection.agentId),
   });
   return Object.freeze(agent);
+}
+
+async function createGrantMcpTools({ baseUrl, grantSession }, grantId, connections) {
+  const mcp = Object.fromEntries(connections.map(({ id, name }) => {
+    if (!MCP_CONNECTION_ID.test(id)) {
+      throw new TypeError("Connect grant contains an invalid MCP connection ID");
+    }
+    return [id, {
+      description: name,
+      fetch: grantMcpFetch(grantSession, baseUrl, grantId, id),
+      url: new URL(`/v1/grants/${grantId}/mcp/${id}`, baseUrl),
+    }];
+  }));
+  return createTools({
+    mcp,
+    mcpOptions: {
+      catalogProvider: (connectionId) => `mcp:${connectionId}`,
+    },
+  });
+}
+
+function grantMcpFetch(session, baseUrl, grantId, connectionId) {
+  const endpoint = new URL(`/v1/grants/${grantId}/mcp/${connectionId}`, baseUrl);
+  return (input, init) => {
+    const url = new URL(input instanceof Request ? input.url : input, endpoint);
+    if (url.origin !== endpoint.origin || url.pathname !== endpoint.pathname) {
+      throw new TypeError("Connect MCP fetch is restricted to its authorized grant connection");
+    }
+    if (input instanceof Request) {
+      const request = init === undefined ? input : new Request(input, init);
+      return session.fetch(new Request(url, request));
+    }
+    return session.fetch(url, init);
+  };
+}
+
+function connectToolsTransport({ baseUrl, grantSession }, grantId, agentId) {
+  const path = `/v1/grants/${grantId}/agents/${encodeURIComponent(agentId)}/tool-host`;
+  return async () => {
+    const response = await grantSession.fetch(new Request(new URL(`${path}/ticket`, baseUrl), {
+      method: "POST",
+    }));
+    const receipt = await response.json().catch(() => undefined);
+    if (!response.ok || typeof receipt?.ticket !== "string" || !receipt.ticket) {
+      throw new Error(receipt?.error?.message ?? "managed tool-host authorization failed");
+    }
+    const url = new URL(path, baseUrl);
+    url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+    url.searchParams.set("ticket", receipt.ticket);
+    const WebSocketImpl = globalThis.WebSocket;
+    if (typeof WebSocketImpl !== "function") {
+      throw new Error("WebSocket is unavailable in this runtime.");
+    }
+    return new WebSocketImpl(url);
+  };
+}
+
+function startToolAttachment(managed, tools) {
+  const state = {
+    abort: new AbortController(),
+    closing: undefined,
+    connector: undefined,
+    tools,
+  };
+  state.supervisor = superviseToolAttachment(state, managed.toolsTarget()).catch((error) => {
+    if (!state.abort.signal.aborted) reportError(error);
+  });
+  return state;
+}
+
+async function superviseToolAttachment(state, target) {
+  for (let attempt = 0; ; attempt += 1) {
+    if (state.abort.signal.aborted) return;
+    const connector = state.tools.attach(target);
+    state.connector = connector;
+    try {
+      await connector.connect();
+      return;
+    } catch (error) {
+      connector.close();
+      if (state.connector === connector) state.connector = undefined;
+      if (error instanceof AttachmentRejectedError) throw error;
+      if (state.abort.signal.aborted) return;
+      await attachmentBackoff(
+        ATTACHMENT_BACKOFF_MS[Math.min(attempt, ATTACHMENT_BACKOFF_MS.length - 1)],
+        state.abort.signal,
+      );
+    }
+  }
+}
+
+function attachmentBackoff(milliseconds, signal) {
+  if (signal.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    const timer = setTimeout(done, milliseconds);
+    signal.addEventListener("abort", done, { once: true });
+    function done() {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", done);
+      resolve();
+    }
+  });
+}
+
+function shutdownToolAttachment(state) {
+  if (!state) return Promise.resolve();
+  if (state.closing) return state.closing;
+  state.abort.abort();
+  state.connector?.close();
+  state.closing = (async () => {
+    await state.supervisor;
+    await state.tools.close();
+  })();
+  return state.closing;
 }
 
 function connectVoiceTransport({ baseUrl, grantSession }, grantId, agentId) {

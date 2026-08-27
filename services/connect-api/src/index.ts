@@ -33,6 +33,10 @@ import {
   isMcpConnectionId,
   validateMcpResources,
 } from "./mcpPolicy.mjs";
+import {
+  managedGrantHeaders,
+  type ManagedGrantAssertion,
+} from "./managedGrant.mjs";
 
 type WorkerWebSocket = WebSocket & { accept(): void };
 declare const WebSocketPair: {
@@ -117,6 +121,7 @@ const MCP_INTENT_TTL = 10 * 60;
 const CONNECT_APPROVAL_TTL = 10 * 60;
 const MODEL_TICKET_TTL = 60;
 const REALTIME_TICKET_TTL = 60;
+const TOOL_HOST_TICKET_TTL = 30;
 const MODEL_PROTOCOL = "nanocodex-connect-v1";
 const MODEL_TICKET_PROTOCOL_PREFIX = "nanocodex-ticket.";
 const ACCOUNT_LINK_TTL = 5 * 60;
@@ -309,6 +314,13 @@ type RealtimeTicket = Readonly<{
   callId: string;
   grantId: `0x${string}`;
 }>;
+type ToolHostTicket = Readonly<{
+  appId: string;
+  appOrigin: string;
+  agentId: string;
+  grantId: `0x${string}`;
+  mcpFingerprint: `0x${string}`;
+}>;
 
 export default {
   async fetch(request: Request, env: Env, context: WorkerContext): Promise<Response> {
@@ -387,6 +399,19 @@ export default {
           url,
           realtimeSocket[1] as `0x${string}`,
           decodeURIComponent(realtimeSocket[2]!),
+        );
+      }
+      const toolHostSocket = url.pathname.match(
+        /^\/v1\/grants\/(0x[0-9a-fA-F]{64})\/agents\/([^/]+)\/tool-host$/,
+      );
+      if (toolHostSocket) {
+        return openGrantToolHostWebSocket(
+          request,
+          env,
+          store,
+          url,
+          toolHostSocket[1] as `0x${string}`,
+          decodeURIComponent(toolHostSocket[2]!),
         );
       }
       if (request.method === "GET" && url.pathname === "/v1/machine-usd/config") {
@@ -639,12 +664,11 @@ async function handleManagedMemoryRoute(
   }
 
   const target = new URL(url.pathname, "https://nanocodex.internal");
+  const headers = new Headers(managedGrantHeaders(managedGrantAssertion(grant)));
+  headers.set("content-type", "application/json");
   const upstream = await env.ACCOUNTS.fetch(new Request(target, {
     method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "x-nanocodex-connect-user": grant.brokerUserId,
-    },
+    headers,
     body: JSON.stringify(body),
     redirect: "manual",
     signal: request.signal,
@@ -839,11 +863,9 @@ async function createHostedAuthorization(
     throw new ApiFailure(502, "hosted_authorization_invalid", "The Nanocodex account service returned an invalid authorization.");
   }
 
-  const appScope = await scopedAppId(app);
-  const [status, mcpConnections, durableAgentId] = await Promise.all([
+  const [status, mcpConnections] = await Promise.all([
     connectorStatuses(env, identity.user_id),
     materializeApprovedMcpConnections(env, store, app, identity.user_id, resources),
-    connectManagedAgent(env, store, identity.user_id, appScope),
   ]);
   const approvalId = randomSubject();
   const token = randomSubject();
@@ -860,7 +882,6 @@ async function createHostedAuthorization(
     brokerUserId: identity.user_id,
     connectedConnectors,
     mcpConnections,
-    durableAgentId,
     profileLinked: true,
     resources,
   } satisfies ConnectApproval, { ttl: CONNECT_APPROVAL_TTL });
@@ -1145,16 +1166,30 @@ async function createConnection(
     throw new ApiFailure(403, "approval_unavailable", "The signed Connect approval changed before it was consumed.");
   }
   const appScope = await scopedAppId(app);
+  const grantId = await digestHex(`grant:${randomSubject()}`);
+  const grantCapabilities = [
+    "nanocodex.agent",
+    ...approvedHostedCapabilities(approval.resources),
+    ...agentCapabilities,
+    ...connectors,
+    ...mcpConnections.map((connection) => `mcp:${connection.id}`),
+  ];
+  const grantAssertion: ManagedGrantAssertion = {
+    brokerUserId: identity.userId,
+    capabilities: grantCapabilities,
+    connectors,
+    grantId,
+    mcpIds: mcpConnections.map(({ id }) => id),
+  };
   const [durableAgentId, egressSubject] = await Promise.all([
     appId === CHROME_EXTENSION_APP_ID
       ? agentId(accountAddress)
       : isConnectAgentId(approval.durableAgentId)
         ? Promise.resolve(approval.durableAgentId)
-        : connectManagedAgent(env, store, identity.userId, appScope),
+        : connectManagedAgent(env, store, appScope, grantAssertion),
     connectEgressSubject(env, store, identity.userId, appScope),
   ]);
   mark("capabilities");
-  const grantId = await digestHex(`grant:${randomSubject()}`);
   const grantToken = randomSubject();
   const grant: GrantRecord = {
     id: grantId,
@@ -1166,13 +1201,7 @@ async function createConnection(
     permission,
     status: "active",
     expiresAt,
-    capabilities: [
-      "nanocodex.agent",
-      ...approvedHostedCapabilities(approval.resources),
-      ...agentCapabilities,
-      ...connectors,
-      ...mcpConnections.map((connection) => `mcp:${connection.id}`),
-    ],
+    capabilities: grantCapabilities,
     mcpConnections: mcpConnections.map(({ id, name }) => ({ id, name })),
     ...(accessKey ? { accessKey } : {}),
     spentAtomics: "0",
@@ -1581,6 +1610,18 @@ async function handleGrantRoute(
   if (action === "model/ticket" && request.method === "POST") {
     return Response.json(await issueModelTicket(store, grant, await json(request)));
   }
+  const toolHostTicket = action?.match(/^agents\/([^/]+)\/tool-host\/ticket$/);
+  if (toolHostTicket && request.method === "POST") {
+    if (url.search) {
+      throw new ApiFailure(400, "invalid_tool_host_request", "Tool host tickets do not accept query parameters.");
+    }
+    requireGrantAppOrigin(request, grant);
+    const requestedAgentId = decodeURIComponent(toolHostTicket[1]!);
+    if (requestedAgentId !== grant.agentId) {
+      throw new ApiFailure(403, "agent_not_granted", "This durable agent is outside the signed Connect authorization.");
+    }
+    return Response.json(await issueToolHostTicket(store, grant));
+  }
   const realtimeTicket = action?.match(/^agents\/([^/]+)\/realtime\/ticket$/);
   if (realtimeTicket && request.method === "POST") {
     requireGrantAppOrigin(request, grant);
@@ -1607,13 +1648,13 @@ async function handleGrantRoute(
 async function connectManagedAgent(
   env: Env,
   store: Kv.Kv,
-  userId: string,
   appId: string,
+  assertion: ManagedGrantAssertion,
 ): Promise<string> {
   if (!store.create) {
     throw new ApiFailure(500, "durable_agent_unavailable", "Atomic durable-agent provisioning is unavailable.");
   }
-  const recordKey = `connect-agent:${appId}:${userId}`;
+  const recordKey = `connect-agent:${appId}:${assertion.brokerUserId}`;
   const retained = await store.get<unknown>(recordKey);
   if (isConnectAgentRecord(retained)) return retained.agentId;
   const lockKey = `${recordKey}:lock`;
@@ -1631,17 +1672,27 @@ async function connectManagedAgent(
     const retainedAfterLock = await store.get<unknown>(recordKey);
     if (isConnectAgentRecord(retainedAfterLock)) return retainedAfterLock.agentId;
 
-    const agentId = await createManagedAgent(env, userId);
+    const agentId = await createManagedAgent(env, assertion);
     try {
       await store.set(recordKey, { agentId } satisfies ConnectAgentRecord);
       return agentId;
     } catch (cause) {
-      await deleteManagedAgent(env, userId, agentId).catch(() => {});
+      await deleteManagedAgent(env, assertion, agentId).catch(() => {});
       throw cause;
     }
   } finally {
     await store.delete(lockKey);
   }
+}
+
+function managedGrantAssertion(grant: GrantRecord): ManagedGrantAssertion {
+  return {
+    brokerUserId: grant.brokerUserId,
+    capabilities: grant.capabilities,
+    connectors: CONNECTOR_IDS.filter((connector) => grant.capabilities.includes(connector)),
+    grantId: grant.id,
+    mcpIds: (grant.mcpConnections ?? []).map(({ id }) => id),
+  };
 }
 
 function isConnectAgentRecord(value: unknown): value is ConnectAgentRecord {
@@ -1721,10 +1772,10 @@ function isConnectSubjectRecord(
     && EGRESS_SUBJECT.test(value.subject);
 }
 
-async function createManagedAgent(env: Env, userId: string): Promise<string> {
+async function createManagedAgent(env: Env, assertion: ManagedGrantAssertion): Promise<string> {
   const response = await env.ACCOUNTS.fetch(new Request("https://nanocodex.internal/v1/agents", {
     method: "POST",
-    headers: { "x-nanocodex-connect-user": userId },
+    headers: managedGrantHeaders(assertion),
   }));
   const body = await response.json().catch(() => undefined) as unknown;
   if (!response.ok || !isRecord(body) || typeof body.agent_id !== "string") {
@@ -1733,12 +1784,16 @@ async function createManagedAgent(env: Env, userId: string): Promise<string> {
   return body.agent_id;
 }
 
-async function deleteManagedAgent(env: Env, userId: string, agentId: string): Promise<void> {
+async function deleteManagedAgent(
+  env: Env,
+  assertion: ManagedGrantAssertion,
+  agentId: string,
+): Promise<void> {
   const response = await env.ACCOUNTS.fetch(new Request(
     `https://nanocodex.internal/v1/agents/${encodeURIComponent(agentId)}`,
     {
       method: "DELETE",
-      headers: { "x-nanocodex-connect-user": userId },
+      headers: managedGrantHeaders(assertion),
     },
   ));
   await response.body?.cancel();
@@ -1768,9 +1823,7 @@ async function proxyManagedAgent(
     `/v1/agents/${encodeURIComponent(grant.agentId)}${suffix}${new URL(request.url).search}`,
     "https://nanocodex.internal",
   );
-  const headers = new Headers({
-    "x-nanocodex-connect-user": grant.brokerUserId,
-  });
+  const headers = new Headers(managedGrantHeaders(managedGrantAssertion(grant)));
   for (const name of ["accept", "content-type", "idempotency-key"]) {
     const value = request.headers.get(name);
     if (value) headers.set(name, value);
@@ -1840,6 +1893,7 @@ function projectManagedJson(value: unknown, grant: GrantRecord, resource: string
   if (!history) {
     if ("active_turn_details" in projected) projected.active_turn_details = [];
     if ("input" in projected) projected.input = "";
+    if ("first_prompt" in projected) projected.first_prompt = "";
     if ("completed_turns" in projected) projected.completed_turns = 0;
   }
   if (isRecord(projected.terminal)) {
@@ -1957,8 +2011,8 @@ async function handleAgentToolRoute(
   const isWeb = request.method === "POST" && url.pathname === "/api/tools/web-search";
   const isImage = request.method === "POST" && url.pathname === "/api/tools/image-generation";
   if (!isAccountInfo && !isEgress && !isWeb && !isImage) return undefined;
-  requirePlaygroundOrigin(request);
   const { grant } = await authenticatedGrant(request, env.CONNECT_STATE);
+  requireGrantAppOrigin(request, grant);
   if (isAccountInfo) return Response.json(await connectAccountInfo(env, store, grant));
   if (isEgress) return grantBrowserEgress(request, env, grant);
   if (isWeb) return grantWebSearch(request, env, grant);
@@ -2430,6 +2484,95 @@ async function issueRealtimeTicket(
   return { ticket, expires_in: REALTIME_TICKET_TTL };
 }
 
+async function issueToolHostTicket(
+  store: Kv.Kv,
+  grant: GrantRecord,
+): Promise<{ ticket: string; expires_in: number }> {
+  if (grant.status !== "active") throw new ApiFailure(409, "grant_inactive", "The grant is not active.");
+  remainingGrantTtl(grant);
+  const ticket = randomSubject();
+  if (!store.create || !await store.create(`tool-host-ticket:${ticket}`, {
+    appId: grant.appId,
+    appOrigin: grant.appOrigin,
+    agentId: grant.agentId,
+    grantId: grant.id,
+    mcpFingerprint: await grantMcpFingerprint(grant),
+  } satisfies ToolHostTicket, { ttl: TOOL_HOST_TICKET_TTL })) {
+    throw new ApiFailure(500, "tool_host_ticket_unavailable", "The tool host connection could not be reserved.");
+  }
+  return { ticket, expires_in: TOOL_HOST_TICKET_TTL };
+}
+
+async function openGrantToolHostWebSocket(
+  request: Request,
+  env: Env,
+  store: Kv.Kv,
+  url: URL,
+  grantId: `0x${string}`,
+  agentId: string,
+): Promise<Response> {
+  if (request.method !== "GET" || request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
+    throw new ApiFailure(426, "websocket_required", "The tool host requires a WebSocket upgrade.");
+  }
+  if ([...url.searchParams.keys()].some((key) => key !== "ticket")
+    || url.searchParams.getAll("ticket").length !== 1) {
+    throw new ApiFailure(400, "invalid_tool_host_request", "The tool host query is invalid.");
+  }
+  const ticketValue = boundedIdentifier(url.searchParams.get("ticket"), "ticket", 64);
+  if (!store.take) {
+    throw new ApiFailure(500, "tool_host_ticket_unavailable", "One-time tool host tickets are unavailable.");
+  }
+  const ticket = await store.take<ToolHostTicket>(`tool-host-ticket:${ticketValue}`);
+  if (!isToolHostTicket(ticket)) {
+    throw new ApiFailure(403, "invalid_tool_host_ticket", "The one-time tool host ticket is invalid or expired.");
+  }
+  const grant = await store.get<GrantRecord>(`grant:${grantId}`);
+  if (!isGrantRecord(grant)
+    || grant.status !== "active"
+    || grant.id.toLowerCase() !== grantId.toLowerCase()
+    || grant.agentId !== agentId) {
+    throw new ApiFailure(403, "agent_not_granted", "The active grant does not include this durable agent.");
+  }
+  remainingGrantTtl(grant);
+  requireGrantAppOrigin(request, grant, ticket);
+  const fingerprint = await grantMcpFingerprint(grant);
+  if (ticket.grantId.toLowerCase() !== grantId.toLowerCase()
+    || ticket.agentId !== agentId
+    || ticket.mcpFingerprint.toLowerCase() !== fingerprint.toLowerCase()) {
+    throw new ApiFailure(403, "invalid_tool_host_ticket", "The one-time tool host ticket does not match this grant.");
+  }
+
+  const target = new URL(
+    `/v1/agents/${encodeURIComponent(agentId)}/tool-host`,
+    "https://nanocodex.internal",
+  );
+  const response = await env.ACCOUNTS.fetch(new Request(target, {
+    headers: {
+      ...managedGrantHeaders(managedGrantAssertion(grant)),
+      upgrade: "websocket",
+    },
+  }));
+  const upstream = (response as Response & { webSocket?: WorkerWebSocket }).webSocket;
+  if (response.status !== 101 || !upstream) return response;
+
+  const pair = new WebSocketPair();
+  const [downstream, server] = Object.values(pair);
+  upstream.accept();
+  server.accept();
+  superviseGrantSocket(store, grant, server, upstream, async (current) => (
+    current.id.toLowerCase() === grantId.toLowerCase()
+    && current.agentId === agentId
+    && current.appId === grant.appId
+    && current.appOrigin === grant.appOrigin
+    && (await grantMcpFingerprint(current)).toLowerCase() === fingerprint.toLowerCase()
+  ));
+  return new Response(null, { status: 101, webSocket: downstream } as ResponseInit);
+}
+
+async function grantMcpFingerprint(grant: Pick<GrantRecord, "mcpConnections">): Promise<`0x${string}`> {
+  return digestHex(`connect-mcp:${JSON.stringify(grant.mcpConnections ?? [])}`);
+}
+
 async function openGrantRealtimeWebSocket(
   request: Request,
   env: Env,
@@ -2476,8 +2619,8 @@ async function openGrantRealtimeWebSocket(
   );
   const response = await env.ACCOUNTS.fetch(new Request(target, {
     headers: {
+      ...managedGrantHeaders(managedGrantAssertion(grant)),
       upgrade: "websocket",
-      "x-nanocodex-connect-user": grant.brokerUserId,
     },
   }));
   const upstream = (response as Response & { webSocket?: WorkerWebSocket }).webSocket;
@@ -2579,6 +2722,10 @@ function superviseGrantSocket(
   grant: GrantRecord,
   downstream: WebSocket,
   upstream: WebSocket,
+  authorized: (current: GrantRecord) => boolean | Promise<boolean> = (current) => (
+    current.egressSubject === grant.egressSubject
+    && current.capabilities.includes("chatgpt")
+  ),
 ): void {
   let closed = false;
   let authorizationTimer: ReturnType<typeof setTimeout> | undefined;
@@ -2607,8 +2754,7 @@ function superviseGrantSocket(
       const active = isGrantRecord(current)
         && current.status === "active"
         && current.expiresAt > Math.floor(Date.now() / 1000)
-        && current.egressSubject === grant.egressSubject
-        && current.capabilities.includes("chatgpt");
+        && await authorized(current);
       if (!active) {
         close(1008, "Nanocodex Connect grant inactive");
         return;
@@ -2647,6 +2793,15 @@ function isRealtimeTicket(value: unknown): value is RealtimeTicket {
     && value.agentId.length > 0
     && typeof value.callId === "string"
     && validRealtimeCallId(value.callId);
+}
+
+function isToolHostTicket(value: unknown): value is ToolHostTicket {
+  return isRecord(value)
+    && /^0x[0-9a-fA-F]{64}$/.test(String(value.grantId))
+    && /^0x[0-9a-fA-F]{64}$/.test(String(value.mcpFingerprint))
+    && validAppId(value.appId)
+    && isPublicAppOrigin(value.appOrigin)
+    && isConnectAgentId(value.agentId);
 }
 
 function realtimeCallId(value: unknown): string {
@@ -4013,24 +4168,15 @@ function createAuth(
       const approvalId = randomSubject();
       const resources = siweResources(message);
       const app = approvedAppContext(resources);
-      const chromeExtension = app.appId === CHROME_EXTENSION_APP_ID;
-      const appScope = await scopedAppId(app);
       let connectorsDuration = 0;
-      let agentDuration = 0;
       const identity = await connectBrokerIdentity(env, store, accountAddress);
       mark("identity");
       const resourcesStartedAt = performance.now();
-      const [status, mcpConnections, durableAgentId] = await Promise.all([
+      const [status, mcpConnections] = await Promise.all([
         measured(connectorStatuses(env, identity.userId), (duration) => { connectorsDuration = duration; }),
         identity.linked
           ? materializeApprovedMcpConnections(env, store, app, identity.userId, resources)
           : pendingMcpConnections(env, store, approvedMcpConnectionIds(resources)),
-        identity.linked && !chromeExtension
-          ? measured(
-              connectManagedAgent(env, store, identity.userId, appScope),
-              (duration) => { agentDuration = duration; },
-            )
-          : Promise.resolve(undefined),
       ]);
       mark("resources");
       const connectedConnectors = CONNECTOR_IDS.filter((connector) => status.connectors[connector].connected);
@@ -4042,7 +4188,6 @@ function createAuth(
         brokerUserId: identity.userId,
         connectedConnectors,
         mcpConnections,
-        ...(durableAgentId ? { durableAgentId } : {}),
         ...(context.keyAuthorization ? { keyAuthorization: context.keyAuthorization } : {}),
         profileLinked: identity.linked,
         resources,
@@ -4064,7 +4209,6 @@ function createAuth(
       }, { headers: { "server-timing": [
         `identity;dur=${(resourcesStartedAt - startedAt).toFixed(1)}`,
         `connectors;dur=${connectorsDuration.toFixed(1)}`,
-        `agent;dur=${agentDuration.toFixed(1)}`,
         `approval;dur=${(performance.now() - (timings.at(-2)?.[1] ?? resourcesStartedAt)).toFixed(1)}`,
       ].join(", ") } });
     },
