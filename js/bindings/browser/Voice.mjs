@@ -6,6 +6,8 @@ import {
 import { createManagedBrowserVoice } from "../managed/Voice.mjs";
 import { BrowserVoiceSession } from "./VoiceSession.mjs";
 
+export { VoiceError } from "./VoiceSession.mjs";
+
 export const voices = Object.freeze([
   "juniper", "maple", "spruce", "ember", "vale", "breeze", "arbor", "sol", "cove",
 ]);
@@ -198,7 +200,14 @@ export function create(agent, options = {}) {
   }
 
   resource = Object.freeze({
-    cancel: () => session?.cancel() ?? Promise.resolve(false),
+    cancel: async () => {
+      if (!session) return false;
+      if (snapshot.status === "connecting") {
+        await stop();
+        return true;
+      }
+      return session.cancel();
+    },
     destroy,
     getSnapshot: () => snapshot,
     onEvent(listener) {

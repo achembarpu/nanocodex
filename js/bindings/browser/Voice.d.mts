@@ -5,6 +5,16 @@ import type { ConnectAgent } from "../cloud/types.mjs";
 export const voices: readonly ["juniper", "maple", "spruce", "ember", "vale", "breeze", "arbor", "sol", "cove"];
 export const defaultVoice: "cove";
 export type VoiceName = (typeof voices)[number];
+export type VoiceErrorCode =
+  | "microphone_capture_cancelled"
+  | "microphone_capture_timeout"
+  | "microphone_not_found"
+  | "microphone_permission_blocked"
+  | "microphone_unavailable";
+export declare class VoiceError extends Error {
+  readonly code: VoiceErrorCode;
+  constructor(code: VoiceErrorCode, message: string, options?: { cause?: unknown });
+}
 export type Transcript = Readonly<{ speaker: "user" | "assistant"; text: string }>;
 export type Snapshot = Readonly<{
   error: Error | undefined;

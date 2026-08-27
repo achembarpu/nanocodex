@@ -1,3 +1,13 @@
+export const MICROPHONE_CAPTURE_TIMEOUT_MS = 15_000;
+
+export class VoiceError extends Error {
+  constructor(code, message, options = {}) {
+    super(message, options.cause === undefined ? undefined : { cause: options.cause });
+    this.name = "VoiceError";
+    this.code = code;
+  }
+}
+
 /** Owns browser speaker playback and retries it from the next user gesture when autoplay is blocked. */
 export class SpeakerPlayback {
   #speaker;
@@ -94,7 +104,7 @@ export class BrowserVoiceSession {
         return core.preferredPhysicalInput(current, JSON.stringify(labels));
       },
     );
-    const microphoneCapture = Promise.resolve(capture).then((microphone) => {
+    const microphoneCapture = acquireMicrophone(capture, this.#closing.signal).then((microphone) => {
       if (this.#closed) stopStream(microphone);
       else this.#microphone = microphone;
       return microphone;
@@ -102,13 +112,19 @@ export class BrowserVoiceSession {
     const core = await this.#options.core;
     this.#core = core;
     if (this.#closed) {
-      await microphoneCapture;
+      await microphoneCapture.catch(() => {});
       core.free();
       this.#core = undefined;
       return;
     }
     await this.#options.beforeAgentTurn?.();
-    const [, microphone] = await Promise.all([core.start(), microphoneCapture]);
+    let microphone;
+    try {
+      [, microphone] = await Promise.all([core.start(), microphoneCapture]);
+    } catch (cause) {
+      if (this.#closed) return;
+      throw cause;
+    }
     if (this.#closed) {
       stopStream(microphone);
       return;
@@ -363,22 +379,76 @@ export async function capturePreferredMicrophone(selectPhysicalInput) {
 }
 
 function microphoneCaptureError(cause) {
+  if (cause instanceof VoiceError) return cause;
   const name = cause && typeof cause === "object" ? cause.name : undefined;
   if (name === "NotAllowedError" || name === "SecurityError") {
     const policy = document.permissionsPolicy ?? document.featurePolicy;
     const embedded = window.top !== window;
     if (embedded && policy?.allowsFeature?.("microphone") === false) {
-      return new Error('Microphone access is blocked by this embed. The host iframe must allow="microphone".', { cause });
+      return new VoiceError(
+        "microphone_permission_blocked",
+        'Microphone access is blocked by this embed. The host iframe must allow="microphone".',
+        { cause },
+      );
     }
-    return new Error("Microphone access is blocked for this site. Allow it in your browser settings, then retry.", { cause });
+    return new VoiceError(
+      "microphone_permission_blocked",
+      "Microphone access is blocked for this site. Allow it in your browser settings, then retry.",
+      { cause },
+    );
   }
   if (name === "NotFoundError" || name === "DevicesNotFoundError") {
-    return new Error("No microphone was found. Connect a microphone, then retry.", { cause });
+    return new VoiceError(
+      "microphone_not_found",
+      "No microphone was found. Connect a microphone, then retry.",
+      { cause },
+    );
   }
   if (name === "NotReadableError" || name === "TrackStartError" || name === "AbortError") {
-    return new Error("The microphone is unavailable. Close other apps using it, then retry.", { cause });
+    return new VoiceError(
+      "microphone_unavailable",
+      "The microphone is unavailable. Close other apps using it, then retry.",
+      { cause },
+    );
   }
   return cause;
+}
+
+function acquireMicrophone(capture, signal) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (settle, value) => {
+      if (settled) return false;
+      settled = true;
+      window.clearTimeout(timer);
+      signal?.removeEventListener("abort", stopped);
+      settle(value);
+      return true;
+    };
+    const stopped = () => {
+      finish(
+        reject,
+        new VoiceError("microphone_capture_cancelled", "Microphone capture was stopped."),
+      );
+    };
+    const timer = window.setTimeout(() => {
+      finish(
+        reject,
+        new VoiceError(
+          "microphone_capture_timeout",
+          "The microphone did not start in time. Check your browser's selected microphone or reconnect it, then retry.",
+        ),
+      );
+    }, MICROPHONE_CAPTURE_TIMEOUT_MS);
+    signal?.addEventListener("abort", stopped, { once: true });
+    if (signal?.aborted) stopped();
+    Promise.resolve(capture).then(
+      (microphone) => {
+        if (!finish(resolve, microphone)) stopStream(microphone);
+      },
+      (cause) => { finish(reject, microphoneCaptureError(cause)); },
+    );
+  });
 }
 
 function realtimeSidebandUrl(callId, sessionId) {

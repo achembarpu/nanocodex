@@ -6,7 +6,9 @@ import { Actions, Voice } from "../browser/index.mjs";
 import {
   BrowserVoiceSession,
   capturePreferredMicrophone,
+  MICROPHONE_CAPTURE_TIMEOUT_MS,
   SpeakerPlayback,
+  VoiceError,
 } from "../browser/VoiceSession.mjs";
 import { createAgentClient, defineRuntime } from "../internal.mjs";
 
@@ -15,6 +17,7 @@ test("browser voice exposes Codex's ChatGPT V3 catalog and default", () => {
     "juniper", "maple", "spruce", "ember", "vale", "breeze", "arbor", "sol", "cove",
   ]);
   assert.equal(Voice.defaultVoice, "cove");
+  assert.equal(Voice.VoiceError, VoiceError);
   assert.throws(() => Voice.create({}), /Nanocodex Agent/);
 });
 
@@ -128,7 +131,9 @@ test("explains browser and embed microphone denials", async () => {
     globalThis.document = { permissionsPolicy: { allowsFeature: () => false } };
     await assert.rejects(
       capturePreferredMicrophone(async () => undefined),
-      /host iframe must allow="microphone"/,
+      (error) => error instanceof VoiceError
+        && error.code === "microphone_permission_blocked"
+        && /host iframe must allow="microphone"/.test(error.message),
     );
 
     const topWindow = {};
@@ -137,12 +142,127 @@ test("explains browser and embed microphone denials", async () => {
     globalThis.document = { permissionsPolicy: { allowsFeature: () => true } };
     await assert.rejects(
       capturePreferredMicrophone(async () => undefined),
-      /Allow it in your browser settings, then retry/,
+      (error) => error instanceof VoiceError
+        && error.code === "microphone_permission_blocked"
+        && /Allow it in your browser settings, then retry/.test(error.message),
+    );
+
+    const missing = Object.assign(new Error("No device"), { name: "NotFoundError" });
+    Object.defineProperty(globalThis, "navigator", {
+      configurable: true,
+      value: { mediaDevices: { getUserMedia: async () => { throw missing; } } },
+    });
+    await assert.rejects(
+      capturePreferredMicrophone(async () => undefined),
+      (error) => error instanceof VoiceError && error.code === "microphone_not_found",
     );
   } finally {
     restoreGlobal("document", previous.document);
     restoreGlobal("navigator", previous.navigator);
     restoreGlobal("window", previous.window);
+  }
+});
+
+test("bounds stalled microphone acquisition with an actionable typed error", async (t) => {
+  const fixture = installBrowserVoiceFixture();
+  const calls = [];
+  const timers = new Map();
+  let nextTimer = 1;
+  let resolveCapture;
+  t.mock.method(globalThis.window, "setTimeout", (callback, delay) => {
+    const handle = nextTimer;
+    nextTimer += 1;
+    timers.set(handle, { callback, delay });
+    return handle;
+  });
+  t.mock.method(globalThis.window, "clearTimeout", (handle) => timers.delete(handle));
+  try {
+    const { agent } = await testAgent(fakeVoiceCore(calls), calls);
+    const voice = Actions.voice.create(agent, {
+      captureMicrophone: () => new Promise((resolve) => { resolveCapture = resolve; }),
+    });
+
+    const starting = voice.start();
+    const timeout = [...timers.entries()].find(([, timer]) => (
+      timer.delay === MICROPHONE_CAPTURE_TIMEOUT_MS
+    ));
+    assert.notEqual(timeout, undefined);
+    timers.delete(timeout[0]);
+    timeout[1].callback();
+
+    await assert.rejects(starting, (error) => (
+      error instanceof VoiceError
+      && error.code === "microphone_capture_timeout"
+      && /selected microphone or reconnect it/.test(error.message)
+    ));
+    const snapshot = voice.getSnapshot();
+    assert.equal(snapshot.status, "error");
+    assert.equal(snapshot.error?.code, "microphone_capture_timeout");
+    assert.match(snapshot.statusText, /selected microphone or reconnect it/);
+    assert.equal(fixture.request, undefined);
+
+    resolveCapture(fakeMicrophone(calls));
+    await waitFor(() => calls.some(([kind]) => kind === "track.stop"));
+    assert.equal(timers.size, 0);
+    agent.dispose();
+  } finally {
+    fixture.restore();
+  }
+});
+
+test("stop and cancel settle pending capture and stop a late microphone", async () => {
+  for (const action of ["stop", "cancel"]) {
+    const fixture = installBrowserVoiceFixture();
+    const calls = [];
+    let resolveCapture;
+    try {
+      const { agent } = await testAgent(fakeVoiceCore(calls), calls);
+      const voice = Actions.voice.create(agent, {
+        captureMicrophone: () => new Promise((resolve) => { resolveCapture = resolve; }),
+      });
+      const starting = voice.start();
+      assert.equal(voice.getSnapshot().status, "connecting");
+
+      const result = await voice[action]();
+      assert.equal(result, action === "cancel" ? true : undefined);
+      await starting;
+      assert.equal(voice.getSnapshot().status, "idle");
+      assert.equal(fixture.request, undefined);
+
+      resolveCapture(fakeMicrophone(calls));
+      await waitFor(() => calls.some(([kind]) => kind === "track.stop"));
+      agent.dispose();
+    } finally {
+      fixture.restore();
+    }
+  }
+});
+
+test("a replacement resource does not wait on the previous pending microphone", async () => {
+  const fixture = installBrowserVoiceFixture();
+  const calls = [];
+  let resolveFirstCapture;
+  try {
+    const { agent } = await testAgent(fakeVoiceCore(calls), calls);
+    const first = Actions.voice.create(agent, {
+      captureMicrophone: () => new Promise((resolve) => { resolveFirstCapture = resolve; }),
+    });
+    const second = Actions.voice.create(agent, {
+      captureMicrophone: async () => fakeMicrophone(calls),
+    });
+
+    const firstStarting = first.start();
+    await second.start();
+    await firstStarting;
+    assert.equal(first.getSnapshot().status, "idle");
+    assert.equal(second.getSnapshot().status, "active");
+
+    resolveFirstCapture(fakeMicrophone(calls));
+    await waitFor(() => calls.some(([kind]) => kind === "track.stop"));
+    await second.stop();
+    agent.dispose();
+  } finally {
+    fixture.restore();
   }
 });
 
