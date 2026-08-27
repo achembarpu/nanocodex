@@ -25,6 +25,7 @@ import {
   readBrowserAccountSession,
   type BrowserAccountSession,
 } from "./browserAccountSession";
+import { retainSavedPasskeyLabels } from "./savedPasskeyAccounts";
 
 import { classifyMachineUsdOrder } from "./machineUsdOrder.mjs";
 import {
@@ -54,6 +55,7 @@ const provider = createProvider(browserLocalWebAuthn);
 const providerStore = (provider as unknown as {
   store: {
     getState(): { activeAccount: number; accounts: readonly ProviderStoreAccount[] };
+    setState(state: { accounts: readonly ProviderStoreAccount[] }): unknown;
     subscribe(listener: () => void): () => void;
   };
 }).store;
@@ -473,7 +475,7 @@ export function ConnectOnboarding({
             && selectedAccount?.discoverCredential) {
             await clearPortableCredential(connectApiUrl(activeRequest));
           }
-          result = await provider.request(
+          result = await retainSavedPasskeyLabels(providerStore, () => provider.request(
             (activeRequest.type === "walletConnect"
               ? walletRequest(
                   activeRequest,
@@ -485,7 +487,7 @@ export function ConnectOnboarding({
                   hostedAuthorization,
                 )
               : activeRequest.rpc) as never,
-          ) as typeof result;
+          ) as Promise<typeof result>);
         } finally {
           if (activeRequest.type === "walletConnect") invalidateBrowserSession();
         }

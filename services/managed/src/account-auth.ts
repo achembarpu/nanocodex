@@ -8,6 +8,7 @@ const LOCAL_PORTABLE_CREDENTIAL_COOKIE = "nanocodex_local_passkey";
 const LOCAL_WEBAUTHN_RP_ID = "nanocodex.localhost";
 const LOCAL_WEBAUTHN_HOST = /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)?nanocodex\.localhost$/;
 const SESSION_TTL_SECONDS = 30 * 24 * 60 * 60;
+const WEBAUTHN_CHALLENGE_TTL_SECONDS = 5 * 60;
 const PASSKEY_REAUTH_WINDOW_SECONDS = 365 * 24 * 60 * 60;
 const USER_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -233,24 +234,11 @@ export async function routeAccountRequest(
       });
     }
     if (url.pathname === "/webauthn/login/options" && request.method === "POST") {
-      const credential = await readPortableLocalCredential(request, env, url);
-      if (credential) {
-        const body = await readJson(request);
-        if (body instanceof Response) return body;
-        const {
-          allowCredentialIds: _allowCredentialIds,
-          credentialId: _credentialId,
-          ...options
-        } = body;
-        const headers = new Headers(request.headers);
-        headers.set("content-type", "application/json");
-        request = new Request(request, {
-          body: JSON.stringify({ ...options, credentialId: credential.credentialId }),
-          headers,
-        });
-      }
+      return webAuthnLoginOptions(request, env, url);
     }
     if (url.pathname === "/webauthn/login" && request.method === "POST") {
+      const targetFailure = await requireSelectedWebAuthnCredential(request, env);
+      if (targetFailure) return targetFailure;
       await seedPortableLocalCredential(request, env, url);
     }
     return webAuthnHandler(env, url).fetch(request);
@@ -620,6 +608,118 @@ function webAuthnHandler(env: AccountAuthEnv, url: URL) {
       });
     },
   });
+}
+
+async function webAuthnLoginOptions(
+  request: Request,
+  env: AccountAuthEnv,
+  url: URL,
+): Promise<Response> {
+  const body = await readJson(request);
+  if (body instanceof Response) return body;
+  const requested = requestedWebAuthnCredentialIds(body);
+  if (requested instanceof Response) return requested;
+
+  if (requested) {
+    const portable = await readPortableLocalCredential(request, env, url);
+    const store = authStore(env, "webauthn");
+    for (const credentialId of requested) {
+      if (portable?.credentialId === credentialId) continue;
+      const credential = await store.get<unknown>(`credential:${credentialId}`);
+      if (!isStoredWebAuthnCredential(credential)) {
+        return json({ error: "unknown credential" }, { status: 400 });
+      }
+    }
+  }
+
+  const headers = new Headers(request.headers);
+  headers.set("content-type", "application/json");
+  const response = await webAuthnHandler(env, url).fetch(new Request(request, {
+    body: JSON.stringify(body),
+    headers,
+  }));
+  if (!response.ok || !requested) return response;
+
+  const payload = await response.clone().json<unknown>().catch(() => undefined);
+  const challenge = webAuthnOptionsChallenge(payload);
+  if (!challenge) return json({ error: "invalid_webauthn_options" }, { status: 500 });
+  await authStore(env, "webauthn").set(
+    `login-target:${challenge}`,
+    requested,
+    { ttl: WEBAUTHN_CHALLENGE_TTL_SECONDS },
+  );
+  return response;
+}
+
+function requestedWebAuthnCredentialIds(
+  body: Record<string, unknown>,
+): readonly string[] | Response | undefined {
+  const value = body.credentialId ?? body.allowCredentialIds;
+  if (value === undefined) return undefined;
+  const ids = typeof value === "string"
+    ? [value]
+    : Array.isArray(value) ? value : [];
+  if (ids.length === 0
+    || ids.some((credentialId) => typeof credentialId !== "string"
+      || !PORTABLE_CREDENTIAL_ID.test(credentialId))) {
+    return json({ error: "invalid_credential_target" }, { status: 400 });
+  }
+  return [...new Set(ids as string[])];
+}
+
+function isStoredWebAuthnCredential(value: unknown): boolean {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const credential = value as Record<string, unknown>;
+  return typeof credential.publicKey === "string"
+    && PORTABLE_PUBLIC_KEY.test(credential.publicKey)
+    && typeof credential.userId === "string"
+    && isUserId(decodeUserId(credential.userId));
+}
+
+function webAuthnOptionsChallenge(value: unknown): string | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  const options = (value as Record<string, unknown>).options;
+  if (typeof options !== "object" || options === null || Array.isArray(options)) return undefined;
+  const publicKey = (options as Record<string, unknown>).publicKey;
+  if (typeof publicKey !== "object" || publicKey === null || Array.isArray(publicKey)) return undefined;
+  const challenge = (publicKey as Record<string, unknown>).challenge;
+  return typeof challenge === "string" && BASE64_URL.test(challenge) ? challenge : undefined;
+}
+
+async function requireSelectedWebAuthnCredential(
+  request: Request,
+  env: AccountAuthEnv,
+): Promise<Response | undefined> {
+  let body: unknown;
+  try {
+    body = await request.clone().json();
+  } catch {
+    return undefined;
+  }
+  if (typeof body !== "object" || body === null || Array.isArray(body)) return undefined;
+  const assertion = body as Record<string, unknown>;
+  if (typeof assertion.id !== "string") return undefined;
+  const metadata = assertion.metadata;
+  if (typeof metadata !== "object" || metadata === null || Array.isArray(metadata)) return undefined;
+  const clientDataJSON = (metadata as Record<string, unknown>).clientDataJSON;
+  if (typeof clientDataJSON !== "string") return undefined;
+
+  let challenge: unknown;
+  try {
+    const clientData = JSON.parse(clientDataJSON) as unknown;
+    challenge = typeof clientData === "object" && clientData !== null && !Array.isArray(clientData)
+      ? (clientData as Record<string, unknown>).challenge
+      : undefined;
+  } catch {
+    return undefined;
+  }
+  if (typeof challenge !== "string" || !BASE64_URL.test(challenge)) return undefined;
+  const selected = await authStore(env, "webauthn").get<unknown>(`login-target:${challenge}`);
+  if (!Array.isArray(selected)) return undefined;
+  if (!selected.includes(assertion.id)) {
+    return json({ error: "selected_credential_mismatch" }, { status: 400 });
+  }
+  return undefined;
 }
 
 async function seedPortableLocalCredential(

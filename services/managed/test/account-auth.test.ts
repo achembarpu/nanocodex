@@ -11,7 +11,10 @@ const ORGANIZATION_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const TEAM_ID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const LOCAL_HMAC_KEY = "shared-local-development-hmac-key";
 const CREDENTIAL_ID = "cG9ydGFibGUtY3JlZGVudGlhbA";
+const SECOND_USER_ID = "22222222-2222-4222-8222-222222222222";
+const SECOND_CREDENTIAL_ID = "c2Vjb25kLXBvcnRhYmxlLWNyZWRlbnRpYWw";
 const PUBLIC_KEY = "0x01020304";
+const SECOND_PUBLIC_KEY = "0x05060708";
 const LOCAL_PASSKEY_COOKIE = "nanocodex_local_passkey";
 
 describe("account provisioning", () => {
@@ -122,7 +125,7 @@ describe("local WebAuthn credential portability", () => {
           "content-type": "application/json",
           origin: "http://two.nanocodex.localhost:20736",
         },
-        body: JSON.stringify({ allowCredentialIds: ["stale-credential"] }),
+        body: JSON.stringify({ credentialId: CREDENTIAL_ID }),
       },
     ), target.env, new URL("http://two.nanocodex.localhost:20736/webauthn/login/options"));
     expect(await options!.json()).toMatchObject({
@@ -139,6 +142,131 @@ describe("local WebAuthn credential portability", () => {
       publicKey: PUBLIC_KEY,
       userId: encodeUserId(USER_ID),
     });
+  });
+
+  it("targets the selected older account after logout while the portable hint is newer", async () => {
+    const target = portableEnv();
+    const latestSessionToken = "n".repeat(43);
+    target.set("webauthn", `credential:${CREDENTIAL_ID}`, {
+      publicKey: PUBLIC_KEY,
+      userId: encodeUserId(USER_ID),
+    });
+    target.set("webauthn", `credential:${SECOND_CREDENTIAL_ID}`, {
+      publicKey: SECOND_PUBLIC_KEY,
+      userId: encodeUserId(SECOND_USER_ID),
+    });
+    target.set("webauthn", `session:${latestSessionToken}`, {
+      credentialId: SECOND_CREDENTIAL_ID,
+      publicKey: SECOND_PUBLIC_KEY,
+      userId: encodeUserId(SECOND_USER_ID),
+      issuedAt: 1,
+      expiresAt: Math.floor(Date.now() / 1_000) + 60,
+    });
+    const origin = "http://two.nanocodex.localhost:20736";
+    const current = await routeAccountRequest(new Request(`${origin}/v1/me`, {
+      headers: { cookie: `nanocodex_account=${latestSessionToken}` },
+    }), target.env, new URL(`${origin}/v1/me`));
+    const portableCookie = localPasskeySetCookie(current!.headers)!.split(";", 1)[0]!;
+
+    const logout = await routeAccountRequest(new Request(`${origin}/webauthn/logout`, {
+      method: "POST",
+      headers: { cookie: `nanocodex_account=${latestSessionToken}`, origin },
+    }), target.env, new URL(`${origin}/webauthn/logout`));
+    expect(logout?.status).toBe(204);
+    expect(target.get("webauthn", `session:${latestSessionToken}`)).toBeUndefined();
+
+    const selected = await routeAccountRequest(new Request(`${origin}/webauthn/login/options`, {
+      method: "POST",
+      headers: {
+        cookie: portableCookie,
+        "content-type": "application/json",
+        origin,
+      },
+      body: JSON.stringify({ credentialId: CREDENTIAL_ID }),
+    }), target.env, new URL(`${origin}/webauthn/login/options`));
+    expect(selected?.status).toBe(200);
+    const selectedBody = await selected!.json<{
+      options: { publicKey: { allowCredentials: { id: string }[]; challenge: string } };
+    }>();
+    expect(selectedBody.options.publicKey.allowCredentials).toEqual([
+      { id: CREDENTIAL_ID, type: "public-key" },
+    ]);
+
+    const mismatched = await routeAccountRequest(new Request(`${origin}/webauthn/login`, {
+      method: "POST",
+      headers: {
+        cookie: portableCookie,
+        "content-type": "application/json",
+        origin,
+      },
+      body: JSON.stringify({
+        id: SECOND_CREDENTIAL_ID,
+        metadata: {
+          clientDataJSON: JSON.stringify({ challenge: selectedBody.options.publicKey.challenge }),
+        },
+      }),
+    }), target.env, new URL(`${origin}/webauthn/login`));
+    expect(mismatched?.status).toBe(400);
+    expect(await mismatched!.json()).toEqual({ error: "selected_credential_mismatch" });
+  });
+
+  it("refuses an unknown selected credential instead of falling back to the portable hint", async () => {
+    const source = portableEnv();
+    const sessionToken = "x".repeat(43);
+    source.set("webauthn", `session:${sessionToken}`, {
+      credentialId: SECOND_CREDENTIAL_ID,
+      publicKey: SECOND_PUBLIC_KEY,
+      userId: encodeUserId(SECOND_USER_ID),
+      issuedAt: 1,
+      expiresAt: Math.floor(Date.now() / 1_000) + 60,
+    });
+    const origin = "http://two.nanocodex.localhost:20736";
+    const current = await routeAccountRequest(new Request(`${origin}/v1/me`, {
+      headers: { cookie: `nanocodex_account=${sessionToken}` },
+    }), source.env, new URL(`${origin}/v1/me`));
+    const portableCookie = localPasskeySetCookie(current!.headers)!.split(";", 1)[0]!;
+    const unknown = await routeAccountRequest(new Request(`${origin}/webauthn/login/options`, {
+      method: "POST",
+      headers: {
+        cookie: portableCookie,
+        "content-type": "application/json",
+        origin,
+      },
+      body: JSON.stringify({ credentialId: "unknown-saved-passkey" }),
+    }), source.env, new URL(`${origin}/webauthn/login/options`));
+
+    expect(unknown?.status).toBe(400);
+    expect(await unknown!.json()).toEqual({ error: "unknown credential" });
+  });
+
+  it("leaves an untargeted login discoverable even when a portable hint exists", async () => {
+    const source = portableEnv();
+    const sessionToken = "d".repeat(43);
+    source.set("webauthn", `session:${sessionToken}`, {
+      credentialId: SECOND_CREDENTIAL_ID,
+      publicKey: SECOND_PUBLIC_KEY,
+      userId: encodeUserId(SECOND_USER_ID),
+      issuedAt: 1,
+      expiresAt: Math.floor(Date.now() / 1_000) + 60,
+    });
+    const origin = "http://two.nanocodex.localhost:20736";
+    const current = await routeAccountRequest(new Request(`${origin}/v1/me`, {
+      headers: { cookie: `nanocodex_account=${sessionToken}` },
+    }), source.env, new URL(`${origin}/v1/me`));
+    const portableCookie = localPasskeySetCookie(current!.headers)!.split(";", 1)[0]!;
+    const chooser = await routeAccountRequest(new Request(`${origin}/webauthn/login/options`, {
+      method: "POST",
+      headers: {
+        cookie: portableCookie,
+        "content-type": "application/json",
+        origin,
+      },
+      body: "{}",
+    }), source.env, new URL(`${origin}/webauthn/login/options`));
+    const body = await chooser!.json<{ options: { publicKey: Record<string, unknown> } }>();
+
+    expect(chooser?.status).toBe(200);
+    expect(body.options.publicKey).not.toHaveProperty("allowCredentials");
   });
 
   it("does not import tampered, mismatched, unsigned, or differently signed records", async () => {

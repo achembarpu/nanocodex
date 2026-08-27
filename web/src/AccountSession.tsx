@@ -22,6 +22,7 @@ import {
   type AuthenticatedAccount,
 } from "./accountSessionRequest";
 import { logoutBrowserAccountSession } from "@nanocodex-connect/browserAccountSession";
+import { retainSavedPasskeyLabels } from "@nanocodex-connect/savedPasskeyAccounts";
 import { clientFailureMessage } from "./clientFailure";
 
 export { isRecord, responseFailure } from "./accountSessionRequest";
@@ -72,6 +73,11 @@ export function AccountSessionProvider({ children }: { children: ReactNode }) {
         credential?: Readonly<{ id: string }> | undefined;
         label?: string | undefined;
       }>[] };
+      setState(state: { accounts: readonly Readonly<{
+        address: `0x${string}`;
+        credential?: Readonly<{ id: string }> | undefined;
+        label?: string | undefined;
+      }>[] }): unknown;
       subscribe(listener: () => void): () => void;
     };
   }).store;
@@ -144,7 +150,7 @@ export function AccountSessionProvider({ children }: { children: ReactNode }) {
       if (selection.mode === "register" && !registrationUser) {
         throw new Error("The browser identity is not ready.");
       }
-      await provider.request({
+      await retainSavedPasskeyLabels(providerStore, () => provider.request({
         method: "wallet_connect",
         params: [{ capabilities: selection.mode === "register"
           ? {
@@ -158,7 +164,7 @@ export function AccountSessionProvider({ children }: { children: ReactNode }) {
                 ? { credentialId: selection.credentialId }
                 : { selectAccount: true }),
             } }],
-      });
+      }));
       const nextUser = await getCurrentUser();
       if (!nextUser) throw new Error("The account session was not created.");
       requestId.current++;
