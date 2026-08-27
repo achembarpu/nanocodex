@@ -94,34 +94,45 @@ impl PatchPlan {
 /// Files created earlier in the same patch are not returned.
 pub fn required_files(patch: &str) -> Result<Vec<PathBuf>, String> {
     let hunks = parse(patch)?;
+    Ok(required_files_from_hunks(&hunks))
+}
+
+fn required_files_from_hunks(hunks: &[Hunk]) -> Vec<PathBuf> {
     let mut produced = HashSet::new();
     let mut required = Vec::new();
     let mut retained = HashSet::new();
     for hunk in hunks {
         match hunk {
             Hunk::AddFile { path, .. } => {
-                produced.insert(path);
+                produced.insert(path.clone());
             }
             Hunk::DeleteFile { path } => {
-                produced.remove(&path);
+                produced.remove(path);
             }
             Hunk::UpdateFile {
                 path, move_path, ..
             } => {
-                if !produced.contains(&path) && retained.insert(path.clone()) {
+                if !produced.contains(path) && retained.insert(path.clone()) {
                     required.push(path.clone());
                 }
-                produced.remove(&path);
-                produced.insert(move_path.unwrap_or(path));
+                produced.remove(path);
+                produced.insert(move_path.as_ref().unwrap_or(path).clone());
             }
         }
     }
-    Ok(required)
+    required
 }
 
 /// Verifies a patch against its required input files and produces mutations.
 pub fn plan(patch: &str, initial_files: &HashMap<PathBuf, String>) -> Result<PatchPlan, String> {
     let hunks = parse(patch)?;
+    plan_hunks(hunks, initial_files)
+}
+
+fn plan_hunks(
+    hunks: Vec<Hunk>,
+    initial_files: &HashMap<PathBuf, String>,
+) -> Result<PatchPlan, String> {
     let mut files = initial_files.clone();
     let mut operations = Vec::new();
     let mut added = Vec::new();
@@ -153,13 +164,6 @@ pub fn plan(patch: &str, initial_files: &HashMap<PathBuf, String>) -> Result<Pat
                     .ok_or_else(|| format!("Failed to read file to update {}", path.display()))?;
                 let updated = apply_chunks(original, &chunks, &path)?;
                 if let Some(destination) = move_path {
-                    if destination == path {
-                        return Err(format!(
-                            "Move destination {} aliases source path {}",
-                            destination.display(),
-                            path.display()
-                        ));
-                    }
                     files.remove(&path);
                     files.insert(destination.clone(), updated.clone());
                     operations.push(PatchOperation::Write {
@@ -206,8 +210,11 @@ struct ApplyPatchArgs {
 
 #[cfg(not(target_family = "wasm"))]
 pub(super) fn apply(patch: &str, workspace: &Path) -> Result<String, String> {
+    let hunks = parse(patch)?;
+    validate_unique_targets(&hunks, |path| normalize_path(&resolve(workspace, path)))?;
+
     let mut initial_files = HashMap::new();
-    for path in required_files(patch)? {
+    for path in required_files_from_hunks(&hunks) {
         let source = resolve(workspace, &path);
         let contents = std::fs::read_to_string(&source).map_err(|error| {
             format!(
@@ -217,7 +224,7 @@ pub(super) fn apply(patch: &str, workspace: &Path) -> Result<String, String> {
         })?;
         initial_files.insert(path, contents);
     }
-    let plan = plan(patch, &initial_files)?;
+    let plan = plan_hunks(hunks, &initial_files)?;
     for operation in plan.operations() {
         match operation {
             PatchOperation::Write { path, contents } => {
@@ -245,6 +252,29 @@ fn parse(patch: &str) -> Result<Vec<Hunk>, String> {
         return Err("No files were modified.".to_owned());
     }
     Ok(hunks.into_iter().map(normalize_hunk_paths).collect())
+}
+
+fn validate_unique_targets(
+    hunks: &[Hunk],
+    mut resolve: impl FnMut(&Path) -> PathBuf,
+) -> Result<(), String> {
+    let mut targets = HashSet::new();
+    for hunk in hunks {
+        let (source, destination) = match hunk {
+            Hunk::AddFile { path, .. } | Hunk::DeleteFile { path } => (path, None),
+            Hunk::UpdateFile {
+                path, move_path, ..
+            } => (path, move_path.as_deref()),
+        };
+
+        for path in std::iter::once(source.as_path()).chain(destination) {
+            let target = resolve(path);
+            if !targets.insert(target.clone()) {
+                return Err(format!("multiple operations target {}", target.display()));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn normalize_hunk_paths(hunk: Hunk) -> Hunk {
@@ -399,7 +429,9 @@ fn push_summary_line(summary: &mut String, operation: char, path: &Path) {
 
 #[cfg(test)]
 mod tests {
-    use super::apply;
+    use std::{collections::HashMap, path::Path};
+
+    use super::{PatchOperation, apply, plan};
 
     fn test_root(name: &str) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
         let root = std::env::temp_dir().join(format!(
@@ -488,6 +520,30 @@ mod tests {
     }
 
     #[test]
+    fn plan_preserves_sequential_operations_on_the_same_virtual_path() {
+        let patch = "*** Begin Patch\n*** Add File: file.txt\n+first\n*** Update File: file.txt\n@@\n-first\n+second\n*** Delete File: file.txt\n*** End Patch";
+
+        let plan = plan(patch, &HashMap::new()).expect("sequential virtual operations should plan");
+
+        assert_eq!(
+            plan.operations(),
+            [
+                PatchOperation::Write {
+                    path: Path::new("file.txt").to_owned(),
+                    contents: "first\n".to_owned(),
+                },
+                PatchOperation::Write {
+                    path: Path::new("file.txt").to_owned(),
+                    contents: "second\n".to_owned(),
+                },
+                PatchOperation::Delete {
+                    path: Path::new("file.txt").to_owned(),
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn rejects_move_to_a_lexical_alias_without_mutating_the_file()
     -> Result<(), Box<dyn std::error::Error>> {
         let root = test_root("aliased-move")?;
@@ -501,9 +557,118 @@ mod tests {
 
         assert_eq!(
             error,
-            "Move destination file.txt aliases source path file.txt"
+            format!(
+                "multiple operations target {}",
+                root.join("file.txt").display()
+            )
         );
         assert_eq!(std::fs::read_to_string(root.join("file.txt"))?, "before\n");
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn preserves_distinct_updated_paths() -> Result<(), Box<dyn std::error::Error>> {
+        let root = test_root("distinct-updates")?;
+        std::fs::write(root.join("first.txt"), "first before\n")?;
+        std::fs::write(root.join("second.txt"), "second before\n")?;
+
+        apply(
+            "*** Begin Patch\n*** Update File: first.txt\n@@\n-first before\n+first after\n*** Update File: second.txt\n@@\n-second before\n+second after\n*** End Patch",
+            &root,
+        )?;
+
+        assert_eq!(
+            std::fs::read_to_string(root.join("first.txt"))?,
+            "first after\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("second.txt"))?,
+            "second after\n"
+        );
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_duplicate_normalized_sources_before_mutation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = test_root("duplicate-sources")?;
+        std::fs::write(root.join("duplicate.txt"), "before\n")?;
+
+        let error = apply(
+            "*** Begin Patch\n*** Update File: duplicate.txt\n@@\n-before\n+first after\n*** Update File: ./duplicate.txt\n@@\n-before\n+second after\n*** End Patch",
+            &root,
+        )
+        .expect_err("duplicate normalized sources must fail before mutation");
+
+        assert_eq!(
+            error,
+            format!(
+                "multiple operations target {}",
+                root.join("duplicate.txt").display()
+            )
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("duplicate.txt"))?,
+            "before\n"
+        );
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_converging_move_destinations_before_mutation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = test_root("converging-moves")?;
+        std::fs::write(root.join("first.txt"), "first before\n")?;
+        std::fs::write(root.join("second.txt"), "second before\n")?;
+
+        let error = apply(
+            "*** Begin Patch\n*** Update File: first.txt\n*** Move to: moved.txt\n@@\n-first before\n+first after\n*** Update File: second.txt\n*** Move to: ./moved.txt\n@@\n-second before\n+second after\n*** End Patch",
+            &root,
+        )
+        .expect_err("converging move destinations must fail before mutation");
+
+        assert_eq!(
+            error,
+            format!(
+                "multiple operations target {}",
+                root.join("moved.txt").display()
+            )
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("first.txt"))?,
+            "first before\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("second.txt"))?,
+            "second before\n"
+        );
+        assert!(!root.join("moved.txt").exists());
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_relative_and_absolute_aliases_before_mutation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = test_root("resolved-aliases")?;
+        let path = root.join("duplicate.txt");
+        std::fs::write(&path, "before\n")?;
+        let patch = format!(
+            "*** Begin Patch\n*** Update File: duplicate.txt\n@@\n-before\n+first after\n*** Update File: {}\n@@\n-before\n+second after\n*** End Patch",
+            path.display()
+        );
+
+        let error = apply(&patch, &root)
+            .expect_err("relative and absolute aliases must fail before mutation");
+
+        assert_eq!(
+            error,
+            format!("multiple operations target {}", path.display())
+        );
+        assert_eq!(std::fs::read_to_string(&path)?, "before\n");
         std::fs::remove_dir_all(root)?;
         Ok(())
     }
