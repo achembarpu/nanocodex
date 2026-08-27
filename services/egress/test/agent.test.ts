@@ -55,6 +55,25 @@ describe("standard managed-agent Worker", () => {
     expect(await response.json()).toEqual({ error: "destination_denied" });
     expect(observed?.url).toBe("https://example.com/");
   });
+
+  it("does not expose private credential-import routes through public agent ingress", async () => {
+    const fetch = vi.fn(async () => Response.json({ unexpected: true }));
+    const response = await handleAgent(
+      new Request("https://agent.example/users/server-user/credentials/chatgpt", {
+        method: "PUT",
+        headers: {
+          authorization: "Bearer agent-secret",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ access_token: "provider-secret" }),
+      }),
+      agentEnv(fetch),
+    );
+
+    expect(response.status).toBe(404);
+    expect(await response.json()).toEqual({ error: "not_found" });
+    expect(fetch).not.toHaveBeenCalled();
+  });
 });
 
 function agentEnv(

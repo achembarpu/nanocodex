@@ -15,6 +15,8 @@ const DEFAULT_REFRESH_BACKOFF_MS = 60_000;
 const MAX_REFRESH_BACKOFF_MS = 15 * 60_000;
 const MAX_REFRESH_BACKOFF_ATTEMPT = 5;
 const MAX_PROVIDER_RESPONSE_BYTES = 16 * 1024;
+const MAX_IMPORTED_TOKEN_BYTES = 32 * 1024;
+const MAX_IMPORTED_ACCOUNT_ID_BYTES = 256;
 const SUBJECT = /^[A-Za-z0-9_-]{43,128}$/;
 const USER_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const SUBJECT_DIRECTORY_PREFIX = "agent-subject-v1:";
@@ -65,6 +67,14 @@ type CredentialState = {
   login?: PendingLogin;
 };
 type StoredRow = { envelope: EncryptedEnvelope };
+
+export type ChatGptCredentialImport = Readonly<{
+  access_token: string;
+  refresh_token: string;
+  account_id: string;
+  expires_at: number;
+  fedramp: boolean;
+}>;
 
 export class AgentSubjectDirectory extends DurableObject<BrokerEnv> {
   readonly #state: DurableObjectState;
@@ -284,8 +294,18 @@ export class UserCredentialBroker extends DurableObject<BrokerEnv> {
         return new Response(null, { status: 204, headers: noStoreHeaders() });
       }
       if (request.method === "POST" && url.pathname === "/v1/chatgpt/local-claim") {
+        if (!localCredentialClaimEnabled(this.#env)) throw new BrokerFailure(404, "not_found");
+        if (await hasRequestPayload(request)) return jsonError(400, "invalid_request");
         await this.#claimLocalBootstrap();
         return json(this.#publicStatus(), 200);
+      }
+      if (request.method === "PUT" && url.pathname === "/v1/chatgpt") {
+        const body = await readJson(request, 64 * 1024);
+        if (!validChatGptCredentialImport(body)) {
+          return jsonError(400, "invalid_chatgpt_credential");
+        }
+        await this.#importChatGpt(body);
+        return new Response(null, { status: 204, headers: noStoreHeaders() });
       }
       if (request.method === "POST" && url.pathname === "/v1/credential") {
         const body = await readJson(request, 1_024);
@@ -453,9 +473,7 @@ export class UserCredentialBroker extends DurableObject<BrokerEnv> {
   }
 
   async #claimLocalBootstrap(): Promise<void> {
-    const environment = this.#env.ENVIRONMENT?.trim().toLowerCase();
-    const local = environment === "development" || environment === "local" || environment === "test";
-    if (!local || this.#env.ALLOW_LOCAL_CREDENTIAL_CLAIM !== "true") {
+    if (!localCredentialClaimEnabled(this.#env)) {
       throw new BrokerFailure(404, "not_found");
     }
     if (this.#credentials.chatgpt && !this.#credentials.chatgpt.deadReason) return;
@@ -484,6 +502,39 @@ export class UserCredentialBroker extends DurableObject<BrokerEnv> {
     delete this.#credentials.login;
     await this.#persist();
     await this.#schedule();
+  }
+
+  async #importChatGpt(imported: ChatGptCredentialImport): Promise<void> {
+    const current = this.#credentials.chatgpt;
+    if (current && !current.deadReason) {
+      if (current.accountId !== imported.account_id) {
+        throw new BrokerFailure(409, "chatgpt_account_conflict");
+      }
+      return;
+    }
+
+    const previous = this.#credentials;
+    const { login: _pendingLogin, ...withoutLogin } = previous;
+    this.#credentials = {
+      ...withoutLogin,
+      active: "chatgpt",
+      chatgpt: {
+        accessToken: imported.access_token,
+        refreshToken: imported.refresh_token,
+        accountId: imported.account_id,
+        fedramp: imported.fedramp,
+        expiresAt: imported.expires_at,
+        revision: (current?.revision ?? -1) + 1,
+        refreshState: "ready",
+        deadReason: null,
+      },
+    };
+    try {
+      await this.#persistAndSchedule();
+    } catch (error) {
+      this.#credentials = previous;
+      throw error;
+    }
   }
 
   async #refreshChatGpt(current: ChatGptCredential): Promise<ChatGptCredential> {
@@ -565,6 +616,18 @@ export class UserCredentialBroker extends DurableObject<BrokerEnv> {
     } satisfies StoredRow);
   }
 
+  async #persistAndSchedule(): Promise<void> {
+    const row = {
+      envelope: await this.#vault.seal(this.#credentials),
+    } satisfies StoredRow;
+    const alarm = this.#nextAlarm();
+    await this.#state.storage.transaction(async (transaction) => {
+      await transaction.put(STATE_KEY, row);
+      if (alarm === undefined) await transaction.deleteAlarm();
+      else await transaction.setAlarm(alarm);
+    });
+  }
+
   async #restoreDurableState(): Promise<void> {
     try {
       const row = await this.#state.storage.get<StoredRow>(STATE_KEY);
@@ -589,6 +652,12 @@ export class UserCredentialBroker extends DurableObject<BrokerEnv> {
   }
 
   async #schedule(): Promise<void> {
+    const alarm = this.#nextAlarm();
+    if (alarm !== undefined) await this.#state.storage.setAlarm(alarm);
+    else await this.#state.storage.deleteAlarm();
+  }
+
+  #nextAlarm(): number | undefined {
     const times: number[] = [];
     if (this.#credentials.login) times.push(this.#credentials.login.expiresAt);
     const chatgpt = this.#credentials.chatgpt;
@@ -599,8 +668,7 @@ export class UserCredentialBroker extends DurableObject<BrokerEnv> {
         chatgpt.refreshAfter ?? 0,
       ));
     }
-    if (times.length) await this.#state.storage.setAlarm(Math.min(...times));
-    else await this.#state.storage.deleteAlarm();
+    return times.length ? Math.min(...times) : undefined;
   }
 }
 
@@ -652,6 +720,21 @@ function nextRefreshAttempt(previous: number | undefined): number {
 
 async function cancelResponseBody(response: Response): Promise<void> {
   try { await response.body?.cancel(); } catch { /* Response disposal is best-effort. */ }
+}
+
+async function hasRequestPayload(request: Request): Promise<boolean> {
+  if (request.body === null) return false;
+  const reader = request.body.getReader();
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) return false;
+      if (value.byteLength > 0) return true;
+    }
+  } finally {
+    await reader.cancel().catch(() => {});
+    reader.releaseLock();
+  }
 }
 
 class BrokerFailure extends Error {
@@ -763,6 +846,80 @@ function jwtPayload(token: string | undefined): Record<string, unknown> | undefi
     const parsed: unknown = JSON.parse(new TextDecoder().decode(bytes));
     return isRecord(parsed) ? parsed : undefined;
   } catch { return undefined; }
+}
+
+export function validChatGptCredentialImport(
+  value: unknown,
+  now = Date.now(),
+): value is ChatGptCredentialImport {
+  if (!isRecord(value)) return false;
+  const keys = Object.keys(value);
+  if (keys.length !== 5 || keys.some((key) => ![
+    "access_token",
+    "refresh_token",
+    "account_id",
+    "expires_at",
+    "fedramp",
+  ].includes(key))) return false;
+
+  const accessToken = exactBoundedString(value.access_token, MAX_IMPORTED_TOKEN_BYTES);
+  const refreshToken = exactBoundedString(value.refresh_token, MAX_IMPORTED_TOKEN_BYTES);
+  const accountId = exactBoundedString(value.account_id, MAX_IMPORTED_ACCOUNT_ID_BYTES);
+  const expiresAt = value.expires_at;
+  if (!accessToken || !refreshToken || !accountId
+    || !Number.isSafeInteger(expiresAt) || typeof expiresAt !== "number"
+    || expiresAt <= now + REFRESH_EARLY_MS || typeof value.fedramp !== "boolean") {
+    return false;
+  }
+
+  const accessClaims = strictJwtPayload(accessToken);
+  const refreshClaims = strictJwtPayload(refreshToken);
+  if (!accessClaims || !refreshClaims
+    || !Number.isSafeInteger(accessClaims.exp)
+    || (accessClaims.exp as number) * 1_000 !== expiresAt
+    || !matchingImportedAuthClaims(accessClaims, accountId, value.fedramp, true)
+    || !matchingImportedAuthClaims(refreshClaims, accountId, value.fedramp, false)) {
+    return false;
+  }
+  return true;
+}
+
+function strictJwtPayload(token: string): Record<string, unknown> | undefined {
+  return /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(token)
+    ? jwtPayload(token)
+    : undefined;
+}
+
+function matchingImportedAuthClaims(
+  claims: Record<string, unknown>,
+  accountId: string,
+  fedramp: boolean,
+  required: boolean,
+): boolean {
+  const auth = claims["https://api.openai.com/auth"];
+  if (auth === undefined) return !required;
+  if (!isRecord(auth)) return false;
+  const claimedAccount = auth.chatgpt_account_id;
+  const claimedFedramp = auth.chatgpt_account_is_fedramp;
+  if (required && typeof claimedAccount !== "string") return false;
+  if (claimedAccount !== undefined
+    && (typeof claimedAccount !== "string" || claimedAccount !== accountId)) return false;
+  if (claimedFedramp !== undefined && typeof claimedFedramp !== "boolean") return false;
+  if (claimedFedramp !== undefined) return claimedFedramp === fedramp;
+  return !required || fedramp === false;
+}
+
+function exactBoundedString(value: unknown, maxBytes: number): string | undefined {
+  if (typeof value !== "string" || !value || value.trim() !== value
+    || /[\u0000-\u001f\u007f]/.test(value)
+    || new TextEncoder().encode(value).byteLength > maxBytes) return undefined;
+  return value;
+}
+
+function localCredentialClaimEnabled(env: BrokerEnv): boolean {
+  const environment = env.ENVIRONMENT?.trim().toLowerCase();
+  return env.ALLOW_LOCAL_CREDENTIAL_CLAIM === "true"
+    && (environment === "development" || environment === "local" || environment === "test");
 }
 
 function parseExpiry(value: unknown): number | undefined {

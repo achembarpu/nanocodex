@@ -43,6 +43,7 @@ managed. Neither value is accepted from a public browser request.
 | `GET /users/:user/credentials` | none | secret-free status |
 | `PUT /users/:user/credentials/openai` | `{ "api_key": "..." }` | `204` |
 | `DELETE /users/:user/credentials/openai` | none | `204` |
+| `PUT /users/:user/credentials/chatgpt` | exact bounded server credential document | empty `204` |
 | `POST /users/:user/credentials/chatgpt/login` | none | pending device-login status |
 | `POST /users/:user/credentials/chatgpt/login/status` | none | pending/authenticated/expired status; polling and token exchange stay server-side |
 | `DELETE /users/:user/credentials/chatgpt` | none | `204` |
@@ -53,11 +54,32 @@ or `test` and `ALLOW_LOCAL_CREDENTIAL_CLAIM=true`. It consumes
 `LOCAL_CHATGPT_BOOTSTRAP` from the broker environment, accepts no provider
 material in the request, and the subject directory permits one claiming user.
 Production returns `404` even if the endpoint is called.
+The local-claim request is always bodyless; it never accepts credential material
+from its caller.
 The claim is missing-only: a healthy retained ChatGPT credential is left
 unchanged, while a missing or dead credential may be installed from the local
 bootstrap. Repeated explicit claims are therefore idempotent.
 When this local-claim profile is enabled, starting an interactive ChatGPT
 device login fails with `409 local_credential_claim_required`.
+
+The ChatGPT import route is available only on this private Worker through its
+Service Binding. Its user path component comes from the authenticated server
+session, never from the submitted document. It accepts exactly `access_token`,
+`refresh_token`, `account_id`, `expires_at` (Unix epoch milliseconds), and
+`fedramp`. The whole JSON document is limited to 64 KiB, each JWT to 32 KiB,
+and the account ID to 256 UTF-8 bytes. Both tokens must be three-part JWTs with
+object payloads; access-token account, FedRAMP, and integer expiry claims must
+match the document exactly, and expiry must be more than five minutes away.
+Unknown fields and malformed or inconsistent claims fail with a stable,
+secret-free error.
+
+A missing or dead ChatGPT credential is encrypted with the existing mandatory
+production vault key and atomically committed with its refresh alarm. Import
+also clears a pending device login. Re-importing the same account while its
+credential is healthy is an idempotent no-op, so a stale caller cannot replace
+a newer token or revision. A different healthy account returns
+`409 chatgpt_account_conflict`. Every success is an empty `204` with `no-store`;
+request bodies and provider material are never logged or reflected.
 
 ## Model egress
 

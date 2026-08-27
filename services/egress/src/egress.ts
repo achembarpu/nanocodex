@@ -3,6 +3,7 @@ import {
   type BrokerEnv,
   UserCredentialBroker,
   type UserCredentialSnapshot,
+  validChatGptCredentialImport,
 } from "./broker";
 import {
   UserConnectorBroker,
@@ -27,6 +28,7 @@ const PROVIDER_PLACEHOLDER = "Bearer NANOCODEX_PROVIDER_CREDENTIAL";
 const MODEL_STATUS_PATH = "/.well-known/nanocodex/model-status";
 const BROKER_READINESS_PATH = "/.well-known/nanocodex/broker-readiness";
 const MAX_CONTROL_BODY_BYTES = 16 * 1024;
+const MAX_CHATGPT_IMPORT_BODY_BYTES = 64 * 1024;
 const MAX_BROKER_RESPONSE_BYTES = 4 * 1024;
 const MAX_MODEL_BODY_BYTES = 32 * 1024 * 1024;
 const CODEX_ATTESTATION_UNAVAILABLE = '{"v":1,"s":1}';
@@ -485,6 +487,7 @@ async function handleControl(request: Request, url: URL, env: EgressEnv): Promis
   if (operation === "chatgpt/local-claim") {
     if (request.method !== "POST") return jsonError(405, "method_not_allowed");
     if (!localClaimEnabled(env)) return jsonError(404, "not_found");
+    if (await hasRequestPayload(request)) return jsonError(400, "invalid_request");
     return userBroker(env, userId).fetch("https://credentials.internal/v1/chatgpt/local-claim", {
       method: "POST",
     });
@@ -504,6 +507,27 @@ async function handleControl(request: Request, url: URL, env: EgressEnv): Promis
   if (operation === "openai" && request.method === "DELETE") {
     return userBroker(env, userId).fetch("https://credentials.internal/v1/openai-key", {
       method: "DELETE",
+    });
+  }
+  if (operation === "chatgpt" && request.method === "PUT") {
+    if (request.headers.get("content-type")?.toLowerCase() !== "application/json") {
+      return jsonError(400, "invalid_chatgpt_credential");
+    }
+    let body: unknown;
+    try {
+      body = JSON.parse(await readBoundedText(request, MAX_CHATGPT_IMPORT_BODY_BYTES));
+    } catch (error) {
+      return error instanceof EgressFailure
+        ? jsonError(error.status, error.code)
+        : jsonError(400, "invalid_chatgpt_credential");
+    }
+    if (!validChatGptCredentialImport(body)) {
+      return jsonError(400, "invalid_chatgpt_credential");
+    }
+    return userBroker(env, userId).fetch("https://credentials.internal/v1/chatgpt", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
     });
   }
   if (operation === "chatgpt/login" && request.method === "POST") {
