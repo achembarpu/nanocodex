@@ -1,4 +1,5 @@
 export const MULTIPLAYER_MAX_MESSAGE_BYTES = 16 * 1024;
+export const MULTIPLAYER_ROOM_ENDED_CLOSE_CODE = 4000;
 
 export type MultiplayerTarget = "room" | "agent";
 
@@ -44,6 +45,7 @@ export type MultiplayerServerMessage =
   | { type: "accepted"; id: string; cursor: string; replayed: boolean }
   | { type: "replay_paused"; cursor: string; latest_cursor: string }
   | { type: "presence"; online_member_ids: string[] }
+  | { type: "room_ended" }
   | { type: "pong"; nonce?: string }
   | { type: "error"; code: string; message: string; id?: string };
 
@@ -474,6 +476,10 @@ export function decodeMultiplayerMessage(encoded: string): MultiplayerServerMess
   if (value.type === "presence") {
     exactKeys(value, ["type", "online_member_ids"]);
     return { type: "presence", online_member_ids: memberIdArray(value.online_member_ids) };
+  }
+  if (value.type === "room_ended") {
+    exactKeys(value, ["type"]);
+    return { type: "room_ended" };
   }
   if (value.type === "pong") {
     exactKeys(value, ["type", "nonce"]);

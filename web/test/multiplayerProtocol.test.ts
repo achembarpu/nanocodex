@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
+  MULTIPLAYER_ROOM_ENDED_CLOSE_CODE,
   MultiplayerProtocolError,
   clearMultiplayerCreateAttempt,
   clearMultiplayerJoinAttempt,
@@ -248,6 +249,35 @@ test("the room decoder and reducer require a contiguous durable event stream", (
     event: { type: "agent_message", id: "agent-2", text: "hi", reply_to: "2" },
   }));
   assert.throws(() => reduceMultiplayerMessage(state, gap), MultiplayerProtocolError);
+});
+
+test("room-ended status is terminal while other socket closes retain reconnect handling", () => {
+  assert.equal(MULTIPLAYER_ROOM_ENDED_CLOSE_CODE, 4000);
+  assert.deepEqual(decodeMultiplayerMessage('{"type":"room_ended"}'), {
+    type: "room_ended",
+  });
+  assert.throws(
+    () => decodeMultiplayerMessage('{"type":"room_ended","retry":true}'),
+    /unsupported fields/,
+  );
+
+  const source = readFileSync(new URL("../src/Multiplayer.tsx", import.meta.url), "utf8");
+  assert.match(source, /message\.type === "room_ended"[\s\S]*?markRoomEnded\(receipt\.roomId\)/);
+  assert.match(
+    source,
+    /event\.code === MULTIPLAYER_ROOM_ENDED_CLOSE_CODE[\s\S]*?markRoomEnded\(receipt\.roomId\)/,
+  );
+  const closeStart = source.indexOf('socket.addEventListener("close"');
+  const closeEnd = source.indexOf('socket.addEventListener("error"', closeStart);
+  const closeHandler = source.slice(closeStart, closeEnd);
+  assert.match(closeHandler, /ROOM_ENDED_CLOSE_CODE[\s\S]*?return;[\s\S]*?setTimeout/);
+
+  const terminalStart = source.indexOf("{roomEnded ? (");
+  const terminalEnd = source.indexOf(") : roomError ? (", terminalStart);
+  const terminalStatus = source.slice(terminalStart, terminalEnd);
+  assert.match(terminalStatus, /This room has ended/);
+  assert.match(terminalStatus, /Create another room/);
+  assert.doesNotMatch(terminalStatus, /Retry/);
 });
 
 test("the public protocol rejects private managed-agent fields", () => {

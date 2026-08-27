@@ -9,6 +9,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
 import type { Env } from "../src/index";
 import { MultiplayerRoom } from "../src/multiplayer-room";
+import { ROOM_ENDED_CLOSE_CODE } from "../src/multiplayer-protocol";
 
 const ORIGIN = "https://example.test";
 const admin = { authorization: "Bearer test-admin-token" };
@@ -1474,6 +1475,38 @@ describe("durable Multiplayer rooms", () => {
     rooms.delete(owner.room_id);
   });
 
+  it("terminates every live owner tab with an explicit room-ended status", async () => {
+    const owner = await createRoom("Ada");
+    const [first, second] = await Promise.all([
+      connectWithReady(owner.websocket_url, owner.cookie),
+      connectWithReady(owner.websocket_url, owner.cookie),
+    ]);
+    try {
+      const ended = [
+        nextWhere(first.socket, (message) => message.type === "room_ended"),
+        nextWhere(second.socket, (message) => message.type === "room_ended"),
+      ];
+      const closed = [nextClose(first.socket), nextClose(second.socket)];
+      const deleted = await SELF.fetch(`${ORIGIN}/v1/rooms/${owner.room_id}`, {
+        method: "DELETE",
+        headers: { cookie: cookiePair(owner.cookie) },
+      });
+      expect(deleted.status).toBe(204);
+      expect(await Promise.all(ended)).toEqual([
+        { type: "room_ended" },
+        { type: "room_ended" },
+      ]);
+      for (const event of await Promise.all(closed)) {
+        expect(event.code).toBe(ROOM_ENDED_CLOSE_CODE);
+        expect(event.reason).toBe("room ended");
+      }
+      rooms.delete(owner.room_id);
+    } finally {
+      first.socket.close(1000, "done");
+      second.socket.close(1000, "done");
+    }
+  });
+
   it("durably meters operator-funded agent turns per member", async () => {
     const owner = await createRoom("Ada");
     const socket = await connect(owner.websocket_url, owner.cookie);
@@ -2135,5 +2168,20 @@ function nextWhere(
       resolve(message);
     };
     socket.addEventListener("message", onMessage);
+  });
+}
+
+function nextClose(socket: WebSocket, timeoutMs = 3_000): Promise<CloseEvent> {
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      socket.removeEventListener("close", onClose);
+      reject(new Error("timed out waiting for room socket close"));
+    }, timeoutMs);
+    const onClose = (event: CloseEvent) => {
+      clearTimeout(timeout);
+      socket.removeEventListener("close", onClose);
+      resolve(event);
+    };
+    socket.addEventListener("close", onClose);
   });
 }

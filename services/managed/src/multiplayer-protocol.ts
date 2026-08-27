@@ -1,5 +1,6 @@
 export const MAX_ROOM_MESSAGE_BYTES = 16 * 1024;
 export const MAX_DISPLAY_NAME_BYTES = 64;
+export const ROOM_ENDED_CLOSE_CODE = 4000;
 
 export type RoomTarget = "room" | "agent";
 
@@ -55,6 +56,7 @@ export type RoomServerMessage =
   | { type: "accepted"; id: string; cursor: string; replayed: boolean }
   | { type: "replay_paused"; cursor: string; latest_cursor: string }
   | { type: "presence"; online_member_ids: string[] }
+  | { type: "room_ended" }
   | { type: "pong"; nonce?: string }
   | { type: "error"; code: string; message: string; id?: string };
 

@@ -130,6 +130,12 @@
   font: 600 10px/1 var(--font-mono);
 }
 
+.multiplayer-room-error.is-terminal {
+  color: var(--text-secondary);
+  background: var(--surface-subtle);
+  border-top-color: var(--border);
+}
+
 .multiplayer-lobby-card button:disabled,
 .multiplayer-composer button:disabled {
   cursor: default;

@@ -9,6 +9,7 @@ import {
 } from "react";
 import {
   MULTIPLAYER_MAX_MESSAGE_BYTES,
+  MULTIPLAYER_ROOM_ENDED_CLOSE_CODE,
   MultiplayerProtocolError,
   clearMultiplayerCreateAttempt,
   clearMultiplayerJoinAttempt,
@@ -42,6 +43,7 @@ type LobbyState =
   | { kind: "create"; error?: string }
   | { kind: "join"; roomId: string; invite: string; error?: string }
   | { kind: "resume"; roomId: string }
+  | { kind: "ended"; roomId: string }
   | { kind: "blocked"; roomId: string; error: string };
 
 type RoomReceipt = {
@@ -80,6 +82,7 @@ export function Multiplayer() {
   const [pending, setPending] = useState(false);
   const [room, setRoom] = useState<MultiplayerRoomState>();
   const [connected, setConnected] = useState(false);
+  const [roomEnded, setRoomEnded] = useState(false);
   const [draft, setDraft] = useState("");
   const [target, setTarget] = useState<MultiplayerTarget>("room");
   const [roomError, setRoomError] = useState<string>();
@@ -121,6 +124,17 @@ export function Multiplayer() {
     }
   }, []);
 
+  const markRoomEnded = useCallback((roomId: string) => {
+    socketGeneration.current++;
+    window.clearTimeout(reconnectTimer.current);
+    socketRef.current = undefined;
+    setConnected(false);
+    setPending(false);
+    setRoomEnded(true);
+    setRoomError(undefined);
+    setLobby({ kind: "ended", roomId });
+  }, []);
+
   const resendPendingSend = useCallback((
     socket: WebSocket,
     roomId: string,
@@ -148,6 +162,7 @@ export function Multiplayer() {
   const connect = useCallback((receipt: PendingRoom, isReconnect = false) => {
     if (!mounted.current) return;
     window.clearTimeout(reconnectTimer.current);
+    setRoomEnded(false);
     const generation = ++socketGeneration.current;
     socketRef.current?.close(1000, "replaced connection");
     const retained = roomRef.current?.roomId === receipt.roomId ? roomRef.current : undefined;
@@ -162,6 +177,10 @@ export function Multiplayer() {
         || typeof event.data !== "string") return;
       try {
         const message = decodeMultiplayerMessage(event.data);
+        if (message.type === "room_ended") {
+          markRoomEnded(receipt.roomId);
+          return;
+        }
         if (message.type === "ready") {
           if (message.room_id !== receipt.roomId
             || (receipt.memberId !== undefined && message.member_id !== receipt.memberId)) {
@@ -223,8 +242,12 @@ export function Multiplayer() {
       }
     });
 
-    socket.addEventListener("close", () => {
+    socket.addEventListener("close", (event) => {
       if (!mounted.current || generation !== socketGeneration.current) return;
+      if (event.code === MULTIPLAYER_ROOM_ENDED_CLOSE_CODE) {
+        markRoomEnded(receipt.roomId);
+        return;
+      }
       setConnected(false);
       if (!roomRef.current || roomRef.current.roomId !== receipt.roomId) {
         setPending(false);
@@ -251,7 +274,7 @@ export function Multiplayer() {
         setRoomError(undefined);
       }
     });
-  }, [commitRoom, forgetPendingSend, resendPendingSend]);
+  }, [commitRoom, forgetPendingSend, markRoomEnded, resendPendingSend]);
 
   useEffect(() => {
     mounted.current = true;
@@ -531,6 +554,7 @@ export function Multiplayer() {
     socketRef.current?.close(1000, "left room");
     socketRef.current = undefined;
     setConnected(false);
+    setRoomEnded(false);
     roomRef.current = undefined;
     pendingRoomRef.current = undefined;
     const joinAttempt = joinAttemptRef.current;
@@ -608,6 +632,15 @@ export function Multiplayer() {
                 {lobby.error ? <p className="multiplayer-error" role="alert">{lobby.error}</p> : null}
                 <button type="submit" disabled={pending}>Join room</button>
               </form>
+            ) : lobby.kind === "ended" ? (
+              <div className="multiplayer-blocked">
+                <p className="multiplayer-kicker">room · {shortRoomId(lobby.roomId)}</p>
+                <h2>Room ended</h2>
+                <p>This room has ended. Its live session is closed.</p>
+                <div className="multiplayer-button-row">
+                  <button type="button" onClick={leaveRoom}>Create another room</button>
+                </div>
+              </div>
             ) : lobby.kind === "blocked" ? (
               <div className="multiplayer-blocked">
                 <p className="multiplayer-kicker">room · {shortRoomId(lobby.roomId)}</p>
@@ -662,7 +695,7 @@ export function Multiplayer() {
     );
   }
 
-  const online = new Set(room.onlineMemberIds);
+  const online = new Set(roomEnded ? [] : room.onlineMemberIds);
   return (
     <section className="multiplayer-room" aria-labelledby="multiplayer-room-title">
       <header className="multiplayer-room-heading">
@@ -671,11 +704,11 @@ export function Multiplayer() {
           <h1 id="multiplayer-room-title">Managed-agent room</h1>
         </div>
         <div className="multiplayer-room-actions">
-          <span className={connected ? "is-live" : ""}><i />{connected ? "live" : "offline"}</span>
-          {room.inviteUrl ? (
+          <span className={connected ? "is-live" : ""}><i />{roomEnded ? "ended" : connected ? "live" : "offline"}</span>
+          {!roomEnded && room.inviteUrl ? (
             <button type="button" onClick={copyInvite}>{inviteCopied ? "Invite copied" : "Copy invite"}</button>
           ) : null}
-          {room.canEndRoom ? (
+          {!roomEnded && room.canEndRoom ? (
             <button type="button" disabled={endingRoom} onClick={() => void endRoom()}>End room</button>
           ) : null}
           <button type="button" onClick={leaveRoom}>Leave</button>
@@ -708,13 +741,18 @@ export function Multiplayer() {
               {unreadCount} unread {unreadCount === 1 ? "update" : "updates"} · Jump to latest
             </button>
           ) : null}
-          {roomError ? (
+          {roomEnded ? (
+            <div className="multiplayer-room-error is-terminal" role="status">
+              <span>This room has ended. The live session is closed.</span>
+              <button type="button" onClick={leaveRoom}>Create another room</button>
+            </div>
+          ) : roomError ? (
             <div className="multiplayer-room-error" role="alert">
               <span>{roomError}</span>
               {!connected ? <button type="button" onClick={retryRoom}>Retry</button> : null}
             </div>
           ) : null}
-          <form className="multiplayer-composer" onSubmit={sendMessage}>
+          {!roomEnded ? <form className="multiplayer-composer" onSubmit={sendMessage}>
             <div className="multiplayer-target" aria-label="Message target">
               <button
                 className={target === "room" ? "is-active" : ""}
@@ -745,18 +783,18 @@ export function Multiplayer() {
               disabled={!connected || pendingSend !== undefined}
             />
             <button type="submit" disabled={!connected || pendingSend !== undefined || !draft.trim()}>Send</button>
-          </form>
+          </form> : null}
         </div>
 
         <aside className="multiplayer-sidebar">
           <section aria-labelledby="multiplayer-members-title">
             <header>
               <p>participants</p>
-              <strong>{room.onlineMemberIds.length + 1} online</strong>
+              <strong>{roomEnded ? "room ended" : `${room.onlineMemberIds.length + 1} online`}</strong>
             </header>
             <h2 className="sr-only" id="multiplayer-members-title">Room participants</h2>
             <ul>
-              <li className="is-online is-agent">
+              <li className={roomEnded ? "is-agent" : "is-online is-agent"}>
                 <i />
                 <span><strong>Nanocodex</strong><small>managed agent</small></span>
               </li>

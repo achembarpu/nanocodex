@@ -8,6 +8,7 @@ import {
 } from "./durable-events";
 import {
   MAX_ROOM_MESSAGE_BYTES,
+  ROOM_ENDED_CLOSE_CODE,
   RoomProtocolError,
   parseRoomCommand,
   truncateRoomMessage,
@@ -1563,7 +1564,10 @@ export class MultiplayerRoom extends DurableObject<MultiplayerRoomEnv> {
       throw error;
     }
     if (!deleting) return new Response(null, { status: 204 });
-    for (const socket of this.ctx.getWebSockets()) closeSocket(socket, 1000, "room deleted");
+    for (const socket of this.ctx.getWebSockets()) {
+      this.#send(socket, { type: "room_ended" });
+      closeSocket(socket, ROOM_ENDED_CLOSE_CODE, "room ended");
+    }
     await this.#rescheduleAlarm();
     return this.#deleteOwnedAgent(deleting);
   }
