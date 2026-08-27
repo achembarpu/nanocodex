@@ -95,6 +95,7 @@ describe("Cloudflare sandbox tools", () => {
   });
 
   it("passes bounded exec options through and reports non-zero results", async () => {
+    const dispose = vi.fn();
     const sandbox = makeSandbox({
       exec: vi.fn(async () => ({
         success: false,
@@ -102,6 +103,7 @@ describe("Cloudflare sandbox tools", () => {
         stdout: "partial",
         stderr: "failed",
         duration: 42,
+        [Symbol.dispose]: dispose,
       })),
     });
     const tools = createCloudflareSandboxTools(async () => sandbox);
@@ -120,6 +122,7 @@ describe("Cloudflare sandbox tools", () => {
       stderr_truncated: false,
       duration_ms: 42,
     });
+    expect(dispose).toHaveBeenCalledOnce();
 
     await invoke(tools, "sandbox_exec", {
       command: "pwd",
@@ -209,10 +212,12 @@ describe("Cloudflare sandbox tools", () => {
 
   it("assembles a bounded multichunk UTF-8 read", async () => {
     const bytes = new TextEncoder().encode("left 😀 right");
+    const dispose = vi.fn();
     const sandbox = makeSandbox({
       readFile: vi.fn(async () => ({
         size: bytes.byteLength,
         content: byteStream(bytes.subarray(0, 7), bytes.subarray(7, 9), bytes.subarray(9)),
+        [Symbol.dispose]: dispose,
       })),
     });
     const tools = createCloudflareSandboxTools(async () => sandbox);
@@ -222,17 +227,23 @@ describe("Cloudflare sandbox tools", () => {
       content: "left 😀 right",
     });
     expect(sandbox.readFile).toHaveBeenCalledWith("/workspace/message.txt", { encoding: "none" });
+    expect(dispose).toHaveBeenCalledOnce();
   });
 
-  it("rejects oversized read metadata without consuming the stream", async () => {
+  it("rejects oversized read metadata without consuming and releases the stream", async () => {
     let pulled = false;
+    const cancel = vi.fn();
+    const dispose = vi.fn();
     const content = new ReadableStream<Uint8Array>({
       pull(controller) {
         pulled = true;
         controller.enqueue(new Uint8Array([1]));
       },
+      cancel,
     }, { highWaterMark: 0 });
-    const sandbox = makeSandbox({ readFile: vi.fn(async () => ({ size: MIB + 1, content })) });
+    const sandbox = makeSandbox({
+      readFile: vi.fn(async () => ({ size: MIB + 1, content, [Symbol.dispose]: dispose })),
+    });
 
     await expect(invoke(
       createCloudflareSandboxTools(async () => sandbox),
@@ -240,6 +251,8 @@ describe("Cloudflare sandbox tools", () => {
       { path: "large.txt" },
     )).rejects.toThrow("file exceeds 1 MiB");
     expect(pulled).toBe(false);
+    expect(cancel).toHaveBeenCalledExactlyOnceWith("file exceeds 1 MiB");
+    expect(dispose).toHaveBeenCalledOnce();
   });
 
   it("cancels a lying stream that crosses the read limit", async () => {
@@ -277,14 +290,18 @@ describe("Cloudflare sandbox tools", () => {
   });
 
   it("includes hidden entries, caps directory results, and exposes previews", async () => {
+    const filesDispose = vi.fn();
+    const tunnelDispose = vi.fn();
     const files = Array.from({ length: 513 }, (_, index) => ({
       name: index === 0 ? ".hidden" : `file-${index}`,
       type: index % 2 === 0 ? "file" : "directory",
       size: index,
     }));
     const sandbox = makeSandbox({
-      listFiles: vi.fn(async () => ({ files })),
-      tunnels: { get: vi.fn(async () => ({ url: "https://preview.example" })) },
+      listFiles: vi.fn(async () => ({ files, [Symbol.dispose]: filesDispose })),
+      tunnels: {
+        get: vi.fn(async () => ({ url: "https://preview.example", [Symbol.dispose]: tunnelDispose })),
+      },
     });
     const tools = createCloudflareSandboxTools(async () => sandbox);
 
@@ -293,6 +310,7 @@ describe("Cloudflare sandbox tools", () => {
     expect(listed.entries).toHaveLength(512);
     expect(listed.entries[0]).toEqual({ name: ".hidden", type: "file", size: 0 });
     expect(listed.truncated).toBe(true);
+    expect(filesDispose).toHaveBeenCalledOnce();
 
     await expect(invoke(tools, "sandbox_preview", { port: 65_535 })).resolves.toEqual({
       port: 65_535,
@@ -300,9 +318,11 @@ describe("Cloudflare sandbox tools", () => {
       persistent: false,
     });
     expect(sandbox.tunnels.get).toHaveBeenCalledWith(65_535);
+    expect(tunnelDispose).toHaveBeenCalledOnce();
   });
 
   it("starts a managed process and optionally waits for port readiness", async () => {
+    const dispose = vi.fn();
     const process = {
       id: "process-1",
       pid: 42,
@@ -310,6 +330,7 @@ describe("Cloudflare sandbox tools", () => {
       status: "starting",
       getStatus: vi.fn(async () => "running"),
       waitForPort: vi.fn(async () => {}),
+      [Symbol.dispose]: dispose,
     };
     const sandbox = makeSandbox({ startProcess: vi.fn(async () => process) });
     const tools = createCloudflareSandboxTools(async () => sandbox);
@@ -331,6 +352,27 @@ describe("Cloudflare sandbox tools", () => {
       autoCleanup: true,
     });
     expect(process.waitForPort).toHaveBeenCalledWith(8080, { timeout: 12_345 });
+    expect(dispose).toHaveBeenCalledOnce();
+  });
+
+  it("releases a process RPC result when readiness or status lookup fails", async () => {
+    const dispose = vi.fn();
+    const failure = new Error("process exited");
+    const process = {
+      id: "process-1",
+      command: "node server.js",
+      getStatus: vi.fn(async () => { throw failure; }),
+      waitForPort: vi.fn(async () => {}),
+      [Symbol.dispose]: dispose,
+    };
+    const sandbox = makeSandbox({ startProcess: vi.fn(async () => process) });
+
+    await expect(invoke(
+      createCloudflareSandboxTools(async () => sandbox),
+      "sandbox_start_process",
+      { command: "node server.js" },
+    )).rejects.toBe(failure);
+    expect(dispose).toHaveBeenCalledOnce();
   });
 
   it("uses a Worker-fronted preview provider after initializing the sandbox", async () => {

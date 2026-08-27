@@ -107,18 +107,22 @@ export function createCloudflareSandboxTools(
         const command = requiredString(value.command, "command", MAX_COMMAND_CHARS);
         const cwd = workspacePath(optionalString(value.cwd, "cwd") ?? ".");
         const timeout = optionalInteger(value.timeout_ms, "timeout_ms", 1, MAX_TIMEOUT_MS) ?? 60_000;
-        const result = await (await sandbox()).exec(command, { cwd, timeout });
-        const stdout = truncate(result.stdout);
-        const stderr = truncate(result.stderr);
-        return {
-          success: result.success,
-          exit_code: result.exitCode,
-          stdout: stdout.text,
-          stderr: stderr.text,
-          stdout_truncated: stdout.truncated,
-          stderr_truncated: stderr.truncated,
-          duration_ms: result.duration,
-        };
+        return withSandboxRpcResult(
+          (await sandbox()).exec(command, { cwd, timeout }),
+          (result) => {
+            const stdout = truncate(result.stdout);
+            const stderr = truncate(result.stderr);
+            return {
+              success: result.success,
+              exit_code: result.exitCode,
+              stdout: stdout.text,
+              stderr: stderr.text,
+              stdout_truncated: stdout.truncated,
+              stderr_truncated: stderr.truncated,
+              duration_ms: result.duration,
+            };
+          },
+        );
       },
     },
     sandbox_read_file: {
@@ -126,9 +130,16 @@ export function createCloudflareSandboxTools(
       parameters: pathParameters(),
       handler: async (input) => {
         const path = workspacePath(requiredString(objectInput(input).path, "path", 1024));
-        const result = await (await sandbox()).readFile(path, { encoding: "none" });
-        if (result.size > MAX_FILE_BYTES) throw new Error("file exceeds 1 MiB");
-        return { path, content: await readBounded(result.content) };
+        return withSandboxRpcResult(
+          (await sandbox()).readFile(path, { encoding: "none" }),
+          async (result) => {
+            if (result.size > MAX_FILE_BYTES) {
+              await cancelReadableStream(result.content, "file exceeds 1 MiB");
+              throw new Error("file exceeds 1 MiB");
+            }
+            return { path, content: await readBounded(result.content) };
+          },
+        );
       },
     },
     sandbox_start_process: {
@@ -155,17 +166,21 @@ export function createCloudflareSandboxTools(
           1,
           MAX_TIMEOUT_MS,
         ) ?? 30_000;
-        const process = await (await sandbox()).startProcess(command, { cwd, autoCleanup: true });
-        if (readyPort !== undefined) {
-          await process.waitForPort(readyPort, { timeout: readyTimeout });
-        }
-        return {
-          process_id: process.id,
-          pid: process.pid,
-          command: process.command,
-          status: await process.getStatus(),
-          ...(readyPort === undefined ? {} : { ready_port: readyPort }),
-        };
+        return withSandboxRpcResult(
+          (await sandbox()).startProcess(command, { cwd, autoCleanup: true }),
+          async (process) => {
+            if (readyPort !== undefined) {
+              await process.waitForPort(readyPort, { timeout: readyTimeout });
+            }
+            return {
+              process_id: process.id,
+              pid: process.pid,
+              command: process.command,
+              status: await process.getStatus(),
+              ...(readyPort === undefined ? {} : { ready_port: readyPort }),
+            };
+          },
+        );
       },
     },
     sandbox_write_file: {
@@ -201,16 +216,18 @@ export function createCloudflareSandboxTools(
       handler: async (input) => {
         const value = objectInput(input);
         const path = workspacePath(optionalString(value.path, "path") ?? ".");
-        const result = await (await sandbox()).listFiles(path, { includeHidden: true });
-        return {
-          path,
-          entries: result.files.slice(0, MAX_LIST_ENTRIES).map((entry) => ({
-            name: entry.name,
-            type: entry.type,
-            size: entry.size,
-          })),
-          truncated: result.files.length > MAX_LIST_ENTRIES,
-        };
+        return withSandboxRpcResult(
+          (await sandbox()).listFiles(path, { includeHidden: true }),
+          (result) => ({
+            path,
+            entries: result.files.slice(0, MAX_LIST_ENTRIES).map((entry) => ({
+              name: entry.name,
+              type: entry.type,
+              size: entry.size,
+            })),
+            truncated: result.files.length > MAX_LIST_ENTRIES,
+          }),
+        );
       },
     },
     sandbox_preview: {
@@ -222,8 +239,10 @@ export function createCloudflareSandboxTools(
         const port = requiredPort(objectInput(input).port);
         await sandbox();
         if (createPreview) return createPreview(port);
-        const tunnel = await (await sandbox()).tunnels.get(port);
-        return { port, url: tunnel.url, persistent: false };
+        return withSandboxRpcResult(
+          (await sandbox()).tunnels.get(port),
+          (tunnel) => ({ port, url: tunnel.url, persistent: false }),
+        );
       },
     },
   };
@@ -434,21 +453,26 @@ async function readBounded(stream: ReadableStream<Uint8Array>): Promise<string> 
   const reader = stream.getReader();
   const chunks: Uint8Array[] = [];
   let size = 0;
+  let completed = false;
+  let cancelled = false;
   try {
     while (true) {
       const next = await reader.read();
-      if (next.done) break;
+      if (next.done) {
+        completed = true;
+        break;
+      }
       size += next.value.byteLength;
       if (size > MAX_FILE_BYTES) {
-        try {
-          await reader.cancel("file exceeds 1 MiB");
-        } catch {
-          // Preserve the deterministic size error if cancellation also fails.
-        }
+        cancelled = true;
+        await cancelReader(reader, "file exceeds 1 MiB");
         throw new Error("file exceeds 1 MiB");
       }
       chunks.push(next.value);
     }
+  } catch (error) {
+    if (!completed && !cancelled) await cancelReader(reader, error);
+    throw error;
   } finally {
     reader.releaseLock();
   }
@@ -462,6 +486,39 @@ async function readBounded(stream: ReadableStream<Uint8Array>): Promise<string> 
     return new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(content);
   } catch {
     throw new Error("file is not valid UTF-8");
+  }
+}
+
+async function withSandboxRpcResult<T extends object, R>(
+  result: Promise<T>,
+  consume: (value: T) => R | Promise<R>,
+): Promise<R> {
+  const value = await result;
+  try {
+    return await consume(value);
+  } finally {
+    disposeSandboxRpcValue(value);
+  }
+}
+
+function disposeSandboxRpcValue(value: object): void {
+  const dispose = (value as Partial<Disposable>)[Symbol.dispose];
+  if (typeof dispose === "function") dispose.call(value);
+}
+
+async function cancelReadableStream(stream: ReadableStream<Uint8Array>, reason: unknown): Promise<void> {
+  try {
+    await stream.cancel(reason);
+  } catch {
+    // Preserve the result or decoding failure when cancellation also fails.
+  }
+}
+
+async function cancelReader(reader: ReadableStreamDefaultReader<Uint8Array>, reason: unknown): Promise<void> {
+  try {
+    await reader.cancel(reason);
+  } catch {
+    // Preserve the result or decoding failure when cancellation also fails.
   }
 }
 
