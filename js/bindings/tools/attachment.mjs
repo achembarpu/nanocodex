@@ -585,7 +585,13 @@ function attachmentEndpoint(target) {
   return url.href;
 }
 function attachmentTransport(target) { return typeof target === "object" && !(target instanceof URL) ? target.transport : undefined; }
-function isLoopback(hostname) { return hostname === "localhost" || hostname === "[::1]" || /^127(?:\.[0-9]{1,3}){3}$/.test(hostname); }
+function isLoopback(hostname) {
+  return hostname === "localhost"
+    || hostname === "[::1]"
+    || /^127(?:\.[0-9]{1,3}){3}$/.test(hostname)
+    || hostname === "nanocodex.localhost"
+    || /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.nanocodex\.localhost$/.test(hostname);
+}
 function closeReason(reason) {
   if (utf8ByteLength(reason) <= 123) return reason;
   let bounded = ""; for (const scalar of reason) { if (utf8ByteLength(bounded + scalar) > 123) break; bounded += scalar; }

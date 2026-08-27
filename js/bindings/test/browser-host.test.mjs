@@ -143,6 +143,49 @@ test("browser host composes an isolate-owned dynamic tool provider", async () =>
   });
 });
 
+test("browser host keeps late pure-attached definitions callable after discovery", async () => {
+  let attached = false;
+  const provider = {
+    definitions: () => attached ? [{
+      type: "function",
+      name: "hosted_echo",
+      description: "Echo through the reverse host.",
+      strict: false,
+      defer_loading: true,
+      parameters: { type: "object", additionalProperties: true },
+    }] : [],
+    resolve: (name) => attached && name === "hosted_echo" ? {
+      name,
+      parallelSafe: true,
+      handler: (input) => ({ source: "private-host", echoed: input }),
+    } : undefined,
+  };
+  const host = createBrowserHost({ toolProviders: [provider] });
+
+  assert.deepEqual(
+    JSON.parse(host.toolDefinitions()).map((definition) =>
+      definition.type === "tool_search" ? "tool_search" : definition.name),
+    ["tool_search"],
+  );
+  attached = true;
+  assert.deepEqual(
+    JSON.parse(host.toolDefinitions()).map((definition) =>
+      definition.type === "tool_search" ? "tool_search" : definition.name),
+    ["tool_search", "hosted_echo"],
+  );
+  const result = JSON.parse(await host.executeTool(
+    "hosted_echo",
+    JSON.stringify({ value: 42 }),
+    "session",
+    "call-hosted-echo",
+  ));
+  assert.equal(result.success, true);
+  assert.deepEqual(result.structured_result, {
+    source: "private-host",
+    echoed: { value: 42 },
+  });
+});
+
 test("browser host directly dispatches tools without dynamic code evaluation", async () => {
   const host = createBrowserHost({
     toolMode: "direct",

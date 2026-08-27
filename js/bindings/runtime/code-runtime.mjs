@@ -36,8 +36,8 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
   }
   if (!toolConfiguration?.[toolRouterBrand]) addTools(toolConfiguration);
 
-  function stableDefinitions() {
-    return router.modelDefinitions();
+  function callableDefinitions() {
+    return router.definitions();
   }
 
   function resolveTool(name) {
@@ -393,7 +393,7 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
     },
     nextCodeUpdate,
     cancel,
-    toolDefinitions: () => JSON.stringify(stableDefinitions()),
+    toolDefinitions: () => JSON.stringify(callableDefinitions()),
     releaseSession,
     reset,
   });

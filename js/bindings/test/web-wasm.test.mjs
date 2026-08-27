@@ -528,6 +528,121 @@ text(await tools[selected.name]({ message: "hello" }));`,
   }
 });
 
+test("web-target WASM directly dispatches a discovered pure-attached tool", async () => {
+  const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+  await new Promise((resolve, reject) => {
+    server.once("listening", resolve);
+    server.once("error", reject);
+  });
+  const connection = new Promise((resolve) => server.once("connection", resolve));
+  const calls = [];
+  const provider = {
+    definitions: () => [{
+      type: "function",
+      name: "browser_echo",
+      description: "Echo a deterministic browser fixture message.",
+      strict: false,
+      defer_loading: true,
+      parameters: {
+        type: "object",
+        properties: { message: { type: "string" } },
+        required: ["message"],
+        additionalProperties: false,
+      },
+    }],
+    resolve: (name) => name === "browser_echo" ? {
+      name,
+      parallelSafe: false,
+      handler: (input) => {
+        calls.push(input);
+        return { echoed: input.message, source: "browser-host" };
+      },
+    } : undefined,
+  };
+  const wasm = await readFile(new URL("../pkg-web/nanocodex_bg.wasm", import.meta.url));
+  const agent = await createWarmAgent({
+    apiKey: "test-key",
+    WebSocketImpl: WebSocket,
+    module: wasm,
+    sessionId: "018f1f9a-7b3c-7a07-8000-000000000013",
+    thinking: "low",
+    [Symbol.for("nanocodex.browser.internalRuntime")]: { toolProviders: [provider] },
+    websocketUrl: `ws://127.0.0.1:${server.address().port}`,
+  });
+  let turn;
+  let result;
+  try {
+    turn = agent.turn.prompt({ input: "Find and call the browser echo tool." });
+    const socket = await connection;
+    const reader = messageReader(socket);
+    const warmup = await reader.next();
+    const toolPrefix = warmup.input.find((item) => item.type === "additional_tools");
+    assert.equal(toolPrefix.tools.some((tool) => tool.name === "browser_echo"), false);
+    send(socket, { type: "response.completed", response: { id: "attached-warmup", usage: null } });
+
+    await reader.next();
+    send(socket, {
+      type: "response.completed",
+      response: {
+        id: "attached-search",
+        status: "completed",
+        output: [{
+          type: "tool_search_call",
+          call_id: "search-attached",
+          execution: "client",
+          arguments: { query: "browser echo deterministic message", limit: 1 },
+        }],
+        usage: null,
+      },
+    });
+
+    const searched = await reader.next();
+    assert.equal(searched.input[0].type, "tool_search_output");
+    assert.equal(searched.input[0].tools[0].name, "browser_echo");
+    send(socket, {
+      type: "response.completed",
+      response: {
+        id: "attached-call",
+        status: "completed",
+        output: [{
+          type: "function_call",
+          call_id: "call-attached",
+          name: "browser_echo",
+          arguments: JSON.stringify({ message: "BROWSER_ECHO_OK" }),
+        }],
+        usage: null,
+      },
+    });
+
+    const called = await reader.next();
+    assert.equal(called.input[0].type, "function_call_output");
+    assert.match(called.input[0].output, /BROWSER_ECHO_OK/);
+    send(socket, {
+      type: "response.completed",
+      response: {
+        id: "attached-final",
+        status: "completed",
+        output: [{
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: "ATTACHED_WASM_OK" }],
+        }],
+        usage: null,
+      },
+    });
+
+    result = await turn.result();
+    assert.equal(result.finalMessage, "ATTACHED_WASM_OK");
+    assert.deepEqual(calls, [{ message: "BROWSER_ECHO_OK" }]);
+  } finally {
+    result?.dispose();
+    turn?.dispose();
+    await agent.session.shutdown();
+    for (const socket of server.clients) socket.terminate();
+    await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+});
+
 test("web-target WASM executes the complete browser harness tool contract", async () => {
   const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
   await new Promise((resolve, reject) => {

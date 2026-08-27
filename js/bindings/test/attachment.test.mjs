@@ -428,6 +428,30 @@ test("attachment target and public one-argument API are enforced", async () => {
   await tools.close();
 });
 
+test("plaintext attachments allow only loopback and canonical local Nanocodex hosts", async () => {
+  const tools = await createTools();
+  for (const target of [
+    "ws://localhost:5173/tools",
+    "ws://127.0.0.1:5173/tools",
+    "ws://[::1]:5173/tools",
+    "ws://nanocodex.localhost:5173/tools",
+    "ws://passkey-fix-a1b2c3.nanocodex.localhost:20735/tools",
+  ]) {
+    assert.doesNotThrow(() => tools.attach(target));
+  }
+  for (const target of [
+    "ws://nested.instance.nanocodex.localhost:5173/tools",
+    "ws://-instance.nanocodex.localhost:5173/tools",
+    "ws://instance-.nanocodex.localhost:5173/tools",
+    "ws://other.localhost:5173/tools",
+    "ws://nanocodex.other.localhost:5173/tools",
+    "ws://instance.nanocodex.localhost.example:5173/tools",
+  ]) {
+    assert.throws(() => tools.attach(target), /plaintext ws/);
+  }
+  await tools.close();
+});
+
 test("attachment waits for providers and dispatches through the socket catalog snapshot", async () => {
   let settle;
   let entries = [];
