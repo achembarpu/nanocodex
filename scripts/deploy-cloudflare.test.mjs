@@ -9,6 +9,7 @@ import {
   assertOneCommandPreflight,
   assertPinnedWrangler,
   assertProductionServiceBindings,
+  cloudflareAccountId,
   executeProductionMutations,
   finalContainerRollout,
   normalizeDeploymentEnvironment,
@@ -104,6 +105,21 @@ test("preflight accepts either a token or authenticated local Wrangler OAuth", (
   const tokenPreflight = preflightEnvironment(token, revision);
   assert.equal(tokenPreflight.CLOUDFLARE_API_TOKEN_CONFIGURED, "true");
   assert.equal(tokenPreflight.CLOUDFLARE_OAUTH_CONFIGURED, "false");
+});
+
+test("one-command deploy discovers the sole account from authenticated Wrangler", () => {
+  const discovered = cloudflareAccountId(undefined, {
+    loggedIn: true,
+    accounts: [{ id: "16ce0442a940f01beefdb15a196a43ea" }],
+  });
+  assert.equal(discovered, "16ce0442a940f01beefdb15a196a43ea");
+  assert.equal(cloudflareAccountId(" explicit-account ", {}), "explicit-account");
+  assert.throws(() => cloudflareAccountId(undefined, {
+    loggedIn: true,
+    accounts: [{ id: "a".repeat(32) }, { id: "b".repeat(32) }],
+  }), /multiple Cloudflare accounts/);
+  assert.throws(() => cloudflareAccountId(undefined, { loggedIn: false, accounts: [] }),
+    /did not expose a Cloudflare account/);
 });
 
 test("legacy private env names normalize and rollout secrets derive stably", () => {

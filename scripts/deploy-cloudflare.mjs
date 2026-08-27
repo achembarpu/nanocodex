@@ -181,6 +181,21 @@ export function normalizeDeploymentEnvironment(environment) {
   return normalized;
 }
 
+export function cloudflareAccountId(configuredAccountId, whoami) {
+  if (configured(configuredAccountId)) return configuredAccountId.trim();
+  const accounts = whoami?.loggedIn === true && Array.isArray(whoami.accounts)
+    ? whoami.accounts.filter(({ id } = {}) => typeof id === "string" && /^[0-9a-f]{32}$/i.test(id))
+    : [];
+  if (accounts.length !== 1) {
+    throw new Error(
+      accounts.length === 0
+        ? "authenticated Wrangler did not expose a Cloudflare account"
+        : "authenticated Wrangler has multiple Cloudflare accounts; set CLOUDFLARE_ACCOUNT_ID",
+    );
+  }
+  return accounts[0].id;
+}
+
 export function assertOneCommandPreflight(environment, checkout) {
   const revision = environment.TARGET_SHA;
   assertProductionCheckout(revision, checkout);
@@ -717,15 +732,16 @@ async function main(environment = process.env) {
   git("fetch", "--quiet", "origin", "master");
   const revision = git("rev-parse", "HEAD");
   const target = environment.TARGET_SHA?.trim() || revision;
-  const rolloutEnvironment = normalizeDeploymentEnvironment({
+  let rolloutEnvironment = normalizeDeploymentEnvironment({
     ...environment,
     TARGET_SHA: target,
   });
-  assertOneCommandPreflight(rolloutEnvironment, checkoutState());
   const resourceTopology = await loadProductionResourceTopology();
 
   await installPinnedDependencies(rolloutEnvironment);
   await assertPinnedWranglerInstallations();
+  rolloutEnvironment = await resolveCloudflareAccountEnvironment(rolloutEnvironment);
+  assertOneCommandPreflight(rolloutEnvironment, checkoutState());
   await verifyCloudflareAuthentication(rolloutEnvironment);
   await buildProductionArtifacts(rolloutEnvironment);
   assertOneCommandPreflight(rolloutEnvironment, checkoutState());
@@ -863,6 +879,24 @@ async function verifyCloudflareAuthentication(environment) {
     redactions: deploymentSecrets(environment),
     timeoutMs: 60_000,
   });
+}
+
+async function resolveCloudflareAccountEnvironment(environment) {
+  if (configured(environment.CLOUDFLARE_ACCOUNT_ID)) return environment;
+  const output = await runWrangler("web", ["whoami", "--json"], {
+    environment: buildEnvironment(environment),
+    label: "Cloudflare account discovery",
+    redactions: deploymentSecrets(environment),
+    timeoutMs: 60_000,
+  });
+  let whoami;
+  try { whoami = JSON.parse(stripVTControlCharacters(output)); } catch (error) {
+    throw new Error("authenticated Wrangler returned invalid account metadata", { cause: error });
+  }
+  return {
+    ...environment,
+    CLOUDFLARE_ACCOUNT_ID: cloudflareAccountId(undefined, whoami),
+  };
 }
 
 async function buildProductionArtifacts(environment) {
