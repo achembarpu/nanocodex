@@ -477,36 +477,43 @@ test("manual compaction and historical forks preserve exact committed boundaries
 
     const branch = await server.nextConnection();
     const branchRequest = await messageReader(branch).next();
-    assert.equal(branchRequest.previous_response_id, undefined);
+    assert.equal(branchRequest.previous_response_id, "resp-first");
+    assert.equal(branchRequest.input.length, 1);
     const encoded = JSON.stringify(branchRequest.input);
-    assert.match(encoded, /remember copper/);
-    assert.match(encoded, /stored copper/);
     assert.match(encoded, /historical branch/);
+    assert.doesNotMatch(encoded, /remember copper/);
+    assert.doesNotMatch(encoded, /stored copper/);
     assert.doesNotMatch(encoded, /remember silver/);
     assert.doesNotMatch(encoded, /after compaction/);
     sendFinal(branch, "resp-historical", "BRANCHED");
   })();
 
-  const first = await agent.turn.prompt({ input: "remember copper" }).result();
-  assert.equal(first.finalMessage, "stored copper");
-  assert.equal(
-    (await agent.turn.prompt({ input: "remember silver" }).result()).finalMessage,
-    "stored silver",
-  );
-  await agent.session.compact();
-  assert.equal(
-    (await agent.turn.prompt({ input: "after compaction" }).result()).finalMessage,
-    "COMPACTED",
-  );
+  let historical;
+  const run = (async () => {
+    const first = await agent.turn.prompt({ input: "remember copper" }).result();
+    assert.equal(first.finalMessage, "stored copper");
+    assert.equal(
+      (await agent.turn.prompt({ input: "remember silver" }).result()).finalMessage,
+      "stored silver",
+    );
+    await agent.session.compact();
+    assert.equal(
+      (await agent.turn.prompt({ input: "after compaction" }).result()).finalMessage,
+      "COMPACTED",
+    );
 
-  const historical = await agent.session.fork({ at: first });
-  assert.equal(
-    (await historical.turn.prompt({ input: "historical branch" }).result()).finalMessage,
-    "BRANCHED",
-  );
+    historical = await agent.session.fork({ at: first });
+    assert.equal(
+      (await historical.turn.prompt({ input: "historical branch" }).result()).finalMessage,
+      "BRANCHED",
+    );
+  })();
 
-  await scenario;
-  historical.dispose();
-  agent.dispose();
-  await server.close();
+  try {
+    await Promise.all([scenario, run]);
+  } finally {
+    historical?.dispose();
+    agent.dispose();
+    await server.close();
+  }
 });
