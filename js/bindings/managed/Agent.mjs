@@ -197,8 +197,40 @@ function agentHandle(client, id, summary) {
       eventStream.close();
     },
   });
-  registerManagedAgent(agent, client, id);
+  registerManagedAgent(agent, client, id, {
+    voiceTransport: managedVoiceTransport(client, id),
+  });
   return agent;
+}
+
+function managedVoiceTransport(client, agentId) {
+  const origin = new URL(client.baseUrl).origin;
+  const realtimePath = `${agentPath(agentId)}/realtime`;
+  return Object.freeze({
+    origin,
+    sameOrigin: true,
+    call(body, signal) {
+      let envelope;
+      try { envelope = JSON.parse(body); }
+      catch { throw new TypeError("managed voice call body is invalid"); }
+      if (!envelope || typeof envelope !== "object" || Array.isArray(envelope)
+        || envelope.managed_agent_id !== agentId
+        || typeof envelope.call_body !== "string") {
+        throw new TypeError("managed voice call body is invalid");
+      }
+      return client.response(`${realtimePath}/calls`, {
+        method: "POST",
+        body: envelope.call_body,
+        signal,
+      });
+    },
+    sidebandUrl(callId) {
+      const url = new URL(`${realtimePath}/sideband`, client.baseUrl);
+      url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+      url.searchParams.set("call_id", callId);
+      return url;
+    },
+  });
 }
 
 function managedSummary(value) {
@@ -1247,6 +1279,7 @@ function managedClient(options) {
     }
   };
   return Object.freeze({
+    baseUrl,
     response,
     toolsTarget(agentId) {
       const url = new URL(`${agentPath(agentId)}/tool-host`, baseUrl);

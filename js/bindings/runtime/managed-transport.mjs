@@ -1,4 +1,5 @@
 import * as ManagedAgent from "../managed/Agent.mjs";
+import { registerManagedAgentAlias } from "../managed/internal.mjs";
 import { reportError } from "../internal.mjs";
 import { AttachmentRejectedError } from "../tools/attachment.mjs";
 import {
@@ -75,6 +76,7 @@ function managedAgentView(managed, agentId, sessionId, tools) {
     watchers: new Set(),
   };
   const agent = agentView(state, {});
+  registerManagedAgentAlias(agent, managed);
   if (tools) {
     state.attachmentSupervisor = superviseAttachment(state).catch((error) => {
       if (!state.closed) reportError(error);

@@ -1,8 +1,13 @@
 const managedAgents = new WeakMap();
 
 /** @internal Retains the authenticated client without exposing it on the public Agent handle. */
-export function registerManagedAgent(agent, client, id) {
-  managedAgents.set(agent, { client, eventAgent: agent, id });
+export function registerManagedAgent(agent, client, id, options = {}) {
+  managedAgents.set(agent, {
+    client,
+    eventAgent: agent,
+    id,
+    ...(options.voiceTransport === undefined ? {} : { voiceTransport: options.voiceTransport }),
+  });
 }
 
 /** @internal Retains managed lifecycle ownership for a capability-bound Agent projection. */

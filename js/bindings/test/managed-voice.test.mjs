@@ -4,6 +4,8 @@ import test from "node:test";
 
 import { Agent } from "../managed/index.mjs";
 import { createManagedBrowserVoice } from "../managed/Voice.mjs";
+import { managedBrowserVoiceTransport } from "../managed/internal.mjs";
+import { Voice } from "../browser/index.mjs";
 
 const AGENT_ID = "019d2f5d-7491-7000-8000-000000000001";
 
@@ -82,4 +84,49 @@ test("managed browser voice keeps protocol in Rust and routes the selected durab
   assert.equal(typeof requests[1].body.operation_id, "string");
   assert.equal(typeof requests[0].body.operation_id, "string");
   assert.equal(typeof requests[4].body.operation_id, "string");
+});
+
+test("managed Agent voice uses its configured same-origin realtime routes", async () => {
+  const requests = [];
+  const agent = Agent.open(AGENT_ID, {
+    baseUrl: "https://managed.example",
+    fetch: async (input, init) => {
+      requests.push({ input: String(input), init });
+      return new Response("v=answer", {
+        headers: { "x-nanocodex-realtime-location": "/v1/realtime/calls/rtc_managed" },
+      });
+    },
+  });
+  const transport = managedBrowserVoiceTransport(agent);
+  const providerBody = JSON.stringify({ sdp: "v=offer", session: { delegation: { type: "client" } } });
+  const response = await transport.call(JSON.stringify({
+    call_body: providerBody,
+    managed_agent_id: AGENT_ID,
+  }));
+  assert.equal(await response.text(), "v=answer");
+  assert.equal(new URL(requests[0].input).origin, "https://managed.example");
+  assert.equal(new URL(requests[0].input).pathname, `/v1/agents/${AGENT_ID}/realtime/calls`);
+  assert.equal(requests[0].init.body, providerBody);
+  const sideband = transport.sidebandUrl("rtc_managed");
+  assert.equal(sideband.origin, "wss://managed.example");
+  assert.equal(sideband.pathname, `/v1/agents/${AGENT_ID}/realtime/sideband`);
+  assert.equal(sideband.searchParams.get("call_id"), "rtc_managed");
+});
+
+test("Voice.create refuses an ordinary managed Agent hosted on another browser origin", () => {
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, "location");
+  Object.defineProperty(globalThis, "location", {
+    configurable: true,
+    value: { origin: "https://consumer.example" },
+  });
+  try {
+    const agent = Agent.open(AGENT_ID, { baseUrl: "https://managed.example" });
+    assert.throws(
+      () => Voice.create(agent),
+      /same-origin managed Agent host; use Connect for cross-origin agents/,
+    );
+  } finally {
+    if (descriptor) Object.defineProperty(globalThis, "location", descriptor);
+    else delete globalThis.location;
+  }
 });

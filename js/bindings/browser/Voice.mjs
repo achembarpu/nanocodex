@@ -29,6 +29,13 @@ export function create(agent, options = {}) {
   const listeners = new Set();
   const eventListeners = new Set();
   const managed = agent.type === "managed" || agent.type === "connect";
+  const managedTransport = managed ? managedBrowserVoiceTransport(agent) : undefined;
+  if (agent.type === "managed" && managedTransport?.sameOrigin) {
+    const browserOrigin = browserLocationOrigin();
+    if (browserOrigin !== undefined && browserOrigin !== managedTransport.origin) {
+      throw new TypeError("Voice.create requires a same-origin managed Agent host; use Connect for cross-origin agents");
+    }
+  }
   const sessionId = managed ? agent.id : agent.sessionId;
   const target = Object.freeze({ pane: "main", branchId: sessionId });
   let snapshot = IDLE_SNAPSHOT;
@@ -98,7 +105,7 @@ export function create(agent, options = {}) {
     const core = Promise.resolve().then(() => managed
       ? createManagedBrowserVoice(agent, selectedVoice)
       : createBrowserVoice(agent, selectedVoice));
-    const transport = managed ? managedBrowserVoiceTransport(agent) : undefined;
+    const transport = managedTransport;
     const next = new BrowserVoiceSession({
       core,
       sessionId,
@@ -245,5 +252,14 @@ function validateOptions(options) {
   }
   if (options.beforeAgentTurn !== undefined && typeof options.beforeAgentTurn !== "function") {
     throw new TypeError("voice beforeAgentTurn must be a function");
+  }
+}
+
+function browserLocationOrigin() {
+  try {
+    const origin = globalThis.location?.origin;
+    return typeof origin === "string" && origin !== "null" ? origin : undefined;
+  } catch {
+    return undefined;
   }
 }

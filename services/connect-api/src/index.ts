@@ -303,6 +303,8 @@ type ModelTicket = Readonly<{
   turnState?: string;
 }>;
 type RealtimeTicket = Readonly<{
+  appId: string;
+  appOrigin: string;
   agentId: string;
   callId: string;
   grantId: `0x${string}`;
@@ -1581,7 +1583,7 @@ async function handleGrantRoute(
   }
   const realtimeTicket = action?.match(/^agents\/([^/]+)\/realtime\/ticket$/);
   if (realtimeTicket && request.method === "POST") {
-    requirePlaygroundOrigin(request);
+    requireGrantAppOrigin(request, grant);
     const requestedAgentId = decodeURIComponent(realtimeTicket[1]!);
     if (requestedAgentId !== grant.agentId) {
       throw new ApiFailure(403, "agent_not_granted", "This durable agent is outside the signed Connect authorization.");
@@ -1596,7 +1598,7 @@ async function handleGrantRoute(
     }));
   }
   if (action?.startsWith("agents/")) {
-    requirePlaygroundOrigin(request);
+    requireGrantAppOrigin(request, grant);
     return proxyManagedAgent(request, env, grant, action.slice("agents/".length));
   }
   throw new ApiFailure(405, "method_not_allowed", "Unsupported grant operation.");
@@ -2417,6 +2419,8 @@ async function issueRealtimeTicket(
   const callId = realtimeCallId(body.call_id);
   const ticket = randomSubject();
   if (!store.create || !await store.create(`realtime-ticket:${ticket}`, {
+    appId: grant.appId,
+    appOrigin: grant.appOrigin,
     agentId: grant.agentId,
     callId,
     grantId: grant.id,
@@ -2434,7 +2438,6 @@ async function openGrantRealtimeWebSocket(
   grantId: `0x${string}`,
   agentId: string,
 ): Promise<Response> {
-  requirePlaygroundOrigin(request);
   if (request.method !== "GET" || request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
     throw new ApiFailure(426, "websocket_required", "The voice sideband requires a WebSocket upgrade.");
   }
@@ -2446,14 +2449,6 @@ async function openGrantRealtimeWebSocket(
   }
   const callId = realtimeCallId(url.searchParams.get("call_id"));
   const ticketValue = boundedIdentifier(url.searchParams.get("ticket"), "ticket", 64);
-  if (!store.take) throw new ApiFailure(500, "realtime_ticket_unavailable", "One-time voice tickets are unavailable.");
-  const ticket = await store.take<RealtimeTicket>(`realtime-ticket:${ticketValue}`);
-  if (!isRealtimeTicket(ticket)
-    || ticket.grantId.toLowerCase() !== grantId.toLowerCase()
-    || ticket.agentId !== agentId
-    || ticket.callId !== callId) {
-    throw new ApiFailure(403, "invalid_realtime_ticket", "The one-time voice ticket is invalid or expired.");
-  }
   const grant = await store.get<GrantRecord>(`grant:${grantId}`);
   if (!isGrantRecord(grant)
     || grant.status !== "active"
@@ -2463,6 +2458,18 @@ async function openGrantRealtimeWebSocket(
     throw new ApiFailure(403, "chatgpt_not_granted", "The active grant does not include ChatGPT.");
   }
   remainingGrantTtl(grant);
+  requireGrantAppOrigin(request, grant);
+  if (!store.take) throw new ApiFailure(500, "realtime_ticket_unavailable", "One-time voice tickets are unavailable.");
+  const ticket = await store.take<RealtimeTicket>(`realtime-ticket:${ticketValue}`);
+  if (!isRealtimeTicket(ticket)
+    || ticket.appId !== grant.appId
+    || ticket.appOrigin !== grant.appOrigin
+    || ticket.grantId.toLowerCase() !== grantId.toLowerCase()
+    || ticket.agentId !== agentId
+    || ticket.callId !== callId) {
+    throw new ApiFailure(403, "invalid_realtime_ticket", "The one-time voice ticket is invalid or expired.");
+  }
+  requireGrantAppOrigin(request, grant, ticket);
   const target = new URL(
     `/v1/agents/${encodeURIComponent(agentId)}/realtime/sideband?call_id=${encodeURIComponent(callId)}`,
     "https://nanocodex.internal",
@@ -2634,6 +2641,8 @@ function isModelTicket(value: unknown): value is ModelTicket {
 function isRealtimeTicket(value: unknown): value is RealtimeTicket {
   return isRecord(value)
     && /^0x[0-9a-fA-F]{64}$/.test(String(value.grantId))
+    && validAppId(value.appId)
+    && isPublicAppOrigin(value.appOrigin)
     && typeof value.agentId === "string"
     && value.agentId.length > 0
     && typeof value.callId === "string"
@@ -4553,6 +4562,19 @@ function requirePlaygroundOrigin(request: Request): void {
   const origin = request.headers.get("origin");
   if (origin !== PLAYGROUND_ORIGIN && !developmentDialogOrigin(request, origin)) {
     throw new ApiFailure(403, "origin_denied", "This operation is available only to the registered Nanocodex app.");
+  }
+}
+
+function requireGrantAppOrigin(
+  request: Request,
+  grant: Pick<GrantRecord, "appId" | "appOrigin">,
+  ticket?: Pick<RealtimeTicket, "appId" | "appOrigin">,
+): void {
+  const origin = request.headers.get("origin");
+  if (origin !== grant.appOrigin
+    || (ticket !== undefined
+      && (ticket.appId !== grant.appId || ticket.appOrigin !== grant.appOrigin))) {
+    throw new ApiFailure(403, "origin_denied", "This operation is available only to the authorized Connect app.");
   }
 }
 

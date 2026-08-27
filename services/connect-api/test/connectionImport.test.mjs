@@ -53,3 +53,26 @@ test("credential bytes cross only the private EGRESS import call and never enter
   const grant = route.slice(route.indexOf("const grant: GrantRecord"), route.indexOf("try {", route.indexOf("const grant: GrantRecord")));
   assert.doesNotMatch(grant, /access_token|refresh_token|chatgpt_credential_import/);
 });
+
+test("Connect realtime admission follows the exact grant app origin", () => {
+  const ticket = section("async function issueRealtimeTicket(", "async function openGrantRealtimeWebSocket(");
+  assert.match(ticket, /appId: grant\.appId/);
+  assert.match(ticket, /appOrigin: grant\.appOrigin/);
+
+  const websocket = section("async function openGrantRealtimeWebSocket(", "async function openGrantModelWebSocket(");
+  assert.doesNotMatch(websocket, /requirePlaygroundOrigin\(request\)/);
+  assert.match(websocket, /ticket\.appId !== grant\.appId/);
+  assert.match(websocket, /ticket\.appOrigin !== grant\.appOrigin/);
+  assert.match(websocket, /grant\.capabilities\.includes\("chatgpt"\)/);
+  assert.match(websocket, /grant\.capabilities\.includes\("agent\.output\.final"\)/);
+  assert.match(websocket, /requireGrantAppOrigin\(request, grant, ticket\)/);
+
+  const grantRoute = section("async function handleGrantRoute(", "async function connectManagedAgent(");
+  assert.match(grantRoute, /requireGrantAppOrigin\(request, grant\)/g);
+  assert.doesNotMatch(grantRoute, /requirePlaygroundOrigin\(request\)/);
+
+  const originGuard = section("function requireGrantAppOrigin(", "function requireCallerApp(");
+  assert.match(originGuard, /origin !== grant\.appOrigin/);
+  assert.match(originGuard, /ticket\.appId !== grant\.appId/);
+  assert.match(originGuard, /ticket\.appOrigin !== grant\.appOrigin/);
+});

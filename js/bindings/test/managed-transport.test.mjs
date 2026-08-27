@@ -4,6 +4,7 @@ import test from "node:test";
 import { Agent as BrowserAgent, Transport as BrowserTransport } from "../browser/index.mjs";
 import { Agent as NodeAgent, Transport as NodeTransport } from "../node/index.mjs";
 import { createTools } from "../index.mjs";
+import { managedBrowserVoiceTransport } from "../managed/internal.mjs";
 
 const origin = "https://managed.example";
 const agentId = "0198d3f0-8844-7000-8000-000000000001";
@@ -78,6 +79,7 @@ test("Agent.create opens an existing managed identity with the common Turn lifec
   assert.equal(agent.type, "managed");
   assert.equal(agent.agentId, agentId);
   assert.equal(agent.sessionId, sessionId);
+  assert.equal(managedBrowserVoiceTransport(agent).origin, origin);
   assert.deepEqual(Object.keys(agent).sort(), [
     "agentId", "dispose", "events", "extend", "key", "name", "session", "sessionId", "turn", "type", "uid",
   ]);
