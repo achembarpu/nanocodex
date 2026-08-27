@@ -3,6 +3,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
@@ -439,12 +440,22 @@ export async function verifyProductionBoundary(environment = process.env, {
       });
       const origin = output.match(/https:\/\/[a-z0-9.-]+\.workers\.dev/i)?.[0];
       if (!origin) throw new Error("Wrangler did not report the boundary probe origin");
-      const response = await fetchImpl(new URL("/verify", origin), {
-        method: "POST",
-        headers: { authorization: `Bearer ${probeToken}` },
-        signal: AbortSignal.any([lifecycleAbort.signal, AbortSignal.timeout(30_000)]),
-      });
-      const body = await boundedJson(response, 8 * 1024);
+      let response;
+      let body;
+      for (let attempt = 0; attempt < 5; attempt += 1) {
+        response = await fetchImpl(new URL("/verify", origin), {
+          method: "POST",
+          headers: { authorization: `Bearer ${probeToken}` },
+          signal: AbortSignal.any([lifecycleAbort.signal, AbortSignal.timeout(30_000)]),
+        });
+        try {
+          body = await boundedJson(response, 8 * 1024);
+          break;
+        } catch (error) {
+          if (response.status !== 404 || attempt === 4) throw error;
+          await delay((attempt + 1) * 1_000, undefined, { signal: lifecycleAbort.signal });
+        }
+      }
       if (response.status !== 200
         || body?.status !== "ok"
         || body?.boundary !== "private-service-binding"
