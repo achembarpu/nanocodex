@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import { resolve } from "node:path";
 import test from "node:test";
 
 import { redactSecrets } from "../services/managed/scripts/child-process.mjs";
@@ -9,12 +11,18 @@ import {
   executeProductionMutations,
   finalContainerRollout,
   normalizeDeploymentEnvironment,
+  parseAiSearchList,
+  parseD1DatabaseList,
+  parseR2BucketList,
   preflightEnvironment,
+  prepareProductionResources,
   productionMutationPlan,
+  productionResourceTopology,
   runProductionPhases,
 } from "./deploy-cloudflare.mjs";
 
 const revision = "a".repeat(40);
+const databaseId = "11111111-2222-4333-8444-555555555555";
 
 function productionEnvironment() {
   return {
@@ -157,6 +165,218 @@ test("each local Wrangler executable must match its checked-in lock", () => {
   );
 });
 
+test("production resource topology is derived from binding configs", () => {
+  const topology = resourceTopology();
+  assert.deepEqual(topology.r2Buckets, [
+    "nanocodex-evals",
+    "nanocodex-git",
+    "nanocodex-managed-history",
+  ]);
+  assert.deepEqual(topology.d1DatabaseNames, ["nanocodex-evals"]);
+  assert.deepEqual(topology.aiSearchInstances, [{
+    name: "nanocodex-history-dev-20260824",
+    namespace: "default",
+    source: "nanocodex-managed-history",
+    type: "r2",
+  }]);
+  assert.equal(topology.d1Migrations.length, 1);
+  assert.equal(topology.d1Migrations[0].binding, "EVALS_DB");
+  assert.equal(topology.d1Migrations[0].migrationsDir, "/repository/web/migrations");
+});
+
+test("production resource topology covers the real checked-in Wrangler configs", async () => {
+  const topology = productionResourceTopology(await Promise.all([
+    ["website", "web", "web/wrangler.jsonc"],
+    ["managed agent", "services/managed", "services/managed/wrangler.jsonc"],
+  ].map(async ([label, directory, path]) => ({
+    config: JSON.parse(await readFile(new URL(`../${path}`, import.meta.url), "utf8")),
+    directory: resolve(directory),
+    label,
+  }))));
+  assert.deepEqual(topology.r2Buckets, [
+    "nanocodex-evals",
+    "nanocodex-git",
+    "nanocodex-managed-history",
+  ]);
+  assert.deepEqual(topology.d1DatabaseNames, ["nanocodex-evals"]);
+  assert.deepEqual(topology.aiSearchInstances, [{
+    name: "nanocodex-history-dev-20260824",
+    namespace: "default",
+    source: "nanocodex-managed-history",
+    type: "r2",
+  }]);
+  assert.equal(topology.d1Migrations.length, 1);
+});
+
+test("Wrangler resource list formats are parsed fail-closed", () => {
+  assert.deepEqual([...parseR2BucketList(`Listing buckets...\nname:  first-bucket\ncreation_date: now\n\nname:  second-bucket\ncreation_date: later\n`)], [
+    "first-bucket",
+    "second-bucket",
+  ]);
+  assert.deepEqual([...parseD1DatabaseList(JSON.stringify([
+    { name: "nanocodex-evals", uuid: databaseId },
+  ])).entries()], [[
+    "nanocodex-evals",
+    { id: databaseId, name: "nanocodex-evals" },
+  ]]);
+  assert.deepEqual([...parseAiSearchList(JSON.stringify([
+    {
+      id: "nanocodex-history-dev-20260824",
+      namespace: "default",
+      source: "nanocodex-managed-history",
+      type: "r2",
+    },
+  ])).values()], [{
+    name: "nanocodex-history-dev-20260824",
+    namespace: "default",
+    source: "nanocodex-managed-history",
+    type: "r2",
+  }]);
+  assert.throws(
+    () => parseD1DatabaseList("Wrangler warning before JSON\n[]"),
+    /clean JSON/,
+  );
+  assert.throws(
+    () => parseD1DatabaseList(JSON.stringify([
+      { name: "duplicate", uuid: databaseId },
+      { name: "duplicate", uuid: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee" },
+    ])),
+    /duplicate name/,
+  );
+});
+
+test("blank-account resources are created, re-adopted, migrated, then Workers deploy", async () => {
+  const fixture = resourceCommandFixture();
+  const temporaryConfigs = [];
+  const options = {
+    run: fixture.run,
+    withConfig: async (config, callback) => {
+      temporaryConfigs.push(config);
+      return callback("/private/d1-migrations.json");
+    },
+  };
+  const topology = resourceTopology();
+  const resources = await prepareProductionResources(topology, options);
+  const workerActions = [];
+  await executeProductionMutations(true, Object.fromEntries(
+    productionMutationPlan(true).map((component) => [component, async () => {
+      fixture.calls.push(["worker-deploy", component]);
+      workerActions.push(component);
+    }]),
+  ));
+
+  assert.deepEqual(resources.created, {
+    aiSearch: ["nanocodex-history-dev-20260824"],
+    d1: ["nanocodex-evals"],
+    r2: ["nanocodex-evals", "nanocodex-git", "nanocodex-managed-history"],
+  });
+  assert.deepEqual(resources.d1DatabaseIds, { "nanocodex-evals": databaseId });
+  for (const command of [
+    ["r2", "bucket", "list"],
+    ["d1", "list", "--json"],
+    [
+      "ai-search", "list", "--namespace", "default", "--page", "1",
+      "--per-page", "100", "--json",
+    ],
+    [
+      "ai-search", "create", "nanocodex-history-dev-20260824",
+      "--namespace", "default", "--type", "r2", "--source",
+      "nanocodex-managed-history", "--json",
+    ],
+    ["r2", "bucket", "create", "nanocodex-git"],
+    ["d1", "create", "nanocodex-evals"],
+  ]) {
+    assert.equal(fixture.calls.some((arguments_) => (
+      JSON.stringify(arguments_) === JSON.stringify(command)
+    )), true, `missing mocked Wrangler command ${command.join(" ")}`);
+  }
+  assert.deepEqual(temporaryConfigs[0].d1_databases, [{
+    binding: "EVALS_DB",
+    database_id: databaseId,
+    database_name: "nanocodex-evals",
+    migrations_dir: "/repository/web/migrations",
+  }]);
+  const migrationIndex = fixture.calls.findIndex((arguments_) => (
+    arguments_[0] === "d1" && arguments_[1] === "migrations"
+  ));
+  const sourceBucketIndex = fixture.calls.findIndex((arguments_) => (
+    arguments_[0] === "r2" && arguments_[2] === "create"
+      && arguments_[3] === "nanocodex-managed-history"
+  ));
+  const aiSearchCreateIndex = fixture.calls.findIndex((arguments_) => (
+    arguments_[0] === "ai-search" && arguments_[1] === "create"
+  ));
+  const firstWorkerIndex = fixture.calls.findIndex((arguments_) => arguments_[0] === "worker-deploy");
+  assert.ok(sourceBucketIndex >= 0 && sourceBucketIndex < aiSearchCreateIndex);
+  assert.ok(migrationIndex >= 0 && migrationIndex < firstWorkerIndex);
+  assert.deepEqual(fixture.calls[migrationIndex], [
+    "d1",
+    "migrations",
+    "apply",
+    "EVALS_DB",
+    "--remote",
+    "--config",
+    "/private/d1-migrations.json",
+  ]);
+  assert.deepEqual(workerActions, productionMutationPlan(true));
+
+  const createsBeforeRerun = fixture.calls.filter(isResourceCreate).length;
+  const rerun = await prepareProductionResources(topology, options);
+  assert.deepEqual(rerun.created, { aiSearch: [], d1: [], r2: [] });
+  assert.equal(fixture.calls.filter(isResourceCreate).length, createsBeforeRerun);
+});
+
+test("existing resources are adopted without mutation and retain the live D1 ID", async () => {
+  const fixture = resourceCommandFixture({ populated: true });
+  const configs = [];
+  const resources = await prepareProductionResources(resourceTopology(), {
+    run: fixture.run,
+    withConfig: async (config, callback) => {
+      configs.push(config);
+      return callback("/private/d1-migrations.json");
+    },
+  });
+  assert.deepEqual(resources.created, { aiSearch: [], d1: [], r2: [] });
+  assert.deepEqual(resources.d1DatabaseIds, { "nanocodex-evals": databaseId });
+  assert.equal(configs[0].d1_databases[0].database_id, databaseId);
+  assert.equal(fixture.calls.filter(isResourceCreate).length, 0);
+});
+
+test("an existing AI Search instance with the wrong source fails closed", async () => {
+  const fixture = resourceCommandFixture({
+    aiSearchSource: "another-history-bucket",
+    populated: true,
+  });
+  await assert.rejects(prepareProductionResources(resourceTopology(), {
+    run: fixture.run,
+    withConfig: async (_config, callback) => callback("/private/d1-migrations.json"),
+  }), /with source nanocodex-managed-history/);
+  assert.equal(fixture.calls.filter(isResourceCreate).length, 0);
+  assert.equal(fixture.calls.some((arguments_) => arguments_[0] === "d1"
+    && arguments_[1] === "migrations"), false);
+});
+
+test("an unreconciled AI Search prerequisite stops before every Worker mutation", async () => {
+  const fixture = resourceCommandFixture({
+    rejectAiSearchCreate: true,
+  });
+  const observed = [];
+  await assert.rejects((async () => {
+    await prepareProductionResources(resourceTopology(), {
+      run: fixture.run,
+      withConfig: async (_config, callback) => callback("/private/d1-migrations.json"),
+    });
+    observed.push("worker-deploy");
+  })(), /could not be provisioned or adopted/);
+  assert.deepEqual(observed, []);
+  assert.equal(fixture.calls.filter((arguments_) => arguments_[0] === "r2"
+    && arguments_[2] === "create").length, 3);
+  assert.equal(fixture.calls.some((arguments_) => arguments_[0] === "d1"
+    && arguments_[1] === "create"), false);
+  assert.equal(fixture.calls.some((arguments_) => arguments_[0] === "d1"
+    && arguments_[1] === "migrations"), false);
+});
+
 test("rollout diagnostics redact deployment and application secrets", () => {
   const secrets = ["cloudflare-token", "oauth-client-secret", "admin-secret"];
   const diagnostic = redactSecrets(
@@ -209,3 +429,100 @@ test("root health requires the exact production SHA", () => {
     revision,
   ), /deployed SHA/);
 });
+
+function resourceTopology() {
+  return productionResourceTopology([
+    {
+      config: {
+        compatibility_date: "2026-05-22",
+        r2_buckets: [
+          { binding: "GIT_OBJECTS", bucket_name: "nanocodex-git" },
+          { binding: "EVALS_ARTIFACTS", bucket_name: "nanocodex-evals" },
+        ],
+        d1_databases: [{
+          binding: "EVALS_DB",
+          database_name: "nanocodex-evals",
+          database_id: "00000000-0000-0000-0000-000000000000",
+          migrations_dir: "migrations",
+        }],
+      },
+      directory: "/repository/web",
+      label: "website",
+    },
+    {
+      config: {
+        compatibility_date: "2026-07-29",
+        r2_buckets: [{
+          binding: "NANOCODEX_HISTORY",
+          bucket_name: "nanocodex-managed-history",
+        }],
+        ai_search: [{
+          binding: "HISTORY_AI_SEARCH",
+          instance_name: "nanocodex-history-dev-20260824",
+        }],
+      },
+      directory: "/repository/services/managed",
+      label: "managed agent",
+    },
+  ]);
+}
+
+function resourceCommandFixture({
+  aiSearchSource = "nanocodex-managed-history",
+  populated = false,
+  rejectAiSearchCreate = false,
+} = {}) {
+  const calls = [];
+  const r2 = new Set(populated ? [
+    "nanocodex-evals",
+    "nanocodex-git",
+    "nanocodex-managed-history",
+  ] : []);
+  const d1 = new Map(populated ? [["nanocodex-evals", databaseId]] : []);
+  const aiSearch = new Set(populated ? ["nanocodex-history-dev-20260824"] : []);
+  return {
+    calls,
+    async run(arguments_) {
+      calls.push([...arguments_]);
+      if (arguments_[0] === "r2" && arguments_[2] === "list") {
+        return [...r2].map((name) => `name:  ${name}\ncreation_date: now`).join("\n\n");
+      }
+      if (arguments_[0] === "r2" && arguments_[2] === "create") {
+        r2.add(arguments_[3]);
+        return "created";
+      }
+      if (arguments_[0] === "d1" && arguments_[1] === "list") {
+        return JSON.stringify([...d1].map(([name, uuid]) => ({ name, uuid })));
+      }
+      if (arguments_[0] === "d1" && arguments_[1] === "create") {
+        d1.set(arguments_[2], databaseId);
+        return "created";
+      }
+      if (arguments_[0] === "ai-search" && arguments_[1] === "list") {
+        return JSON.stringify([...aiSearch].map((id) => ({
+          id,
+          namespace: "default",
+          source: aiSearchSource,
+          type: "r2",
+        })));
+      }
+      if (arguments_[0] === "ai-search" && arguments_[1] === "create") {
+        if (rejectAiSearchCreate) throw new Error("No AI Search API token found");
+        aiSearch.add(arguments_[2]);
+        return JSON.stringify({
+          id: arguments_[2],
+          source: "nanocodex-managed-history",
+          type: "r2",
+        });
+      }
+      if (arguments_[0] === "d1" && arguments_[1] === "migrations") return "migrated";
+      throw new Error(`unexpected fixture command ${arguments_.join(" ")}`);
+    },
+  };
+}
+
+function isResourceCreate(arguments_) {
+  return (arguments_[0] === "r2" && arguments_[2] === "create")
+    || (arguments_[0] === "d1" && arguments_[1] === "create")
+    || (arguments_[0] === "ai-search" && arguments_[1] === "create");
+}

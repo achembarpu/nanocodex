@@ -218,6 +218,7 @@ export function buildBoundaryProbeConfig({
 export function buildWebProductionConfig(baseConfig, {
   artifactDirectory,
   currentWebRoot = webRoot,
+  d1DatabaseIds,
 } = {}) {
   assertRecord(baseConfig, "website artifact config");
   if (baseConfig.name !== WEB_NAME) {
@@ -271,6 +272,9 @@ export function buildWebProductionConfig(baseConfig, {
     }],
     d1_databases: (baseConfig.d1_databases ?? []).map((database) => ({
       ...database,
+      ...(d1DatabaseIds === undefined
+        ? {}
+        : { database_id: resolvedD1DatabaseId(database, d1DatabaseIds) }),
       ...(typeof database.migrations_dir === "string"
         ? { migrations_dir: resolve(configDirectory, database.migrations_dir) }
         : {}),
@@ -477,6 +481,7 @@ export async function verifyProductionBoundary(environment = process.env, {
 export async function deployProductionWeb(environment = process.env, {
   bootstrap = false,
   containersRollout = "none",
+  d1DatabaseIds,
 } = {}) {
   if (!new Set(["immediate", "none"]).has(containersRollout)) {
     throw new Error("production web container rollout must be immediate or none");
@@ -493,6 +498,7 @@ export async function deployProductionWeb(environment = process.env, {
   const configBuilder = bootstrap ? buildWebBootstrapConfig : buildWebProductionConfig;
   const config = configBuilder(baseConfig, {
     artifactDirectory: dirname(webArtifactConfigPath),
+    d1DatabaseIds: d1DatabaseIds ?? {},
   });
   const redactions = [cloudflare.apiToken];
 
@@ -528,6 +534,19 @@ export async function deployProductionWeb(environment = process.env, {
   };
   process.stdout.write(`${JSON.stringify(result)}\n`);
   return result;
+}
+
+function resolvedD1DatabaseId(database, d1DatabaseIds) {
+  const name = database?.database_name;
+  if (typeof name !== "string" || name.length === 0) {
+    throw new Error("production D1 binding must declare database_name");
+  }
+  const id = d1DatabaseIds?.[name];
+  if (typeof id !== "string"
+    || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(id)) {
+    throw new Error(`production D1 database ${name} must have a reconciled database ID`);
+  }
+  return id.toLowerCase();
 }
 
 function assertTokenStrength(value, name) {

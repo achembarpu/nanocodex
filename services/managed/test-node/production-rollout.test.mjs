@@ -233,12 +233,27 @@ test("boundary probe and website configs preserve the private service chain", ()
       { binding: "NANOCODEX_CONNECT_DIALOG", service: "nanocodex-connect-dialog" },
     ],
     containers: [{ class_name: "ChatGptEgress", image: "/stale/Dockerfile" }],
-    d1_databases: [{ binding: "EVALS_DB", migrations_dir: "../../migrations" }],
+    d1_databases: [{
+      binding: "EVALS_DB",
+      database_name: "nanocodex-evals",
+      database_id: "00000000-0000-0000-0000-000000000000",
+      migrations_dir: "../../migrations",
+    }],
     vars: { ENVIRONMENT: "production" },
-  }, { artifactDirectory: "/artifact/nanocodex", currentWebRoot: "/current/web" });
+  }, {
+    artifactDirectory: "/artifact/nanocodex",
+    currentWebRoot: "/current/web",
+    d1DatabaseIds: {
+      "nanocodex-evals": "11111111-2222-4333-8444-555555555555",
+    },
+  });
   assert.equal(website.main, "/artifact/nanocodex/index.js");
   assert.equal(website.assets.directory, "/artifact/client");
   assert.equal(website.containers[0].image, "/current/web/container/Dockerfile");
+  assert.equal(
+    website.d1_databases[0].database_id,
+    "11111111-2222-4333-8444-555555555555",
+  );
   assert.equal(website.d1_databases[0].migrations_dir, "/migrations");
   assert.deepEqual(website.vars, { ENVIRONMENT: "production" });
   assert.deepEqual(website.services, [
@@ -261,6 +276,15 @@ test("boundary probe and website configs preserve the private service chain", ()
     assets: { directory: "../client" },
     services: [{ binding: "MULTIPLAYER_BACKEND", service: "nanocodex-durable-agent" }],
   }, { artifactDirectory: "/artifact" }), /requires NANOCODEX_BACKEND/);
+  assert.throws(() => buildWebProductionConfig({
+    ...website,
+    main: "index.js",
+    assets: { directory: "../client" },
+    containers: [{ class_name: "ChatGptEgress", image: "/stale/Dockerfile" }],
+  }, {
+    artifactDirectory: "/artifact",
+    d1DatabaseIds: {},
+  }), /must have a reconciled database ID/);
 });
 
 test("temporary rollout files are mode 0600 and removed in finally", async () => {

@@ -4,6 +4,7 @@ import { createHmac } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { stripVTControlCharacters } from "node:util";
 
 import {
   deployProductionBroker,
@@ -21,6 +22,7 @@ import {
   preflightProductionRollout,
   productionWranglerEnvironment,
   verifyProductionBoundary,
+  withPrivateRolloutFiles,
 } from "../services/managed/scripts/production-rollout.mjs";
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -28,6 +30,15 @@ const productionOrigin = JSON.parse(
   await readFile(new URL("../web/production.json", import.meta.url), "utf8"),
 ).origin;
 const abortController = new AbortController();
+const AI_SEARCH_NAMESPACE = "default";
+const AI_SEARCH_PAGE_SIZE = 100;
+const AI_SEARCH_RESOURCE_POLICIES = Object.freeze({
+  "nanocodex-history-dev-20260824": Object.freeze({
+    namespace: AI_SEARCH_NAMESPACE,
+    source: "nanocodex-managed-history",
+    type: "r2",
+  }),
+});
 
 const INSTALL_DIRECTORIES = Object.freeze([
   "js/bindings",
@@ -175,6 +186,414 @@ export function assertPinnedWrangler(packageJson, packageLock, installedPackage,
   return installed;
 }
 
+export function productionResourceTopology(configurations) {
+  if (!Array.isArray(configurations) || configurations.length === 0) {
+    throw new Error("production resource topology requires at least one Wrangler config");
+  }
+  const r2Buckets = new Set();
+  const d1DatabaseNames = new Set();
+  const d1Migrations = [];
+  const aiSearchInstances = new Map();
+
+  for (const configuration of configurations) {
+    const label = requiredText(configuration?.label, "Wrangler config label");
+    const directory = resolve(requiredText(
+      configuration?.directory,
+      `${label} Wrangler config directory`,
+    ));
+    const config = configuration?.config;
+    if (!config || typeof config !== "object" || Array.isArray(config)) {
+      throw new Error(`${label} Wrangler config must be an object`);
+    }
+
+    for (const bucket of optionalArray(config.r2_buckets, `${label} r2_buckets`)) {
+      requiredBinding(bucket?.binding, `${label} R2 binding`);
+      r2Buckets.add(requiredResourceName(bucket?.bucket_name, `${label} R2 bucket`));
+    }
+    for (const database of optionalArray(config.d1_databases, `${label} d1_databases`)) {
+      const binding = requiredBinding(database?.binding, `${label} D1 binding`);
+      const databaseName = requiredResourceName(
+        database?.database_name,
+        `${label} D1 database`,
+      );
+      if (database.database_id !== undefined) {
+        requiredD1DatabaseId(database.database_id, `${label} D1 database_id`);
+      }
+      d1DatabaseNames.add(databaseName);
+      if (database.migrations_dir !== undefined) {
+        const migrationsDir = resolve(directory, requiredText(
+          database.migrations_dir,
+          `${label} D1 migrations_dir`,
+        ));
+        const migrationKey = `${databaseName}\0${migrationsDir}`;
+        if (!d1Migrations.some((migration) => migration.key === migrationKey)) {
+          d1Migrations.push({
+            binding,
+            compatibilityDate: requiredText(
+              config.compatibility_date,
+              `${label} compatibility_date`,
+            ),
+            database: { ...database },
+            databaseName,
+            key: migrationKey,
+            label,
+            migrationsDir,
+          });
+        }
+      }
+    }
+    for (const instance of optionalArray(config.ai_search, `${label} ai_search`)) {
+      requiredBinding(instance?.binding, `${label} AI Search binding`);
+      const name = requiredResourceName(
+        instance?.instance_name,
+        `${label} AI Search instance`,
+      );
+      const policy = AI_SEARCH_RESOURCE_POLICIES[name];
+      if (!policy) {
+        throw new Error(`${label} AI Search instance ${name} has no production source policy`);
+      }
+      aiSearchInstances.set(name, Object.freeze({ name, ...policy }));
+    }
+  }
+
+  for (const instance of aiSearchInstances.values()) {
+    if (instance.type === "r2" && !r2Buckets.has(instance.source)) {
+      throw new Error(
+        `production AI Search instance ${instance.name} references missing R2 bucket ${instance.source}`,
+      );
+    }
+  }
+
+  return Object.freeze({
+    aiSearchInstances: Object.freeze(
+      [...aiSearchInstances.values()].sort((left, right) => left.name.localeCompare(right.name)),
+    ),
+    d1DatabaseNames: Object.freeze([...d1DatabaseNames].sort()),
+    d1Migrations: Object.freeze(d1Migrations.map(({ key: _key, ...migration }) => (
+      Object.freeze(migration)
+    ))),
+    r2Buckets: Object.freeze([...r2Buckets].sort()),
+  });
+}
+
+export function parseR2BucketList(output) {
+  const clean = stripVTControlCharacters(String(output));
+  const names = [...clean.matchAll(/(?:^|\n)name:\s*([^\r\n]+)(?=\r?\n|$)/g)]
+    .map((match) => requiredResourceName(match[1].trim(), "listed R2 bucket"));
+  return uniqueListedResources(names, "R2 bucket");
+}
+
+export function parseD1DatabaseList(output) {
+  const databases = parseJsonArray(output, "D1 database list");
+  const byName = new Map();
+  for (const database of databases) {
+    const name = requiredListedName(database?.name, "listed D1 database");
+    const id = requiredD1DatabaseId(database?.uuid, `listed D1 database ${name}`);
+    if (byName.has(name)) throw new Error(`D1 database list contains duplicate name ${name}`);
+    byName.set(name, Object.freeze({ id, name }));
+  }
+  return byName;
+}
+
+export function parseAiSearchList(output) {
+  const instances = parseJsonArray(output, "AI Search instance list");
+  const byName = new Map();
+  for (const instance of instances) {
+    const name = requiredListedName(instance?.id, "listed AI Search instance");
+    if (byName.has(name)) {
+      throw new Error(`AI Search instance list contains duplicate name ${name}`);
+    }
+    byName.set(name, Object.freeze({
+      name,
+      namespace: instance.namespace ?? AI_SEARCH_NAMESPACE,
+      source: instance.source,
+      type: instance.type ?? "builtin",
+    }));
+  }
+  return byName;
+}
+
+export async function reconcileProductionResources(topology, { run }) {
+  if (typeof run !== "function") throw new Error("production resource runner is required");
+  const created = { aiSearch: [], d1: [], r2: [] };
+  let [r2Buckets, d1Databases, aiSearchInstances] = await Promise.all([
+    listR2Buckets(run),
+    listD1Databases(run),
+    listAiSearchInstances(run),
+  ]);
+
+  for (const name of topology.r2Buckets) {
+    if (r2Buckets.has(name)) continue;
+    const createdHere = await createAndAdopt({
+      create: () => run(["r2", "bucket", "create", name], {
+        label: `create production R2 bucket ${name}`,
+      }),
+      inspect: () => listR2Buckets(run),
+      kind: "R2 bucket",
+      name,
+      select: (resources) => resources.has(name),
+    });
+    r2Buckets = createdHere.resources;
+    if (createdHere.created) created.r2.push(name);
+  }
+
+  for (const expected of topology.aiSearchInstances) {
+    const existing = aiSearchInstances.get(expected.name);
+    if (existing) {
+      assertExpectedAiSearch(existing, expected);
+      continue;
+    }
+    if (expected.type === "r2" && !r2Buckets.has(expected.source)) {
+      throw new Error(
+        `production AI Search source bucket ${expected.source} was not reconciled`,
+      );
+    }
+    const createdHere = await createAndAdopt({
+      create: () => run([
+        "ai-search",
+        "create",
+        expected.name,
+        "--namespace",
+        expected.namespace,
+        "--type",
+        expected.type,
+        "--source",
+        expected.source,
+        "--json",
+      ], { label: `create production AI Search instance ${expected.name}` }),
+      inspect: () => listAiSearchInstances(run),
+      kind: "AI Search instance",
+      name: expected.name,
+      select: (resources) => {
+        const instance = resources.get(expected.name);
+        if (!instance) return false;
+        assertExpectedAiSearch(instance, expected);
+        return true;
+      },
+    });
+    aiSearchInstances = createdHere.resources;
+    if (createdHere.created) created.aiSearch.push(expected.name);
+  }
+
+  for (const name of topology.d1DatabaseNames) {
+    if (d1Databases.has(name)) continue;
+    const createdHere = await createAndAdopt({
+      create: () => run(["d1", "create", name], {
+        label: `create production D1 database ${name}`,
+      }),
+      inspect: () => listD1Databases(run),
+      kind: "D1 database",
+      name,
+      select: (resources) => resources.has(name),
+    });
+    d1Databases = createdHere.resources;
+    if (createdHere.created) created.d1.push(name);
+  }
+
+  const d1DatabaseIds = {};
+  for (const name of topology.d1DatabaseNames) {
+    const database = d1Databases.get(name);
+    if (!database) throw new Error(`production D1 database ${name} was not reconciled`);
+    d1DatabaseIds[name] = database.id;
+  }
+  return Object.freeze({
+    created: Object.freeze({
+      aiSearch: Object.freeze(created.aiSearch),
+      d1: Object.freeze(created.d1),
+      r2: Object.freeze(created.r2),
+    }),
+    d1DatabaseIds: Object.freeze(d1DatabaseIds),
+  });
+}
+
+export function productionD1MigrationConfig(migration, d1DatabaseIds) {
+  const databaseId = requiredD1DatabaseId(
+    d1DatabaseIds?.[migration.databaseName],
+    `resolved D1 database ${migration.databaseName}`,
+  );
+  return {
+    name: "nanocodex-production-d1-migrations",
+    compatibility_date: migration.compatibilityDate,
+    d1_databases: [{
+      ...migration.database,
+      database_id: databaseId,
+      migrations_dir: migration.migrationsDir,
+    }],
+  };
+}
+
+export async function applyProductionD1Migrations(topology, d1DatabaseIds, {
+  run,
+  withConfig,
+}) {
+  if (typeof run !== "function") throw new Error("production resource runner is required");
+  if (typeof withConfig !== "function") throw new Error("temporary D1 config writer is required");
+  for (const migration of topology.d1Migrations) {
+    const config = productionD1MigrationConfig(migration, d1DatabaseIds);
+    await withConfig(config, (configPath) => run([
+      "d1",
+      "migrations",
+      "apply",
+      migration.binding,
+      "--remote",
+      "--config",
+      configPath,
+    ], {
+      label: `apply production D1 migrations for ${migration.databaseName}`,
+      timeoutMs: 10 * 60_000,
+    }));
+  }
+}
+
+export async function prepareProductionResources(topology, options) {
+  const resources = await reconcileProductionResources(topology, options);
+  await applyProductionD1Migrations(topology, resources.d1DatabaseIds, options);
+  return resources;
+}
+
+async function listR2Buckets(run) {
+  const output = await run(["r2", "bucket", "list"], {
+    label: "list production R2 buckets",
+  });
+  return parseR2BucketList(output);
+}
+
+async function listD1Databases(run) {
+  const output = await run(["d1", "list", "--json"], {
+    label: "list production D1 databases",
+  });
+  return parseD1DatabaseList(output);
+}
+
+async function listAiSearchInstances(run) {
+  const instances = new Map();
+  for (let page = 1; page <= 1_000; page += 1) {
+    const output = await run([
+      "ai-search",
+      "list",
+      "--namespace",
+      AI_SEARCH_NAMESPACE,
+      "--page",
+      String(page),
+      "--per-page",
+      String(AI_SEARCH_PAGE_SIZE),
+      "--json",
+    ], { label: `list production AI Search instances page ${page}` });
+    const pageInstances = parseAiSearchList(output);
+    for (const [name, instance] of pageInstances) {
+      if (instances.has(name)) {
+        throw new Error(`AI Search instance list contains duplicate name ${name}`);
+      }
+      instances.set(name, instance);
+    }
+    if (pageInstances.size < AI_SEARCH_PAGE_SIZE) return instances;
+  }
+  throw new Error("AI Search instance listing exceeded 1000 pages");
+}
+
+async function createAndAdopt({ create, inspect, kind, name, select }) {
+  let creationFailure;
+  try {
+    await create();
+  } catch (error) {
+    creationFailure = error;
+  }
+  let resources;
+  try {
+    resources = await inspect();
+  } catch (inspectionFailure) {
+    if (creationFailure) {
+      throw new AggregateError(
+        [creationFailure, inspectionFailure],
+        `could not provision or inspect production ${kind} ${name}`,
+      );
+    }
+    throw inspectionFailure;
+  }
+  if (!select(resources)) {
+    throw new Error(`production ${kind} ${name} could not be provisioned or adopted`, {
+      cause: creationFailure,
+    });
+  }
+  return { created: creationFailure === undefined, resources };
+}
+
+function assertExpectedAiSearch(instance, expected) {
+  if (instance.namespace !== expected.namespace
+    || instance.type !== expected.type
+    || instance.source !== expected.source) {
+    throw new Error(
+      `production AI Search instance ${instance.name} must be ${expected.type}`
+        + ` in namespace ${expected.namespace} with source ${expected.source}`,
+    );
+  }
+}
+
+function parseJsonArray(output, label) {
+  let value;
+  try {
+    value = JSON.parse(stripVTControlCharacters(String(output)).trim());
+  } catch (error) {
+    throw new Error(`${label} did not return clean JSON`, { cause: error });
+  }
+  if (!Array.isArray(value)) throw new Error(`${label} must be a JSON array`);
+  return value;
+}
+
+function uniqueListedResources(names, label) {
+  const unique = new Set();
+  for (const name of names) {
+    if (unique.has(name)) throw new Error(`${label} list contains duplicate name ${name}`);
+    unique.add(name);
+  }
+  return unique;
+}
+
+function optionalArray(value, label) {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) throw new Error(`${label} must be an array`);
+  return value;
+}
+
+function requiredText(value, label) {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new Error(`${label} must be a non-empty string`);
+  }
+  return value.trim();
+}
+
+function requiredBinding(value, label) {
+  const binding = requiredText(value, label);
+  if (!/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(binding)) {
+    throw new Error(`${label} must be a JavaScript identifier`);
+  }
+  return binding;
+}
+
+function requiredResourceName(value, label) {
+  const name = requiredText(value, label);
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(name)) {
+    throw new Error(`${label} has an unsupported name`);
+  }
+  return name;
+}
+
+function requiredListedName(value, label) {
+  const name = requiredText(value, label);
+  if (name.length > 512 || /[\u0000-\u001f\u007f]/.test(name)) {
+    throw new Error(`${label} has an unsupported name`);
+  }
+  return name;
+}
+
+function requiredD1DatabaseId(value, label) {
+  const id = requiredText(value, label);
+  if (!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(id)) {
+    throw new Error(`${label} must be a D1 database UUID`);
+  }
+  return id.toLowerCase();
+}
+
 export async function executeProductionMutations(rootExists, actions) {
   const plan = productionMutationPlan(rootExists);
   for (const component of plan) {
@@ -252,6 +671,7 @@ async function main(environment = process.env) {
     TARGET_SHA: target,
   });
   assertOneCommandPreflight(rolloutEnvironment, checkoutState());
+  const resourceTopology = await loadProductionResourceTopology();
 
   await installPinnedDependencies(rolloutEnvironment);
   await assertPinnedWranglerInstallations();
@@ -264,8 +684,28 @@ async function main(environment = process.env) {
     accountId: rolloutEnvironment.CLOUDFLARE_ACCOUNT_ID,
     apiToken: rolloutEnvironment.CLOUDFLARE_API_TOKEN,
   };
-  const childEnvironment = productionWranglerEnvironment(rolloutEnvironment, cloudflare);
+  const childEnvironment = {
+    ...productionWranglerEnvironment(rolloutEnvironment, cloudflare),
+    CI: "true",
+    NO_COLOR: "1",
+  };
   const redactions = deploymentSecrets(rolloutEnvironment);
+  const runResourceCommand = (arguments_, {
+    label,
+    timeoutMs = 60_000,
+  }) => runWrangler("web", arguments_, {
+    environment: childEnvironment,
+    label,
+    redactions,
+    timeoutMs,
+  });
+  const resources = await prepareProductionResources(resourceTopology, {
+    run: runResourceCommand,
+    withConfig: (config, callback) => withPrivateRolloutFiles({
+      "d1-migrations.json": config,
+    }, (paths) => callback(paths["d1-migrations.json"])),
+  });
+  assertOneCommandPreflight(rolloutEnvironment, checkoutState());
   const rootExists = await productionWorkerExists(childEnvironment, redactions);
 
   const actions = {
@@ -281,6 +721,7 @@ async function main(environment = process.env) {
     "root-bootstrap": () => deployProductionWeb(rolloutEnvironment, {
       bootstrap: true,
       containersRollout: "immediate",
+      d1DatabaseIds: resources.d1DatabaseIds,
     }),
     "egress-broker": () => deployProductionBroker(rolloutEnvironment),
     "managed-worker": () => deployProductionManaged(rolloutEnvironment),
@@ -303,6 +744,7 @@ async function main(environment = process.env) {
     }),
     "root-final": () => deployProductionWeb(rolloutEnvironment, {
       containersRollout: finalContainerRollout(rootExists),
+      d1DatabaseIds: resources.d1DatabaseIds,
     }),
   };
 
@@ -310,10 +752,24 @@ async function main(environment = process.env) {
   await waitForProductionHealth(target);
   process.stdout.write(`${JSON.stringify({
     plan,
+    resources_created: resources.created,
     revision: target,
     root_bootstrapped: !rootExists,
     status: "healthy",
   })}\n`);
+}
+
+async function loadProductionResourceTopology() {
+  const definitions = [
+    ["website", "web", "web/wrangler.jsonc"],
+    ["managed agent", "services/managed", "services/managed/wrangler.jsonc"],
+  ];
+  const configurations = await Promise.all(definitions.map(async ([label, directory, path]) => ({
+    config: await readJson(resolve(repositoryRoot, path)),
+    directory: resolve(repositoryRoot, directory),
+    label,
+  })));
+  return productionResourceTopology(configurations);
 }
 
 async function installPinnedDependencies(environment) {
