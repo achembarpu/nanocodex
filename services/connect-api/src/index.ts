@@ -3,6 +3,12 @@ import { custom } from "viem";
 import { KeyAuthorization } from "ox/tempo";
 
 import {
+  chatGptCredentialImportDigest,
+  credentialImportDigestFromResources,
+  parseChatGptCredentialImport,
+} from "./chatGptCredentialImport.mjs";
+import type { ChatGptCredentialImport } from "./chatGptCredentialImport.mjs";
+import {
   cliApp,
   approvedCliAccessKeyMatches,
   parseCliRegisterBody,
@@ -21,7 +27,7 @@ import {
   localMcpAuthorization,
   wrapLocalConnectorAuthorizationState,
   wrapLocalMcpAuthorizationState,
-} from "../../localConnectorCallback";
+} from "../../../web/localConnectorCallback";
 import {
   canonicalRemoteMcpTarget,
   isMcpConnectionId,
@@ -127,6 +133,8 @@ const MAX_MANAGED_MEMORY_RESPONSE_BYTES = 1024 * 1024;
 const MAX_PINNED_RUNTIME_RESPONSE_BYTES = 32 * 1024 * 1024;
 const MAX_ACCOUNT_AUTHORIZATIONS = 64;
 const MAX_DEVICE_REGISTER_BYTES = 64 * 1024;
+const MAX_CONNECTION_REQUEST_BYTES = 128 * 1024;
+const MAX_CHATGPT_IMPORT_BODY_BYTES = 64 * 1024;
 const EGRESS_SUBJECT = /^[A-Za-z0-9_-]{43,128}$/;
 const CONNECTOR_METHODS = new Set(["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"]);
 const CONNECTOR_REQUEST_HEADERS = new Set([
@@ -1063,7 +1071,7 @@ async function createConnection(
   const startedAt = performance.now();
   const timings: Array<readonly [string, number]> = [];
   const mark = (name: string) => timings.push([name, performance.now()]);
-  const body = await json(request);
+  const body = await connectionRequestBody(request);
   const appId = requiredString(body.app_id, "app_id");
   const app = requireCallerApp(request, appId);
   const accountAddress = address(body.account_address);
@@ -1081,6 +1089,12 @@ async function createConnection(
   }
   requireApprovedCapabilities(approval.resources, appId, requested, requestedMcpIds);
   const agentCapabilities = approvedAgentCapabilities(approval.resources);
+  const credentialImport = await approvedChatGptCredentialImport(
+    body.chatgpt_credential_import,
+    approval,
+    app,
+    requested,
+  );
 
   const retainedIdentity = approval.profileLinked === true && isBrokerUserId(approval.brokerUserId)
     ? { linked: true, userId: approval.brokerUserId }
@@ -1090,12 +1104,6 @@ async function createConnection(
   if (!identity.linked) {
     throw new ApiFailure(403, "account_link_required", "Link this Tempo account to your Nanocodex profile before authorizing a durable agent.");
   }
-  // Refresh connector state immediately before provisioning anything durable.
-  // A stale approval snapshot must never mint a grant for a disconnected
-  // provider or leave behind a partially capable grant.
-  const connectors = await connectedRequestedConnectors(env, identity.userId, requested);
-  requireRequestedConnectors(connectors, requested);
-  const mcpConnections = await connectedRequestedMcpConnections(env, identity.userId, requestedMcpIds);
   const credential = await connectionCredential(
     store,
     body,
@@ -1110,6 +1118,26 @@ async function createConnection(
   if (grantTtl <= 0) {
     throw new ApiFailure(403, "access_key_expired", "The delegated access key has expired.");
   }
+  if (credentialImport) {
+    await importChatGptCredential(env, identity.userId, credentialImport);
+    mark("credential-import");
+  }
+  // Provisioning a credential is not approval consumption. Recheck every live
+  // connector and MCP immediately after broker success, then consume the
+  // approval before creating any grant state.
+  const liveConnectorStatuses = (await connectorStatuses(env, identity.userId)).connectors;
+  const connectors = requested.filter((connector) => liveConnectorStatuses[connector].connected);
+  requireRequestedConnectors(connectors, requested);
+  if (credentialImport
+    && liveConnectorStatuses.chatgpt.account_id !== credentialImport.account_id) {
+    throw new ApiFailure(
+      409,
+      "chatgpt_credential_mismatch",
+      "The retained ChatGPT credential does not match the approved import.",
+    );
+  }
+  const mcpConnections = await connectedRequestedMcpConnections(env, identity.userId, requestedMcpIds);
+  mark("live-capabilities");
   const consumedApproval = await takeConnectApproval(store, approvalId, accountAddress);
   if (JSON.stringify(consumedApproval) !== JSON.stringify(approval)) {
     throw new ApiFailure(403, "approval_unavailable", "The signed Connect approval changed before it was consumed.");
@@ -1199,6 +1227,112 @@ async function createConnection(
   }
 }
 
+async function connectionRequestBody(request: Request): Promise<Record<string, unknown>> {
+  const body = await boundedJson(request, MAX_CONNECTION_REQUEST_BYTES, "connection");
+  const allowed = new Set([
+    "account_address",
+    "app_id",
+    "approval_id",
+    "authorization_mode",
+    "chatgpt_credential_import",
+    "key_authorization",
+    "permission",
+    "requested_connectors",
+    "requested_mcp_connections",
+    "reuse_access_key",
+    "signed_key_authorization",
+  ]);
+  if (Object.keys(body).some((key) => !allowed.has(key))) {
+    throw new ApiFailure(400, "invalid_connection_request", "The connection request contains an unknown field.");
+  }
+  return body;
+}
+
+async function approvedChatGptCredentialImport(
+  value: unknown,
+  approval: ConnectApproval,
+  app: CallerApp,
+  requested: readonly ConnectorId[],
+): Promise<ChatGptCredentialImport | undefined> {
+  let approvedDigest: string | undefined;
+  try {
+    approvedDigest = credentialImportDigestFromResources(approval.resources);
+  } catch {
+    throw new ApiFailure(403, "invalid_credential_import_resource", "The signed credential import resource is invalid.");
+  }
+  if ((value === undefined) !== (approvedDigest === undefined)) {
+    throw new ApiFailure(
+      403,
+      "credential_import_mismatch",
+      "The ChatGPT credential body and signed import resource must be provided together.",
+    );
+  }
+  if (value === undefined || approvedDigest === undefined) return undefined;
+  if (app.appId !== CLI_APP_ID || app.origin !== CLI_APP_ORIGIN
+    || approval.appId !== CLI_APP_ID || approval.appOrigin !== CLI_APP_ORIGIN
+    || !approvedConnectors(approval.resources).has("chatgpt")
+    || !requested.includes("chatgpt")) {
+    throw new ApiFailure(
+      403,
+      "credential_import_not_approved",
+      "ChatGPT credential import is reserved for an exact Nanocodex CLI ChatGPT approval.",
+    );
+  }
+  let credential: ChatGptCredentialImport;
+  try {
+    credential = parseChatGptCredentialImport(value);
+  } catch {
+    throw new ApiFailure(400, "invalid_chatgpt_credential", "The ChatGPT credential import is invalid.");
+  }
+  if (credential.expires_at <= Date.now()) {
+    throw new ApiFailure(400, "invalid_chatgpt_credential", "The ChatGPT credential import is expired.");
+  }
+  if (await chatGptCredentialImportDigest(credential) !== approvedDigest) {
+    throw new ApiFailure(
+      403,
+      "credential_import_mismatch",
+      "The ChatGPT credential import does not match its signed commitment.",
+    );
+  }
+  return credential;
+}
+
+async function importChatGptCredential(
+  env: Env,
+  brokerUserId: string,
+  credential: ChatGptCredentialImport,
+): Promise<void> {
+  const encoded = JSON.stringify(credential);
+  if (new TextEncoder().encode(encoded).byteLength > MAX_CHATGPT_IMPORT_BODY_BYTES) {
+    throw new ApiFailure(413, "request_too_large", "The ChatGPT credential import is too large.");
+  }
+  let response: Response;
+  try {
+    response = await env.EGRESS.fetch(new Request(
+      `https://nanocodex.internal/users/${encodeURIComponent(brokerUserId)}/credentials/chatgpt`,
+      {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: encoded,
+      },
+    ));
+  } catch {
+    throw new ApiFailure(502, "chatgpt_credential_import_failed", "The credential broker is unavailable.");
+  }
+  if (response.status !== 204) {
+    await response.body?.cancel();
+    if (response.status === 409) {
+      throw new ApiFailure(
+        409,
+        "chatgpt_credential_conflict",
+        "A different live ChatGPT account is already connected.",
+      );
+    }
+    throw new ApiFailure(502, "chatgpt_credential_import_failed", "The credential broker rejected the import.");
+  }
+  await response.body?.cancel();
+}
+
 async function connectionCredential(
   store: Kv.Kv,
   body: Record<string, unknown>,
@@ -1272,6 +1406,9 @@ async function connectionAccessKey(
   }
   if (!isRecord(body.reuse_access_key)) {
     throw new ApiFailure(400, "invalid_access_key", "reuse_access_key must be an object.");
+  }
+  if (Object.keys(body.reuse_access_key).some((key) => key !== "key_id" && key !== "expiry")) {
+    throw new ApiFailure(400, "invalid_access_key", "reuse_access_key contains an unknown field.");
   }
   const keyId = address(body.reuse_access_key.key_id);
   const claimedExpiry = safeInteger(body.reuse_access_key.expiry, "reuse_access_key.expiry");
@@ -3373,6 +3510,9 @@ function requestedConnectors(value: unknown): ConnectorId[] {
       throw new ApiFailure(400, "invalid_requested_connectors", "requested_connectors contains an unknown connector.");
     }
     requested.add(item as ConnectorId);
+  }
+  if (requested.size !== value.length) {
+    throw new ApiFailure(400, "invalid_requested_connectors", "requested_connectors cannot contain duplicates.");
   }
   return [...requested];
 }

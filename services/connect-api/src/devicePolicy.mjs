@@ -1,4 +1,8 @@
 import { Address, PublicKey } from "ox";
+import {
+  credentialImportDigestFromResources,
+  isAllowedChatGptCredentialImportResource,
+} from "./chatGptCredentialImport.mjs";
 import { isAllowedMcpResource, validateMcpResources } from "./mcpPolicy.mjs";
 
 export const cliApp = Object.freeze({
@@ -62,6 +66,10 @@ export function parseCliWalletRequest(value) {
     throw new Error("The CLI wallet_connect resources are invalid.");
   }
   const requestedConnectors = connectorResources(resources);
+  const credentialImport = credentialImportDigestFromResources(resources);
+  if (credentialImport !== undefined && !requestedConnectors.has("chatgpt")) {
+    throw new Error("A ChatGPT credential import requires the signed ChatGPT connector.");
+  }
   const focused = resources
     .filter((resource) => resource.startsWith(connectorFocusPrefix))
     .map((resource) => resource.slice(connectorFocusPrefix.length));
@@ -308,6 +316,7 @@ export function requestedConnectorsSatisfied(connected, requested) {
 function isAllowedResource(resource) {
   if (requiredResources.has(resource) || optionalResources.has(resource)) return true;
   if (isAllowedMcpResource(resource)) return true;
+  if (isAllowedChatGptCredentialImportResource(resource)) return true;
   if (resource.startsWith("urn:nanocodex:connector:")) {
     return connectors.has(resource.slice("urn:nanocodex:connector:".length));
   }

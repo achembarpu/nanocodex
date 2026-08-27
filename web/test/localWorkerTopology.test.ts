@@ -46,7 +46,7 @@ test("local development mirrors the private Workers and same-session Connect API
       NANOCODEX_LOCAL_WEBAUTHN_HMAC_KEY: "nanocodex-local-passkey-portability-v1",
     },
   });
-  assert.equal(connectApi?.configPath, "./connect-api/wrangler.jsonc");
+  assert.equal(connectApi?.configPath, "../services/connect-api/wrangler.jsonc");
   assert.deepEqual(connectApi?.config({
     services: [
       { binding: "ACCOUNTS", service: "nanocodex-durable-agent" },

@@ -86,7 +86,7 @@ export function localManagedAuxiliaryWorkers(
       }),
     },
     {
-      configPath: "./connect-api/wrangler.jsonc",
+      configPath: "../services/connect-api/wrangler.jsonc",
       devOnly: true,
       config: (configuration) => ({
         compatibility_date: LOCAL_CONNECT_API_COMPATIBILITY_DATE,

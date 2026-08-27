@@ -198,6 +198,10 @@ test("local development installs every package required to start the web stack",
   assert.deepEqual(connectDialog?.requiredFiles, ["node_modules/wrangler/bin/wrangler.js"]);
   assert.deepEqual(connectPlayground?.requiredFiles, ["node_modules/wrangler/bin/wrangler.js"]);
   assert.ok(connectApi);
+  assert.equal(
+    connectApi.root,
+    fileURLToPath(new URL("../../services/connect-api", import.meta.url)),
+  );
   assert.deepEqual(connectApi.requiredFiles, [
     "node_modules/accounts/package.json",
     "node_modules/wrangler/bin/wrangler.js",

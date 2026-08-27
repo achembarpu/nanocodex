@@ -57,6 +57,8 @@ function registration(resources, capabilities = {}) {
 }
 
 const base = ["urn:nanocodex:agent:run", cliAppResource, cliOriginResource];
+const credentialImport =
+  `urn:nanocodex:credential-import:chatgpt:codex-auth-v1:sha256:${"a".repeat(43)}`;
 
 test("CLI device registration accepts exact hosted capabilities without implicit MPP", () => {
   const resources = [
@@ -88,6 +90,33 @@ test("CLI connector focus is signed, singular, and part of the granted connector
     "urn:nanocodex:connector-focus:chatgpt",
     "urn:nanocodex:connector-focus:github",
   ])), /focus/);
+});
+
+test("CLI credential import is singular, well formed, and bound to ChatGPT", () => {
+  assert.doesNotThrow(() => parseCliRegisterBody(registration([
+    ...base,
+    "urn:nanocodex:connectors:chatgpt",
+    credentialImport,
+  ])));
+  assert.throws(() => parseCliRegisterBody(registration([...base, credentialImport])), /ChatGPT/);
+  assert.throws(() => parseCliRegisterBody(registration([
+    ...base,
+    "urn:nanocodex:connectors:chatgpt",
+    credentialImport,
+    credentialImport,
+  ])), /resources/);
+  assert.throws(() => parseCliRegisterBody(registration([
+    ...base,
+    "urn:nanocodex:connectors:chatgpt",
+    `${credentialImport}x`,
+  ])), /resources/);
+  assert.throws(() => parseCliRegisterBody(registration([
+    "urn:nanocodex:agent:run",
+    "urn:nanocodex:app:attacker",
+    cliOriginResource,
+    "urn:nanocodex:connectors:chatgpt",
+    credentialImport,
+  ])), /resources/);
 });
 
 test("CLI remote MCP focus is signed, singular, and part of the exact connection set", () => {
