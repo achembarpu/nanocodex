@@ -13,6 +13,7 @@ import {
   LocalStackLifecycle,
   acquireLocalDevelopmentLease,
   assertLocalDevelopmentPortAvailable,
+  ensureLocalDependencies,
   ensureLocalOAuthRelay,
   localDevelopmentInstance,
   localDevelopmentOrigin,
@@ -184,17 +185,20 @@ test("local development installs every package required to start the web stack",
   const connectPlayground = requirements.find(({ root }) => basename(root) === "connect-playground");
   const connectApi = requirements.find(({ root }) => basename(root) === "connect-api");
   assert.deepEqual(bindings?.requiredFiles, ["node_modules/wata/package.json"]);
+  assert.deepEqual(bindings?.exactVersionPackages, ["wata"]);
   assert.deepEqual(react?.requiredFiles, ["node_modules/nanocodex/package.json"]);
   assert.ok(terminal);
   assert.deepEqual(terminal.requiredFiles, [
     "node_modules/streamdown/package.json",
     "node_modules/typescript/bin/tsc",
   ]);
+  assert.deepEqual(terminal.exactVersionPackages, ["streamdown"]);
   assert.ok(web);
   assert.deepEqual(web.requiredFiles, [
     "node_modules/accounts/package.json",
     "node_modules/wrangler/bin/wrangler.js",
   ]);
+  assert.deepEqual(web.exactVersionPackages, ["accounts"]);
   assert.deepEqual(connectDialog?.requiredFiles, ["node_modules/wrangler/bin/wrangler.js"]);
   assert.deepEqual(connectPlayground?.requiredFiles, ["node_modules/wrangler/bin/wrangler.js"]);
   assert.ok(connectApi);
@@ -206,7 +210,65 @@ test("local development installs every package required to start the web stack",
     "node_modules/accounts/package.json",
     "node_modules/wrangler/bin/wrangler.js",
   ]);
+  assert.deepEqual(connectApi.exactVersionPackages, ["accounts"]);
   assert.equal(requirements.length, 9);
+});
+
+async function writeDependencyFixture(root, declaredVersion, installedVersion) {
+  await mkdir(resolve(root, "node_modules/accounts"), { recursive: true });
+  await writeFile(resolve(root, "package.json"), JSON.stringify({
+    dependencies: { accounts: declaredVersion },
+  }));
+  await writeFile(resolve(root, "node_modules/accounts/package.json"), JSON.stringify({
+    name: "accounts",
+    version: installedVersion,
+  }));
+}
+
+test("a stale direct dependency installs only its deduplicated package root", async (context) => {
+  const fixtureRoot = await mkdtemp(join(tmpdir(), "nanocodex-local-dependencies-"));
+  context.after(() => rm(fixtureRoot, { recursive: true, force: true }));
+  const staleRoot = resolve(fixtureRoot, "stale");
+  const matchingRoot = resolve(fixtureRoot, "matching");
+  await Promise.all([
+    writeDependencyFixture(staleRoot, "0.17.0", "0.16.2"),
+    writeDependencyFixture(matchingRoot, "0.17.0", "0.17.0"),
+  ]);
+  const requirement = (root) => ({
+    root,
+    requiredFiles: ["node_modules/accounts/package.json"],
+    exactVersionPackages: ["accounts"],
+  });
+  const calls = [];
+
+  await ensureLocalDependencies(
+    { PATH: "/bin" },
+    async (...arguments_) => calls.push(arguments_),
+    [requirement(staleRoot), requirement(matchingRoot), requirement(staleRoot)],
+  );
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0][0], "npm");
+  assert.deepEqual(calls[0][1], ["ci", "--prefix", staleRoot]);
+});
+
+test("matching direct dependency versions do not reinstall", async (context) => {
+  const fixtureRoot = await mkdtemp(join(tmpdir(), "nanocodex-local-dependencies-"));
+  context.after(() => rm(fixtureRoot, { recursive: true, force: true }));
+  await writeDependencyFixture(fixtureRoot, "0.17.0", "0.17.0");
+  const calls = [];
+
+  await ensureLocalDependencies(
+    {},
+    async (...arguments_) => calls.push(arguments_),
+    [{
+      root: fixtureRoot,
+      requiredFiles: ["node_modules/accounts/package.json"],
+      exactVersionPackages: ["accounts"],
+    }],
+  );
+
+  assert.deepEqual(calls, []);
 });
 
 test("completed one-shot commands surrender their process-group capabilities", async () => {

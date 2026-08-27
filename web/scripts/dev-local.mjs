@@ -1031,30 +1031,83 @@ export async function verifyLocalModelPreconnect(
   }
 }
 
-async function ensureLocalDependencies(environment, execute = run) {
-  const packages = localDependencyRequirements();
+export async function ensureLocalDependencies(
+  environment,
+  execute = run,
+  requirements = localDependencyRequirements(),
+) {
+  const packages = deduplicateLocalDependencyRequirements(requirements);
   const missing = [];
-  for (const { root, requiredFiles } of packages) {
+  for (const { root, requiredFiles, exactVersionPackages } of packages) {
+    let ready = true;
     for (const requiredFile of requiredFiles) {
       try {
         const metadata = await stat(resolve(root, requiredFile));
         if (!metadata.isFile() || metadata.size === 0) {
-          missing.push(root);
+          ready = false;
           break;
         }
       } catch (error) {
         if (error?.code !== "ENOENT") throw error;
-        missing.push(root);
+        ready = false;
         break;
       }
     }
+    if (ready) ready = await localDependencyVersionsMatch(root, exactVersionPackages);
+    if (!ready) missing.push(root);
   }
   if (missing.length === 0) return;
-  process.stderr.write("Preparing missing local Cloudflare Worker dependencies.\n");
+  process.stderr.write("Preparing missing or stale local Cloudflare Worker dependencies.\n");
   await Promise.all(missing.map((root) => execute("npm", ["ci", "--prefix", root], {
     cwd: repositoryRoot,
     env: environment,
   })));
+}
+
+function deduplicateLocalDependencyRequirements(requirements) {
+  const roots = new Map();
+  for (const requirement of requirements) {
+    const current = roots.get(requirement.root) ?? {
+      root: requirement.root,
+      requiredFiles: new Set(),
+      exactVersionPackages: new Set(),
+    };
+    for (const requiredFile of requirement.requiredFiles) current.requiredFiles.add(requiredFile);
+    for (const packageName of requirement.exactVersionPackages ?? []) {
+      current.exactVersionPackages.add(packageName);
+    }
+    roots.set(requirement.root, current);
+  }
+  return [...roots.values()].map(({ root, requiredFiles, exactVersionPackages }) => ({
+    root,
+    requiredFiles: [...requiredFiles],
+    exactVersionPackages: [...exactVersionPackages],
+  }));
+}
+
+async function localDependencyVersionsMatch(root, packageNames) {
+  if (packageNames.length === 0) return true;
+  const manifest = JSON.parse(await readFile(resolve(root, "package.json"), "utf8"));
+  for (const packageName of packageNames) {
+    const expected = manifest.dependencies?.[packageName]
+      ?? manifest.devDependencies?.[packageName];
+    if (typeof expected !== "string" || !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(expected)) {
+      throw new Error(
+        `${root}/package.json must declare ${packageName} at an exact version`,
+      );
+    }
+    try {
+      const installed = JSON.parse(await readFile(
+        resolve(root, "node_modules", ...packageName.split("/"), "package.json"),
+        "utf8",
+      ));
+      if (installed.version !== expected) return false;
+    } catch (error) {
+      if (error?.code !== "ENOENT" && !(error instanceof SyntaxError)) throw error;
+      return false;
+    }
+  }
+  return true;
 }
 
 export function localDependencyRequirements() {
@@ -1062,6 +1115,7 @@ export function localDependencyRequirements() {
     {
       root: bindingsRoot,
       requiredFiles: ["node_modules/wata/package.json"],
+      exactVersionPackages: ["wata"],
     },
     {
       root: reactRoot,
@@ -1073,6 +1127,7 @@ export function localDependencyRequirements() {
         "node_modules/streamdown/package.json",
         "node_modules/typescript/bin/tsc",
       ],
+      exactVersionPackages: ["streamdown"],
     },
     {
       root: webRoot,
@@ -1080,6 +1135,7 @@ export function localDependencyRequirements() {
         "node_modules/accounts/package.json",
         "node_modules/wrangler/bin/wrangler.js",
       ],
+      exactVersionPackages: ["accounts"],
     },
     {
       root: connectDialogRoot,
@@ -1095,6 +1151,7 @@ export function localDependencyRequirements() {
         "node_modules/accounts/package.json",
         "node_modules/wrangler/bin/wrangler.js",
       ],
+      exactVersionPackages: ["accounts"],
     },
     {
       root: resolve(managedRoot, "../egress"),
