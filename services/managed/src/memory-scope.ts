@@ -93,6 +93,21 @@ type AiOutboxRow = {
   retry_at: number;
 };
 
+type DisposableAiSearchItem = AiSearchItem & Disposable;
+
+export async function withAiSearchItem<T>(
+  items: Pick<AiSearchItems, "get">,
+  itemId: string,
+  operation: (item: AiSearchItem) => Promise<T>,
+): Promise<T> {
+  const item = items.get(itemId) as DisposableAiSearchItem;
+  try {
+    return await operation(item);
+  } finally {
+    item[Symbol.dispose]();
+  }
+}
+
 const json = (body: unknown, init: ResponseInit = {}) => Response.json(body, {
   ...init,
   headers: { "cache-control": "no-store", ...init.headers },
@@ -872,7 +887,11 @@ export class MemoryScope extends DurableObject<MemoryScopeEnv> {
                 );
               } else {
                 try {
-                  item = await this.env.HISTORY_AI_SEARCH.items.get(current.ai_item_id).info();
+                  item = await withAiSearchItem(
+                    this.env.HISTORY_AI_SEARCH.items,
+                    current.ai_item_id,
+                    (currentItem) => currentItem.info(),
+                  );
                 } catch (error) {
                   if (!isAiSearchNotFound(error)) throw error;
                   this.ctx.storage.sql.exec(
@@ -885,7 +904,11 @@ export class MemoryScope extends DurableObject<MemoryScopeEnv> {
               }
               if (item.status !== "completed") {
                 if (item.status === "error" || item.status === "skipped" || item.status === "outdated") {
-                  await this.env.HISTORY_AI_SEARCH.items.get(item.id).sync();
+                  await withAiSearchItem(
+                    this.env.HISTORY_AI_SEARCH.items,
+                    item.id,
+                    (currentItem) => currentItem.sync(),
+                  );
                 }
                 this.#deferAiOperation(row);
                 continue;
