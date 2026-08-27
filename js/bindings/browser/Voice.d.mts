@@ -6,11 +6,14 @@ export const voices: readonly ["juniper", "maple", "spruce", "ember", "vale", "b
 export const defaultVoice: "cove";
 export type VoiceName = (typeof voices)[number];
 export type VoiceErrorCode =
+  | "ice_gathering_timeout"
   | "microphone_capture_cancelled"
   | "microphone_capture_timeout"
   | "microphone_not_found"
   | "microphone_permission_blocked"
-  | "microphone_unavailable";
+  | "microphone_unavailable"
+  | "realtime_call_timeout"
+  | "sideband_open_timeout";
 export declare class VoiceError extends Error {
   readonly code: VoiceErrorCode;
   constructor(code: VoiceErrorCode, message: string, options?: { cause?: unknown });

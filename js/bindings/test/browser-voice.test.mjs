@@ -6,8 +6,11 @@ import { Actions, Voice } from "../browser/index.mjs";
 import {
   BrowserVoiceSession,
   capturePreferredMicrophone,
+  ICE_GATHERING_TIMEOUT_MS,
   MICROPHONE_CAPTURE_TIMEOUT_MS,
+  REALTIME_CALL_TIMEOUT_MS,
   SpeakerPlayback,
+  SIDEBAND_OPEN_TIMEOUT_MS,
   VoiceError,
 } from "../browser/VoiceSession.mjs";
 import { createAgentClient, defineRuntime } from "../internal.mjs";
@@ -163,6 +166,45 @@ test("explains browser and embed microphone denials", async () => {
   }
 });
 
+test("stops the initially acquired microphone when device selection fails", async () => {
+  const previous = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+  const stopped = [];
+  const makeMicrophone = () => ({
+    getAudioTracks: () => [{ label: "Built-in microphone", getSettings: () => ({ deviceId: "current" }) }],
+    getTracks: () => [{ stop: () => stopped.push(true) }],
+  });
+  try {
+    const enumerateFailure = new Error("device enumeration failed");
+    const first = makeMicrophone();
+    Object.defineProperty(globalThis, "navigator", {
+      configurable: true,
+      value: { mediaDevices: {
+        getUserMedia: async () => first,
+        enumerateDevices: async () => { throw enumerateFailure; },
+      } },
+    });
+    await assert.rejects(capturePreferredMicrophone(async () => undefined), (error) => error === enumerateFailure);
+    assert.equal(stopped.length, 1);
+
+    const selectionFailure = new Error("physical input selection failed");
+    const second = makeMicrophone();
+    Object.defineProperty(globalThis, "navigator", {
+      configurable: true,
+      value: { mediaDevices: {
+        getUserMedia: async () => second,
+        enumerateDevices: async () => [{ kind: "audioinput", label: "Built-in microphone", deviceId: "current" }],
+      } },
+    });
+    await assert.rejects(
+      capturePreferredMicrophone(async () => { throw selectionFailure; }),
+      (error) => error === selectionFailure,
+    );
+    assert.equal(stopped.length, 2);
+  } finally {
+    restoreGlobal("navigator", previous);
+  }
+});
+
 test("bounds stalled microphone acquisition with an actionable typed error", async (t) => {
   const fixture = installBrowserVoiceFixture();
   const calls = [];
@@ -207,6 +249,57 @@ test("bounds stalled microphone acquisition with an actionable typed error", asy
     agent.dispose();
   } finally {
     fixture.restore();
+  }
+});
+
+test("bounds each browser voice startup boundary with typed cleanup errors", async (t) => {
+  const boundaries = [
+    ["ice", ICE_GATHERING_TIMEOUT_MS, "ice_gathering_timeout", "network negotiation", "peer"],
+    ["fetch", REALTIME_CALL_TIMEOUT_MS, "realtime_call_timeout", "connection request", "request"],
+    ["sideband", SIDEBAND_OPEN_TIMEOUT_MS, "sideband_open_timeout", "sideband", "sideband"],
+  ];
+  for (const [boundary, timeoutMs, code, message, resource] of boundaries) {
+    const fixture = installBrowserVoiceFixture({ boundary });
+    const calls = [];
+    const timers = new Map();
+    let nextTimer = 1;
+    t.mock.method(globalThis.window, "setTimeout", (callback, delay) => {
+      const handle = nextTimer;
+      nextTimer += 1;
+      timers.set(handle, { callback, delay });
+      return handle;
+    });
+    t.mock.method(globalThis.window, "clearTimeout", (handle) => timers.delete(handle));
+    const session = new BrowserVoiceSession({
+      core: fakeVoiceCore(calls),
+      sessionId: `timeout-${boundary}`,
+      voice: "cove",
+      captureMicrophone: async () => fakeMicrophone(calls),
+      onStatus() {},
+      onTranscript() {},
+      onTerminated() {},
+    });
+    try {
+      const starting = session.start();
+      await waitFor(() => (
+        resource === "peer" ? fixture.peer !== undefined
+          : resource === "request" ? fixture.requestSignal !== undefined
+            : fixture.sideband !== undefined
+      ));
+      const timeout = [...timers.entries()].find(([, timer]) => timer.delay === timeoutMs);
+      assert.notEqual(timeout, undefined, boundary);
+      timers.delete(timeout[0]);
+      timeout[1].callback();
+      await assert.rejects(starting, (error) => (
+        error instanceof VoiceError && error.code === code && error.message.includes(message)
+      ));
+      if (boundary === "ice") assert.equal(fixture.peer.signalingState, "closed");
+      if (boundary === "fetch") assert.equal(fixture.requestSignal.aborted, true);
+      if (boundary === "sideband") assert.equal(fixture.sideband.readyState, fixture.sideband.constructor.CLOSED);
+      await session.close();
+    } finally {
+      fixture.restore();
+    }
   }
 });
 

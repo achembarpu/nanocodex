@@ -1,4 +1,7 @@
 export const MICROPHONE_CAPTURE_TIMEOUT_MS = 15_000;
+export const ICE_GATHERING_TIMEOUT_MS = 15_000;
+export const REALTIME_CALL_TIMEOUT_MS = 15_000;
+export const SIDEBAND_OPEN_TIMEOUT_MS = 15_000;
 
 export class VoiceError extends Error {
   constructor(code, message, options = {}) {
@@ -155,7 +158,13 @@ export class BrowserVoiceSession {
 
     const offer = await peer.createOffer();
     await peer.setLocalDescription(offer);
-    await waitForIce(peer, this.#closing.signal);
+    try {
+      await waitForIce(peer, this.#closing.signal);
+    } catch (cause) {
+      if (this.#closed) return;
+      this.#stopBrowserIo();
+      throw cause;
+    }
     if (this.#closed || peer.signalingState === "closed") return;
     const sdp = peer.localDescription?.sdp;
     if (!sdp) throw new Error("the browser did not produce a Realtime WebRTC offer");
@@ -163,22 +172,40 @@ export class BrowserVoiceSession {
     const call = new AbortController();
     this.#call = call;
     const body = await core.callBody(sdp);
-    const response = this.#options.call
-      ? await this.#options.call(body, call.signal)
-      : await fetch(this.#options.callUrl ?? "/api/realtime/calls", {
-          method: "POST",
-          signal: call.signal,
-          credentials: "same-origin",
-          headers: {
-            "content-type": "application/json",
-            "x-nanocodex-request": "1",
-          },
-          body,
-        });
-    if (!response.ok) throw new Error(await responseError(response, "voice connection failed"));
-    const location = response.headers.get("x-nanocodex-realtime-location");
-    if (!location) throw new Error("voice connection did not return a Realtime Location");
-    const completed = JSON.parse(await core.completeCall(await response.text(), location));
+    let callResponse;
+    try {
+      callResponse = await withStartupDeadline(async () => {
+        const response = this.#options.call
+          ? await this.#options.call(body, call.signal)
+          : await fetch(this.#options.callUrl ?? "/api/realtime/calls", {
+              method: "POST",
+              signal: call.signal,
+              credentials: "same-origin",
+              headers: {
+                "content-type": "application/json",
+                "x-nanocodex-request": "1",
+              },
+              body,
+            });
+        if (!response.ok) throw new Error(await responseError(response, "voice connection failed"));
+        const location = response.headers.get("x-nanocodex-realtime-location");
+        if (!location) throw new Error("voice connection did not return a Realtime Location");
+        return { location, body: await response.text() };
+      }, {
+        signal: call.signal,
+        timeoutMs: REALTIME_CALL_TIMEOUT_MS,
+        onTimeout: () => call.abort(),
+        timeoutError: new VoiceError(
+          "realtime_call_timeout",
+          "The Realtime voice connection request did not finish in time. Check your network connection, then retry.",
+        ),
+      });
+    } catch (cause) {
+      if (this.#closed) return;
+      this.#stopBrowserIo();
+      throw cause;
+    }
+    const completed = JSON.parse(await core.completeCall(callResponse.body, callResponse.location));
     if (this.#closed || peer.signalingState === "closed") return;
     await peer.setRemoteDescription({ type: "answer", sdp: completed.sdp });
     if (this.#closed) return;
@@ -187,7 +214,13 @@ export class BrowserVoiceSession {
     this.#sidebandUrl = this.#options.sidebandUrl
       ? undefined
       : String(await core.sidebandUrl(completed.call_id));
-    await this.#openSideband();
+    try {
+      await this.#openSideband();
+    } catch (cause) {
+      if (this.#closed) return;
+      this.#stopBrowserIo();
+      throw cause;
+    }
     if (this.#closed) return;
     this.#status(`Voice active (${this.#options.voice}) — /voice off to stop`);
   }
@@ -362,18 +395,23 @@ export async function capturePreferredMicrophone(selectPhysicalInput) {
   }
   const current = microphone.getAudioTracks()[0];
   if (!current?.label || !navigator.mediaDevices.enumerateDevices) return microphone;
-  const devices = await navigator.mediaDevices.enumerateDevices();
-  const inputs = devices.filter((device) => device.kind === "audioinput" && device.label);
-  const index = await selectPhysicalInput(current.label, inputs.map((device) => device.label));
-  const physical = index === undefined ? undefined : inputs[index];
-  if (physical?.deviceId && physical.deviceId !== current.getSettings?.().deviceId) {
-    try {
-      const replacement = await navigator.mediaDevices.getUserMedia({ audio: { deviceId: { exact: physical.deviceId } } });
-      stopStream(microphone);
-      microphone = replacement;
-    } catch {
-      // Exact-device reselection is only a desktop convenience; retain the usable capture.
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const inputs = devices.filter((device) => device.kind === "audioinput" && device.label);
+    const index = await selectPhysicalInput(current.label, inputs.map((device) => device.label));
+    const physical = index === undefined ? undefined : inputs[index];
+    if (physical?.deviceId && physical.deviceId !== current.getSettings?.().deviceId) {
+      try {
+        const replacement = await navigator.mediaDevices.getUserMedia({ audio: { deviceId: { exact: physical.deviceId } } });
+        stopStream(microphone);
+        microphone = replacement;
+      } catch {
+        // Exact-device reselection is only a desktop convenience; retain the usable capture.
+      }
     }
+  } catch (cause) {
+    stopStream(microphone);
+    throw cause;
   }
   return microphone;
 }
@@ -462,6 +500,7 @@ function realtimeSidebandUrl(callId, sessionId) {
 function waitForIce(peer, signal) {
   if (peer.iceGatheringState === "complete") return Promise.resolve();
   return new Promise((resolve, reject) => {
+    let timer;
     const changed = () => {
       if (peer.iceGatheringState !== "complete") return;
       cleanup();
@@ -471,34 +510,113 @@ function waitForIce(peer, signal) {
       cleanup();
       reject(new Error("voice connection stopped"));
     };
+    const timedOut = () => {
+      cleanup();
+      peer.close();
+      reject(new VoiceError(
+        "ice_gathering_timeout",
+        "Realtime voice network negotiation did not finish in time. Check your network connection, then retry.",
+      ));
+    };
     const cleanup = () => {
+      window.clearTimeout(timer);
       peer.removeEventListener("icegatheringstatechange", changed);
       signal?.removeEventListener("abort", stopped);
     };
+    timer = window.setTimeout(timedOut, ICE_GATHERING_TIMEOUT_MS);
     peer.addEventListener("icegatheringstatechange", changed);
     signal?.addEventListener("abort", stopped, { once: true });
     if (signal?.aborted) stopped();
+    else changed();
   });
 }
 
 function waitForWebSocket(socket, signal) {
   if (socket.readyState === WebSocket.OPEN) return Promise.resolve();
   return new Promise((resolve, reject) => {
+    let timer;
     const opened = () => { cleanup(); resolve(); };
-    const failed = () => { cleanup(); reject(new Error("voice sideband connection failed")); };
+    const failed = () => {
+      cleanup();
+      socket.close();
+      reject(new Error("voice sideband connection failed"));
+    };
     const closed = () => { cleanup(); reject(new Error("voice sideband closed before opening")); };
-    const stopped = () => { cleanup(); reject(new Error("voice connection stopped")); };
+    const stopped = () => {
+      cleanup();
+      socket.close();
+      reject(new Error("voice connection stopped"));
+    };
+    const timedOut = () => {
+      cleanup();
+      socket.close();
+      reject(new VoiceError(
+        "sideband_open_timeout",
+        "The Realtime voice sideband did not open in time. Check your network connection, then retry.",
+      ));
+    };
     const cleanup = () => {
+      window.clearTimeout(timer);
       socket.removeEventListener("open", opened);
       socket.removeEventListener("error", failed);
       socket.removeEventListener("close", closed);
       signal?.removeEventListener("abort", stopped);
     };
+    timer = window.setTimeout(timedOut, SIDEBAND_OPEN_TIMEOUT_MS);
     socket.addEventListener("open", opened);
     socket.addEventListener("error", failed);
     socket.addEventListener("close", closed);
     signal?.addEventListener("abort", stopped, { once: true });
     if (signal?.aborted) stopped();
+    else if (socket.readyState === WebSocket.OPEN) opened();
+  });
+}
+
+function withStartupDeadline(task, { signal, timeoutMs, onTimeout, timeoutError }) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let timedOut = false;
+    let timer;
+    const cleanup = () => {
+      window.clearTimeout(timer);
+      signal?.removeEventListener("abort", stopped);
+    };
+    const finish = (settle, value) => {
+      if (settled) return false;
+      settled = true;
+      cleanup();
+      settle(value);
+      return true;
+    };
+    const stopped = () => {
+      if (timedOut) return;
+      finish(reject, new Error("voice connection stopped"));
+    };
+    const timeout = () => {
+      if (settled) return;
+      timedOut = true;
+      cleanup();
+      onTimeout?.();
+      settled = true;
+      reject(timeoutError);
+    };
+    timer = window.setTimeout(timeout, timeoutMs);
+    signal?.addEventListener("abort", stopped, { once: true });
+    if (signal?.aborted) {
+      stopped();
+      return;
+    }
+    let result;
+    try {
+      result = task();
+    } catch (cause) {
+      finish(reject, cause);
+      return;
+    }
+    Promise.resolve(result).then(
+      (value) => { finish(resolve, value); },
+      (cause) => { finish(reject, cause); },
+    );
   });
 }
 
