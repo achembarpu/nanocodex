@@ -8,6 +8,7 @@ import {
   assertWebBuildAttestation,
   buildBoundaryProbeConfig,
   buildManagedProductionConfig,
+  buildWebBootstrapConfig,
   buildWebProductionConfig,
   managedSecretPayload,
   productionWranglerEnvironment,
@@ -244,6 +245,16 @@ test("boundary probe and website configs preserve the private service chain", ()
     { binding: "NANOCODEX_BACKEND", service: "nanocodex-durable-agent" },
     { binding: "NANOCODEX_CONNECT_DIALOG", service: "nanocodex-connect-dialog" },
   ]);
+  assert.deepEqual(buildWebBootstrapConfig({
+    name: "nanocodex",
+    keep_vars: true,
+    main: "index.js",
+    assets: { directory: "../client" },
+    services: website.services,
+    containers: [{ class_name: "ChatGptEgress", image: "/stale/Dockerfile" }],
+  }, { artifactDirectory: "/artifact/nanocodex", currentWebRoot: "/current/web" }).services, [
+    { binding: "NANOCODEX_CONNECT_DIALOG", service: "nanocodex-connect-dialog" },
+  ]);
   assert.throws(() => buildWebProductionConfig({
     ...website,
     main: "index.js",
@@ -277,7 +288,7 @@ test("boundary probe verifies only private broker readiness", async () => {
 
 test("website deployment leaves the existing container rollout untouched", async () => {
   const source = await readFile(new URL("../scripts/production-rollout.mjs", import.meta.url), "utf8");
-  assert.match(source, /"--containers-rollout",\s*"none"/);
+  assert.match(source, /containersRollout = "none"/);
 });
 
 test("CI orders the credential-neutral production rollout and keeps freshness gates", async () => {

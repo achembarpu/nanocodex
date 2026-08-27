@@ -10,6 +10,7 @@ import {
 } from "../../egress/scripts/production-broker.mjs";
 import {
   isMissingWorkerDeleteError,
+  redactSecrets,
   runBoundedProcess,
 } from "./child-process.mjs";
 import {
@@ -77,7 +78,12 @@ const APPLICATION_SECRET_NAMES = [
 export function assertProductionPreflight(environment) {
   const revision = productionRevision(environment.TARGET_SHA);
   requiredEnvironment(environment, "CLOUDFLARE_ACCOUNT_ID");
-  requireConfigured(environment, "CLOUDFLARE_API_TOKEN_CONFIGURED");
+  if (environment.CLOUDFLARE_API_TOKEN_CONFIGURED !== "true"
+    && environment.CLOUDFLARE_OAUTH_CONFIGURED !== "true") {
+    throw new Error(
+      "Cloudflare API token or an authenticated local Wrangler OAuth session is required for production rollout",
+    );
+  }
   requireConfigured(environment, "NANOCODEX_CREDENTIAL_ENCRYPTION_KEY_CONFIGURED");
   requireConfigured(environment, "NANOCODEX_BROKER_PROBE_TOKEN_CONFIGURED");
   requireConfigured(environment, "NANOCODEX_GITHUB_OAUTH_CLIENT_ID_CONFIGURED");
@@ -272,6 +278,16 @@ export function buildWebProductionConfig(baseConfig, {
   };
 }
 
+export function buildWebBootstrapConfig(baseConfig, options = {}) {
+  const production = buildWebProductionConfig(baseConfig, options);
+  return {
+    ...production,
+    services: production.services.filter(
+      ({ binding }) => binding === "NANOCODEX_CONNECT_DIALOG",
+    ),
+  };
+}
+
 export async function withPrivateRolloutFiles(values, callback, {
   parentDirectory = tmpdir(),
 } = {}) {
@@ -458,7 +474,13 @@ export async function verifyProductionBoundary(environment = process.env, {
   return result;
 }
 
-export async function deployProductionWeb(environment = process.env) {
+export async function deployProductionWeb(environment = process.env, {
+  bootstrap = false,
+  containersRollout = "none",
+} = {}) {
+  if (!new Set(["immediate", "none"]).has(containersRollout)) {
+    throw new Error("production web container rollout must be immediate or none");
+  }
   const cloudflare = cloudflareCredentials(environment);
   const revision = productionRevision(environment.TARGET_SHA);
   verifyProductionCheckout(revision);
@@ -468,7 +490,8 @@ export async function deployProductionWeb(environment = process.env) {
     readFile(webSourceConfigPath),
   ]);
   assertWebBuildAttestation(attestation, revision, sourceConfig);
-  const config = buildWebProductionConfig(baseConfig, {
+  const configBuilder = bootstrap ? buildWebBootstrapConfig : buildWebProductionConfig;
+  const config = configBuilder(baseConfig, {
     artifactDirectory: dirname(webArtifactConfigPath),
   });
   const redactions = [cloudflare.apiToken];
@@ -486,7 +509,7 @@ export async function deployProductionWeb(environment = process.env) {
       "--message",
       `gakonst/nanocodex@${revision}`,
       "--containers-rollout",
-      "none",
+      containersRollout,
       "--var",
       `DEPLOYMENT_SHA:${revision}`,
     ], {
@@ -498,7 +521,8 @@ export async function deployProductionWeb(environment = process.env) {
   });
 
   const result = {
-    component: "website",
+    component: bootstrap ? "website-bootstrap" : "website",
+    containers_rollout: containersRollout,
     revision,
     status: "deployed",
   };
@@ -549,7 +573,7 @@ function runWrangler(arguments_, {
     env: environment,
     label: `production Wrangler ${arguments_[0] ?? "command"}`,
     maxOutputBytes: 64 * 1024,
-    redact: (value) => redact(value, redactions),
+    redact: (value) => redactSecrets(value, redactions),
     signal: cleanup ? undefined : lifecycleAbort.signal,
     timeoutMs: cleanup ? 60_000 : 180_000,
   });
@@ -659,14 +683,6 @@ function assertNoProviderConfiguration(value, label) {
   if (/OPENAI_API_KEY|CODEX_OAUTH_BOOTSTRAP|CODEX_RELAY_URL/.test(encoded)) {
     throw new Error(`${label} must not contain provider secret configuration`);
   }
-}
-
-function redact(value, secrets) {
-  let redacted = String(value);
-  for (const secret of secrets) {
-    if (secret) redacted = redacted.replaceAll(secret, "[redacted]");
-  }
-  return redacted;
 }
 
 const commands = new Map([

@@ -83,6 +83,13 @@ build-cloudflare-example: build-wasm
     npm ci --prefix services/managed
     npm run check --prefix services/managed
 
+# Build and deploy the complete production Cloudflare topology from origin/master.
+# The orchestrator finishes every read-only preflight before its first remote mutation.
+deploy:
+    node scripts/deploy-cloudflare.mjs
+
+deploy-cloudflare: deploy
+
 # Type-check, test, and bundle the Vercel Workflow actor consumer.
 build-vercel-example: build-wasm
     npm ci --prefix examples/vercel-workflows

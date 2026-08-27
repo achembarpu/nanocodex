@@ -1,10 +1,15 @@
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
+import {
+  redactSecrets,
+  runBoundedProcess,
+} from "../../managed/scripts/child-process.mjs";
+
 const directory = resolve(fileURLToPath(new URL("..", import.meta.url)));
+const wranglerPath = join(directory, "node_modules/wrangler/bin/wrangler.js");
 
 export function productionBrokerSecrets(environment) {
   const encryptionKey = required(environment.NANOCODEX_CREDENTIAL_ENCRYPTION_KEY,
@@ -141,19 +146,20 @@ export async function withPrivateBrokerFiles(files, callback) {
   }
 }
 
-async function deploy() {
-  const accountId = required(process.env.CLOUDFLARE_ACCOUNT_ID, "CLOUDFLARE_ACCOUNT_ID");
-  const apiToken = process.env.CLOUDFLARE_API_TOKEN === undefined
+export async function deployProductionBroker(environment = process.env, {
+  run = runWrangler,
+} = {}) {
+  const accountId = required(environment.CLOUDFLARE_ACCOUNT_ID, "CLOUDFLARE_ACCOUNT_ID");
+  const apiToken = environment.CLOUDFLARE_API_TOKEN === undefined
     ? undefined
-    : required(process.env.CLOUDFLARE_API_TOKEN, "CLOUDFLARE_API_TOKEN");
-  const revision = productionRevision(process.env);
-  const secrets = productionBrokerSecrets(process.env);
+    : required(environment.CLOUDFLARE_API_TOKEN, "CLOUDFLARE_API_TOKEN");
+  const revision = productionRevision(environment);
+  const secrets = productionBrokerSecrets(environment);
   const base = JSON.parse(await readFile(join(directory, "wrangler.broker.jsonc"), "utf8"));
   const config = buildProductionBrokerConfig(base, { mainPath: join(directory, "src/egress.ts") });
   await withPrivateBrokerFiles({ "wrangler.json": config, "secrets.json": secrets }, async (paths) => {
-    const childEnv = brokerWranglerEnvironment(process.env, accountId, apiToken);
+    const childEnv = brokerWranglerEnvironment(environment, accountId, apiToken);
     await run([
-      "wrangler",
       "deploy",
       "--config",
       paths["wrangler.json"],
@@ -164,7 +170,10 @@ async function deploy() {
       `gakonst/nanocodex@${revision}`,
       "--secrets-file",
       paths["secrets.json"],
-    ], childEnv);
+    ], {
+      environment: childEnv,
+      redactions: [apiToken, ...Object.values(secrets)],
+    });
   });
 }
 
@@ -180,18 +189,19 @@ function optional(value, name) {
   return required(value, name);
 }
 
-function run(args, env) {
-  return new Promise((resolvePromise, reject) => {
-    const child = spawn("npx", args, { cwd: directory, env, stdio: "inherit" });
-    child.once("error", reject);
-    child.once("exit", (code) => code === 0
-      ? resolvePromise()
-      : reject(new Error(`${args.join(" ")} exited ${code}`)));
+function runWrangler(arguments_, { environment, redactions }) {
+  return runBoundedProcess(process.execPath, [wranglerPath, ...arguments_], {
+    cwd: directory,
+    env: environment,
+    label: `production broker Wrangler ${arguments_[0] ?? "command"}`,
+    maxOutputBytes: 64 * 1024,
+    redact: (value) => redactSecrets(value, redactions),
+    timeoutMs: 180_000,
   });
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  deploy().catch((error) => {
+  deployProductionBroker().catch((error) => {
     console.error(error instanceof Error ? error.message : String(error));
     process.exitCode = 1;
   });

@@ -5,6 +5,7 @@ import test from "node:test";
 import {
   brokerWranglerEnvironment,
   buildProductionBrokerConfig,
+  deployProductionBroker,
   productionBrokerSecrets,
   productionRevision,
   withPrivateBrokerFiles,
@@ -177,4 +178,33 @@ test("temporary config and secret files are mode 0600 and removed", async () => 
     throw new Error("fixture failure");
   }), /fixture failure/);
   await assert.rejects(access(temporary), { code: "ENOENT" });
+});
+
+test("production broker deploy uses the injected pinned-runner boundary with redactions", async () => {
+  const environment = {
+    CLOUDFLARE_ACCOUNT_ID: "account",
+    CLOUDFLARE_API_TOKEN: "cloudflare-token",
+    NANOCODEX_CREDENTIAL_ENCRYPTION_KEY: encryptionKey,
+    NANOCODEX_BROKER_PROBE_TOKEN: probeToken,
+    TARGET_SHA: "a".repeat(40),
+    ...connectorSecrets,
+  };
+  let invocation;
+  await deployProductionBroker(environment, {
+    run: async (arguments_, options) => {
+      invocation = { arguments_, options };
+      assert.equal(JSON.parse(await readFile(arguments_[2], "utf8")).name, "nanocodex-egress");
+      assert.equal(
+        JSON.parse(await readFile(arguments_.at(-1), "utf8")).CREDENTIAL_ENCRYPTION_KEY,
+        encryptionKey,
+      );
+    },
+  });
+  assert.equal(invocation.arguments_[0], "deploy");
+  assert.ok(invocation.arguments_.includes("--strict"));
+  assert.ok(invocation.arguments_.includes("a".repeat(40)));
+  assert.equal(invocation.options.environment.CLOUDFLARE_API_TOKEN, "cloudflare-token");
+  for (const secret of ["cloudflare-token", encryptionKey, probeToken, ...Object.values(connectorSecrets)]) {
+    assert.ok(invocation.options.redactions.includes(secret));
+  }
 });

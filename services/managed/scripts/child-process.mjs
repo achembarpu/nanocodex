@@ -110,6 +110,17 @@ export function isMissingWorkerDeleteError(error) {
     || /\b(?:no such worker|worker(?: script)? not found)\b/i.test(message);
 }
 
+/** Redact exact secret values from bounded child-process diagnostics. */
+export function redactSecrets(value, secrets) {
+  let redacted = String(value);
+  for (const secret of secrets) {
+    if (typeof secret === "string" && secret.length > 0) {
+      redacted = redacted.replaceAll(secret, "[redacted]");
+    }
+  }
+  return redacted;
+}
+
 function boundedOutput(child, limit) {
   const chunks = [];
   let bytes = 0;
