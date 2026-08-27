@@ -121,7 +121,7 @@
 .multiplayer-button-row button,
 .multiplayer-composer > button,
 .multiplayer-room-error button {
-  min-height: 39px;
+  min-height: 44px;
   padding: 0 14px;
   color: var(--text-inverse);
   background: var(--text);
