@@ -144,6 +144,7 @@ test("ready voice control separates transport, coding-turn cancel, status, and f
     }),
   })));
   assert.equal(renderer.root.findByProps({ role: "alert" }).children.join(""), error.message);
+  assert.equal(renderer.root.findAllByProps({ role: "status" }).length, 0);
   assert.equal(renderer.root.findByProps({ "aria-label": "Start voice" }).props.disabled, false);
 
   await act(async () => renderer.update(React.createElement(VoiceControl, {

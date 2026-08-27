@@ -296,7 +296,7 @@ export function VoiceControl({
     ) : null}
     {statusText || voice.isError ? (
       <div className="agent-voice-feedback">
-        {statusText ? (
+        {statusText && !voice.isError ? (
           <span className="agent-voice-status" role="status" aria-live="polite">
             {statusText}
           </span>
