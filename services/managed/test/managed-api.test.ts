@@ -4405,6 +4405,41 @@ describe("managed agents REST and resumable SSE", () => {
     }
   });
 
+  it("recreates realtime after an idle Agent shutdown", async () => {
+    const agent = await createAgent();
+    await submit(agent, "turn-before-realtime-recreate", "finish before realtime recreate");
+    await waitForTurnState(agent, "turn-before-realtime-recreate", "completed");
+    const first = await managedRealtime(agent, "start", {
+      operation_id: "voice-before-recreate-operation",
+      voice_session_id: "voice-before-recreate-session",
+    });
+    expect(first.status).toBe(200);
+    await first.json();
+    const stopped = await managedRealtime(agent, "stop", {
+      operation_id: "voice-before-recreate-stop",
+      voice_session_id: "voice-before-recreate-session",
+    });
+    expect(stopped.status).toBe(200);
+    await stopped.json();
+
+    const session = testEnv.NANOCODEX_SESSIONS.getByName(agent.agent_id);
+    await runInDurableObject(session, async (_instance, state) => {
+      state.storage.sql.exec(
+        "UPDATE session_state SET last_active = ? WHERE singleton = 1",
+        Date.now() - 60_000,
+      );
+      await state.storage.setAlarm(Date.now());
+    });
+    await runDurableObjectAlarm(session);
+
+    const recreated = await managedRealtime(agent, "start", {
+      operation_id: "voice-after-recreate-operation",
+      voice_session_id: "voice-after-recreate-session",
+    });
+    expect(recreated.status).toBe(200);
+    await recreated.json();
+  }, 60_000);
+
   it("does not idle-shutdown durable accepted work after in-memory ownership is lost", async () => {
     const agent = await createAgent();
     const session = testEnv.NANOCODEX_SESSIONS.getByName(agent.agent_id);

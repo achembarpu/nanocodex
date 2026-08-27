@@ -3493,6 +3493,20 @@ export class NanocodexSession extends DurableComputerSession {
     }
     if (this.#agent) return this.#agent;
     if (this.#agentPromise) return this.#agentPromise;
+    if (this.#agentConstructions.size > 0) {
+      // A failed publication may have already detached the construction from
+      // the public pointers while its resolved Cloudflare Agent is still
+      // being retired. Do not start compaction or a replacement create until
+      // every such rollback has released Cloudflare's lifecycle authority.
+      try {
+        await Promise.all(
+          [...this.#agentConstructions].map((entry) => this.#retireAgentConstruction(entry)),
+        );
+      } catch (error) {
+        throw retryableError(`previous agent construction cleanup failed: ${errorMessage(error)}`);
+      }
+      return this.#ensureAgent();
+    }
     const construction: AgentConstructionOwnership = {
       deletionGeneration: this.#deletionGeneration,
       runtimeGeneration: this.#runtimeOwnershipGeneration,
@@ -3516,20 +3530,22 @@ export class NanocodexSession extends DurableComputerSession {
   async #publishAgentConstruction(
     construction: AgentConstructionOwnership,
   ): Promise<CloudflareAgent.Agent> {
+    let agent: CloudflareAgent.Agent | undefined;
     try {
-      const agent = await construction.promise;
+      const resolvedAgent = await construction.promise;
+      agent = resolvedAgent;
       if (!this.#ownsAgentConstruction(construction)) {
-        try { await this.#retireAgentConstruction(construction, agent); }
+        try { await this.#retireAgentConstruction(construction, resolvedAgent); }
         catch (error) {
           throw retryableError(`superseded agent shutdown failed: ${errorMessage(error)}`);
         }
         throw retryableError("agent construction was superseded");
       }
-      const events = agent.events.watch();
-      events.onEvent((event) => this.#recordAgentEvent(event, agent.sessionId));
+      const events = resolvedAgent.events.watch();
+      events.onEvent((event) => this.#recordAgentEvent(event, resolvedAgent.sessionId));
       if (!this.#ownsAgentConstruction(construction)) {
         events.off();
-        try { await this.#retireAgentConstruction(construction, agent); }
+        try { await this.#retireAgentConstruction(construction, resolvedAgent); }
         catch (error) {
           throw retryableError(`superseded agent shutdown failed: ${errorMessage(error)}`);
         }
@@ -3540,7 +3556,24 @@ export class NanocodexSession extends DurableComputerSession {
       this.#agentConstructions.delete(construction);
       return this.#agent;
     } catch (error) {
-      if (!construction.shutdown) this.#agentConstructions.delete(construction);
+      // Construction can resolve an Agent and then fail while installing the
+      // managed event watcher (for example when an idle shutdown wins the
+      // race). Retiring only the bookkeeping entry leaves Cloudflare's
+      // lifecycle authority active, so the next cold construction reaches
+      // compaction with an orphaned Agent and fails closed. Always join the
+      // resolved Agent's shutdown before publishing the construction failure.
+      if (!construction.shutdown && agent !== undefined) {
+        try {
+          await this.#retireAgentConstruction(construction, agent);
+        } catch (cleanupError) {
+          throw new AggregateError(
+            [error, cleanupError],
+            "managed Agent construction and rollback both failed",
+          );
+        }
+      } else if (!construction.shutdown) {
+        this.#agentConstructions.delete(construction);
+      }
       throw error;
     }
   }
@@ -4565,16 +4598,19 @@ export class NanocodexSession extends DurableComputerSession {
     if (!shutdown) {
       const agent = this.#agent;
       const construction = this.#agentConstruction;
+      const constructions = [...this.#agentConstructions];
       this.#runtimeOwnershipGeneration += 1;
       this.#agent = undefined;
       this.#agentPromise = undefined;
       this.#agentConstruction = undefined;
       this.#events?.off();
       this.#events = undefined;
-      if (!agent && !construction) return;
+      if (!agent && !construction && constructions.length === 0) return;
       shutdown = (async () => {
         if (agent) await agent.session.shutdown();
-        else if (construction) await this.#retireAgentConstruction(construction);
+        const pending = new Set(constructions);
+        if (construction !== undefined) pending.add(construction);
+        await Promise.all([...pending].map((entry) => this.#retireAgentConstruction(entry)));
       })();
       this.#agentShutdownPromise = shutdown;
       void shutdown.finally(() => {
