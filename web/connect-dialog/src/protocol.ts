@@ -1,15 +1,17 @@
 import type { Dialog } from "nanocodex/connect";
 import { Wata, postMessage } from "wata/host";
-import { registeredApp } from "./connectPolicy.mjs";
+import { mcpConnectionsFromWire, registeredApp } from "./connectPolicy.mjs";
 import type { ConnectRequest, WalletRequest } from "./connectTypes";
 
 export type Request = Exclude<ConnectRequest, { type: "deviceError" | "deviceComplete" }>;
 
 type WalletEvent = Readonly<{
-  request: WalletRequest["rpc"];
+  request: WalletRpc;
   respond(result: unknown): Promise<unknown>;
   reject(error: Readonly<{ code: number; message: string }>): Promise<unknown>;
 }>;
+
+type WalletRpc = WalletRequest["rpc"] & Readonly<{ context?: unknown }>;
 
 type WalletHostActions = Readonly<{
   logout(): Promise<void> | void;
@@ -101,14 +103,19 @@ export function startWalletHost(actions: WalletHostActions) {
       void event.reject({ code: -32601, message: "Nanocodex Connect only accepts connection, logout, and access-key revocation requests here." });
       return;
     }
-    walletEvent = event as unknown as WalletEvent;
-    publish(Object.freeze({
-      appId,
-      id: crypto.randomUUID(),
-      origin,
-      rpc: event.request,
-      type,
-    }));
+    try {
+      const request = projectWalletRequest({
+        appId,
+        id: crypto.randomUUID(),
+        origin,
+        rpc: event.request,
+        type,
+      });
+      walletEvent = event as unknown as WalletEvent;
+      publish(request);
+    } catch (error) {
+      void event.reject({ code: -32600, message: errorMessage(error) });
+    }
   });
   session.onNotification((event: Readonly<{ method: string }>) => {
     if (event.method === "cancel" && walletEvent) void parentDialog.reject();
@@ -137,6 +144,61 @@ function settle() {
   walletEvent = undefined;
   fundingParent = undefined;
   publish(undefined);
+}
+
+export function projectWalletRequest(value: Readonly<{
+  appId: string;
+  id: string;
+  origin: string;
+  rpc: WalletRpc;
+  type: WalletRequest["type"];
+}>): WalletRequest {
+  const metadata = walletRequestMetadata(value.rpc.context);
+  if (value.type !== "walletConnect" && Object.keys(metadata).length > 0) {
+    throw new Error("Nanocodex Connect received unexpected MCP request metadata.");
+  }
+  return Object.freeze({
+    appId: value.appId,
+    id: value.id,
+    origin: value.origin,
+    rpc: Object.freeze({
+      method: value.rpc.method,
+      ...(value.rpc.params === undefined ? {} : { params: value.rpc.params }),
+    }),
+    type: value.type,
+    ...metadata,
+  });
+}
+
+function walletRequestMetadata(value: unknown): Readonly<{
+  requestedMcpConnections?: WalletRequest["requestedMcpConnections"];
+  focusMcpConnection?: string;
+}> {
+  if (value === undefined) return Object.freeze({});
+  if (!isRecord(value)
+    || Object.keys(value).some((key) => key !== "requestedMcpConnections" && key !== "focusMcpConnection")) {
+    throw new Error("Nanocodex Connect received invalid MCP request metadata.");
+  }
+  if (value.requestedMcpConnections === undefined) {
+    if (value.focusMcpConnection !== undefined) {
+      throw new Error("The focused MCP connection is invalid.");
+    }
+    return Object.freeze({});
+  }
+  const connections = mcpConnectionsFromWire(value.requestedMcpConnections);
+  if (connections.length > 16
+    || connections.some(({ status }) => status !== "authorization_required")) {
+    throw new Error("Nanocodex Connect received invalid MCP request metadata.");
+  }
+  const focus = value.focusMcpConnection;
+  if (focus !== undefined
+    && (typeof focus !== "string" || !connections.some(({ id }) => id === focus))) {
+    throw new Error("The focused MCP connection is invalid.");
+  }
+  return Object.freeze({
+    requestedMcpConnections: connections,
+    ...(focus === undefined ? {} : { focusMcpConnection: focus }),
+  });
 }
 
 

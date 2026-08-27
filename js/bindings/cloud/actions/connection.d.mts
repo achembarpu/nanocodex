@@ -1,5 +1,5 @@
 import type { Client } from "../Client.mjs";
-import type { CloudAccount, Connection } from "../types.mjs";
+import type { CloudAccount, Connection, McpConnection } from "../types.mjs";
 
 export type Auth = string | Readonly<{
   url?: string | undefined;
@@ -69,6 +69,13 @@ export declare namespace connect {
     dialog?: Readonly<{ close?: "auto" | "manual" | undefined }> | undefined;
     /** Nanocodex permission preset selected by the app. @default "agent.run" */
     permission?: string | undefined;
+    /**
+     * Exact existing account-owned hosted MCP connections requested by this app.
+     * Endpoints, provider tokens, and registration credentials are never accepted.
+     */
+    mcpConnections?: readonly McpConnection[] | undefined;
+    /** Optional requested MCP connection to foreground in the hosted dialog. */
+    focusMcpConnectionId?: string | undefined;
     signal?: AbortSignal | undefined;
   }>;
   type ReturnType = Promise<Connection>;
@@ -91,6 +98,8 @@ export declare namespace reconnect {
     capabilities?: Pick<Capabilities, "agent" | "cloudAccounts"> | undefined;
     /** Reject a retained grant issued for another permission preset. */
     permission?: string | undefined;
+    /** Reject a retained grant with a different exact hosted MCP slice. */
+    mcpConnectionIds?: readonly string[] | undefined;
     signal?: AbortSignal | undefined;
   }>;
   type ReturnType = Promise<Connection | undefined>;

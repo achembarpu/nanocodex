@@ -91,6 +91,7 @@ export function mock(options = {}) {
             if (typeof keyId !== "string") throw new InvalidResponseError("key authorization is missing keyId");
             const expiry = authorization.expiry ?? Math.floor(Date.now() / 1000) + 30 * 86_400;
             const connectors = requestedConnectors(request.body?.requested_connectors);
+            const mcpConnections = requestedMcpConnections(request.body?.requested_mcp_connections);
             const grantId = mockHex(`${appId}:${accountAddress}:${keyId}`, 32);
             const wire = {
               grant_token: `mock-grant-${grantId.slice(2)}`,
@@ -101,7 +102,14 @@ export function mock(options = {}) {
                 permission: request.body?.permission ?? "agent.run",
                 status: "active",
                 expires_at: expiry,
-                capabilities: ["nanocodex.agent", "mercator.boost", "mpp.machusd", ...connectors],
+                capabilities: [
+                  "nanocodex.agent",
+                  "mercator.boost",
+                  "mpp.machusd",
+                  ...connectors,
+                  ...mcpConnections.map(({ id }) => `mcp:${id}`),
+                ],
+                mcp_connections: mcpConnections,
               },
               access_key: {
                 address: keyId,
@@ -360,6 +368,16 @@ function requestedConnectors(value) {
     throw new TypeError("requested_connectors contains an unsupported provider");
   }
   return supported.filter((provider) => value.includes(provider));
+}
+
+function requestedMcpConnections(value) {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > 16
+    || value.some((id) => typeof id !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(id))
+    || new Set(value).size !== value.length) {
+    throw new TypeError("requested_mcp_connections must contain exact hosted connection IDs");
+  }
+  return value.map((id) => ({ id, name: "MCP connection" }));
 }
 
 function connectorResources(resources) {

@@ -18,6 +18,7 @@ export type {
   Hex,
   MachineUsdConfig,
   MachineUsdFunding,
+  McpConnection,
   MppCharge,
   MppPermission,
 } from "./types.mjs";

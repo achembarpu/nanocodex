@@ -38,6 +38,14 @@ export type AgentVisibility = Readonly<{
   rawTraces: boolean;
 }>;
 
+/** Secret-free metadata for one account-owned hosted MCP connection. */
+export type McpConnection = Readonly<{
+  /** Exact opaque 43-character hosted connection ID. */
+  id: string;
+  /** Account-visible display name; endpoints and credentials remain broker-owned. */
+  name: string;
+}>;
+
 export type AgentTurn = Readonly<{
   idempotencyKey: string;
   accepted(): Promise<string>;
@@ -85,6 +93,8 @@ export type Grant = Readonly<{
   visibility: AgentVisibility;
   /** Secret-free cloud account providers bound to this grant. */
   connectors: readonly CloudAccount[];
+  /** Exact secret-free hosted MCP connections bound to this grant. */
+  mcpConnections: readonly McpConnection[];
 }>;
 
 export type MppPermission = Readonly<{

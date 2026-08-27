@@ -406,6 +406,190 @@ test("Connect binds normalized cloud accounts into auth resources and the connec
   );
 });
 
+test("Connect signs and grants exact pre-registered MCP connections without forwarding host secrets", async () => {
+  const mcpId = "abcdefghijklmnopqrstuvwxyz0123456789_-ABCDE";
+  const expiry = Math.floor(Date.now() / 1_000) + 3_600;
+  const keyId = "0x1111111111111111111111111111111111111111";
+  const walletRequests = [];
+  const requests = [];
+  const client = Client.create({
+    appId: "mcp-workspace",
+    appOrigin: "https://consumer.example",
+    dialog: Dialog.memory(),
+    provider: {
+      async request(request) {
+        walletRequests.push(request);
+        return {
+          accounts: [{
+            address: "0x8ba1f109551bd432803012645ac136ddd64dba72",
+            capabilities: {
+              auth: { approval_id: "approval-mcp" },
+              keyAuthorization: {
+                address: keyId,
+                keyId,
+                keyType: "p256",
+                chainId: 4217n,
+                expiry,
+                witness: `0x${"22".repeat(32)}`,
+              },
+              personalSign: { keyAuthorization: "0x1234" },
+            },
+          }],
+        };
+      },
+    },
+    session: false,
+    transport: Transport.from({
+      key: "mcp-capture",
+      name: "mcp-capture",
+      type: "mcp-capture",
+      setup() {
+        return {
+          baseUrl: "https://connect.example",
+          async request(request) {
+            requests.push(request);
+            return testConnectionWire({
+              expiry,
+              keyId,
+              capabilities: [
+                "nanocodex.agent",
+                "agent.output.final",
+                "agent.output.actions",
+                "chatgpt",
+                `mcp:${mcpId}`,
+              ],
+              mcpConnections: [{ id: mcpId, name: "Linear workspace" }],
+            });
+          },
+        };
+      },
+    }),
+  });
+
+  const connection = await client.connection.connect({
+    capabilities: {
+      auth: { resources: ["urn:nanocodex:mcp:https://untrusted.example/mcp"] },
+      cloudAccounts: { chatgpt: true },
+    },
+    focusMcpConnectionId: mcpId,
+    mcpConnections: [{
+      id: mcpId,
+      name: "Linear workspace",
+      endpoint: "https://mcp.linear.app/mcp",
+      token: "provider-secret",
+    }],
+    permission: "agent.run",
+  });
+
+  assert.deepEqual(walletRequests[0].context, {
+    focusMcpConnection: mcpId,
+    requestedMcpConnections: [{
+      id: mcpId,
+      name: "Linear workspace",
+      status: "authorization_required",
+    }],
+  });
+  const resources = walletRequests[0].params[0].capabilities.auth.resources;
+  assert.equal(resources.includes(`urn:nanocodex:mcp:${mcpId}`), true);
+  assert.equal(resources.includes(`urn:nanocodex:mcp-focus:${mcpId}`), true);
+  assert.equal(resources.some((resource) => resource.includes("untrusted.example")), false);
+  assert.deepEqual(requests[0].body.requested_mcp_connections, [mcpId]);
+  assert.deepEqual(connection.grant.mcpConnections, [{ id: mcpId, name: "Linear workspace" }]);
+  const captured = JSON.stringify(
+    { walletRequests, requests },
+    (_key, value) => typeof value === "bigint" ? value.toString() : value,
+  );
+  assert.equal(captured.includes("provider-secret"), false);
+  assert.equal(captured.includes("mcp.linear.app"), false);
+  assert.throws(() => connectionFromWire(testConnectionWire({
+    expiry,
+    keyId,
+    capabilities: ["nanocodex.agent", `mcp:${mcpId}`],
+    mcpConnections: [{
+      id: mcpId,
+      name: "Linear workspace",
+      endpoint: "https://mcp.linear.app/mcp",
+    }],
+  })), /private or unknown fields/);
+  await assert.rejects(
+    client.connection.connect({ mcpConnections: [{ id: `${mcpId}x`, name: "Invalid" }] }),
+    /opaque 43-character IDs/,
+  );
+  assert.equal(walletRequests.length, 1);
+});
+
+test("Connect rejects an initially substituted MCP grant without persisting its session", async () => {
+  const requestedMcpId = "abcdefghijklmnopqrstuvwxyz0123456789_-ABCDE";
+  const substitutedMcpId = "ZYXWVUTSRQPONMLKJIHGFEDCBA9876543210_-abcde";
+  const expiry = Math.floor(Date.now() / 1_000) + 3_600;
+  const keyId = "0x1111111111111111111111111111111111111111";
+  const storage = memoryStorage();
+  const client = Client.create({
+    appId: "substituted-mcp-workspace",
+    dialog: Dialog.memory(),
+    provider: testWalletProvider({ expiry, keyId }),
+    session: storage,
+    transport: Transport.from({
+      key: "substituted-mcp",
+      name: "substituted-mcp",
+      type: "substituted-mcp",
+      setup() {
+        return {
+          baseUrl: "https://connect.example",
+          async request() {
+            return testConnectionWire({
+              expiry,
+              keyId,
+              capabilities: [
+                "nanocodex.agent",
+                "agent.output.final",
+                "agent.output.actions",
+                "chatgpt",
+                `mcp:${substitutedMcpId}`,
+              ],
+              mcpConnections: [{ id: substitutedMcpId, name: "Substituted workspace" }],
+            });
+          },
+        };
+      },
+    }),
+  });
+
+  await assert.rejects(client.connection.connect({
+    capabilities: { cloudAccounts: { chatgpt: true } },
+    mcpConnections: [{ id: requestedMcpId, name: "Requested workspace" }],
+    permission: "agent.run",
+  }), /outside the exact approved request/);
+  assert.equal(client._hasSession(), false);
+  assert.equal(storage.getItem("nanocodex:connect:substituted-mcp-workspace:session"), null);
+});
+
+test("Connect rejects contradictory MCP capability and metadata projections", () => {
+  const mcpId = "abcdefghijklmnopqrstuvwxyz0123456789_-ABCDE";
+  const substitutedMcpId = "ZYXWVUTSRQPONMLKJIHGFEDCBA9876543210_-abcde";
+  const expiry = Math.floor(Date.now() / 1_000) + 3_600;
+  const keyId = "0x1111111111111111111111111111111111111111";
+
+  assert.throws(() => connectionFromWire(testConnectionWire({
+    expiry,
+    keyId,
+    capabilities: ["nanocodex.agent", `mcp:${mcpId}`],
+    mcpConnections: [],
+  })), /MCP capabilities and metadata must match exactly/);
+  assert.throws(() => connectionFromWire(testConnectionWire({
+    expiry,
+    keyId,
+    capabilities: ["nanocodex.agent"],
+    mcpConnections: [{ id: mcpId, name: "Unbound metadata" }],
+  })), /MCP capabilities and metadata must match exactly/);
+  assert.throws(() => connectionFromWire(testConnectionWire({
+    expiry,
+    keyId,
+    capabilities: ["nanocodex.agent", `mcp:${mcpId}`],
+    mcpConnections: [{ id: substitutedMcpId, name: "Substituted metadata" }],
+  })), /MCP capabilities and metadata must match exactly/);
+});
+
 test("Connect keeps the hosted dialog open until the grant session is committed", async () => {
   const events = [];
   let releaseConnection;
@@ -587,6 +771,7 @@ test("Connect canonicalizes empty access-key policy before the wallet signs it",
 });
 
 test("Connect persists, validates, and clears an app-scoped grant session", async () => {
+  const mcpId = "abcdefghijklmnopqrstuvwxyz0123456789_-ABCDE";
   const expiry = Math.floor(Date.now() / 1_000) + 3_600;
   const keyId = "0x1111111111111111111111111111111111111111";
   const storage = memoryStorage();
@@ -594,8 +779,10 @@ test("Connect persists, validates, and clears an app-scoped grant session", asyn
   const wire = testConnectionWire({
     expiry,
     keyId,
-    capabilities: ["nanocodex.agent", "agent.output.final", "chatgpt"],
+    capabilities: ["nanocodex.agent", "agent.output.final", "chatgpt", `mcp:${mcpId}`],
+    mcpConnections: [{ id: mcpId, name: "Linear workspace" }],
   });
+  let refreshedWire = wire;
   const transport = Transport.from({
     key: "session",
     name: "session",
@@ -606,7 +793,7 @@ test("Connect persists, validates, and clears an app-scoped grant session", asyn
         async request(request) {
           requests.push(request);
           if (request.method === "POST" && request.path === "/v1/connections") return wire;
-          if (request.method === "GET" && request.path === `/v1/grants/${wire.grant.id}`) return wire;
+          if (request.method === "GET" && request.path === `/v1/grants/${wire.grant.id}`) return refreshedWire;
           if (request.method === "POST" && request.path === "/v1/connections/disconnect") return undefined;
           throw new Error(`unexpected request ${request.method} ${request.path}`);
         },
@@ -641,7 +828,14 @@ test("Connect persists, validates, and clears an app-scoped grant session", asyn
     session: storage,
     transport,
   });
-  const connected = await first.connection.connect();
+  const connected = await first.connection.connect({
+    capabilities: {
+      agent: { actionSummaries: false },
+      cloudAccounts: { chatgpt: true },
+    },
+    mcpConnections: [{ id: mcpId, name: "Linear workspace" }],
+    permission: "agent.run",
+  });
   assert.equal(connected.grant.id, wire.grant.id);
   const { grant_token: _grantToken, ...connectionWire } = wire;
   assert.deepEqual(JSON.parse(storage.getItem("nanocodex:connect:session-workspace:session")), {
@@ -662,7 +856,31 @@ test("Connect persists, validates, and clears an app-scoped grant session", asyn
   assert.equal(restoredClient._resumeConnection().agentId, wire.agent_id);
   const restored = await restoredClient.connection.reconnect();
   assert.equal(restored.grant.id, connected.grant.id);
+  assert.deepEqual(restored.grant.mcpConnections, [{ id: mcpId, name: "Linear workspace" }]);
   assert.equal(requests.at(-1).headers.authorization, `Bearer ${wire.grant_token}`);
+
+  const substitutedStorage = memoryStorage();
+  substitutedStorage.setItem(
+    "nanocodex:connect:session-workspace:session",
+    storage.getItem("nanocodex:connect:session-workspace:session"),
+  );
+  const substitutedId = "ZYXWVUTSRQPONMLKJIHGFEDCBA9876543210_-abcde";
+  refreshedWire = testConnectionWire({
+    expiry,
+    keyId,
+    capabilities: ["nanocodex.agent", "agent.output.final", "chatgpt", `mcp:${substitutedId}`],
+    mcpConnections: [{ id: substitutedId, name: "Substituted workspace" }],
+  });
+  const substitutedClient = Client.create({
+    appId: "session-workspace",
+    dialog: Dialog.memory(),
+    provider: { request() { throw new Error("wallet must not reopen"); } },
+    session: substitutedStorage,
+    transport,
+  });
+  assert.equal(await substitutedClient.connection.reconnect(), undefined);
+  assert.equal(substitutedClient._hasSession(), false);
+  refreshedWire = wire;
 
   const mismatchedStorage = memoryStorage();
   mismatchedStorage.setItem(
@@ -684,19 +902,19 @@ test("Connect persists, validates, and clears an app-scoped grant session", asyn
     permission: "agent.run",
   }), undefined);
 
-  const narrowerConnectorClient = Client.create({
+  const exactConnectorClient = Client.create({
     appId: "session-workspace",
     dialog: Dialog.memory(),
     provider: { request() { throw new Error("wallet must not reopen"); } },
     session: mismatchedStorage,
     transport,
   });
-  assert.ok(narrowerConnectorClient._resumeConnection({
+  assert.equal(exactConnectorClient._resumeConnection({
     capabilities: {
       cloudAccounts: { github: true, gmail: true, gdrive: true, x: true, chatgpt: true },
     },
     permission: "agent.run",
-  }));
+  }), undefined);
   const mismatched = await mismatchedClient.connection.reconnect({
     capabilities: {
       agent: { finalMessages: true, actionSummaries: true },
@@ -996,7 +1214,7 @@ async function nextDialogRequest(dialog) {
   throw new Error("Nanocodex Connect did not open its dialog");
 }
 
-function testConnectionWire({ expiry, keyId, capabilities, agentId = "agent_connectors" }) {
+function testConnectionWire({ expiry, keyId, capabilities, agentId = "agent_connectors", mcpConnections = [] }) {
   return {
     grant_token: "grant-session-test",
     account_address: "0x8ba1f109551bd432803012645ac136ddd64dba72",
@@ -1007,6 +1225,7 @@ function testConnectionWire({ expiry, keyId, capabilities, agentId = "agent_conn
       status: "active",
       expires_at: expiry,
       capabilities,
+      mcp_connections: mcpConnections,
     },
     access_key: {
       address: keyId,
@@ -1031,6 +1250,30 @@ function testConnectionWire({ expiry, keyId, capabilities, agentId = "agent_conn
       period: 86_400,
       balance_atomics: "0",
       spent_atomics: "0",
+    },
+  };
+}
+
+function testWalletProvider({ expiry, keyId }) {
+  return {
+    async request() {
+      return {
+        accounts: [{
+          address: "0x8ba1f109551bd432803012645ac136ddd64dba72",
+          capabilities: {
+            auth: { approval_id: "approval-test" },
+            keyAuthorization: {
+              address: keyId,
+              keyId,
+              keyType: "p256",
+              chainId: 4217n,
+              expiry,
+              witness: `0x${"22".repeat(32)}`,
+            },
+            personalSign: { keyAuthorization: "0x1234" },
+          },
+        }],
+      };
     },
   };
 }

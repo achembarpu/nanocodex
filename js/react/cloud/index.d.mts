@@ -8,6 +8,7 @@ import type {
   Connection,
   ConnectAgent,
   Dialog,
+  McpConnection,
 } from "nanocodex/connect";
 import type { ReactNode } from "react";
 import type { Agent as StructuralAgent } from "../agent/index.mjs";
@@ -95,17 +96,22 @@ export type UseConnectMutationReturnType<
   context = unknown,
 > = UseMutationResult<data, error, variables, context>;
 
+/** Compatibility alias for the canonical secret-free Connect MCP metadata. */
+export type HostedMcpConnectionRequest = McpConnection;
+export type HostedConnectOptions = Actions.connection.connect.Options;
+export type HostedReconnectOptions = Omit<Actions.connection.reconnect.Options, "signal">;
+
 export function useConnect<
   error = Error,
   context = unknown,
 >(parameters?: UseConnectMutationParameters<
   Connection,
-  Actions.connection.connect.Options,
+  HostedConnectOptions,
   error,
   context
 >): UseConnectMutationReturnType<
   Connection,
-  Actions.connection.connect.Options,
+  HostedConnectOptions,
   error,
   context
 >;
@@ -120,12 +126,12 @@ export type UseConnectAgentParameters<
   context = unknown,
 > = ConfigParameter & Readonly<{
   agent?: Omit<Actions.agent.create.Options, "connection"> | undefined;
-  /** Permission projection a persisted grant must satisfy before reopening. */
-  reconnect?: Omit<Actions.connection.reconnect.Options, "signal"> | undefined;
+  /** Fallback projection for a legacy session without a persisted connection projection. */
+  reconnect?: HostedReconnectOptions | undefined;
   /** Validate and reopen the app-scoped durable grant session on mount. @default true */
   reconnectOnMount?: boolean | undefined;
   mutation?: Omit<
-    UseMutationOptions<ConnectAgentResult, error, Actions.connection.connect.Options, context>,
+    UseMutationOptions<ConnectAgentResult, error, HostedConnectOptions, context>,
     "mutationFn" | "mutationKey"
   > | undefined;
 }>;
@@ -136,14 +142,14 @@ export type UseConnectAgentReturnType<
 > = UseMutationResult<
   ConnectAgentResult,
   error,
-  Actions.connection.connect.Options,
+  HostedConnectOptions,
   context
 > & Readonly<{
   agent: ConnectAgent | undefined;
   connection: Connection | undefined;
   connectionStatus: ConnectionStatus;
-  connect: UseMutationResult<ConnectAgentResult, error, Actions.connection.connect.Options, context>["mutate"];
-  connectAsync: UseMutationResult<ConnectAgentResult, error, Actions.connection.connect.Options, context>["mutateAsync"];
+  connect: UseMutationResult<ConnectAgentResult, error, HostedConnectOptions, context>["mutate"];
+  connectAsync: UseMutationResult<ConnectAgentResult, error, HostedConnectOptions, context>["mutateAsync"];
 }>;
 
 export function useConnectAgent<

@@ -31,6 +31,7 @@ import {
   type DefaultAgent,
   Transport as HostTransport,
 } from "../host/index.mjs";
+import { Client as ConnectClient, type McpConnection } from "../cloud/index.mjs";
 import type * as RootPublicTypes from "../index.mjs";
 import type * as BrowserPublicTypes from "../browser/index.mjs";
 import type * as HostPublicTypes from "../host/index.mjs";
@@ -123,6 +124,24 @@ type HostDurabilityStore = HostPublicTypes.DurabilityStore;
 type NodeDurabilityStore = NodePublicTypes.DurabilityStore;
 
 async function check() {
+  const connectClient = ConnectClient.create({ appId: "typed-connect" });
+  const hostedMcpConnection: McpConnection = {
+    id: "abcdefghijklmnopqrstuvwxyz0123456789_-ABCDE",
+    name: "Linear workspace",
+  };
+  void connectClient.connection.connect({
+    focusMcpConnectionId: hostedMcpConnection.id,
+    mcpConnections: [hostedMcpConnection],
+  });
+  void connectClient.connection.reconnect({ mcpConnectionIds: [hostedMcpConnection.id] });
+  void connectClient.connection.connect({
+    mcpConnections: [{
+      id: hostedMcpConnection.id,
+      name: hostedMcpConnection.name,
+      // @ts-expect-error hosted MCP endpoints are broker-owned, not host request metadata.
+      endpoint: "https://mcp.linear.app/mcp",
+    }],
+  });
   const workerResource = {
     module: browserModule,
     origin: "https://example.com",

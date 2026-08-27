@@ -1,10 +1,19 @@
-import { connectionFromWire, connectionMatchesRequest } from "../internal.mjs";
+import {
+  connectionRequestFromGrant,
+  connectionFromWire,
+  connectionMatchesRequest,
+  reconnectRequestFromConnection,
+} from "../internal.mjs";
+import { InvalidResponseError } from "../Errors.mjs";
 
 const CLOUD_ACCOUNT_PROVIDERS = Object.freeze(["github", "gmail", "gdrive", "x", "chatgpt"]);
 const CONNECTOR_RESOURCE_PREFIX = "urn:nanocodex:connector:";
 const CONNECTORS_RESOURCE_PREFIX = "urn:nanocodex:connectors:";
 const APP_RESOURCE_PREFIX = "urn:nanocodex:app:";
 const APP_ORIGIN_RESOURCE_PREFIX = "urn:nanocodex:origin:";
+const MCP_CONNECTION_ID = /^[A-Za-z0-9_-]{43}$/;
+const MCP_CONNECTION_RESOURCE_PREFIX = "urn:nanocodex:mcp:";
+const MCP_FOCUS_RESOURCE_PREFIX = "urn:nanocodex:mcp-focus:";
 const AGENT_VISIBILITY_RESOURCES = Object.freeze({
   finalMessages: "urn:nanocodex:agent:output:final",
   actionSummaries: "urn:nanocodex:agent:output:actions",
@@ -25,12 +34,22 @@ export async function connect(client, options) {
   if (typeof permission !== "string" || permission.length === 0) throw new TypeError("connect permission must be a non-empty string");
   const requestedConnectors = normalizeCloudAccounts(options.capabilities?.cloudAccounts);
   const agentVisibility = normalizeAgentVisibility(options.capabilities?.agent);
+  const mcpConnections = normalizeMcpConnections(options.mcpConnections ?? []);
+  const focusMcpConnectionId = normalizeMcpFocus(options.focusMcpConnectionId, mcpConnections);
+  const exactRequest = connectionRequestFromGrant({
+    connectors: requestedConnectors,
+    mcpConnections,
+    permission,
+    visibility: agentVisibility,
+  });
   const auth = withConnectionResources(
     options.capabilities?.auth ?? client.auth,
     client.appId,
     client.appOrigin,
     requestedConnectors,
     agentVisibility,
+    mcpConnections,
+    focusMcpConnectionId,
   );
   const walletAuth = delegateAuthVerification(auth);
   client.dialog.showWallet?.();
@@ -57,6 +76,16 @@ export async function connect(client, options) {
           ...(authorizeAccessKey ? { authorizeAccessKey: serializeAuthorizeAccessKey(authorizeAccessKey) } : {}),
         },
       }],
+      ...(mcpConnections.length === 0 ? {} : {
+        context: {
+          requestedMcpConnections: mcpConnections.map(({ id, name }) => ({
+            id,
+            name,
+            status: "authorization_required",
+          })),
+          ...(focusMcpConnectionId ? { focusMcpConnection: focusMcpConnectionId } : {}),
+        },
+      }),
     });
     const account = result.accounts?.[0];
     if (!account) throw new Error("Nanocodex Connect returned no account");
@@ -91,6 +120,9 @@ export async function connect(client, options) {
         }),
         permission,
         ...(requestedConnectors.length === 0 ? {} : { requested_connectors: requestedConnectors }),
+        ...(mcpConnections.length === 0
+          ? {}
+          : { requested_mcp_connections: mcpConnections.map(({ id }) => id) }),
       },
       signal: options.signal,
     });
@@ -99,6 +131,9 @@ export async function connect(client, options) {
       throw new Error("Nanocodex Connect returned no grant-scoped session");
     }
     const connection = connectionFromWire(wire);
+    if (!connectionMatchesRequest(connection, exactRequest)) {
+      throw new InvalidResponseError("Nanocodex Connect returned a grant outside the exact approved request");
+    }
     client._setSession({
       grantId: connection.grant.id,
       token: grantToken,
@@ -141,13 +176,50 @@ function normalizeAgentVisibility(agent) {
   });
 }
 
-function withConnectionResources(auth, appId, appOrigin, requestedConnectors, agentVisibility) {
+function normalizeMcpConnections(value) {
+  if (!Array.isArray(value) || value.length > 16) {
+    throw new TypeError("mcpConnections must be an array of at most 16 pre-registered connections");
+  }
+  const ids = new Set();
+  return Object.freeze(value.map((connection) => {
+    if (!connection || typeof connection !== "object"
+      || typeof connection.id !== "string" || !MCP_CONNECTION_ID.test(connection.id)
+      || typeof connection.name !== "string" || connection.name.length < 1
+      || connection.name.length > 256 || connection.name.trim() !== connection.name
+      || ids.has(connection.id)) {
+      throw new TypeError("mcpConnections must contain unique opaque 43-character IDs and bounded display names");
+    }
+    ids.add(connection.id);
+    return Object.freeze({ id: connection.id, name: connection.name });
+  }));
+}
+
+function normalizeMcpFocus(value, connections) {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || !MCP_CONNECTION_ID.test(value)
+    || !connections.some(({ id }) => id === value)) {
+    throw new TypeError("focusMcpConnectionId must identify one requested MCP connection");
+  }
+  return value;
+}
+
+function withConnectionResources(
+  auth,
+  appId,
+  appOrigin,
+  requestedConnectors,
+  agentVisibility,
+  mcpConnections,
+  focusMcpConnectionId,
+) {
   const configured = typeof auth === "object" && auth !== null
     ? (auth.resources ?? []).filter((resource) =>
       !Object.values(AGENT_VISIBILITY_RESOURCES).includes(resource)
       && !resource.startsWith(AGENT_VISIBILITY_RESOURCE_PREFIX)
       && !resource.startsWith(CONNECTOR_RESOURCE_PREFIX)
       && !resource.startsWith(CONNECTORS_RESOURCE_PREFIX)
+      && !resource.startsWith(MCP_CONNECTION_RESOURCE_PREFIX)
+      && !resource.startsWith(MCP_FOCUS_RESOURCE_PREFIX)
       && !resource.startsWith(APP_RESOURCE_PREFIX)
       && !resource.startsWith(APP_ORIGIN_RESOURCE_PREFIX))
     : [];
@@ -164,6 +236,8 @@ function withConnectionResources(auth, appId, appOrigin, requestedConnectors, ag
     ...(visibility.length === 0
       ? []
       : [`${AGENT_VISIBILITY_RESOURCE_PREFIX}${visibility.join(",")}`]),
+    ...mcpConnections.map(({ id }) => `${MCP_CONNECTION_RESOURCE_PREFIX}${id}`),
+    ...(focusMcpConnectionId ? [`${MCP_FOCUS_RESOURCE_PREFIX}${focusMcpConnectionId}`] : []),
   ])];
   if (typeof auth === "string") return { url: auth, resources };
   return { ...auth, resources };
@@ -279,6 +353,21 @@ export async function disconnect(client, options = {}) {
 export async function reconnect(client, options = {}) {
   const session = client._getSession();
   if (!session) return undefined;
+  let retainedRequest;
+  if (session.connection) {
+    try {
+      const retained = connectionFromWire(session.connection);
+      if (retained.grant.id.toLowerCase() !== session.grantId.toLowerCase()
+        || !connectionMatchesRequest(retained, options)) {
+        client._clearSession();
+        return undefined;
+      }
+      retainedRequest = reconnectRequestFromConnection(retained);
+    } catch {
+      // A legacy or corrupt projection can still be validated against the live
+      // grant. Current sessions always retain a complete exact projection.
+    }
+  }
   client._setSessionToken(session.token);
   try {
     const wire = await client.request({
@@ -292,7 +381,8 @@ export async function reconnect(client, options = {}) {
       client._clearSession();
       return undefined;
     }
-    if (!connectionMatchesRequest(connection, options)) {
+    if (!connectionMatchesRequest(connection, options)
+      || (retainedRequest && !connectionMatchesRequest(connection, retainedRequest))) {
       client._clearSession();
       return undefined;
     }

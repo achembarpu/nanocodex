@@ -21,7 +21,9 @@ import {
 } from "../agent/index.mjs";
 import {
   createConnectAgentSource,
+  useConnectAgent,
   type ConnectAgentSourceOptions,
+  type HostedConnectOptions,
 } from "../cloud/index.mjs";
 import type { ConnectAgent } from "nanocodex/connect";
 
@@ -146,6 +148,34 @@ void normalizedConnectAgent;
 createConnectAgentSource(connectAgent);
 // @ts-expect-error a Connect source cannot infer conversation-history authorization.
 createConnectAgentSource(connectAgent, {});
+
+const hostedConnectOptions: HostedConnectOptions = {
+  capabilities: { agent: { conversationHistory: true } },
+  mcpConnections: [{ id: "abcdefghijklmnopqrstuvwxyz0123456789_-ABCDE", name: "Linear" }],
+  permission: "agent.run",
+};
+void hostedConnectOptions;
+
+function HostedConnectConsumer() {
+  const connect = useConnectAgent({ reconnectOnMount: false });
+  connect.connect({
+    focusMcpConnectionId: "abcdefghijklmnopqrstuvwxyz0123456789_-ABCDE",
+    mcpConnections: [{ id: "abcdefghijklmnopqrstuvwxyz0123456789_-ABCDE", name: "Linear" }],
+    permission: "agent.run",
+  });
+  return connect.connectionStatus;
+}
+void HostedConnectConsumer;
+
+const unsafeHostedConnectOptions: HostedConnectOptions = {
+  mcpConnections: [{
+    id: "abcdefghijklmnopqrstuvwxyz0123456789_-ABCDE",
+    name: "Linear",
+    // @ts-expect-error MCP endpoints are broker-owned and never accepted from a host app.
+    endpoint: "https://mcp.linear.app/mcp",
+  }],
+};
+void unsafeHostedConnectOptions;
 
 function HeadlessConversation() {
   const controller: AgentControllerSnapshot = useAgentController(structuralAgent, {

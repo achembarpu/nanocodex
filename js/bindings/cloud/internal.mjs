@@ -1,6 +1,7 @@
 import { InvalidResponseError } from "./Errors.mjs";
 
 const CLOUD_ACCOUNT_PROVIDERS = Object.freeze(["github", "gmail", "gdrive", "x", "chatgpt"]);
+const MCP_CONNECTION_ID = /^[A-Za-z0-9_-]{43}$/;
 
 export function connectionFromWire(value) {
   const wire = object(value, "connection");
@@ -8,6 +9,15 @@ export function connectionFromWire(value) {
   const accessKey = object(wire.access_key, "connection.access_key");
   const mpp = object(wire.mpp, "connection.mpp");
   const capabilities = strings(grant.capabilities, "connection.grant.capabilities");
+  const grantMcpConnections = mcpConnections(
+    grant.mcp_connections,
+    "connection.grant.mcp_connections",
+  );
+  requireExactMcpProjection(
+    capabilities,
+    grantMcpConnections,
+    "connection.grant",
+  );
   return Object.freeze({
     accountAddress: hex(wire.account_address, "connection.account_address"),
     agentId: string(wire.agent_id, "connection.agent_id"),
@@ -18,6 +28,7 @@ export function connectionFromWire(value) {
       expiresAt: integer(grant.expires_at, "connection.grant.expires_at"),
       capabilities,
       connectors: connectors(capabilities, "connection.grant.capabilities"),
+      mcpConnections: grantMcpConnections,
       visibility: agentVisibility(capabilities),
     }),
     accessKey: accessKeyFromWire(accessKey),
@@ -43,13 +54,11 @@ export function connectionMatchesRequest(connection, options = {}) {
   }
   const requestedCloudAccounts = options.capabilities?.cloudAccounts;
   if (requestedCloudAccounts !== undefined) {
-    const allowed = new Set(CLOUD_ACCOUNT_PROVIDERS.filter(
+    const requested = CLOUD_ACCOUNT_PROVIDERS.filter(
       (provider) => requestedCloudAccounts?.[provider] === true,
-    ));
-    // A request may include accounts the user has not connected yet, so the
-    // issued grant can legitimately be narrower. It must never restore with a
-    // connector the current app request did not include.
-    if (!connection.grant.connectors.every((provider) => allowed.has(provider))) {
+    );
+    if (requested.length !== connection.grant.connectors.length
+      || requested.some((provider) => !connection.grant.connectors.includes(provider))) {
       return false;
     }
   }
@@ -66,7 +75,38 @@ export function connectionMatchesRequest(connection, options = {}) {
       if (connection.grant.visibility[name] !== expected[name]) return false;
     }
   }
+  if (options.mcpConnectionIds !== undefined) {
+    if (!Array.isArray(options.mcpConnectionIds)
+      || options.mcpConnectionIds.some((id) => typeof id !== "string" || !MCP_CONNECTION_ID.test(id))
+      || new Set(options.mcpConnectionIds).size !== options.mcpConnectionIds.length) {
+      return false;
+    }
+    const actual = connection.grant.mcpConnections.map(({ id }) => id);
+    if (actual.length !== options.mcpConnectionIds.length
+      || actual.some((id) => !options.mcpConnectionIds.includes(id))) {
+      return false;
+    }
+  }
   return true;
+}
+
+/** Builds the exact non-secret request projection retained by one minted grant. */
+export function reconnectRequestFromConnection(connection) {
+  return connectionRequestFromGrant(connection.grant);
+}
+
+/** Builds the exact non-secret request projection for normalized grant fields. */
+export function connectionRequestFromGrant(grant) {
+  return Object.freeze({
+    capabilities: Object.freeze({
+      agent: grant.visibility,
+      cloudAccounts: Object.freeze(Object.fromEntries(
+        grant.connectors.map((provider) => [provider, true]),
+      )),
+    }),
+    mcpConnectionIds: Object.freeze(grant.mcpConnections.map(({ id }) => id)),
+    permission: grant.permission,
+  });
 }
 
 export function preparedConnectionFromWire(value) {
@@ -144,6 +184,8 @@ export function accessKeyFromWire(wire) {
 export function grantFromWire(value) {
   const grant = object(value, "grant");
   const capabilities = strings(grant.capabilities, "grant.capabilities");
+  const grantMcpConnections = mcpConnections(grant.mcp_connections, "grant.mcp_connections");
+  requireExactMcpProjection(capabilities, grantMcpConnections, "grant");
   return Object.freeze({
     id: hex(grant.id, "grant.id"),
     permission: string(grant.permission, "grant.permission"),
@@ -151,6 +193,7 @@ export function grantFromWire(value) {
     expiresAt: integer(grant.expires_at, "grant.expires_at"),
     capabilities,
     connectors: connectors(capabilities, "grant.capabilities"),
+    mcpConnections: grantMcpConnections,
     visibility: agentVisibility(capabilities),
   });
 }
@@ -244,6 +287,42 @@ function connectors(capabilities, label) {
   return Object.freeze(providers.filter((provider) =>
     items.includes(provider) || items.includes(`urn:nanocodex:connector:${provider}`)
   ));
+}
+
+function mcpConnections(value, label) {
+  if (value === undefined) return Object.freeze([]);
+  const ids = new Set();
+  const connections = array(value, label);
+  if (connections.length > 16) throw new InvalidResponseError(`${label} must contain at most 16 connections`);
+  return Object.freeze(connections.map((item, index) => {
+    const connection = object(item, `${label}[${index}]`);
+    if (Object.keys(connection).some((key) => key !== "id" && key !== "name")) {
+      throw new InvalidResponseError(`${label}[${index}] contains private or unknown fields`);
+    }
+    const id = string(connection.id, `${label}[${index}].id`);
+    const name = string(connection.name, `${label}[${index}].name`);
+    if (!MCP_CONNECTION_ID.test(id) || ids.has(id)
+      || name.length < 1 || name.length > 256 || name.trim() !== name) {
+      throw new InvalidResponseError(`${label}[${index}] must contain an exact hosted MCP identity`);
+    }
+    ids.add(id);
+    return Object.freeze({ id, name });
+  }));
+}
+
+function requireExactMcpProjection(capabilities, connections, label) {
+  const ids = capabilities.flatMap((capability) => capability.startsWith("mcp:")
+    ? [capability.slice("mcp:".length)]
+    : []);
+  if (ids.length > 16
+    || ids.some((id) => !MCP_CONNECTION_ID.test(id))
+    || new Set(ids).size !== ids.length) {
+    throw new InvalidResponseError(`${label}.capabilities contains invalid hosted MCP identities`);
+  }
+  const metadataIds = connections.map(({ id }) => id);
+  if (ids.length !== metadataIds.length || ids.some((id) => !metadataIds.includes(id))) {
+    throw new InvalidResponseError(`${label} MCP capabilities and metadata must match exactly`);
+  }
 }
 
 function hex(value, label) {
