@@ -236,12 +236,12 @@ complete supported behavior matrix passes against the exact deployed SHA. Any
 failure produces a focused fix, commit, redeploy, and rerun of the affected row
 plus its owning boundary.
 
-As the closeout step, fetch `~/github/openai/codex`, reconcile every commit after
-the reviewed checkpoint `7ada37a15e1f6aa84f83b4b9410f9d29e66fefe4`, classify it
-as port/evaluate/defer/out-of-scope, adopt only relevant invariants, advance the
-checkpoint with evidence, and update `AGENTS.md` and this plan for the parallel
-customer-driven phase. This is not permission to import Codex's app server,
-provider portability, approval framework, or unrelated UI architecture.
+The Codex closeout ledger now reconciles every commit after the prior checkpoint
+through `50ea8fd411422b3f7bc906bcde6c1c4432019a2e`, classifies all 802 commits,
+and advances the reviewed checkpoint with code and regression evidence. Keep
+classifying every later commit before advancing it again. This is not permission
+to import Codex's app server, provider portability, approval framework, or
+unrelated UI architecture.
 
 ## Track A — Nanocodex anywhere
 

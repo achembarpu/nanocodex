@@ -1,28 +1,35 @@
 # Codex parity ledger
 
-This ledger records the review of all 555 commits in the exclusive local
-checkout range
+This ledger records the review of all 1,357 commits in two contiguous exclusive
+local checkout ranges
 
 ```text
 openai/codex@35eaf3ffb0bf2001486c68c47a3d946b34d16634
-    ..openai/codex@7ada37a15e1f6aa84f83b4b9410f9d29e66fefe4
+    ..openai/codex@50ea8fd411422b3f7bc906bcde6c1c4432019a2e
 ```
 
-The review used the clean local Codex checkout at the range head. The command
-`git rev-list --count <range>` returns `555`. The first 37 commits remain
-expanded below; the following 279 are classified individually in
+The review used the clean local Codex checkout at the range head. The earlier
+`35eaf3ff..7ada37a1` range contains 555 commits. Its first 37 remain expanded
+below; the following 279 are classified individually in
 [`codex-parity/8431dc59-3418498f.md`](codex-parity/8431dc59-3418498f.md), and
 the final seven are classified in
 [`codex-parity/3418498f-be2e4afc.md`](codex-parity/3418498f-be2e4afc.md). The
 latest 232 are classified in
 [`codex-parity/be2e4afc-7ada37a1.md`](codex-parity/be2e4afc-7ada37a1.md).
 
-The global checkpoint remains `7ada37a1`. A focused Realtime voice review also
-screened the 802 later commits through local Codex HEAD
-`50ea8fd411422b3f7bc906bcde6c1c4432019a2e`; its five behavior-adjacent changes
-are dispositioned below. This focused review does not advance the global
-checkpoint because the non-voice commits have not yet been classified
-individually in this ledger.
+The later `7ada37a1..50ea8fd4` range contains 802 commits. Every commit is
+classified individually in eight ordered appendices:
+[`part 01`](codex-parity/7ada37a1-50ea8fd4-part01.md),
+[`part 02`](codex-parity/7ada37a1-50ea8fd4-part02.md),
+[`part 03`](codex-parity/7ada37a1-50ea8fd4-part03.md),
+[`part 04`](codex-parity/7ada37a1-50ea8fd4-part04.md),
+[`part 05`](codex-parity/7ada37a1-50ea8fd4-part05.md),
+[`part 06`](codex-parity/7ada37a1-50ea8fd4-part06.md),
+[`part 07`](codex-parity/7ada37a1-50ea8fd4-part07.md), and
+[`part 08`](codex-parity/7ada37a1-50ea8fd4-part08.md). Mechanical validation
+proves exact ordinal and SHA coverage for all 802 commits. The global reviewed
+checkpoint is now
+`openai/codex@50ea8fd411422b3f7bc906bcde6c1c4432019a2e`.
 
 The classifications mean:
 
@@ -41,11 +48,11 @@ claims.
 
 | Classification | Count |
 | --- | ---: |
-| `port` | 53 |
-| `evaluate` | 44 |
-| `defer` | 10 |
-| `out-of-scope` | 448 |
-| Total | 555 |
+| `port` | 73 |
+| `evaluate` | 155 |
+| `defer` | 50 |
+| `out-of-scope` | 1,079 |
+| Total | 1,357 |
 
 ## First range: `35eaf3ff..8431dc59`
 
@@ -460,7 +467,8 @@ only protocol-neutral live-input, developer-message, and read-only session
 context hooks. ChatGPT WebRTC uses native Rust WebRTC/Opus with a sideband
 WebSocket, while the host owns device-attestation generation.
 
-The focused later-commit dispositions are:
+Five Realtime-adjacent entries in the complete later range are called out here
+because they connect directly to `P41` and `P42`:
 
 - `13dfaab4469eff5c5b929bb7e1cbc6bba5e0c1be` is `out-of-scope`: it narrates
   Codex approval, permission, patch-approval, elicitation, and app-owned input
@@ -471,10 +479,9 @@ The focused later-commit dispositions are:
 - `536f86e5cc9ec1ff38457d099bf320b9d08eeeba` is `port`: `P42` owns caller-SDP
   call creation and configuration-free existing-call attachment without
   importing Codex's app-server protocol.
-- `d44696065723a56b9de6538cd6348fcbe6c1542e` is `out-of-scope`: it adds a
-  Codex TUI keymap schema entry and Linux version-skew build plumbing, not a
-  Realtime transport behavior. The current local Codex Rust TUI contains no
-  corresponding native microphone implementation to copy.
+- `d44696065723a56b9de6538cd6348fcbe6c1542e` is `out-of-scope`: it adds an
+  unused Codex TUI keymap schema field and Linux exec-server version-skew build
+  plumbing, not a Realtime session invariant.
 - `be6ebb1f6d4cf3bcd70c5c20be2677bb38dec860` is `out-of-scope`: it adds a
   trace span around Codex's app-server Realtime running-state query without
   changing session behavior.
@@ -505,15 +512,17 @@ stopping the private driver.
 
 ## Open evaluation queue
 
-The 21 `evaluate` rows are not parity claims. The original ten should be
-resolved only through the existing representative TUI corpus and focused
-allocation/frame benchmarks:
+The 155 `evaluate` rows are not parity claims. The 111 evaluations in the
+latest range are enumerated in its eight appendices with the exact missing
+evidence or decision. Representative earlier TUI evaluations should be
+resolved only through the existing trace corpus and focused allocation/frame
+benchmarks:
 
 - ownership and retained allocations: rows 4, 8, 9, 15, and 32;
 - Markdown and layout algorithms: rows 10, 18, 26, and 28;
 - operator-owned metric histogram policy: row 35.
 
-The 11 later evaluations are named `E2` through `E11` in the
+Additional earlier evaluations are named `E2` through `E11` in the
 [range appendix](codex-parity/8431dc59-3418498f.md): platform-specific terminal
 behavior, Codex-only live exec rendering, side-pane navigation, and exact item
 start timing require their corresponding workload before adoption.

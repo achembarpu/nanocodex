@@ -147,7 +147,7 @@ the user asks.
 - Use local `~/github/openai/codex/codex-rs` before claims about Codex. Codex is
   behavioral evidence, not an API requirement.
 - The reviewed checkpoint is
-  `openai/codex@7ada37a15e1f6aa84f83b4b9410f9d29e66fefe4`. Review every later
+  `openai/codex@50ea8fd411422b3f7bc906bcde6c1c4432019a2e`. Review every later
   commit as port/evaluate/defer/out-of-scope and cite adopted behavior before
   advancing it.
 
