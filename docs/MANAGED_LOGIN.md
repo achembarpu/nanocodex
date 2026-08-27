@@ -227,6 +227,40 @@ Once account identity, connector readiness, and policy review are satisfied,
 the browser settles immediately. It must not add a second generic Continue
 step.
 
+### Explicit ChatGPT credential import
+
+`nanocodex connect chatgpt` imports the currently configured Codex ChatGPT
+login only as part of that explicit approval ceremony. `--auth-file` may
+override the source for a request that includes ChatGPT; otherwise the CLI uses
+`NANOCODEX_AUTH_FILE`, `$CODEX_HOME/auth.json`, or `~/.codex/auth.json` in that
+order. Plain `nanocodex login` and every connect request that omits ChatGPT must
+not resolve or open the Codex auth file.
+
+Before device registration, the CLI opens the file once without following its
+final symlink where the platform supports that protection. It accepts only a
+regular file owned by the current user, inaccessible to group and other Unix
+users, and no larger than 64 KiB. The document must be a ChatGPT-mode Codex
+login with bounded access and refresh JWTs. The ID and access JWT account and
+FedRAMP claims must agree with the selected account; any corresponding refresh
+claims must agree as well. The access expiry must be more than five minutes in
+the future.
+
+The signed `wallet_connect` resources contain exactly one import commitment:
+
+```text
+urn:nanocodex:credential-import:chatgpt:codex-auth-v1:sha256:<base64url-sha256>
+```
+
+The digest input is the bytes
+`nanocodex/chatgpt-credential-import/v1\0`, followed in order by the access
+token, refresh token, and account ID, each encoded as a big-endian `u32` UTF-8
+byte length and the UTF-8 bytes, then the expiry in Unix epoch milliseconds as
+a big-endian `u64`, then one FedRAMP byte (`0` or `1`). After the wallet result
+has been validated, `/v1/connections` receives `chatgpt_credential_import` with
+exactly `access_token`, `refresh_token`, `account_id`, `expires_at`, and
+`fedramp`. These credentials are ephemeral request material and are never
+written to `connect.json` or returned in CLI diagnostics.
+
 ## Implementation slices
 
 Implement this as complete vertical slices rather than extending the old

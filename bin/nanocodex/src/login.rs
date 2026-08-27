@@ -1,7 +1,7 @@
 use std::{
     collections::HashSet,
     fmt, fs,
-    io::Write,
+    io::{Read, Write},
     num::NonZeroU64,
     path::{Path, PathBuf},
     str::FromStr,
@@ -26,7 +26,10 @@ use tempo_alloy::{
     },
 };
 
-use crate::{auth::open_browser, config::default_codex_home};
+use crate::{
+    auth::open_browser,
+    config::{default_auth_file, default_codex_home},
+};
 
 pub(crate) const APP_ID: &str = "nanocodex-cli";
 pub(crate) const APP_ORIGIN: &str = "https://cli.nanocodex.xyz";
@@ -42,6 +45,13 @@ const OVERALL_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const MAX_SLOW_DOWN_STREAK: u8 = 3;
 const ACCESS_KEY_LIFETIME: u64 = 30 * 86_400;
 const HOSTED_EXPIRY_CLOCK_SKEW: u64 = 5 * 60;
+const CHATGPT_IMPORT_EXPIRY_MARGIN: Duration = Duration::from_secs(5 * 60);
+const CHATGPT_AUTH_FILE_LIMIT: u64 = 64 * 1024;
+const CHATGPT_TOKEN_LIMIT: usize = 32 * 1024;
+const CHATGPT_ACCOUNT_ID_LIMIT: usize = 256;
+const CHATGPT_IMPORT_DOMAIN: &[u8] = b"nanocodex/chatgpt-credential-import/v1\0";
+const CHATGPT_IMPORT_RESOURCE_PREFIX: &str =
+    "urn:nanocodex:credential-import:chatgpt:codex-auth-v1:sha256:";
 const MPP_LIMIT: u64 = 10_000_000;
 const MPP_PERIOD: u64 = 86_400;
 
@@ -82,6 +92,9 @@ pub(crate) struct Connect {
     /// Hosted services or remote MCP hosts to connect and grant to this installation.
     #[arg(required = true, num_args = 1.., value_name = "SERVICE")]
     services: Vec<ConnectTarget>,
+    /// Override the Codex `auth.json` imported by an explicit ChatGPT connection.
+    #[arg(long, env = "NANOCODEX_AUTH_FILE")]
+    auth_file: Option<PathBuf>,
     /// Use a trusted local Nanocodex Connect endpoint for development.
     #[arg(
         long,
@@ -230,6 +243,7 @@ impl Login {
 
 impl Connect {
     pub(crate) async fn run(self) -> Result<()> {
+        let chatgpt_credential_import = self.load_chatgpt_credential_import()?;
         let paths = LoginPaths::default()?;
         let device_base = validated_device_base(self.device_base_url.as_deref())?;
         let expected_origin = normalized_origin(api_origin(&device_base)?)?;
@@ -249,8 +263,27 @@ impl Connect {
                     .map(|login| PendingRetirement::from_login(login, false))
             });
         LoginFlow::new(device_base, paths, !self.no_open)?
+            .with_chatgpt_credential_import(chatgpt_credential_import)
             .complete(request, retirement)
             .await
+    }
+
+    fn load_chatgpt_credential_import(&self) -> Result<Option<ChatgptCredentialImport>> {
+        let imports_chatgpt = self
+            .services
+            .iter()
+            .any(|service| matches!(service, ConnectTarget::Connector(Connector::Chatgpt)));
+        ensure!(
+            imports_chatgpt || self.auth_file.is_none(),
+            "--auth-file is only valid with an explicit `nanocodex connect chatgpt` request"
+        );
+        let chatgpt_credential_import = if imports_chatgpt {
+            let path = self.auth_file.clone().map_or_else(default_auth_file, Ok)?;
+            Some(load_chatgpt_credential_import(&path)?)
+        } else {
+            None
+        };
+        Ok(chatgpt_credential_import)
     }
 }
 
@@ -367,7 +400,7 @@ impl RequestedCapabilities {
         }
     }
 
-    fn resources(&self) -> Vec<String> {
+    fn resources(&self, chatgpt_import_resource: Option<&str>) -> Vec<String> {
         let mut resources = vec![
             "urn:nanocodex:agent:run".to_owned(),
             "urn:nanocodex:history:read".to_owned(),
@@ -385,6 +418,9 @@ impl RequestedCapabilities {
         }
         if let Some(connector) = self.focus_connector {
             resources.push(format!("urn:nanocodex:connector-focus:{connector}"));
+        }
+        if let Some(resource) = chatgpt_import_resource {
+            resources.push(resource.to_owned());
         }
         resources.extend(
             self.mcp_connections
@@ -408,6 +444,297 @@ impl RequestedCapabilities {
     }
 }
 
+#[derive(Serialize)]
+struct ChatgptCredentialImport {
+    access_token: String,
+    refresh_token: String,
+    account_id: String,
+    expires_at: u64,
+    fedramp: bool,
+}
+
+impl fmt::Debug for ChatgptCredentialImport {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ChatgptCredentialImport")
+            .field("access_token", &"[REDACTED]")
+            .field("refresh_token", &"[REDACTED]")
+            .field("account_id", &self.account_id)
+            .field("expires_at", &self.expires_at)
+            .field("fedramp", &self.fedramp)
+            .finish()
+    }
+}
+
+impl ChatgptCredentialImport {
+    fn resource(&self) -> String {
+        let mut commitment = Sha256::new();
+        commitment.update(CHATGPT_IMPORT_DOMAIN);
+        update_length_prefixed(&mut commitment, self.access_token.as_bytes());
+        update_length_prefixed(&mut commitment, self.refresh_token.as_bytes());
+        update_length_prefixed(&mut commitment, self.account_id.as_bytes());
+        commitment.update(self.expires_at.to_be_bytes());
+        commitment.update([u8::from(self.fedramp)]);
+        format!(
+            "{CHATGPT_IMPORT_RESOURCE_PREFIX}{}",
+            URL_SAFE_NO_PAD.encode(commitment.finalize())
+        )
+    }
+}
+
+fn update_length_prefixed(commitment: &mut Sha256, value: &[u8]) {
+    // All imported values are bounded far below u32::MAX before this point.
+    commitment.update((value.len() as u32).to_be_bytes());
+    commitment.update(value);
+}
+
+#[derive(Deserialize)]
+struct CodexAuthImportFile {
+    auth_mode: Option<String>,
+    tokens: Option<CodexAuthImportTokens>,
+}
+
+#[derive(Deserialize)]
+struct CodexAuthImportTokens {
+    id_token: String,
+    access_token: String,
+    refresh_token: String,
+    account_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ChatgptJwtClaims {
+    account_id: Option<String>,
+    fedramp: Option<bool>,
+    exp: Option<u64>,
+}
+
+fn load_chatgpt_credential_import(path: &Path) -> Result<ChatgptCredentialImport> {
+    let mut file = open_codex_auth_file(path)?;
+    let metadata = file
+        .metadata()
+        .wrap_err_with(|| format!("failed to inspect Codex auth file {}", path.display()))?;
+    ensure!(
+        metadata.file_type().is_file(),
+        "Codex auth file {} is not a regular file",
+        path.display()
+    );
+    validate_codex_auth_file_metadata(&metadata, path)?;
+    ensure!(
+        metadata.len() <= CHATGPT_AUTH_FILE_LIMIT,
+        "Codex auth file {} exceeds 64 KiB",
+        path.display()
+    );
+
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    (&mut file)
+        .take(CHATGPT_AUTH_FILE_LIMIT + 1)
+        .read_to_end(&mut bytes)
+        .wrap_err_with(|| format!("failed to read Codex auth file {}", path.display()))?;
+    ensure!(
+        bytes.len() as u64 <= CHATGPT_AUTH_FILE_LIMIT,
+        "Codex auth file {} exceeds 64 KiB",
+        path.display()
+    );
+    let auth: CodexAuthImportFile = serde_json::from_slice(&bytes)
+        .map_err(|_| eyre!("Codex auth file {} is not valid JSON", path.display()))?;
+    ensure!(
+        auth.auth_mode.as_deref() == Some("chatgpt"),
+        "Codex auth file is not a ChatGPT login"
+    );
+    let tokens = auth
+        .tokens
+        .ok_or_else(|| eyre!("Codex auth file contains no ChatGPT tokens"))?;
+    validate_secret_token("ID", &tokens.id_token)?;
+    validate_secret_token("access", &tokens.access_token)?;
+    validate_secret_token("refresh", &tokens.refresh_token)?;
+
+    let id_claims = decode_chatgpt_jwt_claims("ID", &tokens.id_token)?;
+    let access_claims = decode_chatgpt_jwt_claims("access", &tokens.access_token)?;
+    let refresh_claims = decode_chatgpt_jwt_claims("refresh", &tokens.refresh_token)?;
+    let account_id = tokens
+        .account_id
+        .ok_or_else(|| eyre!("Codex ChatGPT tokens contain no account ID"))?;
+    ensure_bounded_account_id(&account_id)?;
+    ensure!(
+        id_claims.account_id.as_deref() == Some(account_id.as_str())
+            && access_claims.account_id.as_deref() == Some(account_id.as_str()),
+        "Codex ChatGPT account claims are missing or inconsistent"
+    );
+    if let Some(refresh_account_id) = refresh_claims.account_id.as_deref() {
+        ensure!(
+            refresh_account_id == account_id,
+            "Codex ChatGPT account claims are inconsistent"
+        );
+    }
+
+    let id_fedramp = id_claims.fedramp.unwrap_or(false);
+    let access_fedramp = access_claims.fedramp.unwrap_or(false);
+    ensure!(
+        id_fedramp == access_fedramp,
+        "Codex ChatGPT FedRAMP claims are inconsistent"
+    );
+    if let Some(refresh_fedramp) = refresh_claims.fedramp {
+        ensure!(
+            refresh_fedramp == access_fedramp,
+            "Codex ChatGPT FedRAMP claims are inconsistent"
+        );
+    }
+
+    let expires_at = access_claims
+        .exp
+        .ok_or_else(|| eyre!("Codex ChatGPT access token has no valid expiry"))?
+        .checked_mul(1_000)
+        .ok_or_else(|| eyre!("Codex ChatGPT access token expiry is invalid"))?;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .wrap_err("system clock is before the Unix epoch")?;
+    let minimum_expiry = u64::try_from(
+        now.checked_add(CHATGPT_IMPORT_EXPIRY_MARGIN)
+            .ok_or_else(|| eyre!("system time overflowed the ChatGPT import margin"))?
+            .as_millis(),
+    )
+    .wrap_err("system time overflowed milliseconds")?;
+    ensure!(
+        expires_at > minimum_expiry,
+        "Codex ChatGPT access token expires too soon; refresh it before connecting"
+    );
+
+    Ok(ChatgptCredentialImport {
+        access_token: tokens.access_token,
+        refresh_token: tokens.refresh_token,
+        account_id,
+        expires_at,
+        fedramp: access_fedramp,
+    })
+}
+
+fn validate_secret_token(kind: &str, token: &str) -> Result<()> {
+    ensure!(
+        !token.is_empty()
+            && token.trim() == token
+            && token.len() <= CHATGPT_TOKEN_LIMIT
+            && !token.chars().any(char::is_control),
+        "Codex ChatGPT {kind} token is missing or invalid"
+    );
+    Ok(())
+}
+
+fn ensure_bounded_account_id(account_id: &str) -> Result<()> {
+    ensure!(
+        !account_id.is_empty()
+            && account_id.trim() == account_id
+            && account_id.len() <= CHATGPT_ACCOUNT_ID_LIMIT
+            && !account_id.chars().any(char::is_control),
+        "Codex ChatGPT account ID is missing or invalid"
+    );
+    Ok(())
+}
+
+fn decode_chatgpt_jwt_claims(kind: &str, token: &str) -> Result<ChatgptJwtClaims> {
+    let mut segments = token.split('.');
+    let (Some(header), Some(payload), Some(signature), None) = (
+        segments.next(),
+        segments.next(),
+        segments.next(),
+        segments.next(),
+    ) else {
+        bail!("Codex ChatGPT {kind} token is not a three-segment JWT");
+    };
+    ensure!(
+        !header.is_empty() && !payload.is_empty() && !signature.is_empty(),
+        "Codex ChatGPT {kind} token is not a three-segment JWT"
+    );
+    let payload = URL_SAFE_NO_PAD
+        .decode(payload)
+        .map_err(|_| eyre!("Codex ChatGPT {kind} token has an invalid JWT payload"))?;
+    let payload: serde_json::Map<String, Value> = serde_json::from_slice(&payload)
+        .map_err(|_| eyre!("Codex ChatGPT {kind} token has an invalid JWT payload"))?;
+    let exp = match payload.get("exp") {
+        Some(value) => Some(
+            value
+                .as_u64()
+                .ok_or_else(|| eyre!("Codex ChatGPT {kind} token has an invalid expiry"))?,
+        ),
+        None => None,
+    };
+    let Some(auth) = payload.get("https://api.openai.com/auth") else {
+        return Ok(ChatgptJwtClaims {
+            account_id: None,
+            fedramp: None,
+            exp,
+        });
+    };
+    let auth = auth
+        .as_object()
+        .ok_or_else(|| eyre!("Codex ChatGPT {kind} token has invalid account claims"))?;
+    let account_id = match auth.get("chatgpt_account_id") {
+        Some(Value::String(value)) => {
+            ensure_bounded_account_id(value)?;
+            Some(value.clone())
+        }
+        Some(_) => bail!("Codex ChatGPT {kind} token has an invalid account claim"),
+        None => None,
+    };
+    let fedramp = match auth.get("chatgpt_account_is_fedramp") {
+        Some(Value::Bool(value)) => Some(*value),
+        Some(_) => bail!("Codex ChatGPT {kind} token has an invalid FedRAMP claim"),
+        None => None,
+    };
+    Ok(ChatgptJwtClaims {
+        account_id,
+        fedramp,
+        exp,
+    })
+}
+
+fn open_codex_auth_file(path: &Path) -> Result<fs::File> {
+    #[cfg(unix)]
+    {
+        use nix::{
+            fcntl::{OFlag, open},
+            sys::stat::Mode,
+        };
+
+        let descriptor = open(
+            path,
+            OFlag::O_RDONLY | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW,
+            Mode::empty(),
+        )
+        .map_err(std::io::Error::from)
+        .wrap_err_with(|| format!("failed to securely open Codex auth file {}", path.display()))?;
+        Ok(fs::File::from(descriptor))
+    }
+    #[cfg(not(unix))]
+    {
+        fs::File::open(path)
+            .wrap_err_with(|| format!("failed to open Codex auth file {}", path.display()))
+    }
+}
+
+#[cfg(unix)]
+fn validate_codex_auth_file_metadata(metadata: &fs::Metadata, path: &Path) -> Result<()> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    ensure!(
+        metadata.uid() == nix::unistd::geteuid().as_raw(),
+        "Codex auth file {} is not owned by the current user",
+        path.display()
+    );
+    let mode = metadata.permissions().mode() & 0o777;
+    ensure!(
+        mode & 0o077 == 0,
+        "Codex auth file {} must not be accessible by group or other users",
+        path.display()
+    );
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn validate_codex_auth_file_metadata(_metadata: &fs::Metadata, _path: &Path) -> Result<()> {
+    Ok(())
+}
+
 struct LoginFlow {
     http: Client,
     device_base: Url,
@@ -416,6 +743,7 @@ struct LoginFlow {
     overall_timeout: Duration,
     poll_second: Duration,
     open_browser: bool,
+    chatgpt_credential_import: Option<ChatgptCredentialImport>,
     #[cfg(test)]
     fail_login_persistence: bool,
 }
@@ -430,9 +758,18 @@ impl LoginFlow {
             overall_timeout: OVERALL_TIMEOUT,
             poll_second: Duration::from_secs(1),
             open_browser,
+            chatgpt_credential_import: None,
             #[cfg(test)]
             fail_login_persistence: false,
         })
+    }
+
+    fn with_chatgpt_credential_import(
+        mut self,
+        credential_import: Option<ChatgptCredentialImport>,
+    ) -> Self {
+        self.chatgpt_credential_import = credential_import;
+        self
     }
 
     async fn complete(
@@ -440,6 +777,11 @@ impl LoginFlow {
         mut request: RequestedCapabilities,
         retirement: Option<PendingRetirement>,
     ) -> Result<()> {
+        ensure!(
+            self.chatgpt_credential_import.is_none()
+                || request.connectors.contains(&Connector::Chatgpt.id()),
+            "ChatGPT credential import requires an explicit ChatGPT connection request"
+        );
         request.mcp_connections = self.create_mcp_intents(&request.mcp_targets).await?;
         let signer = PrivateKeySigner::random();
         let requested_expiry = unix_timestamp()?
@@ -447,7 +789,17 @@ impl LoginFlow {
             .ok_or_else(|| eyre!("system time overflowed the access-key expiry"))?;
         let verifier = pkce_verifier();
         let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
-        let rpc = wallet_connect_request(&self.api_origin, &request, &signer, requested_expiry)?;
+        let import_resource = self
+            .chatgpt_credential_import
+            .as_ref()
+            .map(ChatgptCredentialImport::resource);
+        let rpc = wallet_connect_request(
+            &self.api_origin,
+            &request,
+            &signer,
+            requested_expiry,
+            import_resource.as_deref(),
+        )?;
         let registration = self.register(&challenge, rpc).await?;
         print_verification_prompt(&registration);
         if self.open_browser
@@ -681,7 +1033,7 @@ impl LoginFlow {
             .wrap_err("invalid Connect grant URL")?;
         let deadline = tokio::time::Instant::now() + self.overall_timeout;
         loop {
-            let body = match approved {
+            let mut body = match approved {
                 ApprovedWalletResult::AccessKey(approved) => json!({
                     "authorization_mode": "access_key",
                     "app_id": APP_ID,
@@ -711,6 +1063,15 @@ impl LoginFlow {
                         .collect::<Vec<_>>(),
                 }),
             };
+            if let Some(credential_import) = &self.chatgpt_credential_import {
+                body.as_object_mut()
+                    .ok_or_else(|| eyre!("invalid Connect grant request"))?
+                    .insert(
+                        "chatgpt_credential_import".to_owned(),
+                        serde_json::to_value(credential_import)
+                            .wrap_err("failed to encode ChatGPT credential import")?,
+                    );
+            }
             let response = self
                 .http
                 .post(url.clone())
@@ -735,11 +1096,14 @@ impl LoginFlow {
                 tokio::time::sleep(self.poll_second).await;
                 continue;
             }
-            let detail = body
-                .pointer("/error/message")
-                .and_then(Value::as_str)
-                .map(|message| format!(": {message}"))
-                .unwrap_or_default();
+            let detail = if self.chatgpt_credential_import.is_some() {
+                String::new()
+            } else {
+                body.pointer("/error/message")
+                    .and_then(Value::as_str)
+                    .map(|message| format!(": {message}"))
+                    .unwrap_or_default()
+            };
             bail!("Connect grant request failed with HTTP {status}{detail}");
         }
     }
@@ -994,7 +1358,7 @@ fn validate_wallet_result(
             ensure!(
                 !requested.mpp
                     && requested
-                        .resources()
+                        .resources(None)
                         .iter()
                         .any(|resource| resource == "urn:nanocodex:authorization:hosted"),
                 "hosted authorization was not requested"
@@ -1960,6 +2324,7 @@ fn wallet_connect_request(
     requested: &RequestedCapabilities,
     signer: &PrivateKeySigner,
     expiry: u64,
+    chatgpt_import_resource: Option<&str>,
 ) -> Result<Value> {
     let challenge = api_origin.join("/v1/connect/auth/challenge")?;
     let verify = api_origin.join("/v1/connect/auth")?;
@@ -2008,7 +2373,7 @@ fn wallet_connect_request(
                     "challenge": challenge,
                     "verify": verify,
                     "logout": logout,
-                    "resources": requested.resources(),
+                    "resources": requested.resources(chatgpt_import_resource),
                     "returnToken": false,
                 },
                 "authorizeAccessKey": access_key,
@@ -2482,6 +2847,59 @@ mod tests {
 
     use super::*;
 
+    const ACCESS_SENTINEL: &str = "access-token-sentinel-never-log";
+    const REFRESH_SENTINEL: &str = "refresh-token-sentinel-never-log";
+    const CHATGPT_ACCOUNT: &str = "account-test-123";
+
+    fn test_jwt(payload: Value) -> String {
+        test_jwt_with_signature(payload, &URL_SAFE_NO_PAD.encode(b"signature"))
+    }
+
+    fn test_jwt_with_signature(payload: Value, signature: &str) -> String {
+        format!(
+            "{}.{}.{}",
+            URL_SAFE_NO_PAD.encode(br#"{"alg":"none"}"#),
+            URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).unwrap()),
+            signature
+        )
+    }
+
+    fn chatgpt_claims(account_id: &str, fedramp: bool) -> Value {
+        json!({
+            "https://api.openai.com/auth": {
+                "chatgpt_account_id": account_id,
+                "chatgpt_account_is_fedramp": fedramp,
+            }
+        })
+    }
+
+    fn valid_codex_auth(exp: u64) -> Value {
+        let mut access_claims = chatgpt_claims(CHATGPT_ACCOUNT, true);
+        access_claims
+            .as_object_mut()
+            .unwrap()
+            .insert("exp".to_owned(), json!(exp));
+        json!({
+            "auth_mode": "chatgpt",
+            "tokens": {
+                "id_token": test_jwt(chatgpt_claims(CHATGPT_ACCOUNT, true)),
+                "access_token": test_jwt_with_signature(access_claims, ACCESS_SENTINEL),
+                "refresh_token": test_jwt_with_signature(json!({}), REFRESH_SENTINEL),
+                "account_id": CHATGPT_ACCOUNT,
+            },
+            "last_refresh": "2026-08-27T00:00:00Z",
+        })
+    }
+
+    fn write_private_auth(path: &Path, auth: &Value) {
+        fs::write(path, serde_json::to_vec(auth).unwrap()).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+    }
+
     #[test]
     fn device_override_accepts_only_canonical_local_nanocodex_origins() {
         assert!(validated_device_base(None).is_ok());
@@ -2557,6 +2975,160 @@ mod tests {
     }
 
     #[test]
+    fn auth_file_override_is_rejected_before_read_without_explicit_chatgpt() {
+        #[derive(clap::Parser)]
+        struct ConnectCli {
+            #[command(flatten)]
+            connect: Connect,
+        }
+
+        let missing = std::env::temp_dir().join("nanocodex-missing-auth-sentinel.json");
+        let github = ConnectCli::try_parse_from([
+            "connect",
+            "github",
+            "--auth-file",
+            missing.to_str().unwrap(),
+        ])
+        .unwrap();
+        let error = github.connect.load_chatgpt_credential_import().unwrap_err();
+        assert!(error.to_string().contains("only valid"));
+        assert!(!error.to_string().contains(missing.to_str().unwrap()));
+
+        let github = ConnectCli::try_parse_from(["connect", "github"]).unwrap();
+        assert!(
+            github
+                .connect
+                .load_chatgpt_credential_import()
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn codex_chatgpt_auth_import_is_strict_bounded_and_secret_safe() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("auth.json");
+        let exp = unix_timestamp().unwrap() + 10 * 60;
+        let auth = valid_codex_auth(exp);
+        write_private_auth(&path, &auth);
+
+        let imported = load_chatgpt_credential_import(&path).unwrap();
+        assert_eq!(imported.account_id, CHATGPT_ACCOUNT);
+        assert_eq!(imported.expires_at, exp * 1_000);
+        assert!(imported.fedramp);
+        let debug = format!("{imported:?}");
+        assert!(!debug.contains(&imported.access_token));
+        assert!(!debug.contains(&imported.refresh_token));
+        assert!(debug.contains("[REDACTED]"));
+        let projected = serde_json::to_value(&imported).unwrap();
+        assert_eq!(projected.as_object().unwrap().len(), 5);
+        assert_eq!(projected["account_id"], CHATGPT_ACCOUNT);
+        assert_eq!(projected["expires_at"], exp * 1_000);
+        assert_eq!(projected["fedramp"], true);
+
+        let mut wrong_mode = auth.clone();
+        wrong_mode["auth_mode"] = json!("apikey");
+        write_private_auth(&path, &wrong_mode);
+        assert!(
+            load_chatgpt_credential_import(&path)
+                .unwrap_err()
+                .to_string()
+                .contains("not a ChatGPT login")
+        );
+
+        let mut inconsistent_account = auth.clone();
+        inconsistent_account["tokens"]["account_id"] = json!("different-account");
+        write_private_auth(&path, &inconsistent_account);
+        let error = load_chatgpt_credential_import(&path).unwrap_err();
+        let rendered = format!("{error:?}");
+        assert!(rendered.contains("inconsistent"));
+        assert!(!rendered.contains(ACCESS_SENTINEL));
+        assert!(!rendered.contains(REFRESH_SENTINEL));
+
+        let mut inconsistent_fedramp = auth.clone();
+        inconsistent_fedramp["tokens"]["id_token"] =
+            json!(test_jwt(chatgpt_claims(CHATGPT_ACCOUNT, false)));
+        write_private_auth(&path, &inconsistent_fedramp);
+        assert!(
+            load_chatgpt_credential_import(&path)
+                .unwrap_err()
+                .to_string()
+                .contains("FedRAMP")
+        );
+
+        let mut invalid_refresh = auth.clone();
+        invalid_refresh["tokens"]["refresh_token"] = json!(format!(
+            "{}.{}.{}.extra",
+            URL_SAFE_NO_PAD.encode(b"{}"),
+            URL_SAFE_NO_PAD.encode(b"[]"),
+            URL_SAFE_NO_PAD.encode(b"signature")
+        ));
+        write_private_auth(&path, &invalid_refresh);
+        let error = load_chatgpt_credential_import(&path).unwrap_err();
+        let rendered = format!("{error:?}");
+        assert!(rendered.contains("three-segment JWT"));
+        assert!(!rendered.contains(ACCESS_SENTINEL));
+        assert!(!rendered.contains(REFRESH_SENTINEL));
+
+        let near_expiry = valid_codex_auth(unix_timestamp().unwrap() + 5 * 60);
+        write_private_auth(&path, &near_expiry);
+        assert!(
+            load_chatgpt_credential_import(&path)
+                .unwrap_err()
+                .to_string()
+                .contains("expires too soon")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn codex_auth_import_rejects_symlinks_public_modes_and_oversized_files() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let directory = tempfile::tempdir().unwrap();
+        let auth_path = directory.path().join("auth.json");
+        let link_path = directory.path().join("auth-link.json");
+        write_private_auth(
+            &auth_path,
+            &valid_codex_auth(unix_timestamp().unwrap() + 10 * 60),
+        );
+        symlink(&auth_path, &link_path).unwrap();
+        assert!(load_chatgpt_credential_import(&link_path).is_err());
+
+        fs::set_permissions(&auth_path, fs::Permissions::from_mode(0o640)).unwrap();
+        assert!(
+            load_chatgpt_credential_import(&auth_path)
+                .unwrap_err()
+                .to_string()
+                .contains("group or other")
+        );
+
+        fs::write(&auth_path, vec![b'x'; CHATGPT_AUTH_FILE_LIMIT as usize + 1]).unwrap();
+        fs::set_permissions(&auth_path, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(
+            load_chatgpt_credential_import(&auth_path)
+                .unwrap_err()
+                .to_string()
+                .contains("exceeds 64 KiB")
+        );
+    }
+
+    #[test]
+    fn chatgpt_import_commitment_has_exact_domain_and_binary_layout() {
+        let imported = ChatgptCredentialImport {
+            access_token: "access".to_owned(),
+            refresh_token: "refresh".to_owned(),
+            account_id: "acct_123".to_owned(),
+            expires_at: 1_700_000_000_123,
+            fedramp: false,
+        };
+        assert_eq!(
+            imported.resource(),
+            "urn:nanocodex:credential-import:chatgpt:codex-auth-v1:sha256:vo_PpDlpaEWBzcjBCi0CpMQsPYiutjEMtb6HsNBjhng"
+        );
+    }
+
+    #[test]
     fn remote_mcp_resources_are_exact_and_focus_is_ui_only() {
         let connection = ManagedMcpConnection {
             id: "a".repeat(43),
@@ -2566,7 +3138,7 @@ mod tests {
             "mcp.linear.app".to_owned(),
         )]);
         focused.mcp_connections.push(connection.clone());
-        let resources = focused.resources();
+        let resources = focused.resources(None);
         assert!(resources.contains(&format!("urn:nanocodex:mcp:{}", connection.id)));
         assert!(resources.contains(&format!("urn:nanocodex:mcp-focus:{}", connection.id)));
         assert!(
@@ -2582,7 +3154,7 @@ mod tests {
         multiple.mcp_connections.push(connection);
         assert!(
             !multiple
-                .resources()
+                .resources(None)
                 .iter()
                 .any(|resource| resource.starts_with("urn:nanocodex:mcp-focus:"))
         );
@@ -2600,7 +3172,8 @@ mod tests {
             focus_connector: None,
             focus_mcp: false,
         };
-        let request = wallet_connect_request(&origin, &defaults, &signer, 4_000_000_000).unwrap();
+        let request =
+            wallet_connect_request(&origin, &defaults, &signer, 4_000_000_000, None).unwrap();
         let capabilities = &request["params"][0]["capabilities"];
         assert!(
             capabilities["authorizeAccessKey"]["publicKey"]
@@ -2647,7 +3220,8 @@ mod tests {
             focus_connector: Some("github"),
             focus_mcp: false,
         };
-        let request = wallet_connect_request(&origin, &optional, &signer, 4_000_000_000).unwrap();
+        let request =
+            wallet_connect_request(&origin, &optional, &signer, 4_000_000_000, None).unwrap();
         let capabilities = &request["params"][0]["capabilities"];
         let resources = capabilities["auth"]["resources"].as_array().unwrap();
         assert!(resources.contains(&json!("urn:nanocodex:connectors:chatgpt,github")));
@@ -2677,7 +3251,8 @@ mod tests {
             focus_connector: None,
             focus_mcp: false,
         };
-        let request = wallet_connect_request(&origin, &multiple, &signer, 4_000_000_000).unwrap();
+        let request =
+            wallet_connect_request(&origin, &multiple, &signer, 4_000_000_000, None).unwrap();
         let resources = request["params"][0]["capabilities"]["auth"]["resources"]
             .as_array()
             .unwrap();
@@ -3113,6 +3688,7 @@ mod tests {
             resource.as_str().is_some_and(|value| {
                 value.starts_with("urn:nanocodex:connectors:")
                     || value.starts_with("urn:nanocodex:connector-focus:")
+                    || value.starts_with(CHATGPT_IMPORT_RESOURCE_PREFIX)
             })
         }));
         assert_eq!(requests[1]["path"], "/v1/device/token");
@@ -3121,6 +3697,11 @@ mod tests {
         assert_eq!(requests[4]["path"], "/v1/connections");
         assert_eq!(requests[4]["origin"], APP_ORIGIN);
         assert_eq!(requests[4]["app_id"], APP_ID);
+        assert!(
+            requests[4]["body"]
+                .get("chatgpt_credential_import")
+                .is_none()
+        );
         drop(requests);
 
         let stored = StoredLogin::load(&paths.login).unwrap().unwrap();
@@ -3131,6 +3712,84 @@ mod tests {
         assert_eq!(keys.len(), 1);
         assert!(keys[0].is_locally_signable());
         assert_eq!(keys[0].allowed_calls(), Some([].as_slice()));
+    }
+
+    #[tokio::test]
+    async fn explicit_chatgpt_flow_commits_and_posts_ephemeral_credentials_only() {
+        nanocodex::oai::transport::install_default_rustls_crypto_provider();
+        let directory = tempfile::tempdir().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let base = Url::parse(&format!("http://{address}/v1/device/")).unwrap();
+        let root = PrivateKeySigner::random();
+        let captured = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let server = tokio::spawn(mock_login_server(
+            listener,
+            root,
+            Arc::clone(&captured),
+            None,
+            None,
+        ));
+        let paths = LoginPaths {
+            login: directory.path().join("connect.json"),
+            accounts: directory.path().join("tempo-store.json"),
+        };
+        let imported = ChatgptCredentialImport {
+            access_token: ACCESS_SENTINEL.to_owned(),
+            refresh_token: REFRESH_SENTINEL.to_owned(),
+            account_id: CHATGPT_ACCOUNT.to_owned(),
+            expires_at: 1_800_000_000_000,
+            fedramp: true,
+        };
+        let expected_resource = imported.resource();
+        let mut flow = LoginFlow::new(base, paths.clone(), false)
+            .unwrap()
+            .with_chatgpt_credential_import(Some(imported));
+        flow.poll_second = Duration::from_millis(1);
+        flow.overall_timeout = Duration::from_secs(2);
+        flow.complete(
+            RequestedCapabilities::connect(&[ConnectTarget::Connector(Connector::Chatgpt)]),
+            None,
+        )
+        .await
+        .unwrap();
+        server.await.unwrap();
+
+        let requests = captured.lock().await;
+        let resources = requests[0]["body"]["message"]["payload"][0]["params"][0]
+            ["capabilities"]["auth"]["resources"]
+            .as_array()
+            .unwrap();
+        assert_eq!(
+            resources
+                .iter()
+                .filter_map(Value::as_str)
+                .filter(|resource| resource.starts_with(CHATGPT_IMPORT_RESOURCE_PREFIX))
+                .collect::<Vec<_>>(),
+            vec![expected_resource.as_str()]
+        );
+        let body = &requests[4]["body"];
+        assert_eq!(body["requested_connectors"], json!(["chatgpt"]));
+        assert_eq!(
+            body["chatgpt_credential_import"].as_object().unwrap().len(),
+            5
+        );
+        assert_eq!(
+            body["chatgpt_credential_import"],
+            json!({
+                "access_token": ACCESS_SENTINEL,
+                "refresh_token": REFRESH_SENTINEL,
+                "account_id": CHATGPT_ACCOUNT,
+                "expires_at": 1_800_000_000_000_u64,
+                "fedramp": true,
+            })
+        );
+        drop(requests);
+
+        let stored = fs::read_to_string(&paths.login).unwrap();
+        assert!(!stored.contains(ACCESS_SENTINEL));
+        assert!(!stored.contains(REFRESH_SENTINEL));
+        assert!(!stored.contains("chatgpt_credential_import"));
     }
 
     #[tokio::test]

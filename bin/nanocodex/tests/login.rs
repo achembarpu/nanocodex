@@ -9,6 +9,12 @@ mod auth {
 mod config {
     use std::path::PathBuf;
 
+    pub(crate) fn default_auth_file() -> eyre::Result<PathBuf> {
+        Ok(std::env::temp_dir()
+            .join("nanocodex-login-tests")
+            .join("auth.json"))
+    }
+
     pub(crate) fn default_codex_home() -> eyre::Result<PathBuf> {
         Ok(std::env::temp_dir().join("nanocodex-login-tests"))
     }
