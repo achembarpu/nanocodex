@@ -385,7 +385,7 @@ export default {
       }
       const modelSocket = url.pathname.match(/^\/v1\/grants\/(0x[0-9a-fA-F]{64})\/model$/);
       if (modelSocket) {
-        return openGrantModelWebSocket(
+        return await openGrantModelWebSocket(
           request,
           env,
           store,
@@ -397,7 +397,7 @@ export default {
         /^\/v1\/grants\/(0x[0-9a-fA-F]{64})\/agents\/([^/]+)\/realtime\/sideband$/,
       );
       if (realtimeSocket) {
-        return openGrantRealtimeWebSocket(
+        return await openGrantRealtimeWebSocket(
           request,
           env,
           store,
@@ -410,7 +410,7 @@ export default {
         /^\/v1\/grants\/(0x[0-9a-fA-F]{64})\/agents\/([^/]+)\/tool-host$/,
       );
       if (toolHostSocket) {
-        return openGrantToolHostWebSocket(
+        return await openGrantToolHostWebSocket(
           request,
           env,
           store,
