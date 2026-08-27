@@ -14,6 +14,7 @@ import {
   acquireLocalDevelopmentLease,
   assertLocalDevelopmentPortAvailable,
   ensureLocalDependencies,
+  ensureLocalEvalSchema,
   ensureLocalOAuthRelay,
   localDevelopmentInstance,
   localDevelopmentOrigin,
@@ -212,6 +213,33 @@ test("local development installs every package required to start the web stack",
   ]);
   assert.deepEqual(connectApi.exactVersionPackages, ["accounts"]);
   assert.equal(requirements.length, 9);
+});
+
+test("local eval bootstrap applies and repairs the canonical D1 schema", async () => {
+  const calls = [];
+  await ensureLocalEvalSchema("/tmp/nanocodex-eval-schema-test", {
+    environment: { PATH: "/usr/bin", OPENAI_API_KEY: "must-not-be-forwarded" },
+    execute: async (...arguments_) => calls.push(arguments_),
+  });
+
+  assert.equal(calls.length, 2);
+  const [migration, repair] = calls;
+  assert.deepEqual(migration[1].slice(-2), [
+    "--config",
+    resolve(fileURLToPath(new URL("..", import.meta.url)), "wrangler.jsonc"),
+  ]);
+  assert.deepEqual(repair[1].slice(-2), [
+    "--config",
+    resolve(fileURLToPath(new URL("..", import.meta.url)), "wrangler.jsonc"),
+  ]);
+  assert.equal(repair[1][repair[1].indexOf("--command") + 1].includes(
+    "CREATE TABLE IF NOT EXISTS worksets",
+  ), true);
+  assert.equal(repair[1][repair[1].indexOf("--command") + 1].includes(
+    "CREATE TABLE IF NOT EXISTS cluster_nodes",
+  ), true);
+  assert.equal(repair[2].env.OPENAI_API_KEY, undefined);
+  assert.equal(repair[2].env.CI, "true");
 });
 
 async function writeDependencyFixture(root, declaredVersion, installedVersion) {

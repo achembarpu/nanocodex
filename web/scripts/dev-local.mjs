@@ -21,6 +21,8 @@ const bindingsRoot = resolve(repositoryRoot, "js/bindings");
 const reactRoot = resolve(repositoryRoot, "js/react");
 const terminalRoot = resolve(repositoryRoot, "js/terminal");
 const managedRoot = resolve(repositoryRoot, "services/managed");
+const localWranglerConfigPath = resolve(webRoot, "wrangler.jsonc");
+const localEvalMigrationPath = resolve(webRoot, "migrations", "0001_eval_coordinator.sql");
 const connectDialogRoot = resolve(webRoot, "connect-dialog");
 const connectPlaygroundRoot = resolve(webRoot, "connect-playground");
 const connectApiRoot = resolve(repositoryRoot, "services/connect-api");
@@ -423,18 +425,10 @@ async function main() {
       ),
     ]);
 
-    await lifecycle.run(process.execPath, [
-      resolve(webRoot, "node_modules/wrangler/bin/wrangler.js"),
-      "d1",
-      "migrations",
-      "apply",
-      "EVALS_DB",
-      "--local",
-      "--env",
-      "development",
-      "--persist-to",
-      statePath,
-    ], { cwd: webRoot, env: { ...toolEnvironment, CI: "true" } }, "local D1 migration");
+    await ensureLocalEvalSchema(statePath, {
+      environment,
+      execute: (...arguments_) => lifecycle.run(...arguments_),
+    });
 
     const relayLaunch = localChatGptRelayChildLaunch(toolEnvironment);
     const relay = lifecycle.spawn(
@@ -1068,6 +1062,64 @@ export async function ensureLocalDependencies(
     cwd: repositoryRoot,
     env: environment,
   })));
+}
+
+/**
+ * Apply the local eval migration and repair a stale persisted D1 file.
+ *
+ * Wrangler records applied migrations separately from the SQLite file used by
+ * a Vite Worker. A persisted checkout can therefore retain the migration
+ * receipt while the Worker opens a newly keyed, empty file after a config
+ * revision. This repair is deliberately owned by local bootstrap; production
+ * uses the deploy orchestrator's remote migration step instead.
+ */
+export async function ensureLocalEvalSchema(
+  statePath,
+  { environment = process.env, execute = run } = {},
+) {
+  if (typeof statePath !== "string" || !statePath) {
+    throw new Error("local eval schema requires a state path");
+  }
+  if (typeof execute !== "function") throw new Error("local eval schema runner is required");
+  const wrangler = resolve(webRoot, "node_modules/wrangler/bin/wrangler.js");
+  const options = {
+    cwd: webRoot,
+    env: { ...buildChildEnvironment(environment), CI: "true" },
+  };
+  await execute(process.execPath, [
+    wrangler,
+    "d1",
+    "migrations",
+    "apply",
+    "EVALS_DB",
+    "--local",
+    "--env",
+    "development",
+    "--persist-to",
+    statePath,
+    "--config",
+    localWranglerConfigPath,
+  ], options, "local D1 migration");
+
+  const migration = await readFile(localEvalMigrationPath, "utf8");
+  const idempotentSchema = migration
+    .replace(/\bCREATE TABLE\b/g, "CREATE TABLE IF NOT EXISTS")
+    .replace(/\bCREATE INDEX\b/g, "CREATE INDEX IF NOT EXISTS");
+  await execute(process.execPath, [
+    wrangler,
+    "d1",
+    "execute",
+    "EVALS_DB",
+    "--local",
+    "--env",
+    "development",
+    "--persist-to",
+    statePath,
+    "--command",
+    idempotentSchema,
+    "--config",
+    localWranglerConfigPath,
+  ], options, "local D1 schema check");
 }
 
 function deduplicateLocalDependencyRequirements(requirements) {
