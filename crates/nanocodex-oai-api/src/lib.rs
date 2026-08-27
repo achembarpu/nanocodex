@@ -105,7 +105,9 @@ pub mod __private {
             CallerServiceFactory, LayeredServiceFactory, ModelConfig, ResponsesServiceFactory,
         },
         session::{
-            context::{ContextManager, assign_missing_response_item_id},
+            context::{
+                ContextManager, assign_missing_response_item_id, responses_lite_request_prefix,
+            },
             state::{ManagedSessionState, ManagedSessionStateError},
         },
         tower::attempt::ResponsesAttemptFactory,
@@ -186,8 +188,10 @@ impl FromStr for Model {
     }
 }
 
-/// Prompt-token budget used by automatic compaction to avoid long-context pricing.
+/// Default GPT-5.6 context window used for accounting and automatic compaction.
 pub const CONTEXT_WINDOW_TOKENS: u64 = 272_000;
+/// Largest context window currently advertised by the supported GPT-5.6 family.
+pub const MAX_CONTEXT_WINDOW_TOKENS: u64 = 872_000;
 
 /// User input for one agent turn.
 ///

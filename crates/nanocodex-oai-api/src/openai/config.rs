@@ -1,6 +1,9 @@
 use std::{borrow::Cow, sync::Arc};
 
-use crate::{Model, OpenAiAuth, ReasoningMode, ResponsesHistory, ResponsesTransport, Thinking};
+use crate::{
+    CONTEXT_WINDOW_TOKENS, Model, OpenAiAuth, ReasoningMode, ResponsesHistory, ResponsesTransport,
+    Thinking,
+};
 
 const SYSTEM_PROMPT: &str = include_str!("../../prompts/system.md");
 
@@ -28,6 +31,8 @@ pub struct ModelConfig {
     pub thinking: Thinking,
     /// Whether requests use priority processing.
     pub fast_mode: bool,
+    /// Resolved context window used for accounting and automatic compaction.
+    pub context_window_tokens: u64,
     /// Preferred initial streaming transport.
     pub responses_transport: ResponsesTransport,
     /// Whether a WebSocket session sends an optional non-generating prewarm
@@ -84,6 +89,7 @@ impl Default for ModelConfig {
             reasoning_mode: ReasoningMode::default(),
             thinking: Thinking::default(),
             fast_mode: false,
+            context_window_tokens: CONTEXT_WINDOW_TOKENS,
             responses_transport: ResponsesTransport::default(),
             websocket_warmup: true,
             responses_history: ResponsesHistory::default(),

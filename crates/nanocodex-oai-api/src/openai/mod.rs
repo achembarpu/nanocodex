@@ -6,8 +6,9 @@ mod config;
 mod platform;
 
 use crate::{
-    DefaultResponsesService, Model, OpenAiAuth, OpenAiAuthError, OpenAiAuthMode, ReasoningMode,
-    ResponsesHistory, ResponsesRetryPolicy, ResponsesTransport, Thinking, session::SessionBuilder,
+    DefaultResponsesService, MAX_CONTEXT_WINDOW_TOKENS, Model, OpenAiAuth, OpenAiAuthError,
+    OpenAiAuthMode, ReasoningMode, ResponsesHistory, ResponsesRetryPolicy, ResponsesTransport,
+    Thinking, session::SessionBuilder,
 };
 
 #[doc(hidden)]
@@ -248,6 +249,20 @@ impl<F> OpenAiBuilder<F> {
     #[must_use]
     pub const fn fast_mode(mut self, enabled: bool) -> Self {
         self.config.fast_mode = enabled;
+        self
+    }
+
+    /// Sets the GPT-5.6 context window used for accounting and compaction.
+    ///
+    /// The supported family defaults to 272,000 tokens and currently advertises
+    /// a maximum of 872,000. Values above that maximum are clamped.
+    #[must_use]
+    pub const fn context_window_tokens(mut self, tokens: u64) -> Self {
+        self.config.context_window_tokens = if tokens > MAX_CONTEXT_WINDOW_TOKENS {
+            MAX_CONTEXT_WINDOW_TOKENS
+        } else {
+            tokens
+        };
         self
     }
 
@@ -546,6 +561,11 @@ fn apply_mode_defaults(config: &mut ModelConfig, mode: OpenAiAuthMode) {
 
 fn validate(config: &ModelConfig) -> Result<(), OpenAiError> {
     config.auth.validate()?;
+    if config.context_window_tokens == 0 {
+        return Err(OpenAiError::InvalidConfiguration {
+            detail: "the model context window must be greater than zero",
+        });
+    }
     if config.websocket_url.trim().is_empty() {
         return Err(OpenAiError::InvalidConfiguration {
             detail: "the Responses WebSocket URL must not be empty",
@@ -658,6 +678,36 @@ mod tests {
             apply_mode_defaults(&mut config, mode);
             assert!(!config.store_responses);
         }
+    }
+
+    #[test]
+    fn context_window_defaults_and_clamps_to_supported_model_limit() {
+        let default = OpenAi::builder("test-key")
+            .service(|| NeverCalled)
+            .build()
+            .unwrap();
+        assert_eq!(
+            default.config.context_window_tokens,
+            crate::CONTEXT_WINDOW_TOKENS
+        );
+
+        let maximum = OpenAi::builder("test-key")
+            .context_window_tokens(u64::MAX)
+            .service(|| NeverCalled)
+            .build()
+            .unwrap();
+        assert_eq!(
+            maximum.config.context_window_tokens,
+            crate::MAX_CONTEXT_WINDOW_TOKENS
+        );
+
+        let error = OpenAi::builder("test-key")
+            .context_window_tokens(0)
+            .service(|| NeverCalled)
+            .build()
+            .err()
+            .expect("zero context window should fail validation");
+        assert!(error.to_string().contains("greater than zero"));
     }
 
     #[test]

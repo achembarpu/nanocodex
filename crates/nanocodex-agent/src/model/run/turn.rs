@@ -39,8 +39,11 @@ where
             .conversation
             .previous_response_id()
             .map(str::to_owned);
-        let auto_compact_token_limit = compaction::auto_compact_token_limit(self.model.as_str())
-            .unwrap_or(CONTEXT_WINDOW_TOKENS);
+        let auto_compact_token_limit = compaction::auto_compact_token_limit(
+            self.model.as_str(),
+            self.config.context_window_tokens,
+        )
+        .unwrap_or(self.config.context_window_tokens);
         let compacted = {
             let compaction = self.perform_compaction(
                 self.stats.model_calls,
@@ -443,7 +446,7 @@ where
             let tool_control = tools.control();
             tool_control.begin_turn();
             self.active_tools = Some(tool_control);
-            let factory = self.attempt_factory(&tools).for_logical_turn(logical_turn);
+            let factory = self.attempt_factory(&tools)?.for_logical_turn(logical_turn);
             let user_content = prepare_user_input(&task.instruction).await;
             let mut context = ContextState::new(selected_agents_md, ContextBaseline::Missing);
             let context_snapshot = context.capture(

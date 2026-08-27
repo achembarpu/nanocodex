@@ -49,6 +49,7 @@ fn is_terminal_response_failure(code: &str) -> bool {
             | "insufficient_quota"
             | "usage_not_included"
             | "cyber_policy"
+            | "misalignment_policy_violation"
             | "invalid_prompt"
             | "bio_policy"
             | "server_is_overloaded"
@@ -192,6 +193,7 @@ mod tests {
             "insufficient_quota",
             "usage_not_included",
             "cyber_policy",
+            "misalignment_policy_violation",
             "invalid_prompt",
             "bio_policy",
         ] {

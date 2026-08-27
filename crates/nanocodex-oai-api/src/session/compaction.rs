@@ -5,8 +5,8 @@ use std::{
 };
 
 use crate::{
-    CONTEXT_WINDOW_TOKENS, ContentItem, FunctionOutputBody, FunctionOutputContent, ImageDetail,
-    ResponseItem, responses::ResponseHistory,
+    ContentItem, FunctionOutputBody, FunctionOutputContent, ImageDetail, ResponseItem,
+    responses::ResponseHistory,
 };
 #[cfg(not(target_family = "wasm"))]
 use sha2::{Digest as _, Sha256};
@@ -64,9 +64,9 @@ static ORIGINAL_IMAGE_ESTIMATE_CACHE: LazyLock<Mutex<OriginalImageEstimateCache>
     LazyLock::new(|| Mutex::new(OriginalImageEstimateCache::default()));
 
 #[must_use]
-pub fn auto_compact_token_limit(model: &str) -> Option<u64> {
+pub fn auto_compact_token_limit(model: &str, context_window_tokens: u64) -> Option<u64> {
     matches!(model, "gpt-5.6-sol" | "gpt-5.6-terra" | "gpt-5.6-luna")
-        .then_some((CONTEXT_WINDOW_TOKENS * 9) / 10)
+        .then_some((context_window_tokens * 9) / 10)
 }
 
 #[must_use]
@@ -77,6 +77,7 @@ pub const fn trigger() -> ResponseItem {
 pub fn trim_tool_outputs_to_fit_context_window(
     history: &mut ResponseHistory,
     request_prefix: &[ResponseItem],
+    context_window_tokens: u64,
 ) -> usize {
     let mut estimated_tokens = request_prefix
         .iter()
@@ -85,7 +86,7 @@ pub fn trim_tool_outputs_to_fit_context_window(
         .fold(0_u64, u64::saturating_add);
     let mut rewritten_outputs = Vec::new();
     for item in history.iter_rev() {
-        if estimated_tokens <= CONTEXT_WINDOW_TOKENS {
+        if estimated_tokens <= context_window_tokens {
             break;
         }
         let tokens_before = estimate_item_tokens(item);
@@ -174,7 +175,10 @@ pub fn install_history(
 ) -> Vec<ResponseItem> {
     let retained = history
         .iter()
-        .filter(|item| item.is_user_message() && !is_contextual_user_message(item))
+        .filter(|item| {
+            (item.is_user_message() && !is_contextual_user_message(item))
+                || is_client_developer_message(item)
+        })
         .cloned()
         .collect();
     let mut installed = truncate_retained_messages(retained, RETAINED_MESSAGE_TOKEN_BUDGET);
@@ -185,6 +189,25 @@ pub fn install_history(
     );
     installed.push(compaction);
     installed
+}
+
+fn is_client_developer_message(item: &ResponseItem) -> bool {
+    let ResponseItem::Message {
+        role: crate::MessageRole::Developer,
+        content,
+        ..
+    } = item
+    else {
+        return false;
+    };
+    !content.iter().any(|content| {
+        let ContentItem::InputText { text } = content else {
+            return false;
+        };
+        let text = text.trim();
+        text.starts_with("<permissions instructions>")
+            && text.ends_with("</permissions instructions>")
+    })
 }
 
 fn truncate_retained_messages(items: Vec<ResponseItem>, max_tokens: usize) -> Vec<ResponseItem> {
@@ -455,6 +478,7 @@ const fn approx_tokens(bytes: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::CONTEXT_WINDOW_TOKENS;
 
     #[cfg(not(target_family = "wasm"))]
     #[test]
@@ -474,10 +498,22 @@ mod tests {
 
     #[test]
     fn supported_models_compact_at_ninety_percent_of_the_policy_budget() {
-        assert_eq!(auto_compact_token_limit("gpt-5.6-sol"), Some(244_800));
-        assert_eq!(auto_compact_token_limit("gpt-5.6-terra"), Some(244_800));
-        assert_eq!(auto_compact_token_limit("gpt-5.6-luna"), Some(244_800));
-        assert_eq!(auto_compact_token_limit("unknown-model"), None);
+        assert_eq!(
+            auto_compact_token_limit("gpt-5.6-sol", CONTEXT_WINDOW_TOKENS),
+            Some(244_800)
+        );
+        assert_eq!(
+            auto_compact_token_limit("gpt-5.6-terra", CONTEXT_WINDOW_TOKENS),
+            Some(244_800)
+        );
+        assert_eq!(
+            auto_compact_token_limit("gpt-5.6-luna", crate::MAX_CONTEXT_WINDOW_TOKENS),
+            Some(784_800)
+        );
+        assert_eq!(
+            auto_compact_token_limit("unknown-model", CONTEXT_WINDOW_TOKENS),
+            None
+        );
     }
 
     #[test]
@@ -491,10 +527,17 @@ mod tests {
         let initial =
             message("<environment_context>\n<cwd>/workspace</cwd>\n</environment_context>");
         let first = message("do the task");
+        let adapter = ResponseItem::message(
+            crate::MessageRole::Developer,
+            [ContentItem::InputText {
+                text: "adapter session state".into(),
+            }],
+        );
         let latest = message("and preserve the tests");
         let history = vec![
             initial.clone(),
             first.clone(),
+            adapter.clone(),
             ResponseItem::Reasoning {
                 id: None,
                 summary: Vec::new(),
@@ -514,25 +557,29 @@ mod tests {
             &[permissions.clone(), initial.clone()],
             compaction,
         );
-        assert_eq!(installed.len(), 5);
+        assert_eq!(installed.len(), 6);
         assert_eq!(
             serde_json::to_value(&installed[0]).unwrap(),
             serde_json::to_value(first).unwrap()
         );
         assert_eq!(
             serde_json::to_value(&installed[1]).unwrap(),
-            serde_json::to_value(permissions).unwrap()
+            serde_json::to_value(adapter).unwrap()
         );
         assert_eq!(
             serde_json::to_value(&installed[2]).unwrap(),
-            serde_json::to_value(initial).unwrap()
+            serde_json::to_value(permissions).unwrap()
         );
         assert_eq!(
             serde_json::to_value(&installed[3]).unwrap(),
+            serde_json::to_value(initial).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(&installed[4]).unwrap(),
             serde_json::to_value(latest).unwrap()
         );
         assert!(matches!(
-            &installed[4],
+            &installed[5],
             ResponseItem::Compaction { id: Some(id), .. } if id.as_str() == "cmp-id"
         ));
     }
@@ -548,7 +595,7 @@ mod tests {
             ),
         )]);
         assert_eq!(
-            trim_tool_outputs_to_fit_context_window(&mut history, &[]),
+            trim_tool_outputs_to_fit_context_window(&mut history, &[], CONTEXT_WINDOW_TOKENS,),
             1
         );
         assert!(matches!(
@@ -582,7 +629,7 @@ mod tests {
         }]);
 
         assert_eq!(
-            trim_tool_outputs_to_fit_context_window(&mut history, &[]),
+            trim_tool_outputs_to_fit_context_window(&mut history, &[], CONTEXT_WINDOW_TOKENS,),
             1
         );
         assert_eq!(
@@ -611,7 +658,7 @@ mod tests {
         let shared_tail = history.shared_tail();
 
         assert_eq!(
-            trim_tool_outputs_to_fit_context_window(&mut history, &[]),
+            trim_tool_outputs_to_fit_context_window(&mut history, &[], CONTEXT_WINDOW_TOKENS,),
             0
         );
         assert!(std::sync::Arc::ptr_eq(&history.shared_tail(), &shared_tail));

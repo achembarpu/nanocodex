@@ -21,9 +21,10 @@ use futures_util::{FutureExt, StreamExt, stream::FuturesOrdered};
 use nanocodex_oai_api::{
     __private::{
         EventSink, ManagedSessionState, ModelConfig, ResponsesAttemptFactory,
-        assign_missing_response_item_id, compaction, with_code_mode_tool_names,
+        assign_missing_response_item_id, compaction, responses_lite_request_prefix,
+        with_code_mode_tool_names,
     },
-    CONTEXT_WINDOW_TOKENS, Model, Prompt, Thinking,
+    Model, Prompt, Thinking,
     events::AgentEventKind,
     pricing::{ServiceTier, estimate_for_model},
     responses::{ContentItem, MessageRole, RequestProfile, ResponseItem, ToolDefinition, Usage},
@@ -178,14 +179,13 @@ impl ModelCheckpoint {
 
     pub(crate) fn resume(
         workspace: String,
-        mut request_prefix: Vec<ResponseItem>,
+        request_prefix: Vec<ResponseItem>,
         prompt_cache_key: Arc<str>,
         canonical_context: ResponseItem,
         history: Vec<ResponseItem>,
         global_instructions: Option<Arc<str>>,
         context_baseline: Option<ContextBaseline>,
     ) -> Result<Self> {
-        assign_request_prefix_ids(&mut request_prefix);
         let context_baseline =
             context_baseline.unwrap_or_else(|| ContextBaseline::reconstruct(&history));
         Ok(Self {
@@ -373,7 +373,7 @@ impl<S> ModelRun<S> {
         let tools = tool_runtime(&workspace, &self.config, &self.tools);
         let tool_control = tools.control();
         self.active_tools = Some(tool_control);
-        let factory = self.attempt_factory(&tools);
+        let factory = self.attempt_factory(&tools)?;
         let context = ContextState::new(selected_agents_md, ContextBaseline::Missing);
         let canonical_context = context
             .capture(
@@ -392,7 +392,7 @@ impl<S> ModelRun<S> {
         })
     }
 
-    fn attempt_factory(&self, tools: &ToolRuntime) -> ResponsesAttemptFactory {
+    fn attempt_factory(&self, tools: &ToolRuntime) -> Result<ResponsesAttemptFactory> {
         attempt_factory(
             &self.events,
             &self.transport_stats,
@@ -447,7 +447,7 @@ pub(crate) fn prepare_resumed_checkpoint(
             tool_specs,
             code_mode_tool_names,
             config.system_prompt(),
-        )
+        )?
         .prefix()
         .to_vec(),
     );
@@ -482,12 +482,12 @@ pub(crate) fn prepare_history_checkpoint(
     let runtime = tool_runtime(&workspace, config, tools);
     let (tool_specs, code_mode_tool_names) = model_tool_contract(&runtime, session_id);
     let request_prefix = request_profile(
-        "history-resume",
-        "history-resume",
+        session_id,
+        prompt_cache_key.as_ref(),
         tool_specs,
         code_mode_tool_names,
         config.system_prompt(),
-    )
+    )?
     .prefix()
     .to_vec();
     let checkpoint = ModelCheckpoint::resume(

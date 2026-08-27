@@ -693,7 +693,11 @@ where
     )
     .for_logical_turn(turn.logical_turn);
     let mut history = session.state.prompt_history();
-    compaction::trim_tool_outputs_to_fit_context_window(&mut history, session.profile.prefix());
+    compaction::trim_tool_outputs_to_fit_context_window(
+        &mut history,
+        session.profile.prefix(),
+        session.context_window_tokens,
+    );
     let request = factory.compaction(
         call_index,
         history.clone(),

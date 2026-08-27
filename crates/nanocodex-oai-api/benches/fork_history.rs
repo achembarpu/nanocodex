@@ -245,8 +245,11 @@ fn benchmark_context_accounting_and_compaction(criterion: &mut Criterion) {
         bencher.iter_batched(
             || history.clone(),
             |mut history| {
-                let rewritten =
-                    compaction::trim_tool_outputs_to_fit_context_window(&mut history, &[]);
+                let rewritten = compaction::trim_tool_outputs_to_fit_context_window(
+                    &mut history,
+                    &[],
+                    nanocodex_oai_api::CONTEXT_WINDOW_TOKENS,
+                );
                 assert!(rewritten > 0);
                 black_box(history)
             },

@@ -358,6 +358,7 @@ impl ExecutionConfig {
     pub(crate) fn start(
         &self,
         session_id: &str,
+        prompt_cache_key: &str,
         workspace: Option<&str>,
         instructions: &str,
         origin_kind: &'static str,
@@ -367,6 +368,7 @@ impl ExecutionConfig {
         Ok(Execution {
             platform: self.platform.start(
                 session_id,
+                prompt_cache_key,
                 workspace,
                 instructions,
                 origin_kind,

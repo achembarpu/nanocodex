@@ -153,6 +153,8 @@ async fn serialized_session_and_codex_rollout_share_committed_history() -> Resul
         let mut original = accept_async(stream).await?;
         let warmup = next_json(&mut original).await?;
         assert_eq!(warmup["prompt_cache_key"], "durable-cache");
+        let original_tools_id = warmup["input"][0]["id"].clone();
+        let original_instructions_id = warmup["input"][1]["id"].clone();
         send_warmup(&mut original, "resp-warmup").await?;
         let first = next_json(&mut original).await?;
         assert_eq!(first["previous_response_id"], "resp-warmup");
@@ -162,13 +164,17 @@ async fn serialized_session_and_codex_rollout_share_committed_history() -> Resul
         let mut resumed = accept_async(stream).await?;
         let replay = next_json(&mut resumed).await?;
         assert!(replay.get("previous_response_id").is_none());
-        assert_eq!(
-            replay["prompt_cache_key"],
-            "019c0d31-c308-7d91-bff4-5dca82d15ac6"
-        );
+        assert_eq!(replay["prompt_cache_key"], "durable-cache");
         assert_eq!(replay["input"][0]["type"], "additional_tools");
-        assert!(replay["input"][0].get("id").is_none());
+        assert_eq!(
+            replay["input"][0]["id"], original_tools_id,
+            "unchanged tools must retain their exact ID across rollout resume"
+        );
         assert_eq!(replay["input"][1]["role"], "developer");
+        assert_ne!(
+            replay["input"][1]["id"], original_instructions_id,
+            "changed instructions must receive a payload-sensitive ID"
+        );
         assert_eq!(
             replay["input"][1]["content"][0]["text"],
             "instructions from the resumed rollout"
@@ -225,8 +231,16 @@ async fn serialized_session_and_codex_rollout_share_committed_history() -> Resul
         workspace.canonicalize()?.to_string_lossy().as_ref()
     );
     assert_eq!(request_prefix[0]["type"], "additional_tools");
-    assert!(request_prefix[0].get("id").is_none());
-    assert!(request_prefix[1].get("id").is_none());
+    assert!(
+        request_prefix[0]["id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("at_"))
+    );
+    assert!(
+        request_prefix[1]["id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("msg_"))
+    );
     assert!(
         snapshot_json["history"]
             .as_array()
@@ -238,6 +252,10 @@ async fn serialized_session_and_codex_rollout_share_committed_history() -> Resul
         .lines()
         .map(serde_json::from_str::<Value>)
         .collect::<serde_json::Result<Vec<_>>>()?;
+    assert_eq!(
+        rollout_lines[0]["payload"]["prompt_cache_key"],
+        "durable-cache"
+    );
     let persisted_context = rollout_lines
         .iter()
         .find(|line| line["type"] == "world_state")

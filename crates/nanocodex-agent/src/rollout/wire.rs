@@ -123,6 +123,7 @@ pub(super) struct SessionContextWindow {
 pub(super) struct SessionMeta {
     pub(super) session_id: String,
     pub(super) id: String,
+    pub(super) prompt_cache_key: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) forked_from_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

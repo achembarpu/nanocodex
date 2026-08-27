@@ -8,6 +8,8 @@ use crate::{
 use super::compaction;
 
 const TOOL_OUTPUT_TOKEN_LIMIT: usize = 12_000;
+const REQUEST_PREFIX_ID_NAMESPACE: uuid::Uuid =
+    uuid::Uuid::from_u128(0x3e203f80_1cd8_4938_9588_0990bb023db5);
 // Changing this value would change model-visible IDs and invalidate prompt caches.
 const SYNTHETIC_OUTPUT_ID_NAMESPACE: uuid::Uuid =
     uuid::Uuid::from_u128(0x90d38d3e_6a5b_4d52_bfe2_2f1e634bfac4);
@@ -383,6 +385,33 @@ pub fn assign_missing_response_item_id(item: &mut ResponseItem) {
         return;
     };
     item.set_id(Some(new_response_item_id(prefix)));
+}
+
+pub fn responses_lite_request_prefix(
+    cache_lineage: &str,
+    tools: Vec<crate::ToolDefinition>,
+    instructions: &str,
+) -> Result<[ResponseItem; 2], serde_json::Error> {
+    let prefix_namespace =
+        uuid::Uuid::new_v5(&REQUEST_PREFIX_ID_NAMESPACE, cache_lineage.as_bytes());
+    let tools_id = crate::ResponseItemId::with_suffix(
+        "at",
+        uuid::Uuid::new_v5(&prefix_namespace, &serde_json::to_vec(&tools)?),
+    );
+    let instructions_id = crate::ResponseItemId::with_suffix(
+        "msg",
+        uuid::Uuid::new_v5(&prefix_namespace, instructions.as_bytes()),
+    );
+    let mut tools_item = ResponseItem::additional_tools(tools);
+    tools_item.set_id(Some(tools_id));
+    let mut instructions_item = ResponseItem::message(
+        crate::MessageRole::Developer,
+        [crate::ContentItem::InputText {
+            text: instructions.into(),
+        }],
+    );
+    instructions_item.set_id(Some(instructions_id));
+    Ok([tools_item, instructions_item])
 }
 
 fn new_response_item_id(prefix: &str) -> ResponseItemId {
@@ -915,6 +944,53 @@ mod tests {
         let aborted = message("<turn_aborted>\ninterrupted\n</turn_aborted>");
         assert!(is_contextual_user_message(&aborted));
         assert!(!is_canonical_context_item(&aborted));
+    }
+
+    #[test]
+    fn responses_lite_prefix_ids_track_lineage_and_visible_payload() {
+        let original =
+            responses_lite_request_prefix("lineage-a", Vec::new(), "instructions").unwrap();
+        let same = responses_lite_request_prefix("lineage-a", Vec::new(), "instructions").unwrap();
+        assert_eq!(
+            original[0].id().map(ResponseItemId::as_str),
+            Some("at_3b16b3c0-4197-5a27-8244-86e6d9dce5cb")
+        );
+        assert_eq!(
+            original[1].id().map(ResponseItemId::as_str),
+            Some("msg_79409b05-5ae7-5578-9bab-8612d6b14ef0")
+        );
+        assert_eq!(original[0].id(), same[0].id(), "tool ID must be stable");
+        assert_eq!(
+            original[1].id(),
+            same[1].id(),
+            "instruction ID must be stable"
+        );
+
+        let changed_tools = responses_lite_request_prefix(
+            "lineage-a",
+            vec![crate::ToolDefinition::function(
+                "lookup",
+                "look up a value",
+                serde_json::json!({"type": "object"}),
+            )],
+            "instructions",
+        )
+        .unwrap();
+        assert_ne!(original[0].id(), changed_tools[0].id());
+        assert_eq!(original[1].id(), changed_tools[1].id());
+
+        let changed_instructions =
+            responses_lite_request_prefix("lineage-a", Vec::new(), "changed").unwrap();
+        assert_eq!(original[0].id(), changed_instructions[0].id());
+        assert_ne!(original[1].id(), changed_instructions[1].id());
+
+        let changed_lineage =
+            responses_lite_request_prefix("lineage-b", Vec::new(), "instructions").unwrap();
+        assert_ne!(original[0].id(), changed_lineage[0].id());
+        assert_ne!(original[1].id(), changed_lineage[1].id());
+
+        assert!(original[0].id().is_some_and(|id| id.starts_with("at_")));
+        assert!(original[1].id().is_some_and(|id| id.starts_with("msg_")));
     }
 
     fn message(text: &str) -> ResponseItem {

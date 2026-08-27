@@ -184,6 +184,7 @@ fn recorder(home: &Path) -> RolloutRecorder {
         &Handle::current(),
         &RolloutConfig::new(home),
         "019c0d31-c308-7d91-bff4-5dca82d15ac6",
+        "durable-cache",
         Path::new("/worktree"),
         "base instructions",
         RolloutOrigin {
@@ -297,6 +298,8 @@ fn loads_codex_rollout_without_a_nanocodex_sidecar() {
     assert_eq!(session.rollout_path(), path.canonicalize().unwrap());
     assert_eq!(session.model(), Model::Sol);
     let snapshot = serde_json::to_value(session.snapshot()).expect("encode snapshot");
+    assert_eq!(snapshot["lineage_id"], thread_id);
+    assert_eq!(snapshot["prompt_cache_key"], thread_id);
     assert!(snapshot.get("request_prefix").is_none());
     assert_eq!(snapshot["history"].as_array().map(Vec::len), Some(2));
     let history = snapshot["history"].to_string();
@@ -603,6 +606,7 @@ async fn resumed_writer_repairs_a_rollout_behind_the_durable_boundary() {
         &Handle::current(),
         &config,
         "019c0d31-c308-7d91-bff4-5dca82d15ac6",
+        "durable-cache",
         Path::new("/worktree"),
         "base instructions",
         RolloutOrigin {
@@ -681,6 +685,7 @@ async fn fork_metadata_retains_parent_identity() {
         &Handle::current(),
         &RolloutConfig::new(home.path()),
         "019c0d31-c308-7d91-bff4-5dca82d15ac6",
+        "durable-cache",
         Path::new("/worktree"),
         "base instructions",
         RolloutOrigin {

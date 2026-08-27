@@ -56,6 +56,77 @@ async fn reconnect_drops_previous_response_id_and_replays_full_history() -> Resu
 }
 
 #[tokio::test]
+async fn stored_reconnect_drops_checkpoint_and_replays_full_history() -> Result<()> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let endpoint = format!("ws://{}", listener.local_addr()?);
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await?;
+        let mut first = accept_async(stream).await?;
+        let warmup = next_json(&mut first).await?;
+        assert_warmup_with_store(&warmup, true);
+        send_warmup(&mut first, "resp-warmup").await?;
+        let generation = next_json(&mut first).await?;
+        assert_eq!(generation["previous_response_id"], "resp-warmup");
+        assert_eq!(generation["store"], true);
+        send_json(
+            &mut first,
+            completed_response(
+                "resp-tool",
+                &[json!({
+                    "id": "server-item-id",
+                    "type": "custom_tool_call",
+                    "call_id": "call-exec",
+                    "name": "exec",
+                    "input": "text(\"continued\")"
+                })],
+            ),
+        )
+        .await?;
+        first.send(Message::Close(None)).await?;
+        drop(first);
+
+        let (stream, _) = listener.accept().await?;
+        let mut replacement = accept_async(stream).await?;
+        let replay = next_json(&mut replacement).await?;
+        assert!(replay.get("previous_response_id").is_none());
+        assert_eq!(replay["store"], true);
+        assert_eq!(replay["input"].as_array().map(Vec::len), Some(7));
+        assert_eq!(replay["input"][0]["type"], "additional_tools");
+        assert_eq!(replay["input"][1]["role"], "developer");
+        assert_eq!(replay["input"][2]["role"], "developer");
+        assert_eq!(replay["input"][3]["role"], "user");
+        assert_eq!(replay["input"][5]["type"], "custom_tool_call");
+        assert!(replay["input"][5].get("id").is_none());
+        assert_eq!(replay["input"][6]["type"], "custom_tool_call_output");
+        assert_client_item_id(&replay["input"][6], "ctco");
+        send_final(&mut replacement, "resp-final").await
+    });
+
+    let workspace = temporary_workspace("stored-reconnect")?;
+    let openai = OpenAi::builder("test-key")
+        .websocket_url(&endpoint)
+        .store(true)
+        .build()?;
+    let (agent, events) = Nanocodex::builder(openai)
+        .thinking(Thinking::Low)
+        .workspace(&workspace)
+        .session_id(test_session_id())
+        .build()?;
+    let turn = agent.prompt("exercise stored reconnect").await?;
+    drop(agent);
+    let mut output = Vec::new();
+    let (event_result, turn_result) = tokio::join!(events.write_jsonl(&mut output), turn.result());
+    event_result?;
+    turn_result?;
+
+    timeout(std::time::Duration::from_secs(5), server)
+        .await
+        .map_err(|_| eyre!("mock Responses server did not finish"))???;
+    std::fs::remove_dir_all(workspace)?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn receive_reset_reconnects_without_replaying_completed_tools() -> Result<()> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let endpoint = format!("ws://{}", listener.local_addr()?);

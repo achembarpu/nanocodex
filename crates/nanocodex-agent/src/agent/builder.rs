@@ -88,6 +88,21 @@ impl<F> NanocodexBuilder<F> {
         self
     }
 
+    /// Sets the GPT-5.6 context window used for accounting and compaction.
+    ///
+    /// Values above the supported family's current 872,000-token maximum are
+    /// clamped. The default remains 272,000 tokens.
+    #[must_use]
+    pub const fn context_window_tokens(mut self, tokens: u64) -> Self {
+        self.config.context_window_tokens = if tokens > nanocodex_oai_api::MAX_CONTEXT_WINDOW_TOKENS
+        {
+            nanocodex_oai_api::MAX_CONTEXT_WINDOW_TOKENS
+        } else {
+            tokens
+        };
+        self
+    }
+
     /// Overrides the `OpenAi` recipe's Responses reasoning execution mode for
     /// this agent.
     ///

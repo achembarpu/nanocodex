@@ -826,15 +826,15 @@ impl Service<ResponsesAttempt> for ResponsesService {
                     connection.capture_turn_state();
                     connection.socket = None;
                 }
+                let replaces_websocket = matches!(transport, ResponsesTransport::WebSocket)
+                    && connection.socket.is_none()
+                    && connection.generation > 0;
                 if matches!(
                     service.config.responses_history,
                     ResponsesHistory::FullReplay
                 ) || (matches!(transport, ResponsesTransport::Https)
                     && !service.config.store_responses)
-                    || (matches!(transport, ResponsesTransport::WebSocket)
-                        && !service.config.store_responses
-                        && connection.socket.is_none()
-                        && request.previous_response_id().is_some())
+                    || replaces_websocket
                 {
                     request.force_full_replay();
                 }

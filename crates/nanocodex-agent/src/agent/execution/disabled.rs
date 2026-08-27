@@ -12,6 +12,7 @@ impl Config {
     pub(super) const fn start(
         &self,
         _session_id: &str,
+        _prompt_cache_key: &str,
         _workspace: Option<&str>,
         _instructions: &str,
         _origin_kind: &'static str,

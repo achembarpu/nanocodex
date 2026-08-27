@@ -145,8 +145,13 @@ where
             session_id: Arc::from(session_id_text.as_str()),
         })?
         .for_session(&session_id_text);
+    let prompt_cache_key = spawner
+        .prompt_cache_key
+        .as_deref()
+        .unwrap_or(&spawner.lineage_id);
     let execution = spawner.execution.start(
         &session_id_text,
+        prompt_cache_key,
         workspace.as_deref(),
         spawner.config.system_prompt(),
         origin.kind,
@@ -224,6 +229,11 @@ pub(super) fn validate(config: &ModelConfig, prompt_cache_key: Option<&str>) -> 
         .auth
         .validate()
         .map_err(|error| NanocodexError::InvalidRequest(error.to_string()))?;
+    if config.context_window_tokens == 0 {
+        return Err(NanocodexError::InvalidRequest(
+            "model context window must be greater than zero".to_owned(),
+        ));
+    }
     if matches!(config.responses_transport, ResponsesTransport::WebSocket)
         && config.websocket_url.trim().is_empty()
     {

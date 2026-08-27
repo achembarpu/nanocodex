@@ -28,6 +28,7 @@ impl Config {
     pub(super) fn start(
         &self,
         session_id: &str,
+        prompt_cache_key: &str,
         workspace: Option<&str>,
         instructions: &str,
         origin_kind: &'static str,
@@ -48,6 +49,7 @@ impl Config {
             &runtime,
             config,
             session_id,
+            prompt_cache_key,
             &cwd,
             instructions,
             RolloutOrigin {

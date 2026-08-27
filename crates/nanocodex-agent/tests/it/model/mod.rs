@@ -96,7 +96,11 @@ fn assert_warmup_with_store(warmup: &Value, store: bool) {
     assert_eq!(warmup["prompt_cache_key"], TEST_SESSION_ID);
     assert_eq!(warmup["input"].as_array().map(Vec::len), Some(2));
     assert_eq!(warmup["input"][0]["type"], "additional_tools");
-    assert!(warmup["input"][0].get("id").is_none());
+    assert!(
+        warmup["input"][0]["id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("at_"))
+    );
     assert_eq!(warmup["input"][0]["role"], "developer");
     assert_eq!(warmup["input"][0]["tools"][0]["type"], "custom");
     assert_eq!(warmup["input"][0]["tools"][0]["name"], "exec");
@@ -108,6 +112,11 @@ fn assert_warmup_with_store(warmup: &Value, store: bool) {
     assert_eq!(warmup["input"][0]["tools"][1]["type"], "function");
     assert_eq!(warmup["input"][0]["tools"][1]["name"], "wait");
     assert_eq!(warmup["input"][1]["role"], "developer");
+    assert!(
+        warmup["input"][1]["id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("msg_"))
+    );
     assert!(warmup.get("tools").is_none());
     assert!(warmup.get("instructions").is_none());
     assert!(warmup.get("context_management").is_none());

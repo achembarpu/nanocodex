@@ -152,6 +152,7 @@ impl SessionSnapshot {
     pub(crate) fn from_rollout(
         model: Model,
         thread_id: String,
+        prompt_cache_key: String,
         workspace: String,
         base_instructions: Option<String>,
         history: Vec<ResponseItem>,
@@ -169,8 +170,8 @@ impl SessionSnapshot {
         Ok(Self {
             version: SESSION_SNAPSHOT_VERSION,
             model: model.as_str().to_owned(),
-            lineage_id: thread_id.clone(),
-            prompt_cache_key: thread_id,
+            lineage_id: thread_id,
+            prompt_cache_key,
             workspace,
             base_instructions,
             request_prefix: None,

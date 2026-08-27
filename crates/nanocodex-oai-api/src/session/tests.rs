@@ -556,8 +556,12 @@ async fn compaction_phase_controls_exact_canonical_context_ordering() {
             .history()
             .map(history_item_shape)
             .collect::<Vec<_>>(),
-        ["user:initial task", "compaction"],
-        "pre-turn compaction must install only retained user history and the summary"
+        [
+            "developer:fresh permissions",
+            "user:initial task",
+            "compaction",
+        ],
+        "pre-turn compaction must retain client developer and user history before the summary"
     );
 
     session.turn().create("next normal turn").await.unwrap();
@@ -572,6 +576,7 @@ async fn compaction_phase_controls_exact_canonical_context_ordering() {
             [
                 "additional_tools",
                 "developer:stable instructions",
+                "developer:fresh permissions",
                 "user:initial task",
                 "compaction",
                 "developer:fresh permissions",
@@ -582,7 +587,7 @@ async fn compaction_phase_controls_exact_canonical_context_ordering() {
         );
         assert_eq!(
             observations[0].input_bytes[2..4],
-            observations[2].input_bytes[4..6],
+            observations[2].input_bytes[5..7],
             "an unchanged standalone snapshot must preserve its exact request bytes"
         );
     }
@@ -601,6 +606,7 @@ async fn compaction_phase_controls_exact_canonical_context_ordering() {
             .map(history_item_shape)
             .collect::<Vec<_>>(),
         [
+            "developer:fresh permissions",
             "developer:fresh permissions",
             "user:# AGENTS.md instructions for /workspace\n\n<INSTRUCTIONS>\nfresh rules\n</INSTRUCTIONS>|<environment_context>\n<cwd>/workspace</cwd>\n</environment_context>",
             "user:mid-turn task",

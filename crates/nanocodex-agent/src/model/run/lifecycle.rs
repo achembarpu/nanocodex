@@ -74,9 +74,10 @@ where
         context: CompactionContext<'_>,
     ) -> Result<bool> {
         let CompactionContext { snapshot, phase } = context;
-        let Some(auto_compact_token_limit) =
-            compaction::auto_compact_token_limit(self.model.as_str())
-        else {
+        let Some(auto_compact_token_limit) = compaction::auto_compact_token_limit(
+            self.model.as_str(),
+            self.config.context_window_tokens,
+        ) else {
             return Ok(false);
         };
         let active_context_tokens = conversation.active_context_tokens();
@@ -279,6 +280,7 @@ where
         compaction::trim_tool_outputs_to_fit_context_window(
             &mut history,
             factory.profile().prefix(),
+            self.config.context_window_tokens,
         );
         let started_at = Instant::now();
         self.stats.compactions += 1;

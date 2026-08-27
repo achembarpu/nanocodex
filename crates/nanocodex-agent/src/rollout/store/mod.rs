@@ -187,6 +187,7 @@ impl RolloutRecorder {
         runtime: &Handle,
         config: &RolloutConfig,
         thread_id: &str,
+        prompt_cache_key: &str,
         cwd: &Path,
         instructions: &str,
         origin: RolloutOrigin<'_>,
@@ -217,6 +218,7 @@ impl RolloutRecorder {
         let meta = SessionMeta {
             session_id: thread_id.to_owned(),
             id: thread_id.to_owned(),
+            prompt_cache_key: prompt_cache_key.to_owned(),
             forked_from_id: (origin.kind == "fork")
                 .then(|| parent_thread_id.clone())
                 .flatten(),

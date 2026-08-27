@@ -76,6 +76,7 @@ impl DurableSession {
         let snapshot = SessionSnapshot::from_rollout(
             materialized.model,
             thread_id.to_owned(),
+            materialized.prompt_cache_key,
             materialized.workspace,
             materialized.base_instructions,
             materialized.history,
@@ -368,6 +369,7 @@ fn find_rollout_path(codex_home: &Path, thread_id: &str) -> io::Result<Option<Pa
 
 fn materialize_rollout(path: &Path, thread_id: &str) -> io::Result<MaterializedRollout> {
     let mut workspace = None;
+    let mut prompt_cache_key = None;
     let mut base_instructions = None;
     let mut history = Vec::new();
     let mut transcript = Vec::new();
@@ -395,6 +397,18 @@ fn materialize_rollout(path: &Path, thread_id: &str) -> io::Result<MaterializedR
                         "Codex rollout thread ID does not match its filename",
                     ));
                 }
+                prompt_cache_key = match payload.get("prompt_cache_key") {
+                    None => None,
+                    Some(serde_json::Value::String(key)) if !key.trim().is_empty() => {
+                        Some(key.to_owned())
+                    }
+                    Some(_) => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "Codex rollout session metadata has an invalid prompt cache key",
+                        ));
+                    }
+                };
                 base_instructions = payload["base_instructions"]["text"]
                     .as_str()
                     .map(str::to_owned);
@@ -478,6 +492,10 @@ fn materialize_rollout(path: &Path, thread_id: &str) -> io::Result<MaterializedR
             "Codex rollout is missing session metadata",
         )
     })?;
+    // Genuine Codex rollouts predate Nanocodex's explicit cache identity. Their
+    // stable thread UUID is the deterministic lineage fallback; Nanocodex-authored
+    // rollouts retain the explicit key recorded in session metadata above.
+    let prompt_cache_key = prompt_cache_key.unwrap_or_else(|| thread_id.to_owned());
     let workspace = Path::new(&workspace).canonicalize()?;
     let workspace = workspace.into_os_string().into_string().map_err(|path| {
         io::Error::new(
@@ -490,6 +508,7 @@ fn materialize_rollout(path: &Path, thread_id: &str) -> io::Result<MaterializedR
     })?;
     Ok(MaterializedRollout {
         model,
+        prompt_cache_key,
         workspace,
         base_instructions,
         history,
@@ -500,6 +519,7 @@ fn materialize_rollout(path: &Path, thread_id: &str) -> io::Result<MaterializedR
 
 struct MaterializedRollout {
     model: Model,
+    prompt_cache_key: String,
     workspace: String,
     base_instructions: Option<String>,
     history: Vec<ResponseItem>,

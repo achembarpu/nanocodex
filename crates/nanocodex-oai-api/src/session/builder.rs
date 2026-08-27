@@ -4,14 +4,14 @@ use ::tower::Service;
 use tokio::sync::mpsc;
 
 use crate::{
-    ContentItem, EventSink, MessageRole, Model, OpenAi, ResponseItem, ResponsesAttempt,
-    ResponsesClient, ResponsesServiceResponse, Thinking, ToolDefinition, TransportStats,
+    EventSink, Model, OpenAi, ResponseItem, ResponsesAttempt, ResponsesClient,
+    ResponsesServiceResponse, Thinking, ToolDefinition, TransportStats,
     openai::{ResponsesServiceFactory, StandardServiceFactory},
     responses::RequestProfile,
 };
 
 use super::{
-    context::assign_missing_response_item_id,
+    context::responses_lite_request_prefix,
     response::{
         CompletedCompaction, Response, ResponseError, ResponseInput, run_compact, run_create,
     },
@@ -119,16 +119,9 @@ where
             return Err(SessionBuildError::EmptyPromptCacheKey);
         }
 
-        let mut prefix = [
-            ResponseItem::additional_tools(self.tools),
-            ResponseItem::message(
-                MessageRole::Developer,
-                [ContentItem::InputText {
-                    text: self.instructions.to_string().into_boxed_str(),
-                }],
-            ),
-        ];
-        assign_request_prefix_ids(&mut prefix);
+        let prefix =
+            responses_lite_request_prefix(&prompt_cache_key, self.tools, &self.instructions)
+                .map_err(SessionBuildError::SerializePromptPrefix)?;
         let profile =
             RequestProfile::new(session_id.to_string(), prompt_cache_key, Arc::from(prefix));
         let config = self.openai.config().clone();
@@ -146,6 +139,7 @@ where
             model: config.model,
             thinking: config.thinking,
             fast_mode: config.fast_mode,
+            context_window_tokens: config.context_window_tokens,
             transport_stats: Arc::new(TransportStats::default()),
         })
     }
@@ -160,6 +154,9 @@ pub enum SessionBuildError {
     /// The explicit prompt-cache identity was empty.
     #[error("OpenAI prompt cache key must not be empty")]
     EmptyPromptCacheKey,
+    /// The immutable Responses Lite prefix could not be serialized.
+    #[error("failed to fingerprint the immutable prompt prefix: {0}")]
+    SerializePromptPrefix(#[source] serde_json::Error),
 }
 
 /// One managed `OpenAI` Responses conversation.
@@ -178,6 +175,7 @@ pub struct Session<S> {
     pub(super) model: Model,
     pub(super) thinking: Thinking,
     pub(super) fast_mode: bool,
+    pub(super) context_window_tokens: u64,
     pub(super) transport_stats: Arc<TransportStats>,
 }
 
@@ -308,22 +306,5 @@ where
     /// compaction leaves the prior history untouched.
     pub async fn compact(&mut self) -> Result<CompletedCompaction, ResponseError> {
         run_compact(self).await
-    }
-}
-
-fn assign_request_prefix_ids(prefix: &mut [ResponseItem]) {
-    for item in prefix {
-        if matches!(
-            item,
-            ResponseItem::AdditionalTools { .. }
-                | ResponseItem::Message {
-                    role: MessageRole::Developer,
-                    ..
-                }
-        ) {
-            item.strip_id();
-            continue;
-        }
-        assign_missing_response_item_id(item);
     }
 }

@@ -588,43 +588,13 @@ pub(super) fn request_profile(
     tool_specs: Vec<ToolDefinition>,
     code_mode_tool_names: Vec<(String, String)>,
     system_prompt: &str,
-) -> RequestProfile {
-    let mut prefix = [
-        ResponseItem::additional_tools(tool_specs),
-        ResponseItem::message(
-            MessageRole::Developer,
-            [ContentItem::InputText {
-                text: system_prompt.into(),
-            }],
-        ),
-    ];
-    assign_request_prefix_ids(&mut prefix);
-    with_code_mode_tool_names(
+) -> Result<RequestProfile> {
+    let prefix = responses_lite_request_prefix(prompt_cache_key, tool_specs, system_prompt)
+        .map_err(NanocodexError::SerializePromptPrefix)?;
+    Ok(with_code_mode_tool_names(
         RequestProfile::new(session_id, prompt_cache_key, Arc::from(prefix)),
         code_mode_tool_names,
-    )
-}
-
-pub(super) fn assign_request_prefix_ids(prefix: &mut [ResponseItem]) {
-    for item in prefix {
-        // Responses Lite request-prefix items are transport configuration, not
-        // retained conversation. Codex sends both without client-defined IDs.
-        if matches!(
-            item,
-            ResponseItem::AdditionalTools { .. }
-                | ResponseItem::Message {
-                    role: MessageRole::Developer,
-                    ..
-                }
-        ) {
-            item.strip_id();
-            continue;
-        }
-        if item.id().is_some_and(|id| !id.is_empty()) {
-            continue;
-        }
-        assign_missing_response_item_id(item);
-    }
+    ))
 }
 
 pub(super) fn attempt_factory(
@@ -633,19 +603,19 @@ pub(super) fn attempt_factory(
     prompt_cache_key: &str,
     tools: &ToolRuntime,
     system_prompt: &str,
-) -> ResponsesAttemptFactory {
+) -> Result<ResponsesAttemptFactory> {
     let (tool_specs, code_mode_tool_names) = model_tool_contract(tools, events.request_id());
-    ResponsesAttemptFactory::new(
+    Ok(ResponsesAttemptFactory::new(
         request_profile(
             events.request_id(),
             prompt_cache_key,
             tool_specs,
             code_mode_tool_names,
             system_prompt,
-        ),
+        )?,
         events.clone(),
         Arc::clone(transport_stats),
-    )
+    ))
 }
 
 pub(super) fn tool_runtime(workspace: &str, config: &ModelConfig, tools: &Tools) -> ToolRuntime {
