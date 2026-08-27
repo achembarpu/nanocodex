@@ -110,6 +110,10 @@
   opacity: 0.45;
 }
 
+.connect-wizard .wizard-account-choice.is-current {
+  box-shadow: inset 2px 0 var(--positive);
+}
+
 .connect-wizard .wizard-account-avatar {
   display: grid;
   width: 42px;
@@ -151,6 +155,12 @@
 .connect-wizard .wizard-account-arrow {
   color: var(--faint);
   font-size: 15px;
+}
+
+.connect-wizard .wizard-account-choice.is-current .wizard-account-arrow {
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
 }
 
 .connect-wizard .wizard-new-account {

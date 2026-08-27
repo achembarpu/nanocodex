@@ -14,7 +14,7 @@ import {
 } from "@nanocodex-connect/AccountConnectionSurface";
 import { isRecord, responseFailure, useAccountSession } from "./AccountSession";
 import { clientFailureMessage } from "./clientFailure";
-import { ConnectionLogo } from "./ConnectionLogo";
+import { ConnectionLogo } from "@nanocodex-connect/ConnectionLogo";
 import { deploymentHealth } from "./deploymentHealth";
 import { localDevelopmentCredential } from "./localDevelopmentCredential";
 import { ProfileConnectors } from "./ProfileConnectors";

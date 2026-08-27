@@ -67,7 +67,7 @@ export function AccountSessionProvider({ children }: { children: ReactNode }) {
   const provider = accountProvider();
   const providerStore = (provider as unknown as {
     store: {
-      getState(): { accounts: readonly Readonly<{
+      getState(): { activeAccount: number; accounts: readonly Readonly<{
         address: `0x${string}`;
         credential?: Readonly<{ id: string }> | undefined;
         label?: string | undefined;
@@ -75,19 +75,11 @@ export function AccountSessionProvider({ children }: { children: ReactNode }) {
       subscribe(listener: () => void): () => void;
     };
   }).store;
-  const providerAccounts = useSyncExternalStore(
+  const providerState = useSyncExternalStore(
     providerStore.subscribe,
-    () => providerStore.getState().accounts,
-    () => providerStore.getState().accounts,
+    providerStore.getState,
+    providerStore.getState,
   );
-  const savedPasskeys = useMemo(() => providerAccounts.flatMap((account) => account.credential?.id
-    ? [{
-        address: account.address,
-        credentialId: account.credential.id,
-        label: account.label,
-      } satisfies StoredPasskey]
-    : []), [providerAccounts]);
-
   const [status, setStatus] = useState<SessionStatus>("checking");
   const [user, setUser] = useState<AuthenticatedAccount | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -95,6 +87,14 @@ export function AccountSessionProvider({ children }: { children: ReactNode }) {
   const [reauthenticationRequired, setReauthenticationRequired] = useState(false);
   const requestId = useRef(0);
   const refreshRequest = useRef<Promise<void> | undefined>(undefined);
+  const savedPasskeys = useMemo(() => providerState.accounts.flatMap((account, index) => account.credential?.id
+    ? [{
+        address: account.address,
+        credentialId: account.credential.id,
+        current: user?.persistent === true && index === providerState.activeAccount,
+        label: account.label,
+      } satisfies StoredPasskey]
+    : []), [providerState, user?.persistent]);
 
   const refresh = useCallback((): Promise<void> => {
     if (refreshRequest.current) return refreshRequest.current;

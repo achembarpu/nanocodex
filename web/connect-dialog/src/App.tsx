@@ -15,7 +15,13 @@ import {
   AccountConnectionSection,
   AccountConnectionSurface,
 } from "./AccountConnectionSurface";
-import { logoutBrowserAccountSession } from "./browserAccountSession";
+import { ConnectionLogo } from "./ConnectionLogo";
+import {
+  BrowserAccountReauthenticationRequiredError,
+  logoutBrowserAccountSession,
+  readBrowserAccountSession,
+  type BrowserAccountSession,
+} from "./browserAccountSession";
 
 import { classifyMachineUsdOrder } from "./machineUsdOrder.mjs";
 import {
@@ -43,11 +49,11 @@ const browserLocalWebAuthn = usesBrowserLocalWebAuthn(window.location.origin);
 const provider = createProvider(browserLocalWebAuthn);
 const providerStore = (provider as unknown as {
   store: {
-    getState(): { accounts: readonly ProviderStoreAccount[] };
+    getState(): { activeAccount: number; accounts: readonly ProviderStoreAccount[] };
     subscribe(listener: () => void): () => void;
   };
 }).store;
-let browserSession: Promise<BrowserSession> | undefined;
+let browserSession: Promise<BrowserAccountSession> | undefined;
 
 export async function logoutAccount() {
   try {
@@ -94,7 +100,6 @@ type ConnectorAttempt = {
   token: string;
 };
 type CeremonyAttempt = Readonly<{ requestId: string }>;
-type BrowserSession = Readonly<{ id: string; persistent: boolean }>;
 type ProviderStoreAccount = Readonly<{
   address: `0x${string}`;
   credential?: Readonly<{ id: string }> | undefined;
@@ -137,23 +142,28 @@ export function ConnectOnboarding({
     expiresAt?: number | undefined;
     url: string;
   }>>();
+  const [browserAccountState, setBrowserAccountState] = useState<
+    BrowserAccountSession | "reauthentication" | null
+  >();
   const activeConnector = useRef<ConnectorAttempt | undefined>(undefined);
   const activeCeremony = useRef<CeremonyAttempt | undefined>(undefined);
-  const automaticallyStartedRequestId = useRef<string | undefined>(undefined);
   const currentRequestId = useRef<string | undefined>(undefined);
-  const providerAccounts = useSyncExternalStore(
+  const providerState = useSyncExternalStore(
     providerStore.subscribe,
-    () => providerStore.getState().accounts,
-    () => providerStore.getState().accounts,
+    providerStore.getState,
+    providerStore.getState,
   );
-  const storedPasskeys = useMemo(() => providerAccounts.flatMap((account) => {
+  const storedPasskeys = useMemo(() => providerState.accounts.flatMap((account, index) => {
     if (!("credential" in account) || !account.credential?.id) return [];
     return [{
       address: account.address,
       credentialId: account.credential.id,
+      current: browserAccountState !== "reauthentication"
+        && browserAccountState?.persistent === true
+        && index === providerState.activeAccount,
       label: account.label,
     } satisfies StoredPasskey];
-  }), [providerAccounts]);
+  }), [browserAccountState, providerState]);
   currentRequestId.current = request?.id;
 
   const finishConnectorAttempt = useCallback((attempt: ConnectorAttempt, closePopup = true) => {
@@ -181,7 +191,24 @@ export function ConnectOnboarding({
     setConnectorStatuses(undefined);
     setConnectorAction(undefined);
     setDeviceCode(undefined);
+    setBrowserAccountState(undefined);
   }, [request?.id, finishConnectorAttempt]);
+
+  useEffect(() => {
+    if (!request || request.type !== "walletConnect") return;
+    const requestId = request.id;
+    void ensureBrowserSession().then((session) => {
+      if (currentRequestId.current === requestId) setBrowserAccountState(session);
+    }).catch((error) => {
+      if (currentRequestId.current !== requestId) return;
+      if (error instanceof BrowserAccountReauthenticationRequiredError) {
+        setBrowserAccountState("reauthentication");
+        return;
+      }
+      setBrowserAccountState(null);
+      setFailure({ id: requestId, message: errorMessage(error) });
+    });
+  }, [request?.id, request?.type]);
 
   useEffect(() => () => {
     const attempt = activeConnector.current;
@@ -244,40 +271,6 @@ export function ConnectOnboarding({
     }
   }, [request?.id, request?.type === "walletConnect" ? request.returnedConnector : undefined,
     request?.type === "walletConnect" ? request.returnedMcpConnection : undefined]);
-
-  useEffect(() => {
-    if (
-      !wizard
-      || request?.type !== "walletConnect"
-      || !allowsAutomaticSavedAccount(request)
-      || request.returnedConnector
-      || request.returnedConnectorResult
-      || request.returnedMcpConnection
-      || request.returnedMcpResult
-      || storedPasskeys.length !== 1
-      || automaticallyStartedRequestId.current === request.id
-    ) return;
-    const account = storedPasskeys[0]!;
-    const selection: WizardAccountSelection = {
-      mode: "login",
-      label: account.label || shortAddress(account.address),
-      address: account.address,
-      credentialId: account.credentialId,
-    };
-    automaticallyStartedRequestId.current = request.id;
-    setWizardAccount(selection);
-    void ensureBrowserSession().then((session) => {
-      if (currentRequestId.current !== request.id) return;
-      void approve(selection, session.persistent);
-    }).catch((error) => {
-      if (currentRequestId.current === request.id) {
-        setFailure({ id: request.id, message: errorMessage(error) });
-      }
-    });
-  }, [request?.id, request?.type === "walletConnect" ? request.returnedConnector : undefined,
-    request?.type === "walletConnect" ? request.returnedConnectorResult : undefined,
-    request?.type === "walletConnect" ? request.returnedMcpConnection : undefined,
-    request?.type === "walletConnect" ? request.returnedMcpResult : undefined, storedPasskeys, wizard]);
 
   useEffect(() => {
     if (!pendingApproval) return;
@@ -1081,7 +1074,6 @@ export function ConnectOnboarding({
         <>
           <div className={wizard ? "wizard-content" : "dialog-content"}>
             <ConnectionApproval
-              accountMode={accountMode}
               connectorAction={connectorAction}
               connectorStatuses={connectorStatuses}
               completed={requestCompleted}
@@ -1090,14 +1082,15 @@ export function ConnectOnboarding({
               deviceCode={deviceCode}
               mcpConnectionAction={mcpConnectionAction}
               mcpConnections={mcpConnections}
-              onAccountModeChange={setAccountMode}
               onChooseAccount={(account) => {
-                if (wizard) {
-                  setWizardAccount(account);
-                  void approve(account);
-                  return;
-                }
                 setWizardAccount(account);
+                void approve(
+                  account,
+                  wizard
+                    && account.current === true
+                    && browserAccountState !== "reauthentication"
+                    && browserAccountState?.persistent === true,
+                );
               }}
               onCancel={reject}
               onConnectConnector={connectConnector}
@@ -1105,6 +1098,7 @@ export function ConnectOnboarding({
               accountAddress={pendingApproval?.accountAddress}
               presentation={presentation}
               request={connectionRequest!}
+              reauthenticationRequired={browserAccountState === "reauthentication"}
               selectedAccount={wizardAccount}
               storedPasskeys={storedPasskeys}
             />
@@ -1112,37 +1106,14 @@ export function ConnectOnboarding({
               <p className="dialog-error" role="alert">{failure.message}</p>
             ) : null}
           </div>
-          {requestCompleted || (wizard && !pendingApproval && !wizardAccount) ? null : <div className={wizard ? "wizard-actions" : "dialog-actions"}>
+          {requestCompleted || !pendingApproval ? null : <div className={wizard ? "wizard-actions" : "dialog-actions"}>
             <button
               type="button"
               disabled={approvalDisabled}
-              onClick={wizard && !pendingApproval ? () => setWizardAccount(undefined) : reject}
+              onClick={reject}
             >
-              {wizard && !pendingApproval ? "Back" : "Cancel"}
+              Cancel
             </button>
-            {!pendingApproval && !wizard ? (
-              <button
-                type="button"
-                disabled={approvalDisabled}
-                onClick={() => void approve()}
-              >
-                {wizard
-                  ? accountMode === "login" ? "Sign in with passkey" : "Create account"
-                  : accountMode === "login" ? "Approve" : "Create & approve"}
-              </button>
-            ) : !pendingApproval && wizardAccount ? (
-              <button
-                type="button"
-                disabled={approvalDisabled}
-                onClick={() => void approve(wizardAccount)}
-              >
-                {connectionRequest?.focusConnector
-                  ? `Connect ${connectorDefinition(connectionRequest.focusConnector).name}`
-                  : connectionRequest?.focusMcpConnection
-                    ? `Connect ${connectionRequest.mcpConnections.find(({ id }) => id === connectionRequest.focusMcpConnection)?.name ?? "MCP"}`
-                  : "Authorize Nanocodex CLI"}
-              </button>
-            ) : null}
           </div>}
         </>
       ) : request.type === "walletRevokeAccessKey" ? (
@@ -1196,7 +1167,6 @@ type ConnectionView = Omit<Dialog.ConnectionRequest, "auth" | "accessKey"> & Rea
 
 function ConnectionApproval({
   accountAddress,
-  accountMode,
   connectorAction,
   connectorStatuses,
   completed,
@@ -1205,18 +1175,17 @@ function ConnectionApproval({
   deviceCode,
   mcpConnectionAction,
   mcpConnections,
-  onAccountModeChange,
   onChooseAccount,
   onCancel,
   onConnectConnector,
   onConnectMcp,
   presentation,
+  reauthenticationRequired,
   request,
   selectedAccount,
   storedPasskeys,
 }: Readonly<{
   accountAddress?: `0x${string}` | undefined;
-  accountMode: "login" | "register";
   connectorAction?: ConnectorId | undefined;
   connectorStatuses?: ConnectorStatuses | undefined;
   completed: boolean;
@@ -1225,186 +1194,38 @@ function ConnectionApproval({
   deviceCode?: Readonly<{ code: string; expiresAt?: number | undefined; url: string }> | undefined;
   mcpConnectionAction?: string | undefined;
   mcpConnections?: readonly McpConnection[] | undefined;
-  onAccountModeChange(mode: "login" | "register"): void;
   onChooseAccount(account: WizardAccountSelection): void;
   onCancel(): void;
   onConnectConnector(id: ConnectorId): void;
   onConnectMcp(id: string): void;
   presentation: "dialog" | "wizard";
+  reauthenticationRequired: boolean;
   request: ConnectionView;
   selectedAccount?: WizardAccountSelection | undefined;
   storedPasskeys: readonly StoredPasskey[];
 }>) {
-  const appVisibility = appVisibilityPermissions(request.auth.resources);
-  if (presentation === "wizard") {
-    return (
-      <ConnectionWizard
-        accountAddress={accountAddress}
-        appVisibility={appVisibility}
-        connectorAction={connectorAction}
-        connectorStatuses={connectorStatuses}
-        completed={completed}
-        confirmationCode={confirmationCode}
-        disabled={disabled}
-        deviceCode={deviceCode}
-        mcpConnectionAction={mcpConnectionAction}
-        mcpConnections={mcpConnections}
-        onChooseAccount={onChooseAccount}
-        onCancel={onCancel}
-        onConnectConnector={onConnectConnector}
-        onConnectMcp={onConnectMcp}
-        request={request}
-        selectedAccount={selectedAccount}
-        storedPasskeys={storedPasskeys}
-      />
-    );
-  }
   return (
-    <>
-      <section className="consent-hero" aria-labelledby="approval-heading">
-        <AppMark name={request.app.name} />
-        <div>
-          <h1 id="approval-heading">Connect to {request.app.name}</h1>
-          <span>{request.accessKey ? "New key" : "Active key"}</span>
-        </div>
-      </section>
-
-      {confirmationCode ? (
-        <div className="terminal-code" role="status">
-          <span>Confirm this code matches your terminal</span>
-          <strong>{confirmationCode.slice(0, 4)}-{confirmationCode.slice(4)}</strong>
-        </div>
-      ) : null}
-
-      {!connectorStatuses ? <div className="account-mode" role="group" aria-label="Nanocodex account">
-        <button
-          type="button"
-          aria-pressed={accountMode === "login"}
-          disabled={disabled}
-          onClick={() => onAccountModeChange("login")}
-        >
-          Existing
-        </button>
-        <button
-          type="button"
-          aria-pressed={accountMode === "register"}
-          disabled={disabled}
-          onClick={() => onAccountModeChange("register")}
-        >
-          New
-        </button>
-      </div> : null}
-
-      <section className="oauth-permissions" aria-label="Requested capabilities">
-        <div className="capability-logos" role="list">
-          {request.permission.connectors.map((connector) => {
-            const id = connector.id as ConnectorId;
-            const status = connectorStatuses?.[id];
-            const resolved = connectorStatuses !== undefined;
-            const label = `${permissionTitle(connector.id, connector.name)}. ${connectorStateLabel(
-              status,
-              resolved,
-            )}. ${connector.detail}`;
-            const className = `capability-token ${status?.connected ? "connected" : resolved ? "disconnected" : "unresolved"}`;
-            const contents = <>
-              <ConnectorLogo id={connector.id} name={connector.name} />
-              {resolved ? <span className="connector-state" aria-hidden="true">
-                {status?.connected ? "✓" : "+"}
-              </span> : null}
-            </>;
-            return (
-              <div className="capability-entry" key={connector.id} role="listitem">
-                {resolved && !status?.connected ? (
-                  <button
-                    aria-label={label}
-                    className={`${className} capability-action`}
-                    data-tooltip={connectorTooltip(status, connector.detail, resolved)}
-                    disabled={disabled || connectorAction !== undefined}
-                    onClick={() => onConnectConnector(id)}
-                    type="button"
-                  >
-                    {contents}
-                  </button>
-                ) : (
-                  <div
-                    aria-label={label}
-                    className={className}
-                    data-tooltip={connectorTooltip(status, connector.detail, resolved)}
-                    tabIndex={0}
-                  >
-                    {contents}
-                  </div>
-                )}
-              </div>
-            );
-          })}
-          {request.mpp ? (
-            <div
-              className="capability-token"
-              data-tooltip={`${formatToken(request.mpp.maxPerRequest, request.mpp.symbol)} per request · ${formatToken(request.mpp.limit, request.mpp.symbol)} per day · ${request.accessKey ? expiryLabel(request.accessKey.expiry) : "active grant"}`}
-              role="listitem"
-              tabIndex={0}
-              aria-label={`machineUSD spend permission. ${formatToken(request.mpp.maxPerRequest, request.mpp.symbol)} per request, ${formatToken(request.mpp.limit, request.mpp.symbol)} per day.`}
-            >
-              <SpendLogo />
-            </div>
-          ) : null}
-        </div>
-        {appVisibility.length > 0 ? (
-          <div className="app-sees" aria-label="App sees" role="list">
-            <span className="app-sees-label" aria-hidden="true">App sees</span>
-            {appVisibility.map((permission) => (
-              <span
-                aria-label={`${permission.label}: ${permission.detail}`}
-                className="app-sees-permission"
-                data-tooltip={permission.detail}
-                key={permission.resource}
-                role="listitem"
-                tabIndex={0}
-              >
-                {permission.label}
-              </span>
-            ))}
-          </div>
-        ) : null}
-      </section>
-
-      {request.mcpConnections.length > 0 ? (
-        <McpConnectionList
-          action={mcpConnectionAction}
-          connections={mcpConnections ?? request.mcpConnections}
-          disabled={disabled}
-          focusedId={request.focusMcpConnection}
-          onConnect={onConnectMcp}
-        />
-      ) : null}
-
-      {deviceCode ? (
-        <a className="device-code" href={deviceCode.url} rel="noreferrer" target="_blank">
-          <span>ChatGPT</span>
-          <strong>{deviceCode.code}</strong>
-        </a>
-      ) : null}
-
-      <details className="advanced-details">
-        <summary>Details</summary>
-        <dl className="key-details">
-          <Detail label="App" value={request.app.origin} />
-          {request.mpp ? <Detail label="Spend" value={`${formatToken(request.mpp.maxPerRequest, request.mpp.symbol)} / request · ${formatToken(request.mpp.limit, request.mpp.symbol)} / day`} /> : null}
-          {request.accessKey ? (
-            <>
-              <Detail label="Key" value={request.accessKey.keyId} />
-              <Detail label="Witness" value={request.accessKey.witness ?? "Bound to the SIWE challenge at approval"} />
-              <Detail label="Expires" value={formatExpiry(request.accessKey.expiry)} />
-            </>
-          ) : <Detail label="Key" value="Reuse the app's active delegated signer" />}
-        </dl>
-        <ul className="resource-list" aria-label="Connect capability resources">
-          {request.auth.resources.map((resource) => <li key={resource}>{resource}</li>)}
-        </ul>
-        {request.auth.message ? <pre>{request.auth.message}</pre> : null}
-      </details>
-    </>
+    <ConnectionWizard
+      accountAddress={accountAddress}
+      appVisibility={appVisibilityPermissions(request.auth.resources)}
+      connectorAction={connectorAction}
+      connectorStatuses={connectorStatuses}
+      completed={completed}
+      confirmationCode={confirmationCode}
+      disabled={disabled}
+      deviceCode={deviceCode}
+      mcpConnectionAction={mcpConnectionAction}
+      mcpConnections={mcpConnections}
+      onChooseAccount={onChooseAccount}
+      onCancel={onCancel}
+      onConnectConnector={onConnectConnector}
+      onConnectMcp={onConnectMcp}
+      presentation={presentation}
+      reauthenticationRequired={reauthenticationRequired}
+      request={request}
+      selectedAccount={selectedAccount}
+      storedPasskeys={storedPasskeys}
+    />
   );
 }
 
@@ -1423,6 +1244,8 @@ function ConnectionWizard({
   onCancel,
   onConnectConnector,
   onConnectMcp,
+  presentation,
+  reauthenticationRequired,
   request,
   selectedAccount,
   storedPasskeys,
@@ -1441,6 +1264,8 @@ function ConnectionWizard({
   onCancel(): void;
   onConnectConnector(id: ConnectorId): void;
   onConnectMcp(id: string): void;
+  presentation: "dialog" | "wizard";
+  reauthenticationRequired: boolean;
   request: ConnectionView;
   selectedAccount?: WizardAccountSelection | undefined;
   storedPasskeys: readonly StoredPasskey[];
@@ -1449,15 +1274,23 @@ function ConnectionWizard({
   const focusedMcp = request.focusMcpConnection
     ? request.mcpConnections.find(({ id }) => id === request.focusMcpConnection)
     : undefined;
-  const redirectingFocusedMcp = focusedMcp !== undefined
-    && mcpConnectionAction === focusedMcp.id;
-  if ((!selectedAccount && !connectorStatuses && !accountAddress) || redirectingFocusedMcp) {
+  const requester = presentation === "wizard" ? "Nanocodex CLI" : request.app.name;
+  if (!connectorStatuses && !accountAddress) {
     return (
       <AccountChooser
         confirmationCode={confirmationCode}
+        description={reauthenticationRequired
+          ? `Your session expired. Use a remembered passkey to reauthenticate before approving ${requester}.`
+          : `Choose the Nanocodex account that will approve ${requester}.`}
         disabled={disabled}
+        newAccountDetail={`Create one passkey and approve only the access requested by ${requester}.`}
         onCancel={onCancel}
         onChooseAccount={onChooseAccount}
+        requestContext={<RequestedConnectionContext
+          appVisibility={appVisibility}
+          request={request}
+          requester={requester}
+        />}
         storedPasskeys={storedPasskeys}
       />
     );
@@ -1472,27 +1305,27 @@ function ConnectionWizard({
               ? `${selectedAccount.mode === "register" ? "Create" : "Use"} ${selectedAccount.label}. `
             : ""}{focused
                 ? connectorStatuses?.[focused.id]?.connected
-                  ? `${focused.name} is connected. You can return to the terminal.`
+                  ? `${focused.name} is connected. You can return to ${requester}.`
                   : connectorAction === focused.id
                   ? `Continue in ${focused.name}. You’ll return here when it is connected.`
                   : "Continue with your passkey."
                 : focusedMcp
                   ? mcpConnections?.find(({ id }) => id === focusedMcp.id)?.status === "connected"
-                    ? `${focusedMcp.name} is connected. You can return to the terminal.`
+                    ? `${focusedMcp.name} is connected. You can return to ${requester}.`
                     : mcpConnectionAction === focusedMcp.id
                       ? `Continue in ${focusedMcp.name}. You’ll return here when it is connected.`
                       : "Continue with your passkey."
-                : "Review this CLI installation’s hosted access."}</>}
-      footer={completed ? (
+                : `Review ${requester}’s hosted access.`}</>}
+      footer={completed && presentation === "wizard" ? (
         <div className="completion-actions">
           <a href="/connect">Connect more accounts</a>
         </div>
       ) : undefined}
-      title={focused ? `Connect ${focused.name}` : focusedMcp ? `Connect ${focusedMcp.name}` : "Authorize Nanocodex CLI"}
+      title={focused ? `Connect ${focused.name}` : focusedMcp ? `Connect ${focusedMcp.name}` : `Authorize ${requester}`}
     >
         {request.permission.connectors.length ? <AccountConnectionSection
           eyebrow="Service"
-          meta={focused ? "Requested by CLI" : `${request.permission.connectors.length} requested by CLI`}
+          meta={focused ? `Requested by ${requester}` : `${request.permission.connectors.length} requested by ${requester}`}
           title={focused ? focused.name : "Connections"}
           titleId="wizard-services-heading"
         >
@@ -1507,7 +1340,7 @@ function ConnectionWizard({
 
         {request.mcpConnections.length ? <AccountConnectionSection
           eyebrow="MCP"
-          meta={focusedMcp ? "Requested by CLI" : `${request.mcpConnections.length} requested by CLI`}
+          meta={focusedMcp ? `Requested by ${requester}` : `${request.mcpConnections.length} requested by ${requester}`}
           title={focusedMcp ? focusedMcp.name : "MCP connections"}
           titleId="wizard-mcp-heading"
         >
@@ -1523,12 +1356,56 @@ function ConnectionWizard({
         {!focused && !focusedMcp ? <AccountConnectionSection
           eyebrow="Access"
           meta={request.accessKey ? "30-day key" : "Active key"}
-          title="CLI access"
+          title={`${requester} access`}
           titleId="wizard-access-heading"
         >
           <WizardRequestSummary appVisibility={appVisibility} request={request} />
         </AccountConnectionSection> : null}
     </AccountConnectionSurface>
+  );
+}
+
+function RequestedConnectionContext({ appVisibility, request, requester }: Readonly<{
+  appVisibility: ReturnType<typeof appVisibilityPermissions>;
+  request: ConnectionView;
+  requester: string;
+}>) {
+  return (
+    <>
+      {request.permission.connectors.length ? <AccountConnectionSection
+        eyebrow="Requested service"
+        meta={`${request.permission.connectors.length} requested`}
+        title="Connections"
+        titleId="requested-services-heading"
+      >
+        <WizardConnectorList
+          connectorStatuses={undefined}
+          disabled
+          onConnectConnector={() => undefined}
+          request={request}
+        />
+      </AccountConnectionSection> : null}
+      {request.mcpConnections.length ? <AccountConnectionSection
+        eyebrow="Requested MCP"
+        meta={`${request.mcpConnections.length} requested`}
+        title="MCP connections"
+        titleId="requested-mcp-heading"
+      >
+        <McpConnectionList
+          connections={request.mcpConnections}
+          disabled
+          onConnect={() => undefined}
+        />
+      </AccountConnectionSection> : null}
+      <AccountConnectionSection
+        eyebrow="Requested access"
+        meta={request.accessKey ? "New delegated key" : "Active delegated key"}
+        title={`${requester} permissions`}
+        titleId="requested-access-heading"
+      >
+        <WizardRequestSummary appVisibility={appVisibility} request={request} />
+      </AccountConnectionSection>
+    </>
   );
 }
 
@@ -1561,7 +1438,7 @@ function WizardConnectorList({ connectorAction, connectorStatuses, disabled, onC
             : connector.detail}
           disabled={actionDisabled}
           key={id}
-          logo={<ConnectorLogo id={id} name={connector.name} />}
+          logo={<ConnectionLogo id={id} />}
           onClick={() => onConnectConnector(id)}
           title={permissionTitle(id, connector.name)}
         />;
@@ -1626,11 +1503,21 @@ function WizardRequestSummary({ appVisibility, request }: Readonly<{
             <div><strong>{permission.label}</strong><small>{permission.detail}</small></div>
           </div>
         ))}
+        {request.mpp ? (
+          <div role="listitem">
+            <span>✓</span>
+            <div>
+              <strong>machineUSD spend</strong>
+              <small>{formatToken(request.mpp.maxPerRequest, request.mpp.symbol)} per request · {formatToken(request.mpp.limit, request.mpp.symbol)} per day</small>
+            </div>
+          </div>
+        ) : null}
       </div>
       <details className="advanced-details">
         <summary>Technical details</summary>
         <dl className="key-details">
           <Detail label="App" value={request.app.origin} />
+          {request.mpp ? <Detail label="Spend" value={`${formatToken(request.mpp.maxPerRequest, request.mpp.symbol)} / request · ${formatToken(request.mpp.limit, request.mpp.symbol)} / day`} /> : null}
           {request.accessKey ? (
             <>
               <Detail label="Key" value={request.accessKey.keyId} />
@@ -1850,74 +1737,6 @@ function SectionHeading({ id, label, value }: Readonly<{ id: string; label: stri
   );
 }
 
-function AppMark({ name }: Readonly<{ name: string }>) {
-  return <span className="app-mark" aria-hidden="true">{name.slice(0, 1).toUpperCase()}</span>;
-}
-
-function ConnectorLogo({ id, name }: Readonly<{ id: string; name: string }>) {
-  if (id === "chatgpt" || id === "model") {
-    return (
-      <span className="connector-logo connector-logo-openai" aria-hidden="true">
-        <svg viewBox="146 227 268 265" role="presentation">
-          <path d="M249.176 323.434V298.276C249.176 296.158 249.971 294.569 251.825 293.509L302.406 264.381C309.29 260.409 317.5 258.555 325.973 258.555C357.75 258.555 377.877 283.185 377.877 309.399C377.877 311.253 377.877 313.371 377.611 315.49L325.178 284.771C322.001 282.919 318.822 282.919 315.645 284.771L249.176 323.434ZM367.283 421.415V361.301C367.283 357.592 365.694 354.945 362.516 353.092L296.048 314.43L317.763 301.982C319.617 300.925 321.206 300.925 323.058 301.982L373.639 331.112C388.205 339.586 398.003 357.592 398.003 375.069C398.003 395.195 386.087 413.733 367.283 421.412V421.415ZM233.553 368.452L211.838 355.742C209.986 354.684 209.19 353.095 209.19 350.975V292.718C209.19 264.383 230.905 242.932 260.301 242.932C271.423 242.932 281.748 246.641 290.49 253.26L238.321 283.449C235.146 285.303 233.555 287.951 233.555 291.659V368.455L233.553 368.452ZM280.292 395.462L249.176 377.985V340.913L280.292 323.436L311.407 340.913V377.985L280.292 395.462ZM300.286 475.968C289.163 475.968 278.837 472.259 270.097 465.64L322.264 435.449C325.441 433.597 327.03 430.949 327.03 427.239V350.445L349.011 363.155C350.865 364.213 351.66 365.802 351.66 367.922V426.179C351.66 454.514 329.679 475.965 300.286 475.965V475.968ZM237.525 416.915L186.944 387.785C172.378 379.31 162.582 361.305 162.582 343.827C162.582 323.436 174.763 305.164 193.563 297.485V357.861C193.563 361.571 195.154 364.217 198.33 366.071L264.535 404.467L242.82 416.915C240.967 417.972 239.377 417.972 237.525 416.915ZM234.614 460.343C204.689 460.343 182.71 437.833 182.71 410.028C182.71 407.91 182.976 405.792 183.238 403.672L235.405 433.863C238.582 435.715 241.763 435.715 244.938 433.863L311.407 395.466V420.622C311.407 422.742 310.612 424.331 308.758 425.389L258.179 454.519C251.293 458.491 243.083 460.343 234.611 460.343H234.614ZM300.286 491.854C332.329 491.854 359.073 469.082 365.167 438.892C394.825 431.211 413.892 403.406 413.892 375.073C413.892 356.535 405.948 338.529 391.648 325.552C392.972 319.991 393.766 314.43 393.766 308.87C393.766 271.003 363.048 242.666 327.562 242.666C320.413 242.666 313.528 243.723 306.644 246.109C294.725 234.457 278.307 227.042 260.301 227.042C228.258 227.042 201.513 249.815 195.42 280.004C165.761 287.685 146.694 315.49 146.694 343.824C146.694 362.362 154.638 380.368 168.938 393.344C167.613 398.906 166.819 404.467 166.819 410.027C166.819 447.894 197.538 476.231 233.024 476.231C240.172 476.231 247.058 475.173 253.943 472.788C265.859 484.441 282.278 491.854 300.286 491.854Z" />
-        </svg>
-      </span>
-    );
-  }
-  if (id === "github") {
-    return (
-      <span className="connector-logo connector-logo-github" aria-hidden="true">
-        <svg viewBox="0 0 24 24" role="presentation">
-          <path d="M12 .7a11.5 11.5 0 0 0-3.64 22.41c.58.1.79-.25.79-.56v-2.23c-3.22.7-3.9-1.37-3.9-1.37-.53-1.34-1.29-1.7-1.29-1.7-1.05-.72.08-.71.08-.71 1.17.08 1.78 1.2 1.78 1.2 1.04 1.78 2.72 1.27 3.38.97.1-.75.41-1.27.74-1.56-2.57-.29-5.27-1.29-5.27-5.69 0-1.26.45-2.29 1.19-3.09-.12-.29-.52-1.47.11-3.05 0 0 .97-.31 3.16 1.18A10.9 10.9 0 0 1 12 6.11c.98 0 1.95.13 2.87.39 2.19-1.49 3.15-1.18 3.15-1.18.63 1.58.23 2.76.11 3.05.74.8 1.19 1.83 1.19 3.09 0 4.42-2.71 5.39-5.29 5.68.42.36.79 1.06.79 2.14v3.27c0 .31.21.67.8.56A11.5 11.5 0 0 0 12 .7Z" />
-        </svg>
-      </span>
-    );
-  }
-  if (id === "gmail") {
-    return (
-      <span className="connector-logo connector-logo-gmail" aria-hidden="true">
-        <svg viewBox="0 0 24 18" role="presentation">
-          <path fill="#4285f4" d="M1.7 18H5V6.4L0 2.65v13.7C0 17.26.74 18 1.7 18Z" />
-          <path fill="#34a853" d="M19 18h3.3c.96 0 1.7-.74 1.7-1.65V2.65L19 6.4V18Z" />
-          <path fill="#fbbc04" d="M19 6.4 24 2.65V1.8C24-.23 21.68-.9 20.23.18L19 1.1v5.3Z" />
-          <path fill="#ea4335" d="M5 6.4V1.1L12 6.35l7-5.25v5.3l-7 5.25L5 6.4Z" />
-          <path fill="#c5221f" d="M0 1.8v.85L5 6.4V1.1L3.77.18C2.32-.9 0-.23 0 1.8Z" />
-        </svg>
-      </span>
-    );
-  }
-  if (id === "gdrive") {
-    return (
-      <span className="connector-logo connector-logo-drive" aria-hidden="true">
-        <svg viewBox="0 0 24 22" role="presentation">
-          <path fill="#0f9d58" d="M8.2 14.7 4.1 22h11.7l4.1-7.3H8.2Z" />
-          <path fill="#ffcd40" d="m16 0 8 14.7h-8L8 0h8Z" />
-          <path fill="#4285f4" d="M8 0 0 14.7 4.1 22 12 7.3 8 0Z" />
-        </svg>
-      </span>
-    );
-  }
-  if (id === "x") {
-    return <span className="connector-logo connector-logo-x" aria-hidden="true">X</span>;
-  }
-  return (
-    <span className="connector-logo connector-logo-nanocodex" aria-hidden="true" title={name}>
-      <svg viewBox="0 0 24 24" role="presentation">
-        <path d="M10.4 3h3.2v7.4H21v3.2h-7.4V21h-3.2v-7.4H3v-3.2h7.4V3Z" />
-      </svg>
-    </span>
-  );
-}
-
-function SpendLogo() {
-  return (
-    <span className="connector-logo connector-logo-spend" aria-hidden="true">
-      <span>M</span>
-      <i>≤</i>
-    </span>
-  );
-}
-
 function permissionTitle(id: string, fallback: string) {
   if (id === "github") return "GitHub";
   if (id === "gmail") return "Gmail";
@@ -1925,16 +1744,6 @@ function permissionTitle(id: string, fallback: string) {
   if (id === "x") return "X";
   if (id === "chatgpt" || id === "model") return "ChatGPT";
   return fallback;
-}
-
-function connectorStateLabel(status: ConnectorStatus | undefined, resolved: boolean) {
-  if (!resolved) return "Requested";
-  if (!status?.connected) return "Not connected";
-  return status.label ? `Connected as ${status.label}` : "Connected";
-}
-
-function connectorTooltip(status: ConnectorStatus | undefined, detail: string, resolved: boolean) {
-  return `${connectorStateLabel(status, resolved)} · ${detail}`;
 }
 
 function Detail({ label, value }: Readonly<{ label: string; value: string }>) {
@@ -1961,11 +1770,6 @@ function formatExpiry(expiry: number) {
     timeStyle: "short",
     timeZone: "UTC",
   }).format(new Date(expiry * 1_000)) + " UTC";
-}
-
-function expiryLabel(expiry: number) {
-  const days = Math.max(1, Math.round((expiry * 1_000 - Date.now()) / 86_400_000));
-  return `${days} day expiry`;
 }
 
 function formatToken(atomics: bigint, symbol: string) {
@@ -2083,26 +1887,10 @@ function createProvider(browserLocal: boolean) {
 
 async function ensureBrowserSession() {
   if (browserSession) return browserSession;
-  const attempt = (async () => {
-    const response = await fetch("/v1/me", {
-      cache: "no-store",
-      credentials: "same-origin",
-      headers: { accept: "application/json" },
-    });
-    const body: unknown = await response.json().catch(() => undefined);
-    if (!response.ok) {
-      throw new Error(apiError(record(body), "Unable to start a Nanocodex browser session."));
-    }
-    if (
-      !isRecord(body)
-      || !isRecord(body.user)
-      || typeof body.user.id !== "string"
-      || typeof body.user.persistent !== "boolean"
-    ) {
-      throw new Error("The Nanocodex account service returned an invalid browser session.");
-    }
-    return { id: body.user.id, persistent: body.user.persistent };
-  })();
+  const attempt = readBrowserAccountSession().then((session) => {
+    if (!session) throw new Error("Unable to start a Nanocodex browser session.");
+    return session;
+  });
   browserSession = attempt;
   try {
     return await attempt;
@@ -2329,17 +2117,6 @@ function walletRequestPolicyError(request: ConnectRequest | undefined) {
     return undefined;
   } catch (error) {
     return errorMessage(error);
-  }
-}
-
-function allowsAutomaticSavedAccount(request: WalletRequest): boolean {
-  if (request.confirmationCode === undefined) return false;
-  try {
-    const resources = walletConnectContext(request).resources;
-    return resources.includes(hostedAuthorizationResource)
-      && !resources.includes("urn:nanocodex:mpp:machusd:spend");
-  } catch {
-    return false;
   }
 }
 

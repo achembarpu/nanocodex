@@ -1012,6 +1012,315 @@ dd {
   line-height: 1.5;
 }
 
+.wizard-page {
+  width: 100%;
+  padding-top: 18px;
+}
+
+.wizard-intro {
+  display: grid;
+  padding-bottom: 16px;
+  gap: 12px;
+}
+
+.wizard-app {
+  display: grid;
+  gap: 6px;
+}
+
+.wizard-app h1 {
+  font-size: 18px;
+  font-weight: 500;
+  letter-spacing: -0.04em;
+}
+
+.wizard-app p {
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 1.55;
+}
+
+.wizard-terminal-code {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  padding-top: 9px;
+  border-top: 1px solid var(--border);
+  gap: 12px;
+}
+
+.wizard-terminal-code span,
+.wizard-section-title span,
+.wizard-section-title small {
+  color: var(--faint);
+  font-size: 8px;
+}
+
+.wizard-terminal-code strong {
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.09em;
+}
+
+.wizard-sections {
+  border-top: 1px solid var(--border);
+}
+
+.wizard-section {
+  padding: 12px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.wizard-section-title {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.wizard-section-title > div {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.wizard-section-title h2 {
+  font-size: 10px;
+  font-weight: 500;
+}
+
+.wizard-account-chooser {
+  margin-top: 14px;
+  overflow: hidden;
+  border: 1px solid var(--border-strong);
+}
+
+.wizard-account-choice {
+  display: grid;
+  width: 100%;
+  min-height: 62px;
+  align-items: center;
+  padding: 10px;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+  grid-template-columns: 34px minmax(0, 1fr) auto;
+  gap: 9px;
+}
+
+.wizard-account-choice:last-child {
+  border-bottom: 0;
+}
+
+.wizard-account-choice.is-current {
+  box-shadow: inset 2px 0 var(--positive);
+}
+
+.wizard-account-choice:hover:not(:disabled),
+.wizard-account-choice:focus-visible {
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.wizard-account-choice:disabled {
+  cursor: default;
+  opacity: 0.48;
+}
+
+.wizard-account-avatar {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  border: 1px solid var(--border-strong);
+  background: var(--surface-raised);
+  font-size: 12px;
+}
+
+.wizard-passkey-avatar {
+  font-size: 16px;
+}
+
+.wizard-account-copy {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.wizard-account-copy strong,
+.wizard-account-copy small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wizard-account-copy strong {
+  font-size: 10px;
+  font-weight: 500;
+}
+
+.wizard-account-copy small {
+  color: var(--muted);
+  font-size: 8px;
+}
+
+.wizard-account-arrow {
+  color: var(--faint);
+  font-size: 8px;
+}
+
+.wizard-account-create-form {
+  cursor: default;
+  grid-template-columns: 34px minmax(0, 1fr) 28px auto;
+}
+
+.wizard-account-create-form input {
+  width: 100%;
+  min-height: 25px;
+  border: 0;
+  border-bottom: 1px solid var(--border-strong);
+  outline: none;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+}
+
+.wizard-account-create-form button {
+  min-height: 30px;
+  padding: 0 7px;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.wizard-account-create-form button:last-child {
+  background: var(--text);
+  color: var(--surface);
+}
+
+.wizard-cancel {
+  min-height: 34px;
+  margin-top: 10px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 9px;
+}
+
+.wizard-connectors {
+  display: grid;
+  margin-top: 9px;
+  gap: 7px;
+}
+
+.wizard-connectors .connection-card {
+  display: grid;
+  width: 100%;
+  min-height: 58px;
+  align-items: center;
+  padding: 8px;
+  border: 1px solid var(--border);
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+  grid-template-columns: 34px minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
+.wizard-connectors .connection-card.is-connected {
+  border-color: rgba(115, 216, 155, 0.58);
+}
+
+.wizard-connectors .connection-card:disabled:not(.is-connected) {
+  cursor: default;
+  opacity: 0.58;
+}
+
+.wizard-connectors .connection-card-copy {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.wizard-connectors .connection-card-copy strong {
+  font-size: 9px;
+  font-weight: 500;
+}
+
+.wizard-connectors .connection-card-copy > span,
+.wizard-connectors .connection-card-action {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 8px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wizard-connectors .is-connected .connection-card-action {
+  color: var(--positive);
+}
+
+.wizard-visibility {
+  display: grid;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border);
+  gap: 4px;
+}
+
+.wizard-visibility > div {
+  display: grid;
+  min-height: 28px;
+  align-items: center;
+  grid-template-columns: 12px 82px minmax(0, 1fr);
+  gap: 5px;
+}
+
+.wizard-visibility > div > span {
+  color: var(--positive);
+  font-size: 8px;
+}
+
+.wizard-visibility > div > div {
+  display: contents;
+}
+
+.wizard-visibility strong,
+.wizard-visibility small {
+  overflow: hidden;
+  font-size: 8px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wizard-visibility strong {
+  font-weight: 500;
+}
+
+.wizard-visibility small {
+  color: var(--faint);
+}
+
+.wizard-device-code {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 9px 0;
+  color: var(--muted);
+  font-size: 8px;
+}
+
+.wizard-device-code strong {
+  color: var(--positive);
+  letter-spacing: 0.08em;
+}
+
+.dialog-actions:has(> button:only-child) {
+  grid-template-columns: 1fr;
+}
+
 @media (max-width: 440px) {
   :scope.dialog-shell {
     width: 100vw;

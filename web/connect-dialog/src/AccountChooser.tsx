@@ -1,12 +1,14 @@
-import { useId, useState } from "react";
+import { useId, useState, type ReactNode } from "react";
 
 export type StoredPasskey = Readonly<{
   address: `0x${string}`;
   credentialId: string;
+  current?: boolean | undefined;
   label?: string | undefined;
 }>;
 
 export type AccountSelection = Readonly<{
+  current?: boolean | undefined;
   mode: "login" | "register";
   label: string;
   address?: `0x${string}` | undefined;
@@ -19,6 +21,7 @@ export function AccountChooser({
   description = "Continue to Nanocodex CLI with a saved passkey, or create a new account.",
   disabled,
   failure,
+  requestContext,
   newAccountDetail = "Create one passkey to sign in and authorize this hosted CLI connection.",
   onCancel,
   onChooseAccount,
@@ -28,6 +31,7 @@ export function AccountChooser({
   description?: string | undefined;
   disabled: boolean;
   failure?: string | null | undefined;
+  requestContext?: ReactNode;
   newAccountDetail?: string | undefined;
   onCancel?: (() => void) | undefined;
   onChooseAccount(account: AccountSelection): void;
@@ -52,14 +56,16 @@ export function AccountChooser({
       </header>
 
       {failure ? <div className="account-failure" role="alert"><p>{failure}</p></div> : null}
+      {requestContext ? <div className="wizard-sections">{requestContext}</div> : null}
 
       <div className="wizard-account-chooser" role="group" aria-label="Choose a Nanocodex account">
-        {storedPasskeys.map((account) => (
+        {orderedPasskeys(storedPasskeys).map((account) => (
           <button
-            className="wizard-account-choice"
+            className={`wizard-account-choice${account.current ? " is-current" : ""}`}
             disabled={disabled}
             key={account.credentialId}
             onClick={() => onChooseAccount({
+              current: account.current,
               mode: "login",
               label: account.label || shortAddress(account.address),
               address: account.address,
@@ -72,9 +78,13 @@ export function AccountChooser({
             </span>
             <span className="wizard-account-copy">
               <strong>{account.label || shortAddress(account.address)}</strong>
-              <small>{account.label ? shortAddress(account.address) : "Saved passkey"}</small>
+              <small>{account.current
+                ? `Current account · ${shortAddress(account.address)}`
+                : account.label ? shortAddress(account.address) : "Saved passkey"}</small>
             </span>
-            <span className="wizard-account-arrow" aria-hidden="true">→</span>
+            <span className="wizard-account-arrow" aria-hidden="true">
+              {account.current ? "Continue" : "→"}
+            </span>
           </button>
         ))}
         <button
@@ -89,7 +99,7 @@ export function AccountChooser({
         >
           <span className="wizard-account-avatar wizard-passkey-avatar" aria-hidden="true">◇</span>
           <span className="wizard-account-copy">
-            <strong>{storedPasskeys.length ? "Use another passkey" : "Continue with passkey"}</strong>
+            <strong>Use another passkey</strong>
             <small>Choose a passkey available on this device.</small>
           </span>
           <span className="wizard-account-arrow" aria-hidden="true">→</span>
@@ -145,6 +155,12 @@ export function AccountChooser({
       ) : null}
     </div>
   );
+}
+
+export function orderedPasskeys(storedPasskeys: readonly StoredPasskey[]): readonly StoredPasskey[] {
+  return storedPasskeys.some((account) => account.current)
+    ? [...storedPasskeys].sort((left, right) => Number(right.current === true) - Number(left.current === true))
+    : storedPasskeys;
 }
 
 function shortAddress(value: unknown) {

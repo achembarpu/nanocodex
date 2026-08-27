@@ -5,7 +5,7 @@ import {
 } from "@nanocodex-connect/AccountConnectionSurface";
 import { isRecord, responseFailure } from "./AccountSession";
 import { clientFailureMessage } from "./clientFailure";
-import { ConnectionLogo } from "./ConnectionLogo";
+import { ConnectionLogo } from "@nanocodex-connect/ConnectionLogo";
 
 type ConnectorId = "github" | "gmail" | "gdrive" | "x";
 type ConnectorStatus = Readonly<{
