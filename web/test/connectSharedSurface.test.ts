@@ -71,6 +71,15 @@ test("Account and embedded Connect share strict in-place OAuth completion", () =
   assert.match(connectorCompletion, /event\.origin === expected\.origin[\s\S]*?event\.source === expected\.source[\s\S]*?event\.data\.connector === expected\.connector/);
 });
 
+test("embedded Connect requires an explicit final approval after requested accounts are ready", () => {
+  assert.match(app, /!wizard[\s\S]*?!pendingApproval[\s\S]*?approvalReady/);
+  assert.match(app, /wizard && approvalReady\(next/);
+  assert.match(app, /connectedAccessReady \? "Approve access" : "Connect requested accounts"/);
+  assert.match(app, /onClick=\{approveConnectedAccess\}/);
+  const finishAttempt = app.slice(app.indexOf("const finishConnectorAttempt"), app.indexOf("useEffect(() =>", app.indexOf("const finishConnectorAttempt")));
+  assert.doesNotMatch(finishAttempt, /setMcpConnections\(undefined\)/);
+});
+
 function source(path: string): string {
   return readFileSync(new URL(path, import.meta.url), "utf8");
 }

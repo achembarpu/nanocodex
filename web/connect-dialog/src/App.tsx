@@ -183,7 +183,6 @@ export function ConnectOnboarding({
     if (attempt.popupClosed !== undefined) window.clearTimeout(attempt.popupClosed);
     if (closePopup && attempt.popup && !attempt.popup.closed) attempt.popup.close();
     setConnectorAction(undefined);
-    setMcpConnections(undefined);
     setMcpConnectionAction(undefined);
     setCompletedRequestId(undefined);
     setSettlingRequestId(undefined);
@@ -198,6 +197,8 @@ export function ConnectOnboarding({
     setPendingApproval(undefined);
     setConnectorStatuses(undefined);
     setConnectorAction(undefined);
+    setMcpConnections(undefined);
+    setMcpConnectionAction(undefined);
     setDeviceCode(undefined);
     setBrowserAccountState(undefined);
   }, [request?.id, finishConnectorAttempt]);
@@ -353,7 +354,8 @@ export function ConnectOnboarding({
 
   useEffect(() => {
     if (
-      !pendingApproval
+      !wizard
+      || !pendingApproval
       || !connectorStatuses
       || !mcpConnections
       || !approvalReady(pendingApproval, connectorStatuses, mcpConnections)
@@ -373,7 +375,7 @@ export function ConnectOnboarding({
         setFailure({ id: completed.requestId, message: errorMessage(error) });
       }
     });
-  }, [connectorAction, connectorStatuses, mcpConnectionAction, mcpConnections, pendingApproval, ceremonyRequestId, host]);
+  }, [connectorAction, connectorStatuses, mcpConnectionAction, mcpConnections, pendingApproval, ceremonyRequestId, host, wizard]);
 
   if (!request || requestPolicyError) return null;
   if (request.type === "deviceError" || request.type === "deviceComplete") {
@@ -533,7 +535,7 @@ export function ConnectOnboarding({
           };
           setConnectorStatuses(hosted.connectors);
           setMcpConnections(hosted.mcpConnections);
-          if (approvalReady(next, hosted.connectors, hosted.mcpConnections)) {
+          if (wizard && approvalReady(next, hosted.connectors, hosted.mcpConnections)) {
             await completeRequest(next.result, next.requestId);
             return;
           }
@@ -568,7 +570,7 @@ export function ConnectOnboarding({
           );
           setConnectorStatuses(auth.connectors);
           setMcpConnections(authenticatedMcpConnections);
-          if (approvalReady(next, auth.connectors, authenticatedMcpConnections)) {
+          if (wizard && approvalReady(next, auth.connectors, authenticatedMcpConnections)) {
             await completeRequest(next.result, next.requestId);
             return;
           }
@@ -581,7 +583,7 @@ export function ConnectOnboarding({
           return;
         }
         const accountState = await authorizeNanocodexAccount(next);
-        if (approvalReady(next, accountState.connectors, accountState.mcpConnections)) {
+        if (wizard && approvalReady(next, accountState.connectors, accountState.mcpConnections)) {
           await completeRequest(next.result, next.requestId);
           return;
         }
@@ -1068,8 +1070,26 @@ export function ConnectOnboarding({
     });
   }
 
+  function approveConnectedAccess() {
+    const approval = pendingApproval;
+    if (!approval
+      || !connectorStatuses
+      || !mcpConnections
+      || !approvalReady(approval, connectorStatuses, mcpConnections)) return;
+    setFailure(undefined);
+    void completeRequest(approval.result, approval.requestId).catch((error) => {
+      if (currentRequestId.current === approval.requestId) {
+        setFailure({ id: approval.requestId, message: errorMessage(error) });
+      }
+    });
+  }
+
   const requestCompleted = completedRequestId === request.id || settlingRequestId === request.id;
   const approvalDisabled = ceremonyActive || requestCompleted;
+  const connectedAccessReady = pendingApproval !== undefined
+    && connectorStatuses !== undefined
+    && mcpConnections !== undefined
+    && approvalReady(pendingApproval, connectorStatuses, mcpConnections);
   const connectionRequest = request.type === "walletConnect" ? walletView(request) : undefined;
 
   return (
@@ -1128,6 +1148,18 @@ export function ConnectOnboarding({
             >
               Cancel
             </button>
+            {!wizard ? (
+              <button
+                type="button"
+                disabled={approvalDisabled
+                  || connectorAction !== undefined
+                  || mcpConnectionAction !== undefined
+                  || !connectedAccessReady}
+                onClick={approveConnectedAccess}
+              >
+                {connectedAccessReady ? "Approve access" : "Connect requested accounts"}
+              </button>
+            ) : null}
           </div>}
         </>
       ) : request.type === "walletRevokeAccessKey" ? (
@@ -1335,7 +1367,9 @@ function ConnectionWizard({
                     : mcpConnectionAction === focusedMcp.id
                       ? `Continue in ${focusedMcp.name}. You’ll return here when it is connected.`
                       : "Continue with your passkey."
-                : `Review ${requester}’s hosted access.`}</>}
+                : presentation === "dialog"
+                  ? `Connect any missing accounts, then approve ${requester}’s requested access.`
+                  : `Review ${requester}’s hosted access.`}</>}
       footer={completed && presentation === "wizard" ? (
         <div className="completion-actions">
           <a href="/connect">Connect more accounts</a>

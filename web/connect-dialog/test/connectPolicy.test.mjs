@@ -346,7 +346,7 @@ test("CLI hosted wallet result retains only its one-use approval", () => {
   }), /hosted CLI approval/);
 });
 
-test("the reviewed passkey approval settles as soon as requested connectors are ready", () => {
+test("the reviewed passkey approval becomes ready only after requested connectors are connected", () => {
   const ready = {
     github: { connected: true },
     gmail: { connected: true },

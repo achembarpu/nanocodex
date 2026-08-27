@@ -4821,10 +4821,17 @@ function requireDialogOrigin(request: Request): void {
 
 function requiredDialogOrigin(request: Request): string {
   const origin = request.headers.get("origin");
-  if (!origin || (origin !== DIALOG_ORIGIN && !developmentDialogOrigin(request, origin))) {
-    throw new ApiFailure(403, "origin_denied", "This account operation is available only inside Nanocodex Connect.");
+  if (origin && (origin === DIALOG_ORIGIN || developmentDialogOrigin(request, origin))) {
+    return origin;
   }
-  return origin;
+  const requestOrigin = new URL(request.url).origin;
+  const connectClient = request.headers.get("x-nanocodex-connect-client");
+  if (!origin
+    && (connectClient === "onboarding" || connectClient === "device")
+    && (requestOrigin === DIALOG_ORIGIN || isLocalDeviceOrigin(requestOrigin))) {
+    return requestOrigin;
+  }
+  throw new ApiFailure(403, "origin_denied", "This account operation is available only inside Nanocodex Connect.");
 }
 
 function isAllowedDialogOrigin(origin: string): boolean {
