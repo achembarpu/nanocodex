@@ -17,9 +17,10 @@ cross the format transition.
 Each native nightly contains both `nanocodex` and `nanocodex2`; x86_64 Linux
 also contains the static VM guest. `nanocodex update --nightly` verifies and
 installs that complete platform bundle atomically and exposes both CLI launchers
-under `$NANOCODEX_DIR/bin`. Switching back to a stable, PR, or local build
-removes the owned `nanocodex2` launcher because those channels do not publish
-the companion yet. Updaters published before this bundle contract need one
+under `$NANOCODEX_DIR/bin`. Stable releases publish the same two native CLI
+binaries. Switching to a PR or local build removes the owned `nanocodex2`
+launcher because those preview channels do not publish the companion. Updaters
+published before this bundle contract need one
 nightly update to promote the bundle-aware manager and a second invocation to
 fetch `nanocodex2`; subsequent nightly updates install the complete bundle in
 one invocation.
