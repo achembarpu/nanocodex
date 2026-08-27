@@ -1,0 +1,90 @@
+import { execFileSync } from "node:child_process";
+import { homedir } from "node:os";
+import { resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { unlink } from "node:fs/promises";
+
+import {
+  localDevelopmentStatePath,
+  localProcessIsAlive,
+  readLocalDevelopmentLease,
+  resolveLocalDevelopmentInstance,
+} from "./dev-local.mjs";
+
+const scriptPath = fileURLToPath(import.meta.url);
+const webRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
+const repositoryRoot = resolve(webRoot, "..");
+const developmentScriptPath = resolve(webRoot, "scripts/dev-local.mjs");
+
+export function assertLocalDevelopmentOwner(command, expectedScript = developmentScriptPath) {
+  if (typeof command !== "string" || !command.includes(expectedScript)) {
+    throw new Error(
+      "the local development lease points at a different live process; refusing to signal a reused PID",
+    );
+  }
+}
+
+export async function stopLocalDevelopment(statePath, {
+  commandForPid = localProcessCommand,
+  isProcessAlive = localProcessIsAlive,
+  kill = process.kill,
+  pause = (milliseconds) => new Promise((resolvePause) => setTimeout(resolvePause, milliseconds)),
+  timeoutMs = 20_000,
+} = {}) {
+  const lockPath = resolve(statePath, "development.lock");
+  const lease = await readLocalDevelopmentLease(lockPath);
+  if (!Number.isSafeInteger(lease?.pid) || lease.pid <= 0 || typeof lease.token !== "string") {
+    await unlink(lockPath).catch((error) => {
+      if (error?.code !== "ENOENT") throw error;
+    });
+    return { status: "not-running" };
+  }
+
+  if (!isProcessAlive(lease.pid)) {
+    await removeOwnedLease(lockPath, lease.token);
+    return { status: "not-running" };
+  }
+
+  assertLocalDevelopmentOwner(commandForPid(lease.pid));
+  kill(lease.pid, "SIGTERM");
+  const deadline = Date.now() + timeoutMs;
+  while (isProcessAlive(lease.pid)) {
+    if (Date.now() >= deadline) {
+      throw new Error(
+        `Nanocodex local development process ${lease.pid} did not stop after SIGTERM`,
+      );
+    }
+    await pause(100);
+  }
+  await removeOwnedLease(lockPath, lease.token);
+  return { pid: lease.pid, status: "stopped" };
+}
+
+async function removeOwnedLease(path, token) {
+  const current = await readLocalDevelopmentLease(path);
+  if (current?.token !== token) return;
+  await unlink(path).catch((error) => {
+    if (error?.code !== "ENOENT") throw error;
+  });
+}
+
+function localProcessCommand(pid) {
+  return execFileSync("ps", ["-p", String(pid), "-o", "command="], {
+    encoding: "utf8",
+  }).trim();
+}
+
+export async function main(environment = process.env) {
+  const instance = await resolveLocalDevelopmentInstance(environment);
+  const statePath = localDevelopmentStatePath(homedir(), instance.id);
+  const result = await stopLocalDevelopment(statePath);
+  const description = result.status === "stopped"
+    ? `stopped process ${result.pid}`
+    : "was not running";
+  process.stdout.write(`Nanocodex local platform ${description} (${instance.id}).\n`);
+  return result;
+}
+
+if (pathToFileURL(resolve(process.argv[1] ?? "")).href === import.meta.url) {
+  await main();
+}

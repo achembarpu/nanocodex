@@ -263,7 +263,7 @@ function sanitizeLocalDevelopmentSlug(value) {
   return slug || "local";
 }
 
-async function resolveLocalDevelopmentInstance(environment) {
+export async function resolveLocalDevelopmentInstance(environment) {
   let primary = false;
   try {
     primary = (await stat(resolve(repositoryRoot, ".git"))).isDirectory();
@@ -578,7 +578,7 @@ export async function acquireLocalDevelopmentLease(
   throw new Error("could not acquire the Nanocodex local development lease");
 }
 
-async function readLocalDevelopmentLease(path) {
+export async function readLocalDevelopmentLease(path) {
   try {
     const value = JSON.parse(await readFile(path, "utf8"));
     return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
@@ -588,7 +588,7 @@ async function readLocalDevelopmentLease(path) {
   }
 }
 
-function localProcessIsAlive(pid) {
+export function localProcessIsAlive(pid) {
   try {
     process.kill(pid, 0);
     return true;
