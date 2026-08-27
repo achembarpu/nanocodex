@@ -67,6 +67,28 @@ test("local down removes a stale dead lease without signalling", async () => {
   await assert.rejects(readFile(resolve(statePath, "development.lock")), { code: "ENOENT" });
 });
 
+test("local down treats an owner that exits during the stop race as stale", async () => {
+  const statePath = await mkdtemp(resolve(tmpdir(), "nanocodex-down-test-"));
+  await writeFile(
+    resolve(statePath, "development.lock"),
+    `${JSON.stringify({
+      pid: 42,
+      processTitle: "ncdx:owner-token-1234",
+      token: "lease-token",
+    })}\n`,
+  );
+  let probes = 0;
+  const result = await stopLocalDevelopment(statePath, {
+    commandForPid: () => {
+      throw Object.assign(new Error("process exited"), { code: "ESRCH" });
+    },
+    isProcessAlive: () => probes++ === 0,
+    kill: () => assert.fail("an exited owner must not be signalled"),
+  });
+  assert.deepEqual(result, { status: "not-running" });
+  await assert.rejects(readFile(resolve(statePath, "development.lock")), { code: "ENOENT" });
+});
+
 test("owner validation accepts only the exact Nanocodex development script", () => {
   const expected = resolve("web/scripts/dev-local.mjs");
   assert.doesNotThrow(() => assertLocalDevelopmentOwner(`node ${expected}`, expected));

@@ -53,11 +53,20 @@ export async function stopLocalDevelopment(statePath, {
     return { status: "not-running" };
   }
 
-  assertLocalDevelopmentOwner(
-    commandForPid(lease.pid),
-    typeof lease.processTitle === "string" ? lease.processTitle : developmentScriptPath,
-  );
-  kill(lease.pid, "SIGTERM");
+  try {
+    assertLocalDevelopmentOwner(
+      commandForPid(lease.pid),
+      typeof lease.processTitle === "string" ? lease.processTitle : developmentScriptPath,
+    );
+    kill(lease.pid, "SIGTERM");
+  } catch (error) {
+    // The owner may exit between the liveness probe and ps/kill. Treat that
+    // narrow race as stale cleanup so `just down` remains idempotent, while
+    // preserving fail-closed PID-reuse protection for a still-live process.
+    if (error?.code !== "ESRCH" && isProcessAlive(lease.pid)) throw error;
+    await removeOwnedLease(lockPath, lease.token);
+    return { status: "not-running" };
+  }
   const deadline = Date.now() + timeoutMs;
   while (isProcessAlive(lease.pid)) {
     if (Date.now() >= deadline) {
