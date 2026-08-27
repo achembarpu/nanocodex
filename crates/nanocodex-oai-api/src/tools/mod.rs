@@ -56,6 +56,11 @@ pub enum ToolOutputContent {
         /// Data URL or provider-supported audio URL.
         audio_url: String,
     },
+    /// Opaque encrypted provider content returned without exposing plaintext.
+    EncryptedContent {
+        /// Provider-generated encrypted payload.
+        encrypted_content: String,
+    },
 }
 
 /// Complete output of one tool invocation.

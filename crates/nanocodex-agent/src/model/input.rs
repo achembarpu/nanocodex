@@ -129,6 +129,11 @@ fn function_output(output: ToolOutputBody) -> FunctionOutputBody {
                             audio_url: audio_url.into_boxed_str(),
                         }
                     }
+                    ToolOutputContent::EncryptedContent { encrypted_content } => {
+                        FunctionOutputContent::EncryptedContent {
+                            encrypted_content: encrypted_content.into_boxed_str(),
+                        }
+                    }
                 })
                 .collect(),
         ),
@@ -289,11 +294,21 @@ mod tests {
                     image_url: "data:image/png;base64,a".to_owned(),
                     detail: ImageDetail::Original,
                 },
+                ToolOutputContent::EncryptedContent {
+                    encrypted_content: "opaque-provider-payload".to_owned(),
+                },
             ]),
         )];
 
         let request = serde_json::to_value(input).expect("tool output should serialize");
 
         assert!(request[0]["output"][1].get("detail").is_none());
+        assert_eq!(
+            request[0]["output"][2],
+            json!({
+                "type": "encrypted_content",
+                "encrypted_content": "opaque-provider-payload",
+            })
+        );
     }
 }

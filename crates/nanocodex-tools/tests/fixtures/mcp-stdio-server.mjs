@@ -98,6 +98,7 @@ lines.on("line", (line) => {
     }
     const message = request.params.arguments?.message;
     const failed = message === "__fail__";
+    const text = failed ? "fixture:synthetic failure" : `fixture:${message}`;
     const delayMs = request.params.arguments?.delay_ms ?? 0;
     setTimeout(() => {
       send({
@@ -106,9 +107,9 @@ lines.on("line", (line) => {
         result: {
           content: [{
             type: "text",
-            text: failed ? "fixture:synthetic failure" : `fixture:${message}`,
+            text,
           }],
-          structuredContent: { echoed: message },
+          structuredContent: { echoed: message, text },
           isError: failed,
         },
       });

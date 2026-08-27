@@ -26,7 +26,8 @@ impl McpOAuthCredentials {
         response: &rmcp::transport::auth::OAuthTokenResponse,
         previous: &Self,
     ) -> Self {
-        let mut credentials = Self::from_token_response(client_id, response);
+        let mut credentials =
+            Self::from_token_response(client_id, response, previous.issuer.clone());
         if response.refresh_token().is_none() {
             credentials
                 .refresh_token
@@ -109,8 +110,40 @@ impl OAuthRuntime {
             ));
         };
 
+        let mut manager = self.manager.lock().await;
+        let metadata = timeout(REFRESH_REQUEST_TIMEOUT, manager.resolve_metadata())
+            .await
+            .map_err(|_| {
+                format!(
+                    "timed out after {REFRESH_REQUEST_TIMEOUT:?} resolving current OAuth metadata for `{}`",
+                    self.server_name
+                )
+            })?
+            .map_err(|error| {
+                format!(
+                    "failed to resolve current OAuth metadata for `{}`: {error}",
+                    self.server_name
+                )
+            })?
+            .metadata;
+        super::validate_authorization_server_endpoints(&metadata).map_err(|error| {
+            format!(
+                "current OAuth metadata for `{}` is invalid: {error}",
+                self.server_name
+            )
+        })?;
+        let current_issuer = super::authorization_issuer(&metadata)?;
+        super::validate_refresh_token_issuer(&latest, current_issuer.as_deref()).map_err(
+            |error| {
+                format!(
+                    "OAuth refresh credentials for `{}` cannot be used: {error}",
+                    self.server_name
+                )
+            },
+        )?;
+        manager.set_metadata(metadata);
+
         if !latest.needs_refresh() {
-            let mut manager = self.manager.lock().await;
             install_credentials(&mut manager, &latest).await?;
             *self.last_credentials.lock().await = Some(latest);
             return Ok(());
@@ -126,7 +159,6 @@ impl OAuthRuntime {
             ));
         }
 
-        let mut manager = self.manager.lock().await;
         install_credentials(&mut manager, &latest)
             .await
             .map_err(|error| format!("failed to stage OAuth credentials for refresh: {error}"))?;
@@ -190,12 +222,15 @@ async fn install_credentials(
 ) -> Result<(), String> {
     let store = InMemoryCredentialStore::new();
     store
-        .save(StoredCredentials::new(
-            credentials.client_id.clone(),
-            Some(credentials.to_token_response()),
-            credentials.scopes.clone(),
-            Some(now_seconds()),
-        ))
+        .save(
+            StoredCredentials::new(
+                credentials.client_id.clone(),
+                Some(credentials.to_token_response()),
+                credentials.scopes.clone(),
+                Some(now_seconds()),
+            )
+            .with_issuer(credentials.issuer.clone()),
+        )
         .await
         .map_err(|error| format!("failed to stage OAuth credentials: {error}"))?;
     manager.set_credential_store(store);

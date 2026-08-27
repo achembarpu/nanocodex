@@ -9,6 +9,7 @@ use nanocodex_oai_api::tools::ToolDefinition;
 use rmcp::model::Tool as RmcpTool;
 use serde::Serialize;
 use serde_json::{Map, Value, json};
+use sha1::{Digest, Sha1};
 use tokio::sync::watch;
 
 use super::{
@@ -18,6 +19,9 @@ use super::{
 
 const DEFAULT_SEARCH_LIMIT: usize = 8;
 const MAX_SEARCH_LIMIT: usize = 32;
+const MAX_MODEL_TOOL_NAME_BYTES: usize = 128;
+const NAME_HASH_BYTES: usize = 12;
+const NAME_HASH_SUFFIX_BYTES: usize = NAME_HASH_BYTES + 1;
 
 #[derive(Clone, Copy, Debug, Default)]
 struct ToolSearchTokenizer;
@@ -436,15 +440,45 @@ impl ToolEntry {
         &self.namespace
     }
 
-    pub(crate) fn new(
+    pub(crate) fn new_many(
         server_name: &str,
+        namespace: &str,
+        tools: Vec<RmcpTool>,
+        client: Client,
+        config: &McpServer,
+    ) -> Vec<Self> {
+        let mut tools_by_name = BTreeMap::new();
+        for tool in tools {
+            tools_by_name.entry(tool.name.to_string()).or_insert(tool);
+        }
+        let mut names = normalized_tool_names(namespace, tools_by_name.keys().map(String::as_str));
+        tools_by_name
+            .into_iter()
+            .filter_map(|(remote_name, tool)| {
+                let model_name = names.remove(&remote_name)?;
+                Some(Self::new(
+                    server_name,
+                    namespace,
+                    model_name,
+                    remote_name,
+                    &tool,
+                    Arc::clone(&client),
+                    config,
+                ))
+            })
+            .collect()
+    }
+
+    fn new(
+        server_name: &str,
+        namespace: &str,
+        model_name: String,
+        remote_name: String,
         tool: &RmcpTool,
         client: Client,
         config: &McpServer,
     ) -> Self {
-        let remote_name = tool.name.to_string();
-        let canonical_name = canonical_tool_name(server_name, &remote_name);
-        let namespace = canonical_namespace(server_name);
+        let canonical_name = format!("{namespace}{model_name}");
         let namespace_description = config
             .description
             .as_deref()
@@ -499,7 +533,7 @@ impl ToolEntry {
             canonical_name,
             server_name: server_name.to_owned(),
             remote_name,
-            namespace,
+            namespace: namespace.to_owned(),
             namespace_description,
             definition,
             supports_parallel_tool_calls,
@@ -527,7 +561,11 @@ impl ToolEntry {
     fn loadable_function(&self) -> LoadableFunction {
         LoadableFunction {
             r#type: "function",
-            name: normalize_name(&self.remote_name),
+            name: self
+                .canonical_name
+                .strip_prefix(&self.namespace)
+                .unwrap_or(&self.canonical_name)
+                .to_owned(),
             description: self.definition.description().to_owned(),
             strict: false,
             defer_loading: true,
@@ -549,28 +587,116 @@ fn tool_supports_parallel_calls(tool: &RmcpTool, server_opt_in: bool, tool_polic
     server_opt_in || tool_policy || tool_is_read_only(tool)
 }
 
-fn canonical_tool_name(server_name: &str, tool_name: &str) -> String {
-    format!(
-        "{}{}",
-        canonical_namespace(server_name),
-        normalize_name(tool_name)
-    )
-}
-
-fn canonical_namespace(server_name: &str) -> String {
-    format!("mcp__{}__", normalize_name(server_name))
-}
-
 fn normalize_name(name: &str) -> String {
-    name.chars()
+    let normalized = name
+        .chars()
         .map(|character| {
-            if character.is_ascii_alphanumeric() || matches!(character, '_' | '-') {
+            if character.is_ascii_alphanumeric() || character == '_' {
                 character
             } else {
                 '_'
             }
         })
+        .collect::<String>();
+    if normalized.is_empty() {
+        "_".to_owned()
+    } else {
+        normalized
+    }
+}
+
+pub(crate) fn normalized_server_names<'a>(
+    server_names: impl IntoIterator<Item = &'a str>,
+) -> BTreeMap<String, String> {
+    let mut candidates = server_names
+        .into_iter()
+        .map(|raw| (raw.to_owned(), format!("mcp__{}", normalize_name(raw))))
+        .collect::<Vec<_>>();
+    let mut counts = BTreeMap::<String, usize>::new();
+    for (_, base) in &candidates {
+        *counts.entry(base.clone()).or_default() += 1;
+    }
+    candidates.sort_by(|left, right| left.0.cmp(&right.0));
+
+    // Reserve enough of the 128-byte qualified-name budget for a hashed tool segment.
+    let maximum_body_bytes = MAX_MODEL_TOOL_NAME_BYTES - NAME_HASH_SUFFIX_BYTES - 2;
+    let mut used = BTreeSet::new();
+    candidates
+        .into_iter()
+        .map(|(raw, base)| {
+            let collides = counts.get(&base).copied().unwrap_or_default() > 1;
+            let body = unique_bounded_name(&base, &raw, maximum_body_bytes, collides, &mut used);
+            (raw, format!("{body}__"))
+        })
         .collect()
+}
+
+fn normalized_tool_names<'a>(
+    namespace: &str,
+    raw_names: impl IntoIterator<Item = &'a str>,
+) -> BTreeMap<String, String> {
+    let mut candidates = raw_names
+        .into_iter()
+        .map(|raw| (raw.to_owned(), normalize_name(raw)))
+        .collect::<Vec<_>>();
+    let mut counts = BTreeMap::<String, usize>::new();
+    for (_, base) in &candidates {
+        *counts.entry(base.clone()).or_default() += 1;
+    }
+    candidates.sort_by(|left, right| left.0.cmp(&right.0));
+
+    let maximum_bytes = MAX_MODEL_TOOL_NAME_BYTES.saturating_sub(namespace.len());
+    let mut used = BTreeSet::new();
+    candidates
+        .into_iter()
+        .map(|(raw, base)| {
+            let collides = counts.get(&base).copied().unwrap_or_default() > 1;
+            let model = unique_bounded_name(&base, &raw, maximum_bytes, collides, &mut used);
+            (raw, model)
+        })
+        .collect()
+}
+
+fn unique_bounded_name(
+    base: &str,
+    raw_identity: &str,
+    maximum_bytes: usize,
+    require_hash: bool,
+    used: &mut BTreeSet<String>,
+) -> String {
+    if !require_hash && base.len() <= maximum_bytes && used.insert(base.to_owned()) {
+        return base.to_owned();
+    }
+
+    let mut attempt = 0_u32;
+    loop {
+        let identity = if attempt == 0 {
+            raw_identity.to_owned()
+        } else {
+            format!("{raw_identity}\0{attempt}")
+        };
+        let suffix = name_hash_suffix(&identity);
+        let prefix_bytes = maximum_bytes.saturating_sub(suffix.len());
+        let prefix = &base[..base.len().min(prefix_bytes)];
+        let candidate = format!("{prefix}{suffix}");
+        if used.insert(candidate.clone()) {
+            return candidate;
+        }
+        attempt = attempt.saturating_add(1);
+    }
+}
+
+fn name_hash_suffix(identity: &str) -> String {
+    let mut hasher = Sha1::new();
+    hasher.update(identity.as_bytes());
+    let hash = hasher.finalize();
+    let mut suffix = String::with_capacity(NAME_HASH_SUFFIX_BYTES);
+    suffix.push('_');
+    for byte in &hash[..NAME_HASH_BYTES / 2] {
+        use std::fmt::Write as _;
+        let _ = write!(suffix, "{byte:02x}");
+    }
+    suffix
 }
 
 fn coalesce_loadable_tools(selected: &[Arc<ToolEntry>]) -> Vec<LoadableNamespace> {
@@ -600,10 +726,41 @@ mod tests {
 
     #[test]
     fn canonical_names_are_stable_and_javascript_safe() {
+        let namespaces = normalized_server_names(["Google Drive"]);
+        let namespace = &namespaces["Google Drive"];
+        let names = normalized_tool_names(namespace, ["files/search"]);
         assert_eq!(
-            canonical_tool_name("Google Drive", "files/search"),
+            format!("{namespace}{}", names["files/search"]),
             "mcp__Google_Drive__files_search"
         );
+    }
+
+    #[test]
+    fn model_names_disambiguate_sanitized_collisions_independent_of_input_order() {
+        let first = normalized_server_names(["docs/api", "docs_api"]);
+        let second = normalized_server_names(["docs_api", "docs/api"]);
+        assert_eq!(first, second);
+        assert_ne!(first["docs/api"], first["docs_api"]);
+
+        let namespace = "mcp__docs__";
+        let names = normalized_tool_names(namespace, ["read/file", "read_file"]);
+        assert_ne!(names["read/file"], names["read_file"]);
+        assert!(
+            names
+                .values()
+                .all(|name| namespace.len() + name.len() <= 128)
+        );
+    }
+
+    #[test]
+    fn model_names_preserve_the_128_byte_boundary_and_hash_longer_names() {
+        let namespace = "mcp__docs__";
+        let exact = "a".repeat(128 - namespace.len());
+        let long = "b".repeat(129 - namespace.len());
+        let names = normalized_tool_names(namespace, [exact.as_str(), long.as_str()]);
+        assert_eq!(names[&exact], exact);
+        assert_eq!(namespace.len() + names[&long].len(), 128);
+        assert_ne!(names[&long], long);
     }
 
     #[test]

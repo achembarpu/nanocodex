@@ -16,11 +16,13 @@ use std::{
     time::Duration,
 };
 
-use crate::{DynamicToolProvider, Tool, ToolContext, ToolInput, ToolOutput, ToolResult};
+use crate::{
+    DynamicToolProvider, Tool, ToolContext, ToolInput, ToolOutput, ToolOutputContent, ToolResult,
+};
 use async_trait::async_trait;
 use catalog::{ConnectedCatalog, ProviderState, ToolEntry};
 use nanocodex_oai_api::tools::ToolDefinition;
-use rmcp::model::CallToolRequestParams;
+use rmcp::model::{CallToolRequestParams, CallToolResult, ContentBlock};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tracing::{Instrument, info_span};
@@ -29,18 +31,36 @@ pub use config::{McpPaymentProvider, McpPendingPayment, McpServer, McpToolExposu
 pub use oauth::{McpOAuthCredentials, McpOAuthRefreshGuard, McpOAuthStore};
 
 const MAX_TOOL_SEARCH_SOURCE_DESCRIPTION_BYTES: usize = 4 * 1024;
+const CODEX_ENCRYPTED_CONTENT_META_KEY: &str = "codex/encryptedContent";
+const CODEX_IMAGE_DETAIL_META_KEY: &str = "codex/imageDetail";
 
-fn same_origin_redirect_policy() -> reqwest::redirect::Policy {
-    reqwest::redirect::Policy::custom(|attempt| {
-        let follows_same_origin = attempt
-            .previous()
-            .last()
-            .is_some_and(|previous| previous.origin() == attempt.url().origin());
-        if follows_same_origin && attempt.previous().len() <= 10 {
-            attempt.follow()
-        } else {
-            attempt.stop()
+fn same_origin_redirect_policy(
+    replays_plaintext_proxy_credentials: bool,
+) -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(move |attempt| {
+        let Some(original) = attempt.previous().first() else {
+            return attempt.error("MCP HTTP redirect has no original request URL");
+        };
+        if attempt.url().origin() != original.origin() {
+            return attempt.error("MCP HTTP redirect to a different origin is not allowed");
         }
+        if attempt.previous().len() > 10 {
+            return attempt.error("MCP HTTP request exceeded the redirect limit");
+        }
+        let secure_destination = attempt.url().scheme() == "https"
+            || match attempt.url().host() {
+                Some(url::Host::Ipv4(_) | url::Host::Ipv6(_)) => true,
+                Some(url::Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
+                None => false,
+            };
+        if !secure_destination {
+            return attempt.error("MCP HTTP redirects for non-loopback hostnames require HTTPS");
+        }
+        if replays_plaintext_proxy_credentials && original.scheme() != "https" {
+            return attempt
+                .error("MCP HTTP redirects cannot replay proxy credentials over plaintext HTTP");
+        }
+        attempt.follow()
     })
 }
 
@@ -61,6 +81,7 @@ pub(crate) struct PreparedMcpTool {
 
 struct NamedServer {
     name: String,
+    model_namespace: String,
     config: McpServer,
 }
 
@@ -255,11 +276,18 @@ impl McpBuilder {
         }
         let mut discovery_timeout = Duration::ZERO;
         let mut named = Vec::with_capacity(self.servers.len());
+        let model_namespaces =
+            catalog::normalized_server_names(self.servers.keys().map(String::as_str));
         for (name, server) in self.servers {
             validate_server(&name, &server)?;
             discovery_timeout = discovery_timeout.max(server.startup_timeout.saturating_mul(2));
+            let model_namespace = model_namespaces
+                .get(&name)
+                .cloned()
+                .ok_or(McpBuildError::EmptyName)?;
             named.push(NamedServer {
                 name,
+                model_namespace,
                 config: server,
             });
         }
@@ -344,18 +372,13 @@ impl McpHandle {
         match result {
             Ok(connected) => {
                 let count = connected.tools.len();
-                let entries = connected
-                    .tools
-                    .into_iter()
-                    .map(|tool| {
-                        ToolEntry::new(
-                            server_name,
-                            &tool,
-                            Arc::clone(&connected.client),
-                            &server.config,
-                        )
-                    })
-                    .collect();
+                let entries = ToolEntry::new_many(
+                    server_name,
+                    &server.model_namespace,
+                    connected.tools,
+                    Arc::clone(&connected.client),
+                    &server.config,
+                );
                 self.state.complete_server(
                     server_name,
                     generation,
@@ -502,6 +525,7 @@ impl DynamicToolProvider for Mcp {
         }
         for server in &*self.servers {
             let name = server.name.clone();
+            let model_namespace = server.model_namespace.clone();
             let config = server.config.clone();
             let state = Arc::clone(&self.state);
             let oauth_store = self.oauth_store.clone();
@@ -520,13 +544,13 @@ impl DynamicToolProvider for Mcp {
                 let result = client::connect(&name, &config, oauth_store, oauth_metadata, &span)
                     .await
                     .map(|connected| {
-                        let entries = connected
-                            .tools
-                            .into_iter()
-                            .map(|tool| {
-                                ToolEntry::new(&name, &tool, Arc::clone(&connected.client), &config)
-                            })
-                            .collect::<Vec<_>>();
+                        let entries = ToolEntry::new_many(
+                            &name,
+                            &model_namespace,
+                            connected.tools,
+                            Arc::clone(&connected.client),
+                            &config,
+                        );
                         ConnectedCatalog {
                             client: connected.client,
                             entries,
@@ -650,18 +674,122 @@ async fn execute_mcp_entry(entry: &ToolEntry, input: Value, timeout: Duration) -
     let success = !result.is_error.unwrap_or(false);
     span.record("status", if success { "completed" } else { "failed" });
     span.record("otel.status_code", if success { "OK" } else { "ERROR" });
-    let value = match serde_json::to_value(result) {
-        Ok(value) => value,
+    match tool_output_from_mcp_result(result, &entry.server_name, &entry.remote_name) {
+        Ok(output) => output,
         Err(error) => {
             span.record("status", "failed");
             span.record("otel.status_code", "ERROR");
-            return ToolOutput::error(format!("failed to encode MCP tool result: {error}"));
+            ToolOutput::error(format!("failed to encode MCP tool result: {error}"))
         }
+    }
+}
+
+fn tool_output_from_mcp_result(
+    result: CallToolResult,
+    server_name: &str,
+    remote_name: &str,
+) -> Result<ToolOutput, serde_json::Error> {
+    let success = !result.is_error.unwrap_or(false);
+    let value = serde_json::to_value(&result)?;
+    let result_metadata = result.meta.as_ref().map(|metadata| &metadata.0);
+    let direct_content = direct_mcp_content(&result.content)?;
+    let contains_encrypted_content = direct_content.as_ref().is_some_and(|content| {
+        content
+            .iter()
+            .any(|item| matches!(item, ToolOutputContent::EncryptedContent { .. }))
+    });
+    let mut output = if contains_encrypted_content {
+        let mut output = ToolOutput::content(direct_content.unwrap_or_default());
+        output.success = success;
+        output.with_structured_result(value)
+    } else if let Some(structured_content) = result
+        .structured_content
+        .as_ref()
+        .filter(|content| !content.is_null())
+    {
+        ToolOutput::from_json(structured_content.clone(), success).with_structured_result(value)
+    } else if let Some(content) = direct_content {
+        let mut output = ToolOutput::content(content);
+        output.success = success;
+        output.with_structured_result(value)
+    } else {
+        ToolOutput::from_json(serde_json::to_value(&result.content)?, success)
+            .with_structured_result(value)
     };
-    ToolOutput::from_json(value, success).with_metadata(json!({
-        "mcp_server": entry.server_name,
-        "mcp_tool": entry.remote_name,
-    }))
+    output = output.with_metadata(json!({
+        "mcp_server": server_name,
+        "mcp_tool": remote_name,
+        "mcp_result_meta": result_metadata,
+    }));
+    Ok(output)
+}
+
+fn direct_mcp_content(
+    content: &[ContentBlock],
+) -> Result<Option<Vec<ToolOutputContent>>, serde_json::Error> {
+    let mut has_typed_content = false;
+    let mut output = Vec::with_capacity(content.len());
+    for item in content {
+        let item = match item {
+            ContentBlock::Text(text)
+                if content_meta_bool(&text.meta, CODEX_ENCRYPTED_CONTENT_META_KEY) =>
+            {
+                has_typed_content = true;
+                ToolOutputContent::EncryptedContent {
+                    encrypted_content: text.text.clone(),
+                }
+            }
+            ContentBlock::Text(text) => ToolOutputContent::InputText {
+                text: text.text.clone(),
+            },
+            ContentBlock::Image(image) => {
+                has_typed_content = true;
+                ToolOutputContent::InputImage {
+                    image_url: media_data_url(&image.data, &image.mime_type),
+                    detail: image_detail(&image.meta),
+                }
+            }
+            ContentBlock::Audio(audio) => {
+                has_typed_content = true;
+                ToolOutputContent::InputAudio {
+                    audio_url: media_data_url(&audio.data, &audio.mime_type),
+                }
+            }
+            _ => ToolOutputContent::InputText {
+                text: serde_json::to_string(item)?,
+            },
+        };
+        output.push(item);
+    }
+    Ok(has_typed_content.then_some(output))
+}
+
+fn content_meta_bool(meta: &Option<rmcp::model::MetaObject>, key: &str) -> bool {
+    meta.as_ref()
+        .and_then(|meta| meta.0.get(key))
+        .and_then(Value::as_bool)
+        == Some(true)
+}
+
+fn media_data_url(data: &str, mime_type: &str) -> String {
+    if data.starts_with("data:") {
+        data.to_owned()
+    } else {
+        format!("data:{mime_type};base64,{data}")
+    }
+}
+
+fn image_detail(meta: &Option<rmcp::model::MetaObject>) -> nanocodex_oai_api::ImageDetail {
+    match meta
+        .as_ref()
+        .and_then(|meta| meta.0.get(CODEX_IMAGE_DETAIL_META_KEY))
+        .and_then(Value::as_str)
+    {
+        Some("low") => nanocodex_oai_api::ImageDetail::Low,
+        Some("high") => nanocodex_oai_api::ImageDetail::High,
+        Some("original") => nanocodex_oai_api::ImageDetail::Original,
+        Some("auto") | Some(_) | None => nanocodex_oai_api::ImageDetail::Auto,
+    }
 }
 
 struct McpSearch {
@@ -845,10 +973,138 @@ mod tests {
     use crate::{ToolOutputBody, Tools, contract::DEFAULT_TOOL_OUTPUT_TOKENS};
     use futures_util::future::join_all;
     use nanocodex_oai_api::MODEL;
+    use rmcp::model::ContentBlock;
     use serde_json::value::to_raw_value;
 
     fn test_context(session_id: &'static str, call_id: &'static str) -> ToolContext<'static> {
         ToolContext::new(MODEL, session_id, call_id, &[], DEFAULT_TOOL_OUTPUT_TOKENS)
+    }
+
+    fn output_contains_text(output: &ToolOutputBody, expected: &str) -> bool {
+        match output {
+            ToolOutputBody::Text(text) => text.contains(expected),
+            ToolOutputBody::Content(content) => content.iter().any(|content| {
+                matches!(content, ToolOutputContent::InputText { text } if text.contains(expected))
+            }),
+        }
+    }
+
+    #[test]
+    fn mcp_structured_content_precedes_unencrypted_content_for_model_input() {
+        let mut result = CallToolResult::success(vec![
+            ContentBlock::text("hello"),
+            ContentBlock::image("aW1hZ2U=", "image/png"),
+        ]);
+        result.structured_content = Some(json!({"answer": 42}));
+        let expected = serde_json::to_value(&result).unwrap();
+
+        let output = tool_output_from_mcp_result(result, "fixture", "media").unwrap();
+        assert!(output.success);
+        assert_eq!(output.structured_result(), expected);
+        assert!(matches!(output.output, ToolOutputBody::Text(text) if text == r#"{"answer":42}"#));
+    }
+
+    #[test]
+    fn mcp_media_preserves_data_urls_image_detail_and_unsupported_blocks() {
+        let result: CallToolResult = serde_json::from_value(json!({
+            "content": [
+                {"type": "text", "text": "hello"},
+                {
+                    "type": "image",
+                    "data": "data:image/png;base64,aW1hZ2U=",
+                    "mimeType": "image/png",
+                    "_meta": {"codex/imageDetail": "original"}
+                },
+                {"type": "audio", "data": "YXVkaW8=", "mimeType": "audio/wav"},
+                {
+                    "type": "resource_link",
+                    "uri": "file:///tmp/report.txt",
+                    "name": "report",
+                    "_meta": {"retained": true}
+                }
+            ]
+        }))
+        .unwrap();
+        let expected = serde_json::to_value(&result).unwrap();
+
+        let output = tool_output_from_mcp_result(result, "fixture", "media").unwrap();
+        assert_eq!(output.structured_result(), expected);
+        assert!(matches!(
+            output.output,
+            ToolOutputBody::Content(content)
+                if matches!(&content[0], ToolOutputContent::InputText { text } if text == "hello")
+                    && matches!(&content[1], ToolOutputContent::InputImage { image_url, detail: nanocodex_oai_api::ImageDetail::Original } if image_url == "data:image/png;base64,aW1hZ2U=")
+                    && matches!(&content[2], ToolOutputContent::InputAudio { audio_url } if audio_url == "data:audio/wav;base64,YXVkaW8=")
+                    && matches!(&content[3], ToolOutputContent::InputText { text } if text.contains("resource_link") && text.contains("retained"))
+        ));
+    }
+
+    #[test]
+    fn encrypted_mcp_text_stays_opaque_and_overrides_structured_content() {
+        let result: CallToolResult = serde_json::from_value(json!({
+            "content": [
+                {"type": "text", "text": "Lookup completed"},
+                {
+                    "type": "text",
+                    "text": "gAAAA-test",
+                    "_meta": {"codex/encryptedContent": true}
+                }
+            ],
+            "structuredContent": {"encrypted_output": "ignored"}
+        }))
+        .unwrap();
+        let expected = serde_json::to_value(&result).unwrap();
+
+        let output = tool_output_from_mcp_result(result, "fixture", "encrypted").unwrap();
+        assert_eq!(output.structured_result(), expected);
+        let ToolOutputBody::Content(content) = output.output else {
+            panic!("encrypted MCP text must use typed function output content");
+        };
+        assert!(matches!(
+            &content[0],
+            ToolOutputContent::InputText { text } if text == "Lookup completed"
+        ));
+        assert!(matches!(
+            &content[1],
+            ToolOutputContent::EncryptedContent { encrypted_content }
+                if encrypted_content == "gAAAA-test"
+        ));
+        assert!(!content.iter().any(|item| {
+            matches!(item, ToolOutputContent::InputText { text } if text.contains("gAAAA-test"))
+        }));
+    }
+
+    #[test]
+    fn unsupported_mcp_content_falls_back_to_lossless_json_text_and_preserves_error() {
+        let result: CallToolResult = serde_json::from_value(json!({
+            "content": [{
+                "type": "resource_link",
+                "uri": "file:///tmp/report.txt",
+                "name": "report"
+            }],
+            "isError": true,
+            "_meta": {"trace": "retained"}
+        }))
+        .unwrap();
+        let expected = serde_json::to_value(&result).unwrap();
+
+        let output = tool_output_from_mcp_result(result, "fixture", "resource").unwrap();
+        assert!(!output.success);
+        assert_eq!(output.structured_result(), expected);
+        assert!(matches!(
+            output.output,
+            ToolOutputBody::Text(text)
+                if text == serde_json::to_string(&expected["content"]).unwrap()
+        ));
+        let metadata: Value = serde_json::from_str(output.metadata.unwrap().get()).unwrap();
+        assert_eq!(
+            metadata,
+            json!({
+                "mcp_server": "fixture",
+                "mcp_tool": "resource",
+                "mcp_result_meta": {"trace": "retained"}
+            })
+        );
     }
 
     #[derive(Default)]
@@ -1121,10 +1377,7 @@ mod tests {
             .await
             .unwrap();
         assert!(execution.success);
-        assert!(matches!(
-            execution.output,
-            ToolOutputBody::Text(output) if output.contains("fixture:hello")
-        ));
+        assert!(output_contains_text(&execution.output, "fixture:hello"));
     }
 
     #[tokio::test]
@@ -1162,9 +1415,9 @@ mod tests {
             .await
             .unwrap();
         assert!(execution.success);
-        assert!(matches!(
-            execution.output,
-            ToolOutputBody::Text(output) if output.contains("fixture:after-payment")
+        assert!(output_contains_text(
+            &execution.output,
+            "fixture:after-payment"
         ));
         assert_eq!(payment.lifecycle.credentials.load(Ordering::Relaxed), 1);
         assert_eq!(payment.lifecycle.commits.load(Ordering::Relaxed), 1);
@@ -1460,9 +1713,9 @@ mod tests {
             .await
             .unwrap();
         assert!(execution.success);
-        assert!(matches!(
-            execution.output,
-            ToolOutputBody::Text(output) if output.contains("fixture:after-reload")
+        assert!(output_contains_text(
+            &execution.output,
+            "fixture:after-reload"
         ));
     }
 

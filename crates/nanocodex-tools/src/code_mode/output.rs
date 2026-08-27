@@ -26,7 +26,9 @@ fn truncate_text_only(
         .iter()
         .filter_map(|item| match item {
             ToolOutputContent::InputText { text } => Some(text.as_str()),
-            ToolOutputContent::InputImage { .. } | ToolOutputContent::InputAudio { .. } => None,
+            ToolOutputContent::InputImage { .. }
+            | ToolOutputContent::InputAudio { .. }
+            | ToolOutputContent::EncryptedContent { .. } => None,
         })
         .collect::<Vec<_>>()
         .join("\n");
@@ -74,6 +76,7 @@ fn truncate_mixed(
                 }
             }
             image @ ToolOutputContent::InputImage { .. } => output.push(image),
+            encrypted @ ToolOutputContent::EncryptedContent { .. } => output.push(encrypted),
             ToolOutputContent::InputAudio { .. } => {}
         }
     }
@@ -194,5 +197,30 @@ mod tests {
             ToolOutputContent::InputText { text }
                 if text == "Warning: truncated output (original token count: 5)\nTotal output lines: 2\n\nabcd…3 tokens truncated…mnop"
         ));
+    }
+
+    #[test]
+    fn preserves_encrypted_content_without_exposing_it_as_text() {
+        let ciphertext = "gAAAA-opaque-provider-payload";
+        let output = truncate_content(
+            vec![
+                ToolOutputContent::InputText {
+                    text: "discarded".to_owned(),
+                },
+                ToolOutputContent::EncryptedContent {
+                    encrypted_content: ciphertext.to_owned(),
+                },
+            ],
+            Some(0),
+        );
+
+        assert!(matches!(
+            &output[0],
+            ToolOutputContent::EncryptedContent { encrypted_content }
+                if encrypted_content == ciphertext
+        ));
+        assert!(!output.iter().any(|item| {
+            matches!(item, ToolOutputContent::InputText { text } if text.contains(ciphertext))
+        }));
     }
 }

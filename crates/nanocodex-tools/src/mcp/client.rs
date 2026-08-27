@@ -1,6 +1,9 @@
 use std::{collections::HashMap, sync::Arc};
 
-use http::{HeaderName, HeaderValue, header::USER_AGENT};
+use http::{
+    HeaderName, HeaderValue,
+    header::{PROXY_AUTHORIZATION, USER_AGENT},
+};
 use rmcp::{
     ServiceExt,
     model::{CallToolRequestParams, CallToolResult, Tool},
@@ -262,12 +265,15 @@ async fn connect_http(input: HttpConnect<'_>) -> Result<ConnectedServer, String>
         return Err("Streamable HTTP URL must not be empty".to_owned());
     }
     let (resolved_headers, default_headers) = resolve_http_headers(headers)?;
+    let replays_plaintext_proxy_credentials = default_headers.contains_key(PROXY_AUTHORIZATION);
     nanocodex_oai_api::transport::install_default_rustls_crypto_provider();
     let http_client = reqwest::Client::builder()
         // Match RMCP's default: its streamed handshake responses are not always fully consumed
         // before the next request, so retaining them as idle connections can stall real peers.
         .pool_max_idle_per_host(0)
-        .redirect(super::same_origin_redirect_policy())
+        .redirect(super::same_origin_redirect_policy(
+            replays_plaintext_proxy_credentials,
+        ))
         .default_headers(default_headers)
         .build()
         .map_err(|error| format!("failed to build MCP HTTP client: {error}"))?;

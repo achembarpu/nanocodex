@@ -1080,7 +1080,9 @@ fn expose_running_shell_sessions(
             .iter()
             .filter_map(|item| match item {
                 ToolOutputContent::InputText { text } => Some(text),
-                ToolOutputContent::InputImage { .. } | ToolOutputContent::InputAudio { .. } => None,
+                ToolOutputContent::InputImage { .. }
+                | ToolOutputContent::InputAudio { .. }
+                | ToolOutputContent::EncryptedContent { .. } => None,
             })
             .any(|text| text_exposes_session_id(text, session_id))
         {

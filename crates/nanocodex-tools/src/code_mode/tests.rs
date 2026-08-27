@@ -2260,7 +2260,9 @@ fn emitted_text(execution: &CodeModeExecution) -> Result<&str> {
         .rev()
         .find_map(|item| match item {
             ToolOutputContent::InputText { text } => Some(text.as_str()),
-            ToolOutputContent::InputImage { .. } | ToolOutputContent::InputAudio { .. } => None,
+            ToolOutputContent::InputImage { .. }
+            | ToolOutputContent::InputAudio { .. }
+            | ToolOutputContent::EncryptedContent { .. } => None,
         })
         .ok_or_else(|| eyre!("code-mode execution did not emit text"))
 }
@@ -2272,7 +2274,9 @@ fn execution_output(execution: &CodeModeExecution) -> String {
             .iter()
             .filter_map(|item| match item {
                 ToolOutputContent::InputText { text } => Some(text.as_str()),
-                ToolOutputContent::InputImage { .. } | ToolOutputContent::InputAudio { .. } => None,
+                ToolOutputContent::InputImage { .. }
+                | ToolOutputContent::InputAudio { .. }
+                | ToolOutputContent::EncryptedContent { .. } => None,
             })
             .collect::<Vec<_>>()
             .join("\n"),

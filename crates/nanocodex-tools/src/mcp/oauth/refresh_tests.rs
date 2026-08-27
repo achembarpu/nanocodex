@@ -75,23 +75,30 @@ impl McpOAuthStore for TestStore {
 async fn runtime_for(
     token_endpoint: String,
     store: Arc<TestStore>,
-    credentials: McpOAuthCredentials,
+    mut credentials: McpOAuthCredentials,
 ) -> Arc<OAuthRuntime> {
     nanocodex_oai_api::transport::install_default_rustls_crypto_provider();
     let server_name = "refresh-test";
-    let server_url = "http://127.0.0.1:9/mcp";
+    let issuer = url::Url::parse(&token_endpoint)
+        .unwrap()
+        .origin()
+        .ascii_serialization();
+    let server_url = format!("{issuer}/mcp");
+    credentials.issuer = Some(issuer.clone());
+    *store.current.lock().await = Some(credentials.clone());
     let metadata: AuthorizationMetadata = serde_json::from_value(serde_json::json!({
-        "authorization_endpoint": "http://127.0.0.1:9/authorize",
+        "authorization_endpoint": format!("{issuer}/authorize"),
         "token_endpoint": token_endpoint,
+        "issuer": issuer,
     }))
     .unwrap();
     let metadata_cache = OAuthMetadataCache::default();
     metadata_cache
-        .insert(server_name, server_url, metadata)
+        .insert(server_name, &server_url, metadata)
         .await;
     transport_from_credentials(
         server_name,
-        server_url,
+        &server_url,
         reqwest::Client::new(),
         store,
         credentials,
@@ -111,21 +118,116 @@ fn expired_credentials() -> McpOAuthCredentials {
 
 async fn token_server(status: &str, body: &str) -> (String, tokio::task::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let endpoint = format!("http://{}/token", listener.local_addr().unwrap());
+    let issuer = format!("http://{}", listener.local_addr().unwrap());
+    let endpoint = format!("{issuer}/token");
     let status = status.to_owned();
     let body = body.to_owned();
     let task = tokio::spawn(async move {
-        let (mut stream, _) = listener.accept().await.unwrap();
-        let mut request = vec![0_u8; 4096];
-        let read = stream.read(&mut request).await.unwrap();
-        let request = String::from_utf8_lossy(&request[..read]);
-        assert!(request.contains("grant_type=refresh_token"));
-        assert!(request.contains("refresh_token=refresh-token"));
-        let response = format!(
-            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-            body.len()
-        );
-        stream.write_all(response.as_bytes()).await.unwrap();
+        let mut refreshed = false;
+        loop {
+            let accepted = timeout(
+                if refreshed {
+                    Duration::from_millis(250)
+                } else {
+                    Duration::from_secs(5)
+                },
+                listener.accept(),
+            )
+            .await;
+            let Ok(Ok((mut stream, _))) = accepted else {
+                assert!(refreshed, "refresh token endpoint was never called");
+                break;
+            };
+            let mut request = vec![0_u8; 4096];
+            let read = stream.read(&mut request).await.unwrap();
+            let request = String::from_utf8_lossy(&request[..read]);
+            let first_line = request.lines().next().unwrap_or_default();
+            let (response_status, response_body) = match first_line {
+                line if line.starts_with("POST /token ") => {
+                    assert!(request.contains("grant_type=refresh_token"));
+                    assert!(request.contains("refresh_token=refresh-token"));
+                    refreshed = true;
+                    (status.as_str(), body.clone())
+                }
+                line if line.starts_with("GET /mcp ") => ("404 Not Found", String::new()),
+                line if line.starts_with("GET ") && line.contains("oauth-protected-resource") => {
+                    // `AuthorizationManager` resolves this snapshot afresh inside the credential lock.
+                    (
+                        "200 OK",
+                        format!(
+                            r#"{{"resource":"{issuer}/mcp","authorization_servers":["{issuer}"]}}"#
+                        ),
+                    )
+                }
+                line if line.starts_with("GET ")
+                    && (line.contains("oauth-authorization-server")
+                        || line.contains("openid-configuration")) =>
+                {
+                    (
+                        "200 OK",
+                        format!(
+                            r#"{{"authorization_endpoint":"{issuer}/authorize","token_endpoint":"{issuer}/token","issuer":"{issuer}"}}"#
+                        ),
+                    )
+                }
+                _ => panic!("unexpected OAuth fixture request: {first_line}"),
+            };
+            let response = format!(
+                "HTTP/1.1 {response_status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
+                response_body.len()
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        }
+    });
+    (endpoint, task)
+}
+
+async fn metadata_server() -> (String, tokio::task::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let issuer = format!("http://{}", listener.local_addr().unwrap());
+    let endpoint = format!("{issuer}/token");
+    let task = tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = vec![0_u8; 4096];
+            let read = stream.read(&mut request).await.unwrap();
+            let first_line = String::from_utf8_lossy(&request[..read])
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .to_owned();
+            assert!(first_line.starts_with("GET "), "{first_line}");
+            let (status, body, complete) = match first_line.as_str() {
+                line if line.starts_with("GET /mcp ") => ("404 Not Found", String::new(), false),
+                line if line.contains("oauth-protected-resource") => (
+                    "200 OK",
+                    format!(
+                        r#"{{"resource":"{issuer}/mcp","authorization_servers":["{issuer}"]}}"#
+                    ),
+                    false,
+                ),
+                line if line.contains("oauth-authorization-server")
+                    || line.contains("openid-configuration") =>
+                {
+                    (
+                        "200 OK",
+                        format!(
+                            r#"{{"authorization_endpoint":"{issuer}/authorize","token_endpoint":"{issuer}/token","issuer":"{issuer}"}}"#
+                        ),
+                        true,
+                    )
+                }
+                _ => panic!("unexpected OAuth fixture request: {first_line}"),
+            };
+            let response = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+            if complete {
+                break;
+            }
+        }
     });
     (endpoint, task)
 }
@@ -190,6 +292,22 @@ async fn rejected_refresh_token_requires_reauthorization() {
 }
 
 #[tokio::test]
+async fn refresh_fails_closed_when_current_metadata_changes_issuer() {
+    let (endpoint, server) = metadata_server().await;
+    let credentials = expired_credentials();
+    let store = Arc::new(TestStore::new(Some(credentials.clone())));
+    let runtime = runtime_for(endpoint, Arc::clone(&store), credentials).await;
+    store.current.lock().await.as_mut().unwrap().issuer = Some("https://issuer-a.example".into());
+
+    let error = runtime.refresh_if_needed().await.unwrap_err();
+    server.await.unwrap();
+
+    assert!(error.contains("issuer changed"), "{error}");
+    assert!(error.contains("authorization required"), "{error}");
+    assert_eq!(store.saves.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
 async fn concurrent_runtimes_refresh_a_rotating_token_once() {
     let (endpoint, server) = token_server(
         "200 OK",
@@ -218,21 +336,56 @@ async fn concurrent_runtimes_refresh_a_rotating_token_once() {
 #[tokio::test]
 async fn caller_cancellation_does_not_cancel_refresh_persistence() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let endpoint = format!("http://{}/token", listener.local_addr().unwrap());
+    let issuer = format!("http://{}", listener.local_addr().unwrap());
+    let endpoint = format!("{issuer}/token");
     let (requested, requested_rx) = oneshot::channel();
     let (release, release_rx) = oneshot::channel();
     let server = tokio::spawn(async move {
-        let (mut stream, _) = listener.accept().await.unwrap();
-        let mut request = vec![0_u8; 4096];
-        let _ = stream.read(&mut request).await.unwrap();
-        requested.send(()).unwrap();
-        release_rx.await.unwrap();
-        let body = r#"{"access_token":"refreshed-access","token_type":"Bearer","expires_in":3600,"refresh_token":"rotated-refresh"}"#;
-        let response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-            body.len()
-        );
-        stream.write_all(response.as_bytes()).await.unwrap();
+        let mut requested = Some(requested);
+        let mut release_rx = Some(release_rx);
+        loop {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = vec![0_u8; 4096];
+            let read = stream.read(&mut request).await.unwrap();
+            let request = String::from_utf8_lossy(&request[..read]);
+            let first_line = request.lines().next().unwrap_or_default();
+            let (status, body) = match first_line {
+                line if line.starts_with("POST /token ") => {
+                    requested.take().unwrap().send(()).unwrap();
+                    release_rx.take().unwrap().await.unwrap();
+                    (
+                        "200 OK",
+                        r#"{"access_token":"refreshed-access","token_type":"Bearer","expires_in":3600,"refresh_token":"rotated-refresh"}"#.to_owned(),
+                    )
+                }
+                line if line.starts_with("GET /mcp ") => ("404 Not Found", String::new()),
+                line if line.contains("oauth-protected-resource") => (
+                    "200 OK",
+                    format!(
+                        r#"{{"resource":"{issuer}/mcp","authorization_servers":["{issuer}"]}}"#
+                    ),
+                ),
+                line if line.contains("oauth-authorization-server")
+                    || line.contains("openid-configuration") =>
+                {
+                    (
+                        "200 OK",
+                        format!(
+                            r#"{{"authorization_endpoint":"{issuer}/authorize","token_endpoint":"{issuer}/token","issuer":"{issuer}"}}"#
+                        ),
+                    )
+                }
+                _ => panic!("unexpected OAuth fixture request: {first_line}"),
+            };
+            let response = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+            if first_line.starts_with("POST /token ") {
+                break;
+            }
+        }
     });
     let credentials = expired_credentials();
     let store = Arc::new(TestStore::new(Some(credentials.clone())));
@@ -335,12 +488,19 @@ async fn server_401_refreshes_and_retries_once() {
     });
     let credentials = McpOAuthCredentials::new("client", "current-access")
         .refresh_token("refresh-token")
+        .issuer(
+            url::Url::parse(&server_url)
+                .unwrap()
+                .origin()
+                .ascii_serialization(),
+        )
         .expires_at_millis(now_millis() + 3_600_000)
         .scopes(["mcp:tools"]);
     let store = Arc::new(TestStore::new(Some(credentials.clone())));
     let metadata: AuthorizationMetadata = serde_json::from_value(serde_json::json!({
-        "authorization_endpoint": "http://127.0.0.1:9/authorize",
+        "authorization_endpoint": format!("{}/authorize", url::Url::parse(&server_url).unwrap().origin().ascii_serialization()),
         "token_endpoint": token_endpoint,
+        "issuer": url::Url::parse(&server_url).unwrap().origin().ascii_serialization(),
     }))
     .unwrap();
     let metadata_cache = OAuthMetadataCache::default();
