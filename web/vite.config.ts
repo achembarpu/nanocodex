@@ -6,6 +6,7 @@ import { createHash } from "node:crypto";
 import { readFile, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { defineConfig, type Plugin } from "vite";
+import { isLocalDocumentRequest } from "./scripts/local-document-request.mjs";
 import { rewriteConnectDialogDevModuleUrl } from "./vite/connectDialogDevModules.ts";
 import { rewriteDocsDevModuleUrl } from "./vite/docsDevModules.ts";
 import { localManagedAuxiliaryWorkers } from "./vite/localWorkerTopology.ts";
@@ -86,7 +87,7 @@ function localConnectApplications(): Plugin {
             next();
             return;
           }
-          if (request.headers.accept?.includes("text/html")) {
+          if (isLocalDocumentRequest(request, url.pathname === "/")) {
             try {
               await serveDocument(connectPlaygroundIndex, `${url.pathname}${url.search}`);
             } catch (error) {
@@ -111,7 +112,10 @@ function localConnectApplications(): Plugin {
             next();
             return;
           }
-          if (request.headers.accept?.includes("text/html")) {
+          if (isLocalDocumentRequest(
+            request,
+            url.pathname === "/connect-dialog" || url.pathname === "/connect-dialog/",
+          )) {
             try {
               response.setHeader(
                 "content-security-policy",
@@ -154,16 +158,15 @@ function applicationRouteFallback(): Plugin {
           return;
         }
         const url = new URL(request.url ?? "/", "https://localhost");
-        const acceptsHtml = request.headers.accept?.includes("text/html") ?? false;
-        if ((request.method !== "GET" && request.method !== "HEAD") || !acceptsHtml) {
-          next();
-          return;
-        }
         if (isManagedRoutePath(url.pathname) || isConnectApiBrowserRoutePath(url.pathname)) {
           next();
           return;
         }
         const status = documentStatusForPath(url.pathname);
+        if (!isLocalDocumentRequest(request, status != null)) {
+          next();
+          return;
+        }
         if (status == null) {
           response.statusCode = 404;
           response.setHeader("cache-control", "no-store");

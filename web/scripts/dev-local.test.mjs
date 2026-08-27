@@ -39,6 +39,7 @@ import {
   verifyLocalGitAdvertisement,
   verifyLocalHealthResponse,
   verifyLocalConnectHealthResponse,
+  verifyLocalDocumentResponse,
   verifyLocalModelPreconnect,
   verifyLocalState,
   verifyLocalMultiplayer,
@@ -1191,6 +1192,31 @@ test("managed localhost requires exact non-interactive health and WebSocket atte
   await assert.rejects(
     verifyLocalModelPreconnect(origin, InvalidWebSocket, 1_000),
     /invalid attestation/,
+  );
+});
+
+test("local readiness verifies every advertised application document", async () => {
+  assert.equal(await verifyLocalDocumentResponse(new Response(
+    '<!doctype html><meta name="nanocodex-theme" content="ready">',
+    { headers: { "content-type": "text/html; charset=utf-8" } },
+  ), "Account", ["nanocodex-theme"]), true);
+
+  await assert.rejects(
+    verifyLocalDocumentResponse(Response.json({ error: "not_found" }, { status: 404 }),
+      "Account", ["nanocodex-theme"]),
+    /Account document returned HTTP 404/,
+  );
+  await assert.rejects(
+    verifyLocalDocumentResponse(new Response("plain", {
+      headers: { "content-type": "text/plain" },
+    }), "Connect dialog", ["connect-dialog/src/main.tsx"]),
+    /Connect dialog document did not return HTML/,
+  );
+  await assert.rejects(
+    verifyLocalDocumentResponse(new Response("<!doctype html>", {
+      headers: { "content-type": "text/html" },
+    }), "Connect playground", ["Private playground"]),
+    /Connect playground document omitted its application marker/,
   );
 });
 

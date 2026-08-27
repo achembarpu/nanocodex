@@ -479,6 +479,24 @@ async function main() {
       [relayChild, website.child],
       verifyLocalConnectHealthResponse,
     );
+    await Promise.all([
+      [new URL("/connect", publicOrigin), "Account", ["nanocodex-theme"]],
+      [new URL("/agent", publicOrigin), "managed agent", ["nanocodex-theme"]],
+      [
+        new URL("/connect-dialog", publicOrigin),
+        "Connect dialog",
+        ['src="/connect-dialog/src/main.tsx"'],
+      ],
+      [
+        new URL("/", playgroundOrigin),
+        "Connect playground",
+        ["Private playground for the Nanocodex Connect API"],
+      ],
+    ].map(([url, label, markers]) => waitForHttp(
+      url,
+      [relayChild, website.child],
+      (response) => verifyLocalDocumentResponse(response, label, markers),
+    )));
 
     await lifecycle.run(process.execPath, [resolve(webRoot, "scripts/publish-repository.mjs")], {
       cwd: webRoot,
@@ -960,6 +978,29 @@ export async function verifyLocalConnectHealthResponse(response) {
   return health?.mode === "live"
     && health?.status === "ok"
     && Object.keys(health).length === 2;
+}
+
+export async function verifyLocalDocumentResponse(response, label, markers) {
+  if (response.status !== 200) {
+    throw new Error(`local ${label} document returned HTTP ${response.status}`);
+  }
+  if (!/^text\/html\b/i.test(response.headers.get("content-type") ?? "")) {
+    throw new Error(`local ${label} document did not return HTML`);
+  }
+  if (!Array.isArray(markers) || markers.length === 0
+    || markers.some((marker) => typeof marker !== "string" || marker.length === 0)) {
+    throw new Error(`local ${label} document markers are invalid`);
+  }
+  const document = await response.text();
+  if (Buffer.byteLength(document) > 512 * 1024) {
+    throw new Error(`local ${label} document exceeded 512 KiB`);
+  }
+  for (const marker of markers) {
+    if (!document.includes(marker)) {
+      throw new Error(`local ${label} document omitted its application marker`);
+    }
+  }
+  return true;
 }
 
 export async function verifyLocalModelPreconnect(
