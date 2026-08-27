@@ -134,7 +134,7 @@ impl Update {
 
         if let Some(requested) = &self.version {
             let key = requested.to_string();
-            if !self.force && store.is_cached(&key)? {
+            if !self.force && store.is_cached_bundle(&key, false)? {
                 store.activate(&key)?;
                 maybe_promote_manager(&store, &key, requested, &manager_version)?;
                 report_activation(&previous, &key, false);
@@ -174,9 +174,9 @@ impl Update {
             .as_ref()
             .map_or_else(|| nightly_key(&release), |version| Ok(version.to_string()))?;
         let cached = if self.nightly {
-            store.is_cached_nightly(&key, vm_guest_binary_asset_name().is_some())?
+            store.is_cached_bundle(&key, vm_guest_binary_asset_name().is_some())?
         } else {
-            store.is_cached(&key)?
+            store.is_cached_bundle(&key, false)?
         };
         if !self.force && cached {
             store.activate(&key)?;
@@ -191,18 +191,18 @@ impl Update {
 
         let binary_name = binary_asset_name()?;
         let (binary, compressed) = find_preferred_asset(&release, binary_name)?;
+        let (companion, companion_compressed) =
+            find_preferred_asset(&release, nanocodex2_binary_asset_name()?)?;
         let checksums = find_asset(&release, CHECKSUMS_ASSET)?;
         let checksum_manifest = download(&client, checksums, false).await?;
         let archive = download_verified(&client, binary, &checksum_manifest, true).await?;
         let contents = unpack_release_asset(archive, &binary.name, compressed)?;
-        if self.nightly {
-            let (companion, compressed) =
-                find_preferred_asset(&release, nanocodex2_binary_asset_name()?)?;
-            let companion_archive =
-                download_verified(&client, companion, &checksum_manifest, true).await?;
-            let companion_contents =
-                unpack_release_asset(companion_archive, &companion.name, compressed)?;
-            let guest_contents = if let Some(guest_name) = vm_guest_binary_asset_name() {
+        let companion_archive =
+            download_verified(&client, companion, &checksum_manifest, true).await?;
+        let companion_contents =
+            unpack_release_asset(companion_archive, &companion.name, companion_compressed)?;
+        let guest_contents = if self.nightly {
+            if let Some(guest_name) = vm_guest_binary_asset_name() {
                 let (guest, compressed) = find_preferred_asset(&release, guest_name)?;
                 let guest_archive =
                     download_verified(&client, guest, &checksum_manifest, true).await?;
@@ -213,16 +213,16 @@ impl Update {
                 )?)
             } else {
                 None
-            };
-            store.install_nightly_bundle(
-                &key,
-                &contents,
-                &companion_contents,
-                guest_contents.as_deref(),
-            )?;
+            }
         } else {
-            store.install(&key, &contents)?;
-        }
+            None
+        };
+        store.install_bundle(
+            &key,
+            &contents,
+            &companion_contents,
+            guest_contents.as_deref(),
+        )?;
         store.activate(&key)?;
         if self.nightly {
             store.promote_manager(&key)?;
@@ -708,7 +708,7 @@ mod tests {
     }
 
     #[test]
-    fn publishes_only_linux_x86_64_and_apple_silicon_assets() {
+    fn publishes_both_binaries_only_for_linux_x86_64_and_apple_silicon() {
         assert_eq!(
             release_asset_name_for("linux", "x86_64").unwrap(),
             "nanocodex-x86_64-unknown-linux-gnu.gz"
@@ -717,9 +717,20 @@ mod tests {
             release_asset_name_for("macos", "aarch64").unwrap(),
             "nanocodex-aarch64-apple-darwin.gz"
         );
+        assert_eq!(
+            nanocodex2_binary_asset_name_for("linux", "x86_64").unwrap(),
+            "nanocodex2-x86_64-unknown-linux-gnu"
+        );
+        assert_eq!(
+            nanocodex2_binary_asset_name_for("macos", "aarch64").unwrap(),
+            "nanocodex2-aarch64-apple-darwin"
+        );
         assert!(release_asset_name_for("linux", "aarch64").is_err());
         assert!(release_asset_name_for("macos", "x86_64").is_err());
         assert!(release_asset_name_for("windows", "x86_64").is_err());
+        assert!(nanocodex2_binary_asset_name_for("linux", "aarch64").is_err());
+        assert!(nanocodex2_binary_asset_name_for("macos", "x86_64").is_err());
+        assert!(nanocodex2_binary_asset_name_for("windows", "x86_64").is_err());
     }
 
     #[test]
@@ -763,6 +774,9 @@ mod tests {
     fn rejects_missing_and_malformed_checksums() {
         assert!(checksum_for(b"abcd  nanocodex-test\n", "nanocodex-test").is_err());
         assert!(checksum_for(b"", "nanocodex-test").is_err());
+        let manifest =
+            b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  nanocodex-test\n";
+        assert!(checksum_for(manifest, "nanocodex2-test").is_err());
     }
 
     #[test]
@@ -808,6 +822,22 @@ mod tests {
         let (raw, compressed) = find_preferred_asset(&raw_release, "nanocodex-test").unwrap();
         assert_eq!(raw.id, 1);
         assert!(!compressed);
+    }
+
+    #[test]
+    fn requires_independently_selectable_assets_for_both_binaries() {
+        let release = Release {
+            tag_name: "v0.5.0".to_owned(),
+            target_commitish: "master".to_owned(),
+            assets: vec![ReleaseAsset {
+                id: 1,
+                name: "nanocodex-test.gz".to_owned(),
+                browser_download_url: "https://example.invalid/nanocodex".to_owned(),
+            }],
+        };
+
+        assert!(find_preferred_asset(&release, "nanocodex-test").is_ok());
+        assert!(find_preferred_asset(&release, "nanocodex2-test").is_err());
     }
 
     #[test]
