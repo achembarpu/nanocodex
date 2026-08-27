@@ -24,3 +24,11 @@ pub use tools::{
 
 /// Default maximum number of active turns in one task tree.
 pub const DEFAULT_MAX_SUBAGENTS: usize = 32;
+
+/// Default maximum number of inactive, reusable subagent runtimes retained in memory.
+///
+/// Active turns may temporarily exceed this limit. Once turns reach a terminal
+/// state, the least-recently-used inactive runtimes are unloaded until residency
+/// returns to this bound. Their topology, status, and last output remain
+/// inspectable.
+pub const DEFAULT_MAX_RESIDENT_SUBAGENTS: usize = 16;

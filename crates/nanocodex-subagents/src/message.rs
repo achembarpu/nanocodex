@@ -22,6 +22,13 @@ pub(super) struct MessageThreads {
 }
 
 impl MessageThreads {
+    pub(super) fn has_pending_for(&self, agent_id: AgentId) -> bool {
+        self.pending.iter().any(|id| {
+            self.message(*id)
+                .is_some_and(|message| message.to == agent_id)
+        })
+    }
+
     pub(super) fn prepare(
         &mut self,
         from: MessageSender,

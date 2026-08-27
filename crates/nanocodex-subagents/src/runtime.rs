@@ -22,7 +22,10 @@ use serde::Serialize;
 use serde_json::Value;
 use std::{
     collections::HashMap,
-    sync::{Arc, Weak},
+    sync::{
+        Arc, Weak,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::Duration,
 };
 use tokio::sync::{mpsc, oneshot, watch};
@@ -41,6 +44,8 @@ pub(super) struct ChildSession {
     pub(super) steering: bool,
     pub(super) submitted_output: Option<Value>,
     pub(super) last_output: Option<Value>,
+    pub(super) last_used: u64,
+    pub(super) evicted: bool,
 }
 
 pub(super) struct OutputContract {
@@ -74,6 +79,8 @@ pub struct Registry {
     pub(super) updates: mpsc::UnboundedSender<ScopedAgentUpdate>,
     revision: watch::Sender<u64>,
     capacity: Capacity,
+    max_resident: AtomicUsize,
+    residency_lock: tokio::sync::Mutex<()>,
     message_lock: tokio::sync::Mutex<()>,
 }
 
@@ -81,6 +88,7 @@ pub struct Registry {
 pub(super) struct RegistryState {
     root_by_session: HashMap<String, String>,
     scopes: HashMap<String, AgentScope>,
+    next_access: u64,
 }
 
 #[derive(Default)]
@@ -197,6 +205,11 @@ pub(super) struct TurnSteer {
     token: u64,
 }
 
+struct ResidentEviction {
+    id: AgentId,
+    harness: HarnessHandle,
+}
+
 impl TurnSteer {
     pub(super) const fn token(&self) -> u64 {
         self.token
@@ -204,6 +217,11 @@ impl TurnSteer {
 }
 
 impl RegistryState {
+    fn next_access(&mut self) -> u64 {
+        self.next_access = self.next_access.wrapping_add(1);
+        self.next_access
+    }
+
     fn submit_result(
         &mut self,
         session_id: &str,
@@ -382,6 +400,9 @@ impl RegistryState {
         )?;
         self.root_by_session
             .insert(session_id, root_session_id.clone());
+        let last_used = self.next_access();
+        let mut session = session;
+        session.last_used = last_used;
         self.scope_mut(&root_session_id)
             .sessions
             .insert(id, session);
@@ -456,11 +477,14 @@ impl RegistryState {
                     return None;
                 }
                 let can_message = caller != Some(id)
+                    && session.harness.is_some()
                     && !matches!(
                         session.status,
                         AgentStatus::Pending | AgentStatus::Closing | AgentStatus::Closed
                     );
-                let can_manage = can_message && scope.topology.authorize(session_id, id).is_ok();
+                let can_manage = caller != Some(id)
+                    && !matches!(session.status, AgentStatus::Closing | AgentStatus::Closed)
+                    && scope.topology.authorize(session_id, id).is_ok();
                 Some(AgentDirectoryEntry {
                     agent_id: id,
                     role: bounded_summary(&session.descriptor.role),
@@ -502,7 +526,7 @@ impl RegistryState {
         }
         let target = scope
             .sessions
-            .get(&to)
+            .get_mut(&to)
             .ok_or_else(|| std::io::Error::other(format!("unknown agent_id {to}")))?;
         if matches!(target.status, AgentStatus::Pending) {
             return Err(std::io::Error::other(format!(
@@ -515,10 +539,13 @@ impl RegistryState {
                 target.status
             )));
         }
-        let harness = target
-            .harness
-            .clone()
-            .ok_or_else(|| std::io::Error::other(format!("agent {to} is closed")))?;
+        let harness = target.harness.clone().ok_or_else(|| {
+            std::io::Error::other(format!(
+                "agent {to} is not resident and cannot receive messages"
+            ))
+        })?;
+        self.next_access = self.next_access.wrapping_add(1);
+        target.last_used = self.next_access;
         let message = scope
             .messages
             .prepare(from, to, priority, purpose, in_reply_to, body)?;
@@ -744,6 +771,7 @@ impl RegistryState {
                 )));
             }
             session.harness = None;
+            session.evicted = false;
             harness_tasks.extend(session.harness_task.take());
             event_tasks.extend(session.event_task.take());
             session.status = AgentStatus::Closed;
@@ -770,6 +798,44 @@ impl RegistryState {
                 .get(id)
                 .is_some_and(|session| !session.active)
         }))
+    }
+
+    fn take_resident_eviction(
+        &mut self,
+        root_session_id: &str,
+        limit: usize,
+    ) -> Option<ResidentEviction> {
+        let scope = self.scopes.get_mut(root_session_id)?;
+        let resident = scope
+            .sessions
+            .values()
+            .filter(|session| session.harness.is_some())
+            .count();
+        if resident <= limit {
+            return None;
+        }
+
+        let candidate = scope
+            .sessions
+            .iter()
+            .filter(|(_, session)| {
+                !session.active && session.status.can_start_turn() && session.harness.is_some()
+            })
+            .filter(|(id, _)| !scope.messages.has_pending_for(**id))
+            .filter(|(id, _)| {
+                !scope.sessions.iter().any(|(other_id, other)| {
+                    other.harness.is_some() && scope.topology.is_descendant(*other_id, **id)
+                })
+            })
+            .min_by_key(|(id, session)| (session.last_used, **id))
+            .map(|(id, _)| *id)?;
+        let session = scope.sessions.get_mut(&candidate)?;
+        let harness = session.harness.take()?;
+        session.evicted = true;
+        Some(ResidentEviction {
+            id: candidate,
+            harness,
+        })
     }
 
     fn subtree_shutdown_order(
@@ -819,6 +885,8 @@ impl Registry {
             updates,
             revision,
             capacity: Capacity::new(max_concurrency),
+            max_resident: AtomicUsize::new(crate::DEFAULT_MAX_RESIDENT_SUBAGENTS),
+            residency_lock: tokio::sync::Mutex::new(()),
             message_lock: tokio::sync::Mutex::new(()),
         }
     }
@@ -840,6 +908,10 @@ impl Registry {
 
     pub fn set_max_concurrency(&self, limit: usize) {
         self.capacity.set_limit(limit);
+    }
+
+    pub fn set_max_resident(&self, limit: usize) {
+        self.max_resident.store(limit.max(1), Ordering::Relaxed);
     }
 
     pub async fn is_root_session(&self, session_id: &str) -> bool {
@@ -935,6 +1007,8 @@ impl Registry {
                 steering: false,
                 submitted_output: None,
                 last_output: None,
+                last_used: 0,
+                evicted: false,
             },
         )?;
         drop(state);
@@ -964,6 +1038,7 @@ impl Registry {
     ) -> Option<u64> {
         let token = {
             let mut state = self.state.lock().await;
+            let last_used = state.next_access();
             let session = state
                 .scopes
                 .get_mut(root_session_id)
@@ -977,6 +1052,7 @@ impl Registry {
                 session.active = true;
                 session.steering = false;
                 session.submitted_output = None;
+                session.last_used = last_used;
                 session.status = AgentStatus::Running;
                 Some(token)
             }
@@ -1023,7 +1099,7 @@ impl Registry {
     }
 
     pub(super) async fn harness_turn_finished(
-        &self,
+        self: &Arc<Self>,
         root_session_id: &str,
         id: AgentId,
         result: AgentResult<TurnResult>,
@@ -1060,10 +1136,37 @@ impl Registry {
         };
         self.send(root_session_id, AgentUpdate::Status { id, status });
         self.changed();
+        let registry = Arc::clone(self);
+        let root_session_id = root_session_id.to_owned();
+        drop(platform::spawn(async move {
+            registry.enforce_resident_limit(&root_session_id).await;
+        }));
+    }
+
+    async fn enforce_resident_limit(&self, root_session_id: &str) {
+        let _residency_guard = self.residency_lock.lock().await;
+        loop {
+            // Serialize candidate selection with delivery admission. A message
+            // is committed before this guard becomes available, so pending
+            // mailbox work makes its target ineligible for eviction.
+            let _message_guard = self.message_lock.lock().await;
+            let eviction = self
+                .state
+                .lock()
+                .await
+                .take_resident_eviction(root_session_id, self.max_resident.load(Ordering::Relaxed));
+            let Some(ResidentEviction { id, harness }) = eviction else {
+                return;
+            };
+            self.changed();
+            if harness.close().await.is_err() {
+                self.harness_closed(root_session_id, id).await;
+            }
+        }
     }
 
     pub(super) async fn harness_closed(&self, root_session_id: &str, id: AgentId) {
-        let changed = {
+        let status_update = {
             let mut state = self.state.lock().await;
             let Some(session) = state
                 .scopes
@@ -1073,26 +1176,26 @@ impl Registry {
                 return;
             };
             if matches!(session.status, AgentStatus::Closed) {
-                false
+                None
             } else {
+                session.harness = None;
                 session.active = false;
                 session.active_turn_token = None;
                 session.steering = false;
                 session.submitted_output = None;
-                session.status = AgentStatus::Closed;
-                true
+                if session.evicted && !matches!(session.status, AgentStatus::Closing) {
+                    None
+                } else {
+                    session.evicted = false;
+                    session.status = AgentStatus::Closed;
+                    Some(AgentStatus::Closed)
+                }
             }
         };
-        if changed {
-            self.send(
-                root_session_id,
-                AgentUpdate::Status {
-                    id,
-                    status: AgentStatus::Closed,
-                },
-            );
-            self.changed();
+        if let Some(status) = status_update {
+            self.send(root_session_id, AgentUpdate::Status { id, status });
         }
+        self.changed();
     }
 
     async fn runtime_closed(&self, root_session_id: &str, id: AgentId) {
@@ -1598,6 +1701,12 @@ impl SubagentControl {
         self.registry.set_max_concurrency(limit);
     }
 
+    /// Changes the maximum number of reusable subagent runtimes retained after
+    /// their turns become inactive. Values below one are clamped to one.
+    pub fn set_max_resident(&self, limit: usize) {
+        self.registry.set_max_resident(limit);
+    }
+
     pub async fn cancel_all(&self, root_session_id: &str) {
         self.registry.cancel_all(root_session_id).await;
     }
@@ -1938,6 +2047,8 @@ mod tests {
             steering: false,
             submitted_output: None,
             last_output: None,
+            last_used: 0,
+            evicted: false,
         }
     }
 
@@ -2122,6 +2233,149 @@ mod tests {
             summaries[0].last_output,
             Some(json!({ "report": "completed work" }))
         );
+    }
+
+    #[tokio::test]
+    async fn pending_mailbox_work_protects_an_inactive_resident_from_eviction() {
+        let (registry, _control, mut updates) = super::channel(0);
+        registry.set_max_resident(1);
+        let protected_called = Arc::new(Notify::new());
+        let (protected, _protected_session) =
+            insert_pending_runtime_session(&registry, "main", None, Arc::clone(&protected_called))
+                .await;
+        let (idle, _idle_session) =
+            insert_pending_runtime_session(&registry, "main", None, Arc::new(Notify::new())).await;
+        mark_reusable(&registry, "main", protected).await;
+        mark_reusable(&registry, "main", idle).await;
+
+        let receipt = registry
+            .send_message(
+                "main",
+                protected,
+                MessagePriority::Deferred,
+                MessagePurpose::Coordinate,
+                None,
+                "Preserve this queued follow-up across residency enforcement.".to_owned(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(receipt.disposition, MessageDisposition::Queued);
+        assert_eq!(
+            next_message_update(&mut updates).await.delivery,
+            MessageDeliveryState::Admitted {
+                disposition: MessageDisposition::Queued,
+            }
+        );
+
+        registry.enforce_resident_limit("main").await;
+        {
+            let state = registry.state.lock().await;
+            let sessions = &state.scopes["main"].sessions;
+            assert!(sessions[&protected].harness.is_some());
+            assert_eq!(
+                sessions[&protected].status,
+                AgentStatus::Completed {
+                    output: json!({ "report": "ready for another turn" }),
+                }
+            );
+            assert!(sessions[&idle].harness.is_none());
+            assert!(sessions[&idle].evicted);
+        }
+
+        registry.set_max_concurrency(1);
+        timeout(Duration::from_secs(5), protected_called.notified())
+            .await
+            .expect("the protected queued message should start");
+        registry.close_all("main").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn eviction_preserves_interrupted_status_and_lifecycle_addressability() {
+        let (registry, _control, _updates) = super::channel(1);
+        registry.set_max_resident(1);
+        let (interrupted, _interrupted_session) =
+            insert_pending_runtime_session(&registry, "main", None, Arc::new(Notify::new())).await;
+        let (newer, _newer_session) =
+            insert_pending_runtime_session(&registry, "main", None, Arc::new(Notify::new())).await;
+        {
+            let mut state = registry.state.lock().await;
+            let sessions = &mut state
+                .scopes
+                .get_mut("main")
+                .expect("main scope should exist")
+                .sessions;
+            sessions
+                .get_mut(&interrupted)
+                .expect("interrupted session should exist")
+                .status = AgentStatus::Interrupted;
+            sessions
+                .get_mut(&newer)
+                .expect("newer session should exist")
+                .status = AgentStatus::Completed {
+                output: json!({ "report": "newer" }),
+            };
+        }
+
+        registry.enforce_resident_limit("main").await;
+
+        let entry = registry
+            .directory("main", true, false)
+            .await
+            .into_iter()
+            .find(|entry| entry.agent_id == interrupted)
+            .expect("evicted agent should remain in the directory");
+        assert_eq!(entry.status, AgentStatus::Interrupted);
+        assert!(!entry.can_message);
+        assert!(entry.can_manage);
+        let (summaries, timed_out) = registry
+            .wait("main", &[interrupted], Duration::from_millis(1))
+            .await
+            .unwrap();
+        assert!(!timed_out);
+        assert_eq!(summaries[0].status, AgentStatus::Interrupted);
+        assert_eq!(
+            registry.close("main", interrupted).await.unwrap()[0].status,
+            AgentStatus::Closed
+        );
+        registry.close_all("main").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn active_turns_do_not_consume_the_inactive_residency_budget() {
+        let (registry, _control, _updates) = super::channel(2);
+        registry.set_max_resident(1);
+        let first_called = Arc::new(Notify::new());
+        let second_called = Arc::new(Notify::new());
+        let (first, _) =
+            insert_pending_runtime_session(&registry, "main", None, Arc::clone(&first_called))
+                .await;
+        let (second, _) =
+            insert_pending_runtime_session(&registry, "main", None, Arc::clone(&second_called))
+                .await;
+        for id in [first, second] {
+            registry
+                .launch_initial_turn(
+                    "main",
+                    id,
+                    format!("active turn for {id}"),
+                    registry.reserve_turn().unwrap(),
+                )
+                .await
+                .unwrap();
+        }
+        timeout(Duration::from_secs(5), first_called.notified())
+            .await
+            .unwrap();
+        timeout(Duration::from_secs(5), second_called.notified())
+            .await
+            .unwrap();
+
+        registry.enforce_resident_limit("main").await;
+        let state = registry.state.lock().await;
+        assert!(state.scopes["main"].sessions[&first].harness.is_some());
+        assert!(state.scopes["main"].sessions[&second].harness.is_some());
+        drop(state);
+        registry.close_all("main").await.unwrap();
     }
 
     #[tokio::test]
@@ -2725,7 +2979,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn directory_separates_same_tree_messaging_from_management() {
+    async fn directory_keeps_nonresident_agents_manageable_but_not_messageable() {
         let mut registry = RegistryState::default();
         let parent = registry.reserve("main", None).unwrap();
         insert_session(
@@ -2771,7 +3025,7 @@ mod tests {
                 .iter()
                 .map(|entry| (entry.agent_id, entry.can_message, entry.can_manage))
                 .collect::<Vec<_>>(),
-            [(child.id, true, true), (sibling.id, true, false)]
+            [(child.id, false, true), (sibling.id, false, false)]
         );
     }
 

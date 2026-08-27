@@ -103,7 +103,7 @@ impl TaskTree {
         order
     }
 
-    fn is_descendant(&self, candidate: AgentId, ancestor: AgentId) -> bool {
+    pub(super) fn is_descendant(&self, candidate: AgentId, ancestor: AgentId) -> bool {
         let mut parent = self.nodes.get(&candidate).and_then(|node| node.parent);
         while let Some(id) = parent {
             if id == ancestor {
