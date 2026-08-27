@@ -89,29 +89,6 @@ impl SearchCommands {
         requests
     }
 
-    pub(super) fn missing_specialized_results(&self, output: &str) -> Vec<&'static str> {
-        let expected = [
-            (
-                "finance",
-                self.finance.as_ref().map_or(0, Vec::len),
-                "finance",
-            ),
-            (
-                "weather",
-                self.weather.as_ref().map_or(0, Vec::len),
-                "forecast",
-            ),
-            ("sports", self.sports.as_ref().map_or(0, Vec::len), "sports"),
-            ("time", self.time.as_ref().map_or(0, Vec::len), "time"),
-        ];
-        expected
-            .into_iter()
-            .filter_map(|(name, count, reference_kind)| {
-                (reference_count(output, reference_kind) < count).then_some(name)
-            })
-            .collect()
-    }
-
     fn has_operations(&self) -> bool {
         [
             self.search_query.as_ref().map_or(0, Vec::len),
@@ -127,16 +104,6 @@ impl SearchCommands {
         .into_iter()
         .any(|count| count > 0)
     }
-}
-
-fn reference_count(output: &str, kind: &str) -> usize {
-    output
-        .split("cite")
-        .skip(1)
-        .filter_map(|item| item.split('').next())
-        .flat_map(|reference| reference.split(''))
-        .filter(|reference| reference.contains(kind))
-        .count()
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
@@ -406,19 +373,5 @@ mod tests {
         let encoded = serde_json::to_value(&requests).expect("requests should encode");
         assert_eq!(encoded[0]["sports"][0]["tool"], "sports");
         assert_eq!(encoded[1]["sports"][0]["tool"], "sports");
-    }
-
-    #[test]
-    fn detects_silently_omitted_specialized_results() {
-        let commands: SearchCommands = serde_json::from_value(json!({
-            "finance": [{"ticker": "NOT-A-TICKER", "type": "equity"}],
-            "time": [{"utc_offset": "+00:00"}]
-        }))
-        .expect("specialized commands should decode");
-
-        assert_eq!(
-            commands.missing_specialized_results("UTC time\nciteturn0time0"),
-            vec!["finance"]
-        );
     }
 }
