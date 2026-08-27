@@ -40,10 +40,23 @@ test("Account and filtered Connect reuse the shared MCP card with exact identifi
   assert.match(app, /McpConnectionCard/);
   assert.match(profileConnectors, /McpConnectionCard/);
   const sharedSurface = source("../connect-dialog/src/AccountConnectionSurface.tsx");
+  assert.match(sharedSurface, /export function McpConnectionAddCard/);
+  assert.match(sharedSurface, /Linear shorthand or a public HTTPS endpoint/);
+  assert.doesNotMatch(sharedSurface, /canonicalRemoteMcpTarget|private.*host|localhost/);
   assert.match(sharedSurface, /navigator\.clipboard\.writeText\(connection\.id\)/);
   assert.match(sharedSurface, /shortMcpConnectionIdentifier\(connection\.id\)/);
   assert.match(sharedSurface, /Copied identifier/);
   assert.doesNotMatch(profileConnectors, /mcpConnections\?\.map[\s\S]*?className={`connection-card connector-row mcp-connector-row/);
+});
+
+test("Account owns MCP creation and in-place authorization without broadening embedded grants", () => {
+  assert.match(profileConnectors, /method: "POST"[\s\S]*?body: JSON\.stringify\(\{ target \}\)/);
+  assert.match(profileConnectors, /mcp-connections\/\$\{encodeURIComponent\(connection\.id\)\}\/start/);
+  assert.match(profileConnectors, /body: JSON\.stringify\(\{ return_to: connectorReturnTo\(\) \}\)/);
+  assert.match(profileConnectors, /searchParams\.get\("mcp_connection"\)/);
+  assert.match(profileConnectors, /searchParams\.get\("mcp_result"\)/);
+  assert.match(profileConnectors, /mcpConnectionAction\(connection\.status\)/);
+  assert.doesNotMatch(app, /McpConnectionAddCard/);
 });
 
 test("Account and embedded Connect share strict in-place OAuth completion", () => {

@@ -790,12 +790,17 @@ describe("managed agents REST and resumable SSE", () => {
     await seedPasskeySession(userId, token);
 
     const originalBroker = testEnv.NANOCODEX;
-    const brokerRequests: Request[] = [];
+    const brokerRequests: Array<{ body: string; method: string; url: string }> = [];
     let listing: "valid" | "invalid" | "failed" = "valid";
+    let createdId: string | undefined;
     testEnv.NANOCODEX = {
       async fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
         const request = new Request(input, init);
-        brokerRequests.push(request);
+        brokerRequests.push({
+          body: await request.text(),
+          method: request.method,
+          url: request.url,
+        });
         if (request.method === "GET") {
           if (listing === "failed") {
             return Response.json({ access_token: "must-not-leak" }, { status: 503 });
@@ -824,6 +829,32 @@ describe("managed agents REST and resumable SSE", () => {
             ],
           });
         }
+        if (request.method === "PUT") {
+          createdId = request.url.split("/").at(-1);
+          return Response.json({
+            mcp_connections: [{
+              id: createdId,
+              name: "mcp.linear.app",
+              status: "authorization_required",
+              endpoint: "https://must-not-leak.example/mcp",
+              access_token: "must-not-leak",
+            }],
+          });
+        }
+        if (request.method === "POST" && request.url.endsWith("/start")) {
+          return Response.json({
+            mcp_connections: [{ id: createdId, name: "mcp.linear.app", status: "authorization_required" }],
+            authorization_url: "https://provider.test/authorize?state=broker-state",
+            access_token: "must-not-leak",
+          });
+        }
+        if (request.method === "POST" && request.url.endsWith("/callback")) {
+          return Response.json({
+            mcp_connections: [{ id: createdId, name: "mcp.linear.app", status: "connected" }],
+            return_to: "/connect?section=connectors",
+            access_token: "must-not-leak",
+          });
+        }
         if (request.method === "DELETE") {
           return Response.json({
             mcp_connections: [{ id: connectionId, name: "Linear workspace", status: "revoked" }],
@@ -845,13 +876,91 @@ describe("managed agents REST and resumable SSE", () => {
       expect(listed.status).toBe(200);
       expect(listed.headers.get("cache-control")).toBe("no-store");
       expect(await listed.json()).toEqual({
-        mcp_connections: [{ id: connectionId, name: "Linear workspace", status: "connected" }],
+        mcp_connections: [
+          { id: connectionId, name: "Linear workspace", status: "connected" },
+          { id: "b".repeat(43), name: "Linear workspace", status: "authorization_required" },
+        ],
       });
       expect(brokerRequests).toHaveLength(1);
       expect(brokerRequests[0]?.url).toBe(
         `https://broker.internal/users/${userId}/mcp-connections`,
       );
-      expect(brokerRequests[0]?.body).toBeNull();
+      expect(brokerRequests[0]?.body).toBe("");
+
+      const deniedCreate = await RAW_SELF.fetch("https://example.test/v1/connectors/mcp-connections", {
+        method: "POST",
+        headers: { cookie, "content-type": "application/json" },
+        body: JSON.stringify({ target: "mcp.linear.app" }),
+      });
+      expect(deniedCreate.status).toBe(403);
+      expect(brokerRequests).toHaveLength(1);
+
+      const invalidTarget = await RAW_SELF.fetch("https://example.test/v1/connectors/mcp-connections", {
+        method: "POST",
+        headers: { cookie, origin: "https://example.test", "content-type": "application/json" },
+        body: JSON.stringify({ target: "https://mcp.linear.app/mcp?token=must-not-leak" }),
+      });
+      expect(invalidTarget.status).toBe(400);
+      expect(await invalidTarget.json()).toEqual({ error: "invalid_mcp_target" });
+      expect(brokerRequests).toHaveLength(1);
+
+      const created = await RAW_SELF.fetch("https://example.test/v1/connectors/mcp-connections", {
+        method: "POST",
+        headers: { cookie, origin: "https://example.test", "content-type": "application/json" },
+        body: JSON.stringify({ target: "mcp.linear.app" }),
+      });
+      expect(created.status).toBe(201);
+      const createdBody = await created.json<{ mcp_connection: { id: string; name: string; status: string } }>();
+      expect(createdBody).toMatchObject({
+        mcp_connection: { id: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/), name: "mcp.linear.app", status: "authorization_required" },
+      });
+      expect(JSON.stringify(createdBody)).not.toContain("must-not-leak");
+      expect(brokerRequests).toHaveLength(2);
+      expect(brokerRequests[1]?.method).toBe("PUT");
+      expect(brokerRequests[1]?.url).toBe(
+        `https://broker.internal/users/${userId}/mcp-connections/${createdBody.mcp_connection.id}`,
+      );
+      expect(JSON.parse(brokerRequests[1]!.body)).toEqual({
+        endpoint: "https://mcp.linear.app/mcp",
+        name: "mcp.linear.app",
+      });
+
+      const started = await RAW_SELF.fetch(
+        `https://example.test/v1/connectors/mcp-connections/${createdBody.mcp_connection.id}/start`,
+        {
+          method: "POST",
+          headers: { cookie, origin: "https://example.test", "content-type": "application/json" },
+          body: JSON.stringify({ return_to: "/connect?section=connectors" }),
+        },
+      );
+      expect(started.status).toBe(200);
+      expect(await started.json()).toEqual({
+        mcp_connection: createdBody.mcp_connection,
+        authorization_url: "https://provider.test/authorize?state=broker-state",
+      });
+      expect(brokerRequests).toHaveLength(3);
+      expect(JSON.parse(brokerRequests[2]!.body)).toEqual({
+        redirect_uri: `https://example.test/v1/connectors/mcp-connections/${createdBody.mcp_connection.id}/callback`,
+        return_to: "/connect?section=connectors",
+      });
+
+      const callback = await RAW_SELF.fetch(
+        `https://example.test/v1/connectors/mcp-connections/${createdBody.mcp_connection.id}/callback?code=authorization-code&state=broker-state`,
+        { headers: { cookie }, redirect: "manual" },
+      );
+      expect(callback.status).toBe(303);
+      const callbackLocation = new URL(callback.headers.get("location")!);
+      expect(callbackLocation.pathname).toBe("/connect");
+      expect(callbackLocation.searchParams.get("section")).toBe("connectors");
+      expect(callbackLocation.searchParams.get("mcp_connection")).toBe(createdBody.mcp_connection.id);
+      expect(callbackLocation.searchParams.get("mcp_result")).toBe("connected");
+      expect(brokerRequests).toHaveLength(4);
+      expect(JSON.parse(brokerRequests[3]!.body)).toEqual({
+        code: "authorization-code",
+        state: "broker-state",
+        error: null,
+        error_description: null,
+      });
 
       for (const origin of [undefined, "https://attacker.test"]) {
         const denied = await RAW_SELF.fetch(
@@ -863,7 +972,7 @@ describe("managed agents REST and resumable SSE", () => {
         );
         expect(denied.status).toBe(403);
       }
-      expect(brokerRequests).toHaveLength(1);
+      expect(brokerRequests).toHaveLength(4);
 
       const disconnected = await RAW_SELF.fetch(
         `https://example.test/v1/connectors/mcp-connections/${connectionId}`,
@@ -871,12 +980,12 @@ describe("managed agents REST and resumable SSE", () => {
       );
       expect(disconnected.status).toBe(204);
       expect(await disconnected.text()).toBe("");
-      expect(brokerRequests).toHaveLength(2);
-      expect(brokerRequests[1]?.url).toBe(
+      expect(brokerRequests).toHaveLength(5);
+      expect(brokerRequests[4]?.url).toBe(
         `https://broker.internal/users/${userId}/mcp-connections/${connectionId}`,
       );
-      expect(brokerRequests[1]?.method).toBe("DELETE");
-      expect(brokerRequests[1]?.body).toBeNull();
+      expect(brokerRequests[4]?.method).toBe("DELETE");
+      expect(brokerRequests[4]?.body).toBe("");
 
       listing = "invalid";
       const invalid = await RAW_SELF.fetch("https://example.test/v1/connectors/mcp-connections", {

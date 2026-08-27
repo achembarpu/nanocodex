@@ -22,6 +22,7 @@ test("accepts public HTTPS MCP URLs and rejects private or credential-bearing ta
     "https://example.com/custom/mcp");
   for (const target of [
     "http://mcp.linear.app/mcp",
+    "mcp.example.com",
     "mcp.localhost",
     "https://127.0.0.1/mcp",
     "https://mcp.example.com:8443/mcp",

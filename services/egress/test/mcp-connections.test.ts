@@ -110,6 +110,7 @@ describe("generic remote MCP connection owner", () => {
     expect(callback.status).toBe(200);
     expect(await callback.json()).toEqual({
       mcp_connections: [{ id, name: "Linear", status: "connected" }],
+      return_to: "/connections",
     });
     const replay = await control(
       `/users/${user}/mcp-connections/${id}/callback`,

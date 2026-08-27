@@ -7,6 +7,7 @@ import {
   localConnectorAuthorization,
   wrapLocalConnectorAuthorizationState,
 } from "../../../web/localConnectorCallback";
+import { canonicalRemoteMcpTarget } from "../../mcp-policy/mcpTarget.mjs";
 
 type ConnectorEnv = AccountAuthEnv & {
   NANOCODEX: Fetcher;
@@ -36,6 +37,7 @@ const MCP_CONNECTION_STATUSES = new Set<McpConnectionStatus>([
   "revoked",
 ]);
 const MAX_MCP_CONNECTIONS = 64;
+const MAX_MCP_CREATE_BODY_BYTES = 4_096;
 const CALLBACK_SUFFIX = "/callback";
 const CONNECTOR_ERROR_CODES = new Set([
   "authorization_code_missing",
@@ -56,28 +58,70 @@ export async function routeConnectorRequest(
   url: URL,
 ): Promise<Response | undefined> {
   if (url.pathname === "/v1/connectors/mcp-connections") {
-    if (request.method !== "GET" || url.search) return json({ error: "method_not_allowed" }, 405);
+    if ((request.method !== "GET" && request.method !== "POST") || url.search) {
+      return json({ error: "method_not_allowed" }, 405);
+    }
     const principal = await authenticatePersistentAccount(request, env, url);
     if (!principal) return json({ error: "unauthorized" }, 401);
+    if (request.method === "POST") {
+      const originFailure = requireSameOriginMutation(request, url, principal);
+      if (originFailure) return originFailure;
+      const target = await decodeMcpTarget(request);
+      if (!target) return json({ error: "invalid_request" }, 400);
+      let materialization: Readonly<{ endpoint: string; name: string }>;
+      try { materialization = canonicalRemoteMcpTarget(target); } catch {
+        return json({ error: "invalid_mcp_target" }, 400);
+      }
+      const id = newMcpConnectionId();
+      const response = await env.NANOCODEX.fetch(
+        `https://broker.internal/users/${encodeURIComponent(principal.userId)}/mcp-connections/${id}`,
+        {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(materialization),
+        },
+      );
+      const connection = await publicMcpConnectionResponse(response, id);
+      return connection
+        ? json({ mcp_connection: connection }, 201)
+        : json({ error: "mcp_broker_failed" }, 502);
+    }
     return publicMcpConnectionList(await env.NANOCODEX.fetch(
       `https://broker.internal/users/${encodeURIComponent(principal.userId)}/mcp-connections`,
     ));
   }
 
-  const mcpMatch = url.pathname.match(/^\/v1\/connectors\/mcp-connections\/([^/]+)$/);
+  const mcpMatch = url.pathname.match(
+    /^\/v1\/connectors\/mcp-connections\/([^/]+)(?:\/(start|callback))?$/,
+  );
   if (mcpMatch) {
     const connectionId = mcpConnectionId(mcpMatch[1]);
     if (!connectionId) return json({ error: "not_found" }, 404);
-    if (request.method !== "DELETE") return json({ error: "method_not_allowed" }, 405);
+    const operation = mcpMatch[2];
+    if ((!operation && request.method !== "DELETE")
+      || (operation === "start" && request.method !== "POST")
+      || (operation === "callback" && request.method !== "GET")) {
+      return json({ error: "method_not_allowed" }, 405);
+    }
     const principal = await authenticatePersistentAccount(request, env, url);
     if (!principal) return json({ error: "unauthorized" }, 401);
-    const originFailure = requireSameOriginMutation(request, url, principal);
-    if (originFailure) return originFailure;
-    if (url.search) return json({ error: "invalid_request" }, 400);
+    if (operation !== "callback") {
+      const originFailure = requireSameOriginMutation(request, url, principal);
+      if (originFailure) return originFailure;
+    }
+    if (operation !== "callback" && url.search) return json({ error: "invalid_request" }, 400);
+    const target = `https://broker.internal/users/${encodeURIComponent(principal.userId)}/mcp-connections/${connectionId}${operation ? `/${operation}` : ""}`;
+    if (operation === "start") {
+      const start = await mcpStartRequest(request, url, connectionId);
+      if (!start) return json({ error: "invalid_return_to" }, 400);
+      const response = await env.NANOCODEX.fetch(target, start);
+      return publicMcpStartResponse(response, connectionId);
+    }
     const response = await env.NANOCODEX.fetch(
-      `https://broker.internal/users/${encodeURIComponent(principal.userId)}/mcp-connections/${connectionId}`,
-      { method: "DELETE" },
+      target,
+      operation === "callback" ? mcpCallbackRequest(url) : { method: "DELETE" },
     );
+    if (operation === "callback") return finishMcpCallback(response, url, connectionId);
     await response.body?.cancel();
     if (!response.ok) return json({ error: "mcp_broker_failed" }, 502);
     return new Response(null, {
@@ -233,25 +277,143 @@ async function publicMcpConnectionList(response: Response): Promise<Response> {
     await response.body?.cancel();
     return json({ error: "mcp_broker_failed" }, 502);
   }
-  const value: unknown = await response.json().catch(() => undefined);
-  if (!isRecord(value) || !Array.isArray(value.mcp_connections)
-    || value.mcp_connections.length > MAX_MCP_CONNECTIONS) {
+  const connections = publicMcpConnections(await response.json().catch(() => undefined));
+  if (!connections) {
     return json({ error: "mcp_broker_invalid" }, 502);
   }
+  return json({
+    mcp_connections: connections.filter(({ status }) => status !== "revoked"),
+  }, 200);
+}
+
+function publicMcpConnections(value: unknown): McpConnection[] | undefined {
+  if (!isRecord(value) || !Array.isArray(value.mcp_connections)
+    || value.mcp_connections.length > MAX_MCP_CONNECTIONS) return undefined;
   const seen = new Set<string>();
   const connections: McpConnection[] = [];
   for (const candidate of value.mcp_connections) {
     const connection = publicMcpConnection(candidate);
-    if (!connection || seen.has(connection.id)) {
-      return json({ error: "mcp_broker_invalid" }, 502);
-    }
+    if (!connection || seen.has(connection.id)) return undefined;
     seen.add(connection.id);
-    if (connection.status === "authorization_required" || connection.status === "revoked") {
-      continue;
-    }
     connections.push(connection);
   }
-  return json({ mcp_connections: connections }, 200);
+  return connections;
+}
+
+async function publicMcpConnectionResponse(
+  response: Response,
+  id: string,
+): Promise<McpConnection | undefined> {
+  if (!response.ok) {
+    await response.body?.cancel();
+    return undefined;
+  }
+  return publicMcpConnections(await response.json().catch(() => undefined))?.find(
+    (connection) => connection.id === id,
+  );
+}
+
+async function mcpStartRequest(
+  request: Request,
+  url: URL,
+  connectionId: string,
+): Promise<RequestInit | undefined> {
+  const returnTo = await decodeReturnTo(request, url);
+  if (!returnTo) return undefined;
+  return {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      redirect_uri: `${url.origin}/v1/connectors/mcp-connections/${connectionId}/callback`,
+      return_to: returnTo,
+    }),
+  };
+}
+
+function mcpCallbackRequest(url: URL): RequestInit {
+  return {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      code: url.searchParams.get("code"),
+      state: url.searchParams.get("state"),
+      error: url.searchParams.get("error"),
+      error_description: url.searchParams.get("error_description"),
+    }),
+  };
+}
+
+async function publicMcpStartResponse(response: Response, id: string): Promise<Response> {
+  if (!response.ok) {
+    await response.body?.cancel();
+    return json({ error: "mcp_broker_failed" }, 502);
+  }
+  const value: unknown = await response.json().catch(() => undefined);
+  const connection = publicMcpConnections(value)?.find((candidate) => candidate.id === id);
+  const authorizationUrl = isRecord(value) && typeof value.authorization_url === "string"
+    ? safeAuthorizationUrl(value.authorization_url)
+    : undefined;
+  return connection && authorizationUrl
+    ? json({ mcp_connection: connection, authorization_url: authorizationUrl }, 200)
+    : json({ error: "mcp_broker_invalid" }, 502);
+}
+
+async function finishMcpCallback(response: Response, url: URL, id: string): Promise<Response> {
+  const value: unknown = await response.json().catch(() => undefined);
+  const returnTo = isRecord(value) && typeof value.return_to === "string"
+    ? safeReturnTo(value.return_to, url)
+    : undefined;
+  const connection = publicMcpConnections(value)?.find((candidate) => candidate.id === id);
+  const result = response.ok && connection?.status === "connected"
+    ? "connected"
+    : url.searchParams.has("error") ? "cancelled" : "failed";
+  return redirectMcpResult(url, returnTo ?? "/", id, result);
+}
+
+function safeAuthorizationUrl(value: string): string | undefined {
+  if (value.length > 8_192) return undefined;
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && !url.username && !url.password && !url.hash ? url.href : undefined;
+  } catch { return undefined; }
+}
+
+function redirectMcpResult(
+  requestUrl: URL,
+  returnTo: string,
+  id: string,
+  result: "connected" | "cancelled" | "failed",
+): Response {
+  const destination = new URL(returnTo, requestUrl.origin);
+  destination.searchParams.set("mcp_connection", id);
+  destination.searchParams.set("mcp_result", result);
+  return new Response(null, {
+    status: 303,
+    headers: {
+      "cache-control": "no-store",
+      location: destination.href,
+      "referrer-policy": "no-referrer",
+    },
+  });
+}
+
+async function decodeMcpTarget(request: Request): Promise<string | undefined> {
+  const contentLength = Number(request.headers.get("content-length"));
+  if (Number.isFinite(contentLength) && contentLength > MAX_MCP_CREATE_BODY_BYTES) return undefined;
+  const text = await request.text();
+  if (new TextEncoder().encode(text).byteLength > MAX_MCP_CREATE_BODY_BYTES) return undefined;
+  let value: unknown;
+  try { value = JSON.parse(text); } catch { return undefined; }
+  return isRecord(value) && Object.keys(value).length === 1 && typeof value.target === "string"
+    ? value.target
+    : undefined;
+}
+
+function newMcpConnectionId(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(32));
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
 function publicMcpConnection(value: unknown): McpConnection | undefined {

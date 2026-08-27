@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useId, useState, type FormEvent, type ReactNode } from "react";
 
 import { ConnectionLogo } from "./ConnectionLogo";
 import type { McpConnection, McpConnectionStatus } from "./connectTypes";
@@ -106,12 +106,68 @@ export function AccountConnectionCard({
   );
 }
 
+export function McpConnectionAddCard({
+  disabled = false,
+  error,
+  listItem = true,
+  onSubmit,
+}: Readonly<{
+  disabled?: boolean | undefined;
+  error?: string | undefined;
+  listItem?: boolean | undefined;
+  onSubmit(target: string): Promise<boolean>;
+}>) {
+  const [target, setTarget] = useState("");
+  const id = useId();
+  const targetId = `mcp-connection-target-${id}`;
+  const errorId = `mcp-connection-target-error-${id}`;
+
+  const submit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!target.trim() || disabled) return;
+    if (await onSubmit(target)) setTarget("");
+  };
+
+  return (
+    <div
+      className="connection-card connector-row mcp-connector-row mcp-connection-add"
+      role={listItem ? "listitem" : undefined}
+    >
+      <ConnectionLogo id="mcp" />
+      <form className="connection-card-copy mcp-connection-add-form" onSubmit={(event) => void submit(event)}>
+        <label htmlFor={targetId}><strong>Add MCP connection</strong></label>
+        <span>Linear shorthand or a public HTTPS endpoint</span>
+        <div className="mcp-connection-actions">
+          <input
+            aria-describedby={error ? errorId : undefined}
+            aria-invalid={error ? true : undefined}
+            autoComplete="url"
+            disabled={disabled}
+            id={targetId}
+            inputMode="url"
+            onChange={(event) => setTarget(event.target.value)}
+            placeholder="mcp.linear.app or https://…"
+            required
+            size={20}
+            style={{ minHeight: 44, fontSize: 16 }}
+            type="text"
+            value={target}
+          />
+          <button disabled={disabled} type="submit">Add MCP</button>
+        </div>
+        {error ? <small id={errorId} role="alert">{error}</small> : null}
+      </form>
+    </div>
+  );
+}
+
 type McpCopyState = "idle" | "copied" | "failed";
 
 export function McpConnectionCard({
   action,
   actionDisabled = false,
   connection,
+  error,
   listItem = true,
   onAction,
   presentation = "connect",
@@ -119,6 +175,7 @@ export function McpConnectionCard({
   action?: string | undefined;
   actionDisabled?: boolean | undefined;
   connection: McpConnection;
+  error?: string | undefined;
   listItem?: boolean | undefined;
   onAction?: (() => void) | undefined;
   presentation?: "account" | "connect" | undefined;
@@ -152,6 +209,7 @@ export function McpConnectionCard({
       <span className={account ? "connection-card-copy" : "mcp-connection-copy"}>
         <strong>{connection.name}</strong>
         <span>{status}</span>
+        {error ? <small className="mcp-connection-error" role="alert">{error}</small> : null}
         <small className="mcp-connection-identifier">
           ID {shortMcpConnectionIdentifier(connection.id)}
         </small>

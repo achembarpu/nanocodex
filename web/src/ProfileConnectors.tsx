@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 import {
   AccountConnectionCard,
   AccountConnectionGrid,
+  McpConnectionAddCard,
   McpConnectionCard,
 } from "@nanocodex-connect/AccountConnectionSurface";
 import { isRecord, responseFailure } from "./AccountSession";
@@ -33,6 +34,13 @@ type McpConnection = Readonly<{
 type ConnectorAttempt = {
   abort: AbortController;
   connector: ConnectorId;
+  popup: Window;
+  popupCheck: number;
+  popupClosed?: number | undefined;
+};
+type McpAttempt = {
+  abort: AbortController;
+  connection: McpConnection;
   popup: Window;
   popupCheck: number;
   popupClosed?: number | undefined;
@@ -77,16 +85,33 @@ export function ProfileConnectors({
   const [connectors, setConnectors] = useState<Record<ConnectorId, ConnectorStatus> | null>(null);
   const [mcpConnections, setMcpConnections] = useState<readonly McpConnection[] | null>(null);
   const [mcpError, setMcpError] = useState<string | null>(null);
+  const [mcpConnectionError, setMcpConnectionError] = useState<Readonly<{
+    id: string;
+    message: string;
+  }> | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [operation, setOperation] = useState<string | null>(null);
   const request = useRef<Promise<void> | undefined>(undefined);
   const mcpRequest = useRef<Promise<void> | undefined>(undefined);
   const activeConnector = useRef<ConnectorAttempt | undefined>(undefined);
+  const activeMcp = useRef<McpAttempt | undefined>(undefined);
   const [result] = useState(readConnectorResult);
+  const [mcpResult] = useState(readMcpResult);
 
   const finishConnectorAttempt = useCallback((attempt: ConnectorAttempt, closePopup = true) => {
     if (activeConnector.current !== attempt) return false;
     activeConnector.current = undefined;
+    attempt.abort.abort();
+    window.clearInterval(attempt.popupCheck);
+    if (attempt.popupClosed !== undefined) window.clearTimeout(attempt.popupClosed);
+    if (closePopup && !attempt.popup.closed) attempt.popup.close();
+    setOperation(null);
+    return true;
+  }, []);
+
+  const finishMcpAttempt = useCallback((attempt: McpAttempt, closePopup = true) => {
+    if (activeMcp.current !== attempt) return false;
+    activeMcp.current = undefined;
     attempt.abort.abort();
     window.clearInterval(attempt.popupCheck);
     if (attempt.popupClosed !== undefined) window.clearTimeout(attempt.popupClosed);
@@ -154,61 +179,115 @@ export function ProfileConnectors({
   useEffect(() => {
     const previous = activeConnector.current;
     if (previous) finishConnectorAttempt(previous);
+    const previousMcp = activeMcp.current;
+    if (previousMcp) finishMcpAttempt(previousMcp);
     setConnectors(null);
     setMcpConnections(null);
     setMcpError(null);
+    setMcpConnectionError(null);
     setError(null);
     if (requiresLogin) return;
     void load();
     void loadMcpConnections();
-  }, [accountId, finishConnectorAttempt, load, loadMcpConnections, requiresLogin]);
+  }, [accountId, finishConnectorAttempt, finishMcpAttempt, load, loadMcpConnections, requiresLogin]);
 
   useEffect(() => () => {
     const attempt = activeConnector.current;
-    if (!attempt) return;
-    activeConnector.current = undefined;
-    attempt.abort.abort();
-    window.clearInterval(attempt.popupCheck);
-    if (attempt.popupClosed !== undefined) window.clearTimeout(attempt.popupClosed);
-    if (!attempt.popup.closed) attempt.popup.close();
+    if (attempt) {
+      activeConnector.current = undefined;
+      attempt.abort.abort();
+      window.clearInterval(attempt.popupCheck);
+      if (attempt.popupClosed !== undefined) window.clearTimeout(attempt.popupClosed);
+      if (!attempt.popup.closed) attempt.popup.close();
+    }
+    const mcpAttempt = activeMcp.current;
+    if (mcpAttempt) {
+      activeMcp.current = undefined;
+      mcpAttempt.abort.abort();
+      window.clearInterval(mcpAttempt.popupCheck);
+      if (mcpAttempt.popupClosed !== undefined) window.clearTimeout(mcpAttempt.popupClosed);
+      if (!mcpAttempt.popup.closed) mcpAttempt.popup.close();
+    }
   }, []);
 
   useEffect(() => {
     const onMessage = (event: MessageEvent<unknown>) => {
       const attempt = activeConnector.current;
-      if (!attempt) return;
+      if (attempt) {
+        const completion = connectorCompletionFor(event, {
+          connector: attempt.connector,
+          origin: window.location.origin,
+          source: attempt.popup,
+        });
+        if (!completion) return;
+        if (completion.result !== "success") {
+          if (finishConnectorAttempt(attempt)) {
+            setError(completion.message ?? "The account provider did not complete the connection. Try again.");
+          }
+          return;
+        }
+        window.clearInterval(attempt.popupCheck);
+        if (attempt.popupClosed !== undefined) window.clearTimeout(attempt.popupClosed);
+        void refreshConnectors(attempt.abort.signal).then((statuses) => {
+          if (activeConnector.current !== attempt) return;
+          if (!statuses) {
+            throw new Error("Your account session expired. Sign in again and retry the connection.");
+          }
+          if (!statuses[attempt.connector].connected) {
+            throw new Error("The account provider completed without connecting the requested account.");
+          }
+          finishConnectorAttempt(attempt);
+        }).catch((cause) => {
+          if (finishConnectorAttempt(attempt)) {
+            setError(failureMessage(cause, `Couldn’t connect ${connectorLabel(attempt.connector)}.`));
+          }
+        });
+        return;
+      }
+      const mcpAttempt = activeMcp.current;
+      if (!mcpAttempt) return;
       const completion = connectorCompletionFor(event, {
-        connector: attempt.connector,
+        connector: mcpCompletionIdentifier(mcpAttempt.connection.id),
         origin: window.location.origin,
-        source: attempt.popup,
+        source: mcpAttempt.popup,
       });
       if (!completion) return;
       if (completion.result !== "success") {
-        if (finishConnectorAttempt(attempt)) {
-          setError(completion.message ?? "The account provider did not complete the connection. Try again.");
+        if (finishMcpAttempt(mcpAttempt)) {
+          setMcpConnectionError({
+            id: mcpAttempt.connection.id,
+            message: completion.message ?? "The MCP provider did not complete authorization. Connect again when you are ready.",
+          });
         }
         return;
       }
-      window.clearInterval(attempt.popupCheck);
-      if (attempt.popupClosed !== undefined) window.clearTimeout(attempt.popupClosed);
-      void refreshConnectors(attempt.abort.signal).then((statuses) => {
-        if (activeConnector.current !== attempt) return;
-        if (!statuses) {
-          throw new Error("Your account session expired. Sign in again and retry the connection.");
-        }
-        if (!statuses[attempt.connector].connected) {
-          throw new Error("The account provider completed without connecting the requested account.");
-        }
-        finishConnectorAttempt(attempt);
+      window.clearInterval(mcpAttempt.popupCheck);
+      if (mcpAttempt.popupClosed !== undefined) window.clearTimeout(mcpAttempt.popupClosed);
+      void loadMcpConnections().then(() => {
+        if (activeMcp.current !== mcpAttempt) return;
+        finishMcpAttempt(mcpAttempt);
       }).catch((cause) => {
-        if (finishConnectorAttempt(attempt)) {
-          setError(failureMessage(cause, `Couldn’t connect ${connectorLabel(attempt.connector)}.`));
+        if (finishMcpAttempt(mcpAttempt)) {
+          setMcpConnectionError({
+            id: mcpAttempt.connection.id,
+            message: failureMessage(cause, `Couldn’t connect ${mcpAttempt.connection.name}.`),
+          });
         }
       });
     };
     window.addEventListener("message", onMessage);
     return () => window.removeEventListener("message", onMessage);
-  }, [finishConnectorAttempt, refreshConnectors]);
+  }, [finishConnectorAttempt, finishMcpAttempt, loadMcpConnections, refreshConnectors]);
+
+  useEffect(() => {
+    if (!mcpResult || mcpResult.result === "connected") return;
+    setMcpConnectionError({
+      id: mcpResult.id,
+      message: mcpResult.result === "cancelled"
+        ? "The MCP authorization was cancelled. Connect again when you are ready."
+        : "The MCP provider could not complete authorization. Try connecting again.",
+    });
+  }, [mcpResult]);
 
   const connect = async (id: ConnectorId) => {
     if (operation || activeConnector.current) return;
@@ -282,6 +361,7 @@ export function ProfileConnectors({
     if (operation || connection.status !== "connected") return;
     setOperation(connection.id);
     setMcpError(null);
+    setMcpConnectionError(null);
     try {
       const response = await connectorRequest(
         `/v1/connectors/mcp-connections/${encodeURIComponent(connection.id)}`,
@@ -293,9 +373,106 @@ export function ProfileConnectors({
       await response.body?.cancel();
       await loadMcpConnections();
     } catch (cause) {
-      setMcpError(failureMessage(cause, `Couldn’t disconnect ${connection.name}.`));
+      setMcpConnectionError({
+        id: connection.id,
+        message: failureMessage(cause, `Couldn’t disconnect ${connection.name}.`),
+      });
     } finally {
       setOperation(null);
+    }
+  };
+
+  const createMcp = async (target: string): Promise<boolean> => {
+    if (operation) return false;
+    setOperation("mcp:create");
+    setMcpError(null);
+    setMcpConnectionError(null);
+    try {
+      const response = await connectorRequest("/v1/connectors/mcp-connections", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ target }),
+      });
+      if (!response.ok) throw await responseFailure(response, "Couldn’t add the MCP connection.");
+      const body: unknown = await response.json();
+      const connection = mcpConnectionFromResponse(body);
+      setMcpConnections((current) => [
+        connection,
+        ...(current ?? []).filter(({ id }) => id !== connection.id),
+      ]);
+      return true;
+    } catch (cause) {
+      setMcpError(failureMessage(cause, "Couldn’t add the MCP connection."));
+      return false;
+    } finally {
+      setOperation(null);
+    }
+  };
+
+  const connectMcp = async (connection: McpConnection) => {
+    if (operation || activeMcp.current || !mcpConnectionCanAuthorize(connection.status)) return;
+    const popup = window.open(
+      "about:blank",
+      "nanocodex-account-mcp",
+      "popup,width=520,height=720",
+    );
+    if (!popup) {
+      setMcpConnectionError({
+        id: connection.id,
+        message: "The MCP authorization popup was blocked. Allow popups and try again.",
+      });
+      return;
+    }
+    const attempt: McpAttempt = {
+      abort: new AbortController(),
+      connection,
+      popup,
+      popupCheck: window.setInterval(() => {
+        if (activeMcp.current !== attempt || !popup.closed) return;
+        window.clearInterval(attempt.popupCheck);
+        attempt.popupClosed = window.setTimeout(() => {
+          if (finishMcpAttempt(attempt, false)) {
+            setMcpConnectionError({
+              id: connection.id,
+              message: "The MCP authorization popup was closed before it completed. Connect again when you are ready.",
+            });
+          }
+        }, 750);
+      }, 300),
+    };
+    activeMcp.current = attempt;
+    setOperation(connection.id);
+    setMcpError(null);
+    setMcpConnectionError(null);
+    try {
+      const response = await connectorRequest(
+        `/v1/connectors/mcp-connections/${encodeURIComponent(connection.id)}/start`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ return_to: connectorReturnTo() }),
+          signal: attempt.abort.signal,
+        },
+      );
+      if (activeMcp.current !== attempt) return;
+      if (!response.ok) throw await responseFailure(response, `Couldn’t connect ${connection.name}.`);
+      const body: unknown = await response.json();
+      const updated = mcpConnectionFromResponse(body, connection.id);
+      setMcpConnections((current) => replaceMcpConnection(current ?? [], updated));
+      if (updated.status === "connected") {
+        finishMcpAttempt(attempt);
+        return;
+      }
+      const authorizationUrl = authorizationUrlFromResponse(body);
+      if (popup.closed) throw new Error("The MCP authorization popup was closed before it started.");
+      popup.location.href = authorizationUrl.href;
+    } catch (cause) {
+      if (finishMcpAttempt(attempt) && !isAbortError(cause)) {
+        setMcpConnectionError({
+          id: connection.id,
+          message: failureMessage(cause, `Couldn’t connect ${connection.name}.`),
+        });
+      }
     }
   };
 
@@ -367,7 +544,7 @@ export function ProfileConnectors({
               title={definition.label}
             />;
           }) : null}
-          {mcpError ? <AccountConnectionCard
+          {mcpError && !mcpConnections ? <AccountConnectionCard
             action="Retry"
             detail={mcpError}
             disabled={operation !== null}
@@ -375,14 +552,21 @@ export function ProfileConnectors({
             onClick={() => void loadMcpConnections()}
             title="MCP connections"
           /> : null}
+          {mcpConnections ? <McpConnectionAddCard
+            disabled={operation !== null}
+            error={mcpError ?? undefined}
+            onSubmit={createMcp}
+          /> : null}
           {mcpConnections?.map((connection) => {
-            const connected = connection.status === "connected";
             return <McpConnectionCard
-              action={connected ? "Disconnect" : undefined}
+              action={mcpConnectionAction(connection.status)}
               actionDisabled={operation !== null}
               connection={connection}
+              error={mcpConnectionError?.id === connection.id ? mcpConnectionError.message : undefined}
               key={connection.id}
-              onAction={connected ? () => void disconnectMcp(connection) : undefined}
+              onAction={mcpConnectionCanAuthorize(connection.status)
+                ? () => void connectMcp(connection)
+                : connection.status === "connected" ? () => void disconnectMcp(connection) : undefined}
               presentation="account"
             />;
           })}
@@ -446,7 +630,12 @@ export function ProfileConnectors({
           </button>
         );
       }) : null}
-      {mcpError ? (
+      {mcpConnections ? <McpConnectionAddCard
+        disabled={operation !== null}
+        error={mcpError ?? undefined}
+        listItem={false}
+        onSubmit={createMcp}
+      /> : mcpError ? (
         <button
           className="connection-card connector-row mcp-connector-row is-unavailable"
           disabled={operation !== null}
@@ -461,20 +650,20 @@ export function ProfileConnectors({
           <span className="connection-card-action">Retry</span>
         </button>
       ) : null}
-      {mcpConnections?.map((connection) => {
-        const connected = connection.status === "connected";
-        return (
+      {mcpConnections?.map((connection) => (
           <McpConnectionCard
-            action={connected ? "Disconnect" : undefined}
+            action={mcpConnectionAction(connection.status)}
             actionDisabled={operation !== null}
             connection={connection}
+            error={mcpConnectionError?.id === connection.id ? mcpConnectionError.message : undefined}
             key={connection.id}
             listItem={false}
-            onAction={connected ? () => void disconnectMcp(connection) : undefined}
+            onAction={mcpConnectionCanAuthorize(connection.status)
+              ? () => void connectMcp(connection)
+              : connection.status === "connected" ? () => void disconnectMcp(connection) : undefined}
             presentation="account"
           />
-        );
-      })}
+      ))}
       {after}
     </div>
   );
@@ -524,22 +713,64 @@ function decodeMcpConnections(value: unknown): readonly McpConnection[] {
   }
   const seen = new Set<string>();
   return value.mcp_connections.map((candidate): McpConnection => {
-    if (!isRecord(candidate)
-      || typeof candidate.id !== "string" || !mcpConnectionId.test(candidate.id)
-      || seen.has(candidate.id)
-      || typeof candidate.name !== "string" || !mcpConnectionName.test(candidate.name)
-      || candidate.name.trim().length === 0
-      || typeof candidate.status !== "string"
-      || !mcpConnectionStatuses.has(candidate.status as McpConnectionStatus)) {
-      throw new Error("Invalid MCP connection response.");
-    }
-    seen.add(candidate.id);
-    return {
-      id: candidate.id,
-      name: candidate.name,
-      status: candidate.status as McpConnectionStatus,
-    };
-  }).filter(({ status }) => status !== "revoked");
+    const connection = decodeMcpConnection(candidate);
+    if (seen.has(connection.id)) throw new Error("Invalid MCP connection response.");
+    seen.add(connection.id);
+    return connection;
+  });
+}
+
+function mcpConnectionFromResponse(value: unknown, expectedId?: string): McpConnection {
+  if (!isRecord(value)) throw new Error("Invalid MCP connection response.");
+  const connection = decodeMcpConnection(value.mcp_connection);
+  if (expectedId !== undefined && connection.id !== expectedId) {
+    throw new Error("The account broker returned the wrong MCP connection.");
+  }
+  return connection;
+}
+
+function decodeMcpConnection(value: unknown): McpConnection {
+  if (!isRecord(value)
+    || typeof value.id !== "string" || !mcpConnectionId.test(value.id)
+    || typeof value.name !== "string" || !mcpConnectionName.test(value.name)
+    || value.name.trim().length === 0
+    || typeof value.status !== "string"
+    || !mcpConnectionStatuses.has(value.status as McpConnectionStatus)) {
+    throw new Error("Invalid MCP connection response.");
+  }
+  return { id: value.id, name: value.name, status: value.status as McpConnectionStatus };
+}
+
+function authorizationUrlFromResponse(value: unknown): URL {
+  if (!isRecord(value) || typeof value.authorization_url !== "string") {
+    throw new Error("Invalid MCP authorization response.");
+  }
+  let url: URL;
+  try { url = new URL(value.authorization_url); } catch {
+    throw new Error("Invalid MCP authorization URL.");
+  }
+  if (url.protocol !== "https:" || url.username || url.password || url.hash) {
+    throw new Error("Invalid MCP authorization URL.");
+  }
+  return url;
+}
+
+function replaceMcpConnection(
+  connections: readonly McpConnection[],
+  replacement: McpConnection,
+): readonly McpConnection[] {
+  return connections.map((connection) => connection.id === replacement.id ? replacement : connection);
+}
+
+function mcpConnectionCanAuthorize(status: McpConnectionStatus): boolean {
+  return status === "authorization_required" || status === "reauthorization_required";
+}
+
+function mcpConnectionAction(status: McpConnectionStatus): string | undefined {
+  if (status === "connected") return "Revoke";
+  if (status === "authorization_required") return "Connect";
+  if (status === "reauthorization_required") return "Reconnect";
+  return undefined;
 }
 
 function connectorReturnTo(): string {
@@ -564,6 +795,27 @@ function readConnectorResult(): { id: ConnectorId; result: "connected" | "cancel
   url.searchParams.delete("connector_result");
   window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${url.hash}`);
   return { id: id as ConnectorId, result };
+}
+
+function readMcpResult(): { id: string; result: "connected" | "cancelled" | "failed" } | null {
+  const url = new URL(window.location.href);
+  const id = url.searchParams.get("mcp_connection");
+  const result = url.searchParams.get("mcp_result");
+  if (!id || !mcpConnectionId.test(id)
+    || (result !== "connected" && result !== "cancelled" && result !== "failed")) return null;
+  if (window.opener && window.opener !== window) {
+    window.opener.postMessage(connectorCompletion(mcpCompletionIdentifier(id), result), window.location.origin);
+    window.close();
+    return null;
+  }
+  url.searchParams.delete("mcp_connection");
+  url.searchParams.delete("mcp_result");
+  window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${url.hash}`);
+  return { id, result };
+}
+
+function mcpCompletionIdentifier(id: string): string {
+  return `mcp:${id}`;
 }
 
 function connectorResultMessage(result: NonNullable<ReturnType<typeof readConnectorResult>>): string {

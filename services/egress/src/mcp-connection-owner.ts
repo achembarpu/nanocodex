@@ -5,6 +5,7 @@ import {
   type CredentialVaultEnv,
   type EncryptedEnvelope,
 } from "./credential-vault";
+import { canonicalRemoteMcpTarget } from "../../mcp-policy/mcpTarget.mjs";
 
 const STATE_KEY = "mcp-connection-state";
 const CONNECTION_ID = /^[A-Za-z0-9_-]{43}$/;
@@ -220,8 +221,11 @@ export class McpConnectionOwner {
       }, 200);
     }
     if (request.method === "POST" && operation === "callback") {
-      await this.#callback(id, request);
-      return json(this.#publicWire([this.#connection(id)]), 200);
+      const callback = await this.#callback(id, request);
+      return json({
+        ...this.#publicWire([this.#connection(id)]),
+        return_to: callback.returnTo,
+      }, 200);
     }
     if (request.method === "DELETE" && operation === undefined) {
       await this.#revoke(id);
@@ -299,7 +303,7 @@ export class McpConnectionOwner {
     return authorization.href;
   }
 
-  async #callback(id: string, request: Request): Promise<void> {
+  async #callback(id: string, request: Request): Promise<{ returnTo: string }> {
     const connection = this.#connection(id);
     this.#requireActive(connection);
     const body = await readJson(request, MAX_CONTROL_BODY_BYTES);
@@ -311,7 +315,7 @@ export class McpConnectionOwner {
     }
     delete connection.pending;
     await this.#persist();
-    if (!code) throw new McpFailure(400, "authorization_code_missing");
+    if (!code) return { returnTo: pending.returnTo };
     const parameters = new URLSearchParams({
       grant_type: "authorization_code",
       code,
@@ -344,6 +348,7 @@ export class McpConnectionOwner {
     };
     delete connection.reauthorizationRequired;
     await this.#persist();
+    return { returnTo: pending.returnTo };
   }
 
   async #proxy(id: string, request: Request): Promise<Response> {
@@ -1054,9 +1059,13 @@ function mcpMaterialization(value: unknown): {
   const name = stringField(value, "name");
   const requestedScopes = stringArrayField(value, "scopes");
   return endpoint && name && name.trim() === name && name.length <= 128 && !hasControlCharacter(name)
-    && requestedScopes !== undefined && canonicalPublicEndpoint(endpoint)
+    && requestedScopes !== undefined && canonicalMcpEndpoint(endpoint)
     ? { endpoint, name, requestedScopes }
     : undefined;
+}
+
+function canonicalMcpEndpoint(endpoint: string): boolean {
+  try { return canonicalRemoteMcpTarget(endpoint).endpoint === endpoint; } catch { return false; }
 }
 
 function validScopes(value: unknown[]): value is string[] {
