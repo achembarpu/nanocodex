@@ -22,7 +22,9 @@ describe("Service-Binding-only ChatGPT credential import", () => {
       { ...valid, fedramp: undefined },
       { ...valid, access_token: ` ${valid.access_token}` },
       { ...valid, access_token: "not.a.jwt.with.too.many.parts" },
-      { ...valid, refresh_token: "not-a-jwt" },
+      { ...valid, refresh_token: ` ${valid.refresh_token}` },
+      { ...valid, refresh_token: `${valid.refresh_token}\n` },
+      { ...valid, refresh_token: "r".repeat(32 * 1024 + 1) },
       { ...valid, account_id: "a".repeat(257) },
       { ...valid, expires_at: valid.expires_at + 1_000 },
       importedCredential("bounds-account", { expiresInMs: REFRESH_EARLY_MS - 1_000 }),
@@ -30,7 +32,6 @@ describe("Service-Binding-only ChatGPT credential import", () => {
         accessAccount: "access-account",
       }),
       importedCredential("bounds-account", { accessFedramp: true }),
-      importedCredential("bounds-account", { refreshAccount: "other-account" }),
     ];
 
     for (const [index, body] of invalid.entries()) {
@@ -58,7 +59,7 @@ describe("Service-Binding-only ChatGPT credential import", () => {
     expect(await oversized.json()).toEqual({ error: "body_too_large" });
   });
 
-  it("installs missing state encrypted, clears pending login, and schedules refresh", async () => {
+  it("preserves an opaque refresh token in encrypted missing state", async () => {
     const user = "encrypted-import";
     const stub = workerEnv.USER_CREDENTIALS.getByName(user);
     const login = await stub.fetch("https://credentials.internal/v1/chatgpt/login/start", {
@@ -66,7 +67,10 @@ describe("Service-Binding-only ChatGPT credential import", () => {
     });
     expect(login.status).toBe(200);
 
-    const imported = importedCredential("encrypted-account", { expiresInMs: 60 * 60_000 });
+    const imported = importedCredential("encrypted-account", {
+      expiresInMs: 60 * 60_000,
+      refreshToken: "opaque::refresh/token+bytes=kept.exactly~",
+    });
     const response = await importThroughControl(user, imported);
     expect(response.status).toBe(204);
     expect(response.headers.get("cache-control")).toBe("no-store");
@@ -242,7 +246,7 @@ function importedCredential(
     accessFedramp?: boolean;
     expiresInMs?: number;
     marker?: string;
-    refreshAccount?: string;
+    refreshToken?: string;
   }> = {},
 ): ChatGptCredentialImport {
   const expiresAt = Math.ceil(
@@ -259,13 +263,8 @@ function importedCredential(
         chatgpt_account_is_fedramp: accessFedramp,
       },
     }),
-    refresh_token: jwt({
-      marker: options.marker ?? "refresh-secret",
-      "https://api.openai.com/auth": {
-        chatgpt_account_id: options.refreshAccount ?? accountId,
-        chatgpt_account_is_fedramp: fedramp,
-      },
-    }),
+    refresh_token: options.refreshToken
+      ?? `opaque-refresh::${options.marker ?? "refresh-secret"}+/=~`,
     account_id: accountId,
     expires_at: expiresAt,
     fedramp,

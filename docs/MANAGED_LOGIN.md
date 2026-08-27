@@ -240,10 +240,11 @@ Before device registration, the CLI opens the file once without following its
 final symlink where the platform supports that protection. It accepts only a
 regular file owned by the current user, inaccessible to group and other Unix
 users, and no larger than 64 KiB. The document must be a ChatGPT-mode Codex
-login with bounded access and refresh JWTs. The ID and access JWT account and
-FedRAMP claims must agree with the selected account; any corresponding refresh
-claims must agree as well. The access expiry must be more than five minutes in
-the future.
+login with bounded ID and access JWTs and a bounded refresh token. The ID and
+access JWT account and FedRAMP claims must agree with the stored account ID. The
+refresh token is an opaque value: it must be nonblank and control-free, but is
+not decoded as a JWT. The access expiry must be more than five minutes in the
+future.
 
 The signed `wallet_connect` resources contain exactly one import commitment:
 

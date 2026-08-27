@@ -551,7 +551,6 @@ fn load_chatgpt_credential_import(path: &Path) -> Result<ChatgptCredentialImport
 
     let id_claims = decode_chatgpt_jwt_claims("ID", &tokens.id_token)?;
     let access_claims = decode_chatgpt_jwt_claims("access", &tokens.access_token)?;
-    let refresh_claims = decode_chatgpt_jwt_claims("refresh", &tokens.refresh_token)?;
     let account_id = tokens
         .account_id
         .ok_or_else(|| eyre!("Codex ChatGPT tokens contain no account ID"))?;
@@ -561,12 +560,6 @@ fn load_chatgpt_credential_import(path: &Path) -> Result<ChatgptCredentialImport
             && access_claims.account_id.as_deref() == Some(account_id.as_str()),
         "Codex ChatGPT account claims are missing or inconsistent"
     );
-    if let Some(refresh_account_id) = refresh_claims.account_id.as_deref() {
-        ensure!(
-            refresh_account_id == account_id,
-            "Codex ChatGPT account claims are inconsistent"
-        );
-    }
 
     let id_fedramp = id_claims.fedramp.unwrap_or(false);
     let access_fedramp = access_claims.fedramp.unwrap_or(false);
@@ -574,12 +567,6 @@ fn load_chatgpt_credential_import(path: &Path) -> Result<ChatgptCredentialImport
         id_fedramp == access_fedramp,
         "Codex ChatGPT FedRAMP claims are inconsistent"
     );
-    if let Some(refresh_fedramp) = refresh_claims.fedramp {
-        ensure!(
-            refresh_fedramp == access_fedramp,
-            "Codex ChatGPT FedRAMP claims are inconsistent"
-        );
-    }
 
     let expires_at = access_claims
         .exp
@@ -2848,7 +2835,7 @@ mod tests {
     use super::*;
 
     const ACCESS_SENTINEL: &str = "access-token-sentinel-never-log";
-    const REFRESH_SENTINEL: &str = "refresh-token-sentinel-never-log";
+    const REFRESH_SENTINEL: &str = "opaque-refresh-token-sentinel-never-log_A1b2C3d4E5f6G7h8I9j0";
     const CHATGPT_ACCOUNT: &str = "account-test-123";
 
     fn test_jwt(payload: Value) -> String {
@@ -2884,7 +2871,7 @@ mod tests {
             "tokens": {
                 "id_token": test_jwt(chatgpt_claims(CHATGPT_ACCOUNT, true)),
                 "access_token": test_jwt_with_signature(access_claims, ACCESS_SENTINEL),
-                "refresh_token": test_jwt_with_signature(json!({}), REFRESH_SENTINEL),
+                "refresh_token": REFRESH_SENTINEL,
                 "account_id": CHATGPT_ACCOUNT,
             },
             "last_refresh": "2026-08-27T00:00:00Z",
@@ -3014,6 +3001,7 @@ mod tests {
 
         let imported = load_chatgpt_credential_import(&path).unwrap();
         assert_eq!(imported.account_id, CHATGPT_ACCOUNT);
+        assert_eq!(imported.refresh_token, REFRESH_SENTINEL);
         assert_eq!(imported.expires_at, exp * 1_000);
         assert!(imported.fedramp);
         let debug = format!("{imported:?}");
@@ -3022,6 +3010,7 @@ mod tests {
         assert!(debug.contains("[REDACTED]"));
         let projected = serde_json::to_value(&imported).unwrap();
         assert_eq!(projected.as_object().unwrap().len(), 5);
+        assert_eq!(projected["refresh_token"], REFRESH_SENTINEL);
         assert_eq!(projected["account_id"], CHATGPT_ACCOUNT);
         assert_eq!(projected["expires_at"], exp * 1_000);
         assert_eq!(projected["fedramp"], true);
@@ -3056,19 +3045,32 @@ mod tests {
                 .contains("FedRAMP")
         );
 
-        let mut invalid_refresh = auth.clone();
-        invalid_refresh["tokens"]["refresh_token"] = json!(format!(
-            "{}.{}.{}.extra",
-            URL_SAFE_NO_PAD.encode(b"{}"),
-            URL_SAFE_NO_PAD.encode(b"[]"),
-            URL_SAFE_NO_PAD.encode(b"signature")
-        ));
-        write_private_auth(&path, &invalid_refresh);
-        let error = load_chatgpt_credential_import(&path).unwrap_err();
-        let rendered = format!("{error:?}");
-        assert!(rendered.contains("three-segment JWT"));
-        assert!(!rendered.contains(ACCESS_SENTINEL));
-        assert!(!rendered.contains(REFRESH_SENTINEL));
+        for invalid in [
+            String::new(),
+            " leading-space".to_owned(),
+            "control\ncharacter".to_owned(),
+            "x".repeat(CHATGPT_TOKEN_LIMIT + 1),
+        ] {
+            let mut invalid_refresh = auth.clone();
+            invalid_refresh["tokens"]["refresh_token"] = json!(invalid);
+            write_private_auth(&path, &invalid_refresh);
+            let error = load_chatgpt_credential_import(&path).unwrap_err();
+            let rendered = format!("{error:?}");
+            assert!(rendered.contains("refresh token is missing or invalid"));
+            assert!(!rendered.contains(ACCESS_SENTINEL));
+            assert!(!rendered.contains(REFRESH_SENTINEL));
+        }
+
+        for (kind, field) in [("ID", "id_token"), ("access", "access_token")] {
+            let mut invalid_jwt = auth.clone();
+            invalid_jwt["tokens"][field] = json!("opaque-not-a-jwt");
+            write_private_auth(&path, &invalid_jwt);
+            let error = load_chatgpt_credential_import(&path).unwrap_err();
+            let rendered = format!("{error:?}");
+            assert!(rendered.contains(&format!("{kind} token is not a three-segment JWT")));
+            assert!(!rendered.contains(ACCESS_SENTINEL));
+            assert!(!rendered.contains(REFRESH_SENTINEL));
+        }
 
         let near_expiry = valid_codex_auth(unix_timestamp().unwrap() + 5 * 60);
         write_private_auth(&path, &near_expiry);

@@ -873,12 +873,10 @@ export function validChatGptCredentialImport(
   }
 
   const accessClaims = strictJwtPayload(accessToken);
-  const refreshClaims = strictJwtPayload(refreshToken);
-  if (!accessClaims || !refreshClaims
+  if (!accessClaims
     || !Number.isSafeInteger(accessClaims.exp)
     || (accessClaims.exp as number) * 1_000 !== expiresAt
-    || !matchingImportedAuthClaims(accessClaims, accountId, value.fedramp, true)
-    || !matchingImportedAuthClaims(refreshClaims, accountId, value.fedramp, false)) {
+    || !matchingImportedAuthClaims(accessClaims, accountId, value.fedramp)) {
     return false;
   }
   return true;
@@ -894,19 +892,15 @@ function matchingImportedAuthClaims(
   claims: Record<string, unknown>,
   accountId: string,
   fedramp: boolean,
-  required: boolean,
 ): boolean {
   const auth = claims["https://api.openai.com/auth"];
-  if (auth === undefined) return !required;
   if (!isRecord(auth)) return false;
   const claimedAccount = auth.chatgpt_account_id;
   const claimedFedramp = auth.chatgpt_account_is_fedramp;
-  if (required && typeof claimedAccount !== "string") return false;
-  if (claimedAccount !== undefined
-    && (typeof claimedAccount !== "string" || claimedAccount !== accountId)) return false;
+  if (typeof claimedAccount !== "string" || claimedAccount !== accountId) return false;
   if (claimedFedramp !== undefined && typeof claimedFedramp !== "boolean") return false;
   if (claimedFedramp !== undefined) return claimedFedramp === fedramp;
-  return !required || fedramp === false;
+  return fedramp === false;
 }
 
 function exactBoundedString(value: unknown, maxBytes: number): string | undefined {
