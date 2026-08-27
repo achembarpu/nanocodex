@@ -62,6 +62,22 @@ const WRANGLER_DIRECTORIES = Object.freeze([
   "web/connect-playground",
 ]);
 
+const PRODUCTION_SERVICE_BINDINGS = Object.freeze({
+  "connect-api": Object.freeze([
+    ["ACCOUNTS", "nanocodex-durable-agent"],
+    ["EGRESS", "nanocodex-egress"],
+    ["NANOCODEX", "nanocodex"],
+  ]),
+  "connect-dialog": Object.freeze([]),
+  "connect-playground": Object.freeze([]),
+  "egress-broker": Object.freeze([]),
+  "managed-agent": Object.freeze([["NANOCODEX", "nanocodex-egress"]]),
+  website: Object.freeze([
+    ["NANOCODEX_BACKEND", "nanocodex-durable-agent"],
+    ["NANOCODEX_CONNECT_DIALOG", "nanocodex-connect-dialog"],
+  ]),
+});
+
 const DEPLOYMENT_SECRET_NAMES = Object.freeze([
   "CLOUDFLARE_API_TOKEN",
   "NANOCODEX_ADMIN_TOKEN",
@@ -274,6 +290,41 @@ export function productionResourceTopology(configurations) {
     ))),
     r2Buckets: Object.freeze([...r2Buckets].sort()),
   });
+}
+
+/**
+ * Ensures the checked-in Worker configs describe the same deployable service
+ * graph as the rollout. Wrangler only discovers a bad binding when that
+ * individual Worker deploys, which is too late for a one-command preflight.
+ */
+export function assertProductionServiceBindings(configurations) {
+  if (!Array.isArray(configurations) || configurations.length === 0) {
+    throw new Error("production service binding topology requires Wrangler configs");
+  }
+  const seen = new Set();
+  for (const configuration of configurations) {
+    const label = requiredText(configuration?.label, "Worker config label");
+    if (seen.has(label)) throw new Error(`production service binding topology repeats ${label}`);
+    seen.add(label);
+    const expected = PRODUCTION_SERVICE_BINDINGS[label];
+    if (!expected) throw new Error(`production service binding topology does not recognize ${label}`);
+    const actual = optionalArray(configuration?.config?.services, `${label} services`)
+      .map((service) => {
+        const binding = requiredBinding(service?.binding, `${label} service binding`);
+        const target = requiredResourceName(service?.service, `${label} service target`);
+        return [binding, target];
+      })
+      .sort(([left], [right]) => left.localeCompare(right));
+    const wanted = [...expected].sort(([left], [right]) => left.localeCompare(right));
+    if (JSON.stringify(actual) !== JSON.stringify(wanted)) {
+      throw new Error(
+        `production ${label} service bindings must be ${JSON.stringify(wanted)}`,
+      );
+    }
+  }
+  for (const label of Object.keys(PRODUCTION_SERVICE_BINDINGS)) {
+    if (!seen.has(label)) throw new Error(`production service binding topology is missing ${label}`);
+  }
 }
 
 export function parseR2BucketList(output) {
@@ -762,14 +813,21 @@ async function main(environment = process.env) {
 async function loadProductionResourceTopology() {
   const definitions = [
     ["website", "web", "web/wrangler.jsonc"],
-    ["managed agent", "services/managed", "services/managed/wrangler.jsonc"],
+    ["managed-agent", "services/managed", "services/managed/wrangler.jsonc"],
+    ["egress-broker", "services/egress", "services/egress/wrangler.broker.jsonc"],
+    ["connect-api", "services/connect-api", "services/connect-api/wrangler.jsonc"],
+    ["connect-dialog", "web/connect-dialog", "web/connect-dialog/wrangler.jsonc"],
+    ["connect-playground", "web/connect-playground", "web/connect-playground/wrangler.jsonc"],
   ];
   const configurations = await Promise.all(definitions.map(async ([label, directory, path]) => ({
     config: await readJson(resolve(repositoryRoot, path)),
     directory: resolve(repositoryRoot, directory),
     label,
   })));
-  return productionResourceTopology(configurations);
+  assertProductionServiceBindings(configurations);
+  return productionResourceTopology(configurations.filter(
+    ({ label }) => label === "website" || label === "managed-agent",
+  ));
 }
 
 async function installPinnedDependencies(environment) {

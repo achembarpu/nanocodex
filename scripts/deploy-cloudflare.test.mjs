@@ -8,6 +8,7 @@ import {
   assertLiveResponse,
   assertOneCommandPreflight,
   assertPinnedWrangler,
+  assertProductionServiceBindings,
   executeProductionMutations,
   finalContainerRollout,
   normalizeDeploymentEnvironment,
@@ -206,6 +207,29 @@ test("production resource topology covers the real checked-in Wrangler configs",
     type: "r2",
   }]);
   assert.equal(topology.d1Migrations.length, 1);
+});
+
+test("production service bindings form the complete deployment graph", async () => {
+  const definitions = [
+    ["website", "web/wrangler.jsonc"],
+    ["managed-agent", "services/managed/wrangler.jsonc"],
+    ["egress-broker", "services/egress/wrangler.broker.jsonc"],
+    ["connect-api", "services/connect-api/wrangler.jsonc"],
+    ["connect-dialog", "web/connect-dialog/wrangler.jsonc"],
+    ["connect-playground", "web/connect-playground/wrangler.jsonc"],
+  ];
+  const configurations = await Promise.all(definitions.map(async ([label, path]) => ({
+    config: JSON.parse(await readFile(new URL(`../${path}`, import.meta.url), "utf8")),
+    label,
+  })));
+  assert.doesNotThrow(() => assertProductionServiceBindings(configurations));
+
+  const broken = structuredClone(configurations);
+  broken.find(({ label }) => label === "connect-api").config.services[1].service = "wrong-worker";
+  assert.throws(
+    () => assertProductionServiceBindings(broken),
+    /connect-api service bindings/,
+  );
 });
 
 test("Wrangler resource list formats are parsed fail-closed", () => {
