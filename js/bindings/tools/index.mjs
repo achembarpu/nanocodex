@@ -15,4 +15,5 @@ export {
 } from "./standard.mjs";
 export { dataset } from "./dataset.mjs";
 export { justBash } from "./bash.mjs";
+export { materializeRepositoryWorkspace } from "./repository-workspace.mjs";
 export { createTools } from "./Tools.mjs";

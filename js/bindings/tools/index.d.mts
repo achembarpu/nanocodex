@@ -32,6 +32,12 @@ export { dataset } from "./dataset.mjs";
 export type { DatasetOptions } from "./dataset.mjs";
 export { justBash } from "./bash.mjs";
 export type { JustBashNetworkOptions, JustBashRuntime } from "./bash.mjs";
+export { materializeRepositoryWorkspace } from "./repository-workspace.mjs";
+export type {
+  RepositoryWorkspaceDescriptor,
+  RepositoryWorkspaceFetch,
+  RepositoryWorkspaceRemote,
+} from "./repository-workspace.mjs";
 export { createTools } from "./Tools.mjs";
 export type {
   AttachmentClient,

@@ -107,6 +107,10 @@
       "types": "./tools/bash.d.mts",
       "import": "./tools/bash.mjs"
     },
+    "./tools/repository-workspace": {
+      "types": "./tools/repository-workspace.d.mts",
+      "import": "./tools/repository-workspace.mjs"
+    },
     "./tools/browser": {
       "types": "./tools/browser/index.d.mts",
       "import": "./tools/browser/index.mjs"
