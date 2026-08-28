@@ -1,4 +1,4 @@
-export const productionConnectApiOrigin = "https://nanocodex.gakonst.workers.dev";
+export const productionConnectApiOrigin = "https://nanocodex-connect-api.gakonst.workers.dev";
 export const productionNanocodexOrigin = "https://nanocodex.gakonst.workers.dev";
 
 const cliApp = Object.freeze({
