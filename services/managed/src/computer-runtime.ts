@@ -58,12 +58,14 @@ export async function createManagedComputerRuntime(options: Readonly<{
       options.connectorAllowed,
     );
     let mountedFilesystem: Workspace | undefined;
+    const gitCommand = createManagedGitCommand(fetch, () => {
+      if (!mountedFilesystem) throw new Error("managed shell filesystem is not mounted");
+      return mountedFilesystem;
+    });
     const commands = Object.freeze([
-      createManagedGitCommand(fetch, () => {
-        if (!mountedFilesystem) throw new Error("managed shell filesystem is not mounted");
-        return mountedFilesystem;
-      }),
-      createManagedGhCommand(fetch),
+      gitCommand,
+      createManagedGhCommand(fetch, (args, context) =>
+        gitCommand.execute(["clone", ...args], context)),
     ]);
     const shell = await justBash({
       filesystem: sourceFilesystem,

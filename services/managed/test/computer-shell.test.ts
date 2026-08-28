@@ -112,7 +112,12 @@ describe("Nanocodex managed Just Bash commands", () => {
           owner: { login: "gakonst" },
         }]
         : { full_name: "gakonst/nanocodex", description: "small agents", html_url: "https://github.com/gakonst/nanocodex" })) as ManagedShellFetch;
-    const gh = createManagedGhCommand(fetch);
+    const clone = vi.fn(async () => ({
+      exitCode: 0,
+      stderr: "",
+      stdout: "Cloning into 'centaur'...\n",
+    }));
+    const gh = createManagedGhCommand(fetch, clone);
 
     expect(await gh.execute(["auth", "status"])).toMatchObject({
       exitCode: 0,
@@ -153,10 +158,18 @@ describe("Nanocodex managed Just Bash commands", () => {
       "https://api.github.com/user?page=1",
       expect.objectContaining({ method: "GET", body: undefined }),
     );
-    expect(await gh.execute(["repo", "clone", "gakonst/nanocodex"])).toMatchObject({
-      exitCode: 1,
-      stderr: expect.stringContaining("Supported commands"),
+    expect(await gh.execute([
+      "repo", "clone", "paradigmxyz/centaur", "centaur-src",
+      "--", "--depth", "1", "--branch", "main",
+    ], { cwd: "/workspace/repositories" })).toMatchObject({
+      exitCode: 0,
+      stdout: "Cloning into 'centaur'...\n",
     });
+    expect(clone).toHaveBeenCalledWith([
+      "--depth", "1", "--branch", "main",
+      "https://github.com/paradigmxyz/centaur.git",
+      "centaur-src",
+    ], { cwd: "/workspace/repositories" });
   });
 
   it("advertises managed git clone and rejects non-GitHub repositories", async () => {

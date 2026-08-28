@@ -1,6 +1,10 @@
-import { describe, expect, it, vi } from "vitest";
+import git from "isomorphic-git";
+import type { PromiseFsClient } from "isomorphic-git";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createManagedComputerRuntime } from "../src/computer-runtime";
+
+afterEach(() => vi.restoreAllMocks());
 
 describe("managed Computer runtime", () => {
   it("shares one mounted filesystem and command set across every consumer", async () => {
@@ -35,6 +39,37 @@ describe("managed Computer runtime", () => {
     runtime.dispose();
     runtime.dispose();
     expect(computer.inspect.dispose).toHaveBeenCalledTimes(1);
+  });
+
+  it("dispatches gh repo clone through managed git in Just Bash", async () => {
+    const clone = vi.spyOn(git, "clone").mockImplementation(async (options) => {
+      const fs = options.fs as PromiseFsClient;
+      await fs.promises.mkdir(`${options.dir}/.git`, { recursive: true });
+      await fs.promises.writeFile(`${options.dir}/README.md`, "centaur\n");
+    });
+    const runtime = await createManagedComputerRuntime({
+      computer: memoryComputer(),
+      egress: { fetch: vi.fn() } as unknown as Fetcher,
+    });
+
+    expect(await runtime.tool.handler({
+      cmd: "gh repo clone paradigmxyz/centaur centaur -- --depth 1 && cat centaur/README.md",
+    }, {
+      callId: "clone-centaur",
+      parentCallId: "",
+      sessionId: "test",
+      signal: new AbortController().signal,
+    })).toMatchObject({
+      exit_code: 0,
+      output: "Cloning into 'centaur'...\ncentaur\n",
+    });
+    expect(clone).toHaveBeenCalledWith(expect.objectContaining({
+      depth: 1,
+      dir: "/workspace/centaur",
+      url: "https://github.com/paradigmxyz/centaur.git",
+    }));
+
+    runtime.dispose();
   });
 });
 

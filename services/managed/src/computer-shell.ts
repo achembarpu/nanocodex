@@ -23,6 +23,17 @@ export type ManagedShellFetch = (
   options?: ShellFetchOptions,
 ) => Promise<ShellFetchResult>;
 
+type ManagedCommandContext = Readonly<{ cwd?: unknown }>;
+type ManagedCommandResult = Readonly<{
+  stdout: string;
+  stderr: string;
+  exitCode: number;
+}>;
+type ManagedGitClone = (
+  args: string[],
+  context: ManagedCommandContext,
+) => Promise<ManagedCommandResult>;
+
 const REPOSITORY = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const GITHUB_REPOSITORY = /^https:\/\/github\.com\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+?)(?:\.git)?\/?$/;
 const MAX_GIT_HTTP_BODY_BYTES = 16 * 1024 * 1024;
@@ -58,11 +69,14 @@ export function createManagedShellFetch(
 }
 
 /** gh compatibility command backed by the connected GitHub account. */
-export function createManagedGhCommand(fetch: ManagedShellFetch) {
+export function createManagedGhCommand(
+  fetch: ManagedShellFetch,
+  clone?: ManagedGitClone,
+) {
   return {
     name: "gh",
     trusted: true,
-    async execute(args: string[]) {
+    async execute(args: string[], context: ManagedCommandContext = {}) {
       try {
         if (args[0] === "auth" && args[1] === "status") {
           const user = await github(fetch, "/user");
@@ -104,6 +118,10 @@ export function createManagedGhCommand(fetch: ManagedShellFetch) {
             `url:\t${optionalText(repo, "html_url") ?? `https://github.com/${repository}`}`,
             "",
           ].join("\n"));
+        }
+        if (args[0] === "repo" && args[1] === "clone") {
+          if (!clone) throw new Error("repository cloning is unavailable in this runtime");
+          return clone(ghRepoCloneArguments(args.slice(2)), context);
         }
         if (args[0] === "repo" && args[1] === "list") {
           const owner = positional(args.slice(2), ["--limit", "-L"]);
@@ -150,6 +168,7 @@ export function createManagedGhCommand(fetch: ManagedShellFetch) {
           "  gh auth status",
           "  gh api [--method METHOD] [-f key=value] ENDPOINT",
           "  gh repo list [OWNER] [--limit N]",
+          "  gh repo clone OWNER/REPO [DIRECTORY] [-- GITFLAGS...]",
           "  gh repo view OWNER/REPO",
           "  gh pr list --repo OWNER/REPO [--limit N]",
           "",
@@ -161,6 +180,25 @@ export function createManagedGhCommand(fetch: ManagedShellFetch) {
       }
     },
   };
+}
+
+function ghRepoCloneArguments(args: string[]): string[] {
+  const separator = args.indexOf("--");
+  const commandArgs = separator === -1 ? args : args.slice(0, separator);
+  const gitArgs = separator === -1 ? [] : args.slice(separator + 1);
+  if (commandArgs.some((value) => value.startsWith("-"))) {
+    throw new Error("gh repo clone supports OWNER/REPO [DIRECTORY] [-- GITFLAGS...]");
+  }
+  if (commandArgs.length < 1 || commandArgs.length > 2) {
+    throw new Error("gh repo clone requires OWNER/REPO and an optional destination");
+  }
+  const repository = commandArgs[0];
+  requireRepository(repository, "gh repo clone requires OWNER/REPO");
+  return [
+    ...gitArgs,
+    `https://github.com/${repository}.git`,
+    ...(commandArgs[1] === undefined ? [] : [commandArgs[1]]),
+  ];
 }
 
 /** Git compatibility command backed by durable workspace storage and public Git smart HTTP. */
