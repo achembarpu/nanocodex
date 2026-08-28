@@ -683,10 +683,13 @@ describe("managed agents REST and resumable SSE", () => {
       })}`,
       { headers: { cookie }, redirect: "manual" },
     );
-    expect(callback.status).toBe(303);
-    expect(callback.headers.get("location")).toBe(
-      "https://example.test/agent?thread=connector&connector=github&connector_result=connected",
-    );
+    expect(callback.status).toBe(200);
+    expect(callback.headers.get("content-type")).toBe("text/html; charset=utf-8");
+    const completionPage = await callback.text();
+    expect(completionPage).toContain('"type":"nanocodex:connector-complete"');
+    expect(completionPage).toContain('"connector":"github"');
+    expect(completionPage).toContain('"result":"success"');
+    expect(completionPage).toContain("window.close()");
 
     const connected = await RAW_SELF.fetch("https://example.test/v1/connectors", {
       headers: { cookie },
