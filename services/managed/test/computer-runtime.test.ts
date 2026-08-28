@@ -38,7 +38,7 @@ describe("managed Computer runtime", () => {
     expect(runtime.instructions).toContain(
       "call exec_command immediately and once with the complete command",
     );
-    expect(runtime.instructions).toContain("gh repo clone OWNER/REPO");
+    expect(runtime.instructions).toContain("exactly gh repo clone OWNER/REPO DESTINATION");
 
     runtime.dispose();
     runtime.dispose();
@@ -72,6 +72,46 @@ describe("managed Computer runtime", () => {
       dir: "/workspace/centaur",
       url: "https://github.com/paradigmxyz/centaur.git",
     }));
+
+    runtime.dispose();
+  });
+
+  it("removes a failed clone destination so one direct retry can succeed", async () => {
+    let attempts = 0;
+    vi.spyOn(git, "clone").mockImplementation(async (options) => {
+      attempts += 1;
+      const fs = options.fs as PromiseFsClient;
+      await fs.promises.mkdir(options.dir, { recursive: true });
+      if (attempts === 1) {
+        await fs.promises.writeFile(`${options.dir}/partial`, "partial\n");
+        throw new Error("clone interrupted");
+      }
+      await fs.promises.mkdir(`${options.dir}/.git`, { recursive: true });
+      await fs.promises.writeFile(`${options.dir}/README.md`, "centaur\n");
+    });
+    const runtime = await createManagedComputerRuntime({
+      computer: memoryComputer(),
+      egress: { fetch: vi.fn() } as unknown as Fetcher,
+    });
+    const context = {
+      callId: "retry-clone-centaur",
+      parentCallId: "",
+      sessionId: "test",
+      signal: new AbortController().signal,
+    };
+
+    expect(await runtime.tool.handler({
+      cmd: "gh repo clone paradigmxyz/centaur centaur",
+    }, context)).toMatchObject({
+      exit_code: 1,
+      output: "git: clone interrupted\n",
+    });
+    expect(await runtime.tool.handler({
+      cmd: "gh repo clone paradigmxyz/centaur centaur && cat centaur/README.md",
+    }, context)).toMatchObject({
+      exit_code: 0,
+      output: "Cloning into 'centaur'...\ncentaur\n",
+    });
 
     runtime.dispose();
   });

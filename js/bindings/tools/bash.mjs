@@ -287,7 +287,8 @@ function defaultInstructions(descriptor) {
 Use exec_command for shell work. When the user requests an explicit shell operation that maps directly to an
 available command, call exec_command immediately and once with the complete command. Do not inspect the runtime,
 account, or workspace, search for another tool, or split the operation into exploratory calls before trying it.
-For example, clone OWNER/REPO with gh repo clone OWNER/REPO, and clone an explicit URL with git clone URL.
+For an ordinary clone request, use exactly gh repo clone OWNER/REPO DESTINATION or git clone URL DESTINATION.
+Do not add depth, filter, branch, or other flags unless the user requests them, and do not inspect a successful clone.
 Only investigate after that direct command fails or when the user explicitly asks for investigation.
 Available commands: ${descriptor.commands.join(", ")}. Use ${descriptor.cwd}/tmp, not /tmp, for temporary files. Commands run without a host process, container, PTY, session, or sandbox
 escalation, and cannot access paths outside ${descriptor.cwd}. The shell is one-shot per call, but files persist

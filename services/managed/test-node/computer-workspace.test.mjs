@@ -60,6 +60,15 @@ test("bounds file reads and writes before allocating or touching Computer storag
   assert.equal(client.inspect.writeCount, 0);
 });
 
+test("the default file bound admits Git pack files larger than 16 MiB", async () => {
+  const client = memoryComputer();
+  const filesystem = await createComputerFilesystem(client);
+  const pack = new Uint8Array(16 * 1024 * 1024 + 1);
+
+  await filesystem.writeFile("repo/.git/objects/pack/repository.pack", pack);
+  assert.equal(client.inspect.writeCount, 1);
+});
+
 test("fails a read if the file grows after lstat", async () => {
   const client = memoryComputer({ files: { "/workspace/racy.bin": "four" } });
   const lstat = client.fs.lstat;

@@ -329,15 +329,22 @@ async function cloneRepository(
     : workspace.root;
   const dir = `${root}/${destination}`;
   if (await workspaceEntry(workspace, dir)) throw new Error(`destination path '${destination}' already exists`);
-  await git.clone({
-    fs: workspaceFs(workspace),
-    http: managedGitHttp(fetch),
-    dir,
-    url: `https://github.com/${repository}.git`,
-    singleBranch: branch !== undefined,
-    ...(branch === undefined ? {} : { ref: branch }),
-    ...(depth === undefined ? {} : { depth }),
-  });
+  try {
+    await git.clone({
+      fs: workspaceFs(workspace),
+      http: managedGitHttp(fetch),
+      dir,
+      url: `https://github.com/${repository}.git`,
+      singleBranch: branch !== undefined,
+      ...(branch === undefined ? {} : { ref: branch }),
+      ...(depth === undefined ? {} : { depth }),
+    });
+  } catch (error) {
+    if (await workspaceEntry(workspace, dir)) {
+      await workspace.remove(dir, { recursive: true });
+    }
+    throw error;
+  }
   return `Cloning into '${destination}'...\n`;
 }
 

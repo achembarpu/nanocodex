@@ -3,7 +3,7 @@ import type { Workspace, WorkspaceEntry } from "nanocodex/workspace";
 
 const ROOT = "/workspace";
 const DEFAULT_MAX_ENTRIES = 2_000;
-const DEFAULT_MAX_FILE_BYTES = 16 * 1024 * 1024;
+const DEFAULT_MAX_FILE_BYTES = 64 * 1024 * 1024;
 
 type ComputerDirent = Readonly<{
   name: string;
