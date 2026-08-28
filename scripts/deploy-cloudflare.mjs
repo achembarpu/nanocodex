@@ -111,6 +111,7 @@ export function productionMutationPlan(rootExists) {
     "connect-api",
     "connect-playground",
     "root-final",
+    "repository-publication",
   ]);
 }
 
@@ -712,6 +713,15 @@ export function assertLiveResponse(probe, response, body, revision) {
     assert.deepEqual(body, { status: "ok", mode: "live" });
     return;
   }
+  if (probe === "repository") {
+    assert.equal(response.status, 200, "production repository snapshot must return HTTP 200");
+    assert.equal(
+      body?.repository?.head,
+      revision,
+      "production repository snapshot must report the deployed SHA",
+    );
+    return;
+  }
   if (probe === "root-connect-dialog" || probe === "connect-playground") {
     assert.equal(response.status, 200, `${probe} must return HTTP 200`);
     assert.match(
@@ -814,6 +824,19 @@ async function main(environment = process.env) {
       containersRollout: finalContainerRollout(rootExists),
       d1DatabaseIds: resources.d1DatabaseIds,
     }),
+    "repository-publication": () => runLocal(
+      process.execPath,
+      [resolve(repositoryRoot, "web/scripts/publish-repository.mjs")],
+      {
+        environment: {
+          ...rolloutEnvironment,
+          NANOCODEX_GIT_ORIGIN: PRODUCTION_ORIGINS.root,
+          NANOCODEX_REPO: repositoryRoot,
+        },
+        label: "publish production repository generation",
+        timeoutMs: 10 * 60_000,
+      },
+    ),
   };
 
   const plan = await executeProductionMutations(rootExists, actions);
@@ -1005,6 +1028,7 @@ async function waitForProductionHealth(revision, fetchImpl = globalThis.fetch) {
         ["root-health", new URL("/api/health", PRODUCTION_ORIGINS.root), "json"],
         ["managed-binding", new URL("/v1/me", PRODUCTION_ORIGINS.root), "json"],
         ["connect-api", new URL("/healthz", PRODUCTION_ORIGINS.connectApi), "json"],
+        ["repository", new URL("/api/repository/snapshot", PRODUCTION_ORIGINS.root), "json"],
         ["root-connect-dialog", new URL("/connect-dialog/", PRODUCTION_ORIGINS.root), "text"],
         ["connect-playground", new URL("/", PRODUCTION_ORIGINS.playground), "text"],
       ];

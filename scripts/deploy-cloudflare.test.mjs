@@ -57,6 +57,7 @@ test("production mutation plan is dependency-safe with and without root bootstra
     "connect-api",
     "connect-playground",
     "root-final",
+    "repository-publication",
   ]);
   assert.deepEqual(productionMutationPlan(true), [
     "connect-dialog",
@@ -66,6 +67,7 @@ test("production mutation plan is dependency-safe with and without root bootstra
     "connect-api",
     "connect-playground",
     "root-final",
+    "repository-publication",
   ]);
   assert.equal(finalContainerRollout(false), "none");
   assert.equal(finalContainerRollout(true), "immediate");
@@ -466,6 +468,22 @@ test("root health requires the exact production SHA", () => {
     "root-health",
     response,
     { status: "ok", deployment_sha: "b".repeat(40) },
+    revision,
+  ), /deployed SHA/);
+});
+
+test("repository health requires the exact production generation", () => {
+  const response = Response.json({ repository: { head: revision } });
+  assert.doesNotThrow(() => assertLiveResponse(
+    "repository",
+    response,
+    { repository: { head: revision } },
+    revision,
+  ));
+  assert.throws(() => assertLiveResponse(
+    "repository",
+    response,
+    { repository: { head: "b".repeat(40) } },
     revision,
   ), /deployed SHA/);
 });
