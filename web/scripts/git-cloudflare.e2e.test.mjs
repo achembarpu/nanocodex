@@ -192,7 +192,7 @@ class MemoryR2Bucket {
 
 async function storeArtifacts(bucket, current, artifacts) {
   await bucket.putBytes(
-    current.snapshotKey,
+    `generations/${current.head}/publication.json`,
     new TextEncoder().encode(JSON.stringify(current)),
   );
   const pack = await readFile(artifacts.packPath);
