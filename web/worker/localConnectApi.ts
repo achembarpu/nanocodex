@@ -8,6 +8,13 @@ export function routeLocalConnectApi(
   url: URL,
 ): Promise<Response> | undefined {
   if (!isLocalConnectApiPath(url.pathname)) return undefined;
+  // Connect and the account-owned browser runtime intentionally share the
+  // public /v1/egress path. A Connect client carries its grant bearer token;
+  // the browser shell carries only the persistent account cookie and must
+  // fall through to the managed account router.
+  if (url.pathname === "/v1/egress" && !request.headers.has("authorization")) {
+    return undefined;
+  }
   if (!env.NANOCODEX_CONNECT_API) return undefined;
   const headers = new Headers(request.headers);
   headers.set("x-nanocodex-local-origin", url.origin);

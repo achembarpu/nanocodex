@@ -84,6 +84,27 @@ test("local Connect API routing owns the complete dialog protocol", async () => 
   assert.deepEqual(seen, paths);
 });
 
+test("egress routes by authorization scope instead of path alone", async () => {
+  const binding = fetcher(() => Promise.resolve(new Response("connect")));
+  const url = new URL("http://passkey-a.nanocodex.localhost:5273/v1/egress");
+  const accountRequest = new Request(url, {
+    method: "POST",
+    headers: { cookie: "nanocodex_account=session" },
+  });
+  assert.equal(routeLocalConnectApi(accountRequest, {
+    NANOCODEX_CONNECT_API: binding,
+  }, url), undefined);
+
+  const connectRequest = new Request(url, {
+    method: "POST",
+    headers: { authorization: `Bearer ${"a".repeat(43)}` },
+  });
+  const response = await routeLocalConnectApi(connectRequest, {
+    NANOCODEX_CONNECT_API: binding,
+  }, url);
+  assert.equal(await response?.text(), "connect");
+});
+
 test("overlapping connector routes are left to the explicit Connect or managed router", () => {
   const binding = { fetch: () => Promise.resolve(new Response()) };
   for (const path of [
