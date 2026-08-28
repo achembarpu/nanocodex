@@ -97,6 +97,8 @@ test("every declared document route and the internal artifact runtime retain the
     "/code",
     "/commits",
     "/requests",
+    "/connect",
+    "/connect/device",
     "/evals",
     ...Object.keys(docsPreview),
     "/evals/worksets/suite-one",

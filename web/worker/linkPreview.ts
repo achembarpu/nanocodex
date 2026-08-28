@@ -137,7 +137,8 @@ export function documentStatusForPath(pathname: string): 200 | 404 | null {
   if (pathname === "/" || pathname === "/agent" || pathname === "/multiplayer"
     || pathname === "/world" || pathname === "/artifact-runtime"
     || pathname === "/changelog" || pathname === "/code" || pathname === "/commits"
-    || pathname === "/requests" || pathname === "/connect") return 200;
+    || pathname === "/requests" || pathname === "/connect"
+    || pathname === "/connect/device") return 200;
   if (Object.hasOwn(docsPreview, pathname) || isEvalDocumentPath(pathname)) return 200;
   if (pathname.startsWith("/docs/") || pathname.startsWith("/evals/")) return 404;
   return null;
@@ -224,6 +225,7 @@ async function previewForUrl(url: URL, env: LinkPreviewEnv): Promise<Preview> {
   if (pathname === "/commits") return fixed(pathname, "Commits", "Inspect the published Nanocodex source history and focused patches.");
   if (pathname === "/requests") return fixed(pathname, "Requests", "Track proposed changes to the published Nanocodex source tree.", "REQUESTS");
   if (pathname === "/connect") return fixed(pathname, "Account", "Manage your Nanocodex identity, connections, and API keys.", "NANOCODEX ACCOUNT");
+  if (pathname === "/connect/device") return fixed(pathname, "Connect device", "Authorize a Nanocodex device with your passkey-backed account.", "NANOCODEX CONNECT");
   if (pathname === "/code") {
     const sourcePath = boundedText(url.searchParams.get("path"), 240);
     const canonical = new URL("https://canonical.invalid/code");
