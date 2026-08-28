@@ -1,10 +1,12 @@
+import git, { type GitHttpRequest, type HttpClient } from "isomorphic-git";
+import type { Workspace, WorkspaceEntry } from "nanocodex/workspace";
 import { handleManagedEgress } from "./managed-egress";
 import type { ManagedEgressConnectorId } from "./managed-egress";
 
 type ShellFetchOptions = Readonly<{
   method?: string | undefined;
   headers?: Headers | Record<string, string> | undefined;
-  body?: string | undefined;
+  body?: string | Uint8Array | undefined;
   signal?: AbortSignal | undefined;
 }>;
 
@@ -22,6 +24,9 @@ export type ManagedShellFetch = (
 ) => Promise<ShellFetchResult>;
 
 const REPOSITORY = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+const GITHUB_REPOSITORY = /^https:\/\/github\.com\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+?)(?:\.git)?\/?$/;
+const MAX_GIT_HTTP_BODY_BYTES = 16 * 1024 * 1024;
+const MAX_GIT_ENTRIES = 20_000;
 
 /** One credential-free fetch capability shared by curl and app-owned shell commands. */
 export function createManagedShellFetch(
@@ -90,6 +95,30 @@ export function createManagedGhCommand(fetch: ManagedShellFetch) {
             "",
           ].join("\n"));
         }
+        if (args[0] === "repo" && args[1] === "list") {
+          const owner = positional(args.slice(2), ["--limit", "-L"]);
+          const perPage = limit(option(args.slice(2), "--limit", "-L"));
+          const repositories = await github(fetch, `/user/repos?${new URLSearchParams({
+            affiliation: "owner,collaborator,organization_member",
+            per_page: "100",
+            sort: "updated",
+          })}`);
+          if (!Array.isArray(repositories)) throw new Error("GitHub returned an invalid repository list");
+          const selected = repositories.filter((repository) => {
+            if (!owner) return true;
+            const record = requireRecord(repository, "repository");
+            const repositoryOwner = requireRecord(record.owner, "repository owner");
+            return optionalText(repositoryOwner, "login")?.toLowerCase() === owner.toLowerCase();
+          }).slice(0, perPage);
+          return ok(selected.map((repository) => {
+            const record = requireRecord(repository, "repository");
+            return [
+              optionalText(record, "full_name") ?? "unknown",
+              optionalText(record, "description") ?? "",
+              record.private === true ? "private" : "public",
+            ].join("\t");
+          }).join("\n") + (selected.length ? "\n" : ""));
+        }
         if (args[0] === "pr" && args[1] === "list") {
           const repository = option(args.slice(2), "--repo", "-R");
           requireRepository(repository, "gh pr list requires --repo OWNER/REPO");
@@ -104,12 +133,13 @@ export function createManagedGhCommand(fetch: ManagedShellFetch) {
             return [row.number, text(row, "title"), text(head, "ref")].join("\t");
           }).join("\n") + (pulls.length ? "\n" : ""));
         }
-        return ok([
+        return fail([
           "gh (Nanocodex Just Bash compatibility command)",
           "",
           "Supported commands:",
           "  gh auth status",
           "  gh api [--method METHOD] [-f key=value] ENDPOINT",
+          "  gh repo list [OWNER] [--limit N]",
           "  gh repo view OWNER/REPO",
           "  gh pr list --repo OWNER/REPO [--limit N]",
           "",
@@ -121,6 +151,289 @@ export function createManagedGhCommand(fetch: ManagedShellFetch) {
       }
     },
   };
+}
+
+/** Git compatibility command backed by durable workspace storage and public Git smart HTTP. */
+export function createManagedGitCommand(
+  fetch: ManagedShellFetch,
+  workspace: () => Workspace,
+) {
+  return {
+    name: "git",
+    trusted: true,
+    async execute(args: string[], context: { cwd?: unknown } = {}) {
+      try {
+        const command = args[0];
+        if (command === "clone") {
+          return ok(await cloneRepository(fetch, workspace(), args.slice(1), context.cwd));
+        }
+        const mounted = workspace();
+        const dir = await gitDirectory(mounted, context.cwd);
+        const fs = workspaceFs(mounted);
+        if (command === "status") {
+          const matrix = await git.statusMatrix({ fs, dir });
+          const changed = matrix.filter(([, head, workdir, stage]) => head !== workdir || head !== stage);
+          if (args.includes("--short") || args.includes("-s") || args.includes("--porcelain")) {
+            return ok(changed.map(([path, head, workdir, stage]) => (
+              `${head === 0 ? "?" : stage === head ? " " : "M"}${workdir === stage ? " " : "M"} ${path}`
+            )).join("\n") + (changed.length ? "\n" : ""));
+          }
+          const branch = await git.currentBranch({ fs, dir, fullname: false });
+          return ok(`On branch ${branch ?? "HEAD"}\n${changed.length ? `${changed.length} changed path(s)\n` : "nothing to commit, working tree clean\n"}`);
+        }
+        if (command === "log") {
+          const depth = logDepth(args.slice(1));
+          const commits = await git.log({ fs, dir, depth });
+          if (args.includes("--oneline")) {
+            return ok(commits.map(({ oid, commit }) => `${oid.slice(0, 7)} ${commit.message.split("\n")[0]}`).join("\n") + (commits.length ? "\n" : ""));
+          }
+          return ok(commits.map(({ oid, commit }) => [
+            `commit ${oid}`,
+            `Author: ${commit.author.name} <${commit.author.email}>`,
+            `Date:   ${new Date(commit.author.timestamp * 1_000).toISOString()}`,
+            "",
+            `    ${commit.message.trim().replaceAll("\n", "\n    ")}`,
+            "",
+          ].join("\n")).join("\n"));
+        }
+        if (command === "rev-parse" && args[1] === "HEAD") {
+          return ok(`${await git.resolveRef({ fs, dir, ref: "HEAD" })}\n`);
+        }
+        if (command === "branch" && (args.length === 1 || args.includes("--show-current"))) {
+          const branch = await git.currentBranch({ fs, dir, fullname: false });
+          return ok(args.includes("--show-current") ? `${branch ?? ""}\n` : `${branch ? `* ${branch}` : "* (detached HEAD)"}\n`);
+        }
+        if (command === "remote" && (args.length === 1 || args.includes("-v"))) {
+          const remotes = await git.listRemotes({ fs, dir });
+          return ok(remotes.flatMap(({ remote, url }) => args.includes("-v")
+            ? [`${remote}\t${url} (fetch)`, `${remote}\t${url} (push)`]
+            : [remote]).join("\n") + (remotes.length ? "\n" : ""));
+        }
+        if (command === "ls-files") {
+          const files = await git.listFiles({ fs, dir });
+          return ok(`${files.join("\n")}${files.length ? "\n" : ""}`);
+        }
+        return fail([
+          `git: '${command ?? ""}' is not implemented by managed git`,
+          "Managed git supports clone, status, log, rev-parse HEAD, branch, remote, and ls-files.",
+          "",
+        ].join("\n"));
+      } catch (error) {
+        return fail(`git: ${error instanceof Error ? error.message : String(error)}\n`);
+      }
+    },
+  };
+}
+
+async function gitDirectory(workspace: Workspace, cwd: unknown): Promise<string> {
+  let directory = typeof cwd === "string" ? gitWorkspacePath(workspace, cwd) : workspace.root;
+  for (;;) {
+    if (await workspaceEntry(workspace, `${directory}/.git`)) return directory;
+    if (directory === workspace.root) throw new Error("not a git repository");
+    directory = directory.slice(0, directory.lastIndexOf("/")) || workspace.root;
+  }
+}
+
+function logDepth(args: string[]): number {
+  const compact = args.find((value) => /^-\d+$/.test(value));
+  const explicit = option(args, "--max-count", "-n") ?? joinedOption(args, "--max-count");
+  const value = explicit ?? compact?.slice(1);
+  if (value === undefined) return 20;
+  const depth = positiveInteger(value, "log depth");
+  if (depth > 200) throw new Error("log depth cannot exceed 200");
+  return depth;
+}
+
+async function cloneRepository(
+  fetch: ManagedShellFetch,
+  workspace: Workspace,
+  args: string[],
+  cwd: unknown,
+): Promise<string> {
+  const depthValue = option(args, "--depth", "-") ?? joinedOption(args, "--depth");
+  const depth = depthValue === undefined ? undefined : positiveInteger(depthValue, "--depth");
+  const branch = option(args, "--branch", "-b") ?? joinedOption(args, "--branch");
+  const positionals = gitPositionals(args);
+  const remote = positionals[0];
+  const match = remote?.match(GITHUB_REPOSITORY);
+  if (!match) throw new Error("clone requires an https://github.com/OWNER/REPO URL");
+  if (branch !== undefined && (!branch || branch.startsWith("-") || branch.includes(".."))) {
+    throw new Error("--branch must name one branch or tag");
+  }
+  const repository = match[1]!;
+  const destination = positionals[1] ?? repository.slice(repository.indexOf("/") + 1);
+  if (!/^[A-Za-z0-9_.-]+$/.test(destination) || destination === "." || destination === "..") {
+    throw new Error("clone destination must be one workspace directory name");
+  }
+  const root = typeof cwd === "string" && cwd.startsWith(`${workspace.root}/`)
+    ? cwd
+    : workspace.root;
+  const dir = `${root}/${destination}`;
+  if (await workspaceEntry(workspace, dir)) throw new Error(`destination path '${destination}' already exists`);
+  await git.clone({
+    fs: workspaceFs(workspace),
+    http: managedGitHttp(fetch),
+    dir,
+    url: `https://github.com/${repository}.git`,
+    singleBranch: branch !== undefined,
+    ...(branch === undefined ? {} : { ref: branch }),
+    ...(depth === undefined ? {} : { depth }),
+  });
+  return `Cloning into '${destination}'...\n`;
+}
+
+function managedGitHttp(fetch: ManagedShellFetch): HttpClient {
+  return {
+    async request(request: GitHttpRequest) {
+      const body = request.body === undefined
+        ? undefined
+        : await collectGitBody(request.body);
+      const response = await fetch(request.url, {
+        method: request.method,
+        headers: request.headers,
+        body,
+        ...(request.signal instanceof AbortSignal ? { signal: request.signal } : {}),
+      });
+      return {
+        url: response.url,
+        statusCode: response.status,
+        statusMessage: response.statusText,
+        headers: response.headers,
+        body: (async function* () { yield response.body; })(),
+      };
+    },
+  };
+}
+
+async function collectGitBody(body: AsyncIterable<Uint8Array>): Promise<Uint8Array> {
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for await (const chunk of body) {
+    size += chunk.byteLength;
+    if (size > MAX_GIT_HTTP_BODY_BYTES) throw new Error("git HTTP request body is too large");
+    chunks.push(chunk);
+  }
+  const joined = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) {
+    joined.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return joined;
+}
+
+function workspaceFs(workspace: Workspace) {
+  const resolve = (path: string) => gitWorkspacePath(workspace, path);
+  const promises = {
+    readFile: async (path: string, options?: string | { encoding?: string }) => {
+      const contents = await workspace.readFile(resolve(path));
+      const encoding = typeof options === "string" ? options : options?.encoding;
+      return encoding ? new TextDecoder(encoding).decode(contents) : contents;
+    },
+    writeFile: async (path: string, contents: Uint8Array | string) => workspace.writeFile(resolve(path), contents),
+    unlink: async (path: string) => workspace.remove(resolve(path)),
+    readdir: async (path: string) => (await workspace.list(resolve(path), { maxEntries: MAX_GIT_ENTRIES }))
+      .map(({ path: child }) => child.slice(child.lastIndexOf("/") + 1)),
+    mkdir: async (path: string, options?: { recursive?: boolean }) => {
+      path = resolve(path);
+      if (options?.recursive) {
+        const relative = path.startsWith(workspace.root) ? path.slice(workspace.root.length) : path;
+        let current = workspace.root;
+        for (const segment of relative.split("/").filter(Boolean)) {
+          current += `/${segment}`;
+          if (!(await workspaceEntry(workspace, current))) await workspace.mkdir(current);
+        }
+      } else {
+        await workspace.mkdir(path);
+      }
+    },
+    rmdir: async (path: string) => workspace.remove(resolve(path)),
+    stat: async (path: string) => gitStat(await requiredWorkspaceEntry(workspace, resolve(path))),
+    lstat: async (path: string) => gitStat(await requiredWorkspaceEntry(workspace, resolve(path))),
+    readlink: async () => { throw Object.assign(new Error("symbolic links are unavailable"), { code: "EINVAL" }); },
+    symlink: async () => { throw Object.assign(new Error("symbolic links are unavailable"), { code: "ENOSYS" }); },
+    chmod: async (path: string) => { await requiredWorkspaceEntry(workspace, resolve(path)); },
+  };
+  return { promises };
+}
+
+function gitWorkspacePath(workspace: Workspace, path: string): string {
+  const source = path.startsWith("/") ? path : `${workspace.root}/${path}`;
+  const segments: string[] = [];
+  for (const segment of source.split("/")) {
+    if (!segment || segment === ".") continue;
+    if (segment === "..") segments.pop();
+    else segments.push(segment);
+  }
+  const resolved = `/${segments.join("/")}`;
+  if (resolved !== workspace.root && !resolved.startsWith(`${workspace.root}/`)) {
+    throw Object.assign(new Error(`path escapes ${workspace.root}`), { code: "EPERM" });
+  }
+  return resolved;
+}
+
+async function workspaceEntry(workspace: Workspace, path: string): Promise<WorkspaceEntry | undefined> {
+  if (path === workspace.root) return { kind: "directory", path };
+  const separator = path.lastIndexOf("/");
+  const parent = path.slice(0, separator) || workspace.root;
+  const target = path.slice(separator + 1);
+  try {
+    return (await workspace.list(parent, { maxEntries: MAX_GIT_ENTRIES }))
+      .find((entry) => entry.path === target || entry.path.endsWith(`/${target}`));
+  } catch (error) {
+    if ((error as { code?: unknown })?.code === "ENOENT") return undefined;
+    throw error;
+  }
+}
+
+async function requiredWorkspaceEntry(workspace: Workspace, path: string): Promise<WorkspaceEntry> {
+  const entry = await workspaceEntry(workspace, path);
+  if (entry) return entry;
+  throw Object.assign(new Error(`${path} does not exist`), { code: "ENOENT" });
+}
+
+function gitStat(entry: WorkspaceEntry) {
+  const modified = new Date(entry.modifiedAt ?? 0);
+  return {
+    isFile: () => entry.kind === "file",
+    isDirectory: () => entry.kind === "directory",
+    isSymbolicLink: () => false,
+    mode: entry.kind === "directory" ? 0o755 : 0o644,
+    size: entry.size ?? 0,
+    mtime: modified,
+    ctime: modified,
+    birthtime: modified,
+    dev: 0,
+    ino: 0,
+    uid: 0,
+    gid: 0,
+  };
+}
+
+function gitPositionals(args: string[]): string[] {
+  const positionals: string[] = [];
+  for (let index = 0; index < args.length; index += 1) {
+    const value = args[index]!;
+    if (value === "--depth" || value === "--branch" || value === "-b") {
+      index += 1;
+      continue;
+    }
+    if (value.startsWith("--depth=") || value.startsWith("--branch=")) continue;
+    if (value.startsWith("-")) throw new Error(`unsupported clone option '${value}'`);
+    positionals.push(value);
+  }
+  if (positionals.length < 1 || positionals.length > 2) throw new Error("clone requires a repository URL and optional destination");
+  return positionals;
+}
+
+function joinedOption(args: string[], name: string): string | undefined {
+  return args.find((value) => value.startsWith(`${name}=`))?.slice(name.length + 1);
+}
+
+function positiveInteger(value: string, name: string): number {
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 1) throw new Error(`${name} must be a positive integer`);
+  return parsed;
 }
 
 async function github(
@@ -169,6 +482,18 @@ function apiFields(args: string[]): Record<string, string> {
 function option(args: string[], long: string, short: string): string | undefined {
   const index = args.findIndex((value) => value === long || value === short);
   return index === -1 ? undefined : args[index + 1];
+}
+
+function positional(args: string[], optionsWithValues: string[]): string | undefined {
+  for (let index = 0; index < args.length; index += 1) {
+    const value = args[index]!;
+    if (optionsWithValues.includes(value)) {
+      index += 1;
+      continue;
+    }
+    if (!value.startsWith("-")) return value;
+  }
+  return undefined;
 }
 
 function limit(value: string | undefined): number {

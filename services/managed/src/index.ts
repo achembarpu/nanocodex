@@ -17,6 +17,7 @@ import type {
 import { Agent as CloudflareAgent } from "nanocodex/cloudflare";
 import { imageGeneration, updatePlan, viewImage, web } from "nanocodex/tools";
 import { justBash } from "nanocodex/tools/bash";
+import type { Workspace } from "nanocodex/workspace";
 import { createComputerFilesystem } from "./computer-workspace";
 import { managedCodeEvaluator } from "./code-evaluator";
 import { createDefaultManagedTools } from "./default-mcp";
@@ -28,6 +29,7 @@ import {
 import { fetchResponseWithDeadline, withHardDeadline } from "./deadline";
 import { drainRuntimeForDeletion } from "./deletion-runtime";
 import {
+  createManagedGitCommand,
   createManagedGhCommand,
   createManagedShellFetch,
 } from "./computer-shell";
@@ -3894,13 +3896,21 @@ export class NanocodexSession extends DurableComputerSession {
       multiplayer ? undefined : this.ctx.id.toString(),
       (connector) => this.#activeTurnConnectorAllowed(connector),
     );
+    let mountedShellFilesystem: Workspace | undefined;
     const shell = await justBash({
       filesystem: sourceFilesystem,
-      maxEntries: 2_000,
+      maxEntries: 20_000,
       maxOutputTokens: 10_000,
       fetch: shellFetch,
-      customCommands: [createManagedGhCommand(shellFetch)],
+      customCommands: [
+        createManagedGitCommand(shellFetch, () => {
+          if (!mountedShellFilesystem) throw new Error("managed shell filesystem is not mounted");
+          return mountedShellFilesystem;
+        }),
+        createManagedGhCommand(shellFetch),
+      ],
     });
+    mountedShellFilesystem = shell.filesystem;
     const execCommand = Object.freeze({ ...shell.tool, dispose: disposeWorkspace });
     const currentAccountInfo = () => {
       const authorization = this.#activeTurnAuthorization();
@@ -3962,7 +3972,7 @@ export class NanocodexSession extends DurableComputerSession {
           shell_network: multiplayer ? "public-http-only" : "connector-http-gateway",
           sandbox: "disabled",
           workspace: "/workspace",
-          custom_commands: ["gh"],
+          custom_commands: ["git", "gh"],
           account: await currentAccountInfo(),
         }),
       },

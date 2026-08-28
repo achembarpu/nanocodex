@@ -43,6 +43,7 @@
     "@cloudflare/sandbox": "0.12.4",
     "@jitl/quickjs-wasmfile-release-asyncify": "0.32.0",
     "accounts": "0.16.2",
+    "isomorphic-git": "^1.41.5",
     "nanocodex": "file:../../js/bindings",
     "quickjs-emscripten-core": "0.32.0",
     "ox": "0.14.36",

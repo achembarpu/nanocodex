@@ -43,7 +43,8 @@ const EXEC_OUTPUT = Object.freeze({
 });
 
 const INSTRUCTIONS = `You have an in-process Bash interpreter and a persistent virtual filesystem rooted at /workspace.
-Use exec_command for shell work such as ls, cat, find, grep, sed, and awk. Commands run
+Use exec_command for shell work such as ls, cat, find, grep, sed, and awk. Use /workspace/tmp,
+not /tmp, for temporary files. Commands run
 without a host process, container, PTY, or access outside /workspace. The shell is one-shot per call,
 but files persist across calls and agent restarts. Network commands are unavailable unless the host
 explicitly enables them, and model subscription credentials are never exposed to the shell.`;

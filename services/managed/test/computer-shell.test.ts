@@ -3,6 +3,7 @@ import { justBash } from "nanocodex/tools/bash";
 import type { Workspace } from "nanocodex/workspace";
 
 import {
+  createManagedGitCommand,
   createManagedGhCommand,
   createManagedShellFetch,
   type ManagedShellFetch,
@@ -100,7 +101,14 @@ describe("Nanocodex managed Just Bash commands", () => {
   it("implements the useful read/write gh compatibility surface", async () => {
     const fetch = vi.fn(async (url: string) => response(url.endsWith("/user")
       ? { login: "gakonst" }
-      : { full_name: "gakonst/nanocodex", description: "small agents", html_url: "https://github.com/gakonst/nanocodex" })) as ManagedShellFetch;
+      : url.includes("/user/repos?")
+        ? [{
+          full_name: "gakonst/nanocodex",
+          description: "small agents",
+          private: true,
+          owner: { login: "gakonst" },
+        }]
+        : { full_name: "gakonst/nanocodex", description: "small agents", html_url: "https://github.com/gakonst/nanocodex" })) as ManagedShellFetch;
     const gh = createManagedGhCommand(fetch);
 
     expect(await gh.execute(["auth", "status"])).toMatchObject({
@@ -115,6 +123,10 @@ describe("Nanocodex managed Just Bash commands", () => {
       exitCode: 0,
       stdout: expect.stringContaining("small agents"),
     });
+    expect(await gh.execute(["repo", "list", "gakonst", "--limit", "20"])).toMatchObject({
+      exitCode: 0,
+      stdout: expect.stringContaining("gakonst/nanocodex\tsmall agents\tprivate"),
+    });
     expect(await gh.execute([
       "api", "--method", "POST", "repos/gakonst/nanocodex/issues", "-f", "title=hello",
     ])).toMatchObject({
@@ -125,6 +137,23 @@ describe("Nanocodex managed Just Bash commands", () => {
       "https://api.github.com/repos/gakonst/nanocodex/issues",
       expect.objectContaining({ method: "POST", body: JSON.stringify({ title: "hello" }) }),
     );
+    expect(await gh.execute(["repo", "clone", "gakonst/nanocodex"])).toMatchObject({
+      exitCode: 1,
+      stderr: expect.stringContaining("Supported commands"),
+    });
+  });
+
+  it("advertises managed git clone and rejects non-GitHub repositories", async () => {
+    const git = createManagedGitCommand(vi.fn() as ManagedShellFetch, memoryWorkspace);
+
+    expect(await git.execute(["status"])).toMatchObject({
+      exitCode: 1,
+      stderr: expect.stringContaining("not a git repository"),
+    });
+    expect(await git.execute(["clone", "https://example.com/repository.git"])).toMatchObject({
+      exitCode: 1,
+      stderr: expect.stringContaining("https://github.com/OWNER/REPO"),
+    });
   });
 });
 

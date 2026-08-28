@@ -7,6 +7,7 @@ const chooser = source("../connect-dialog/src/AccountChooser.tsx");
 const accountMenu = source("../src/AccountMenu.tsx");
 const profileConnectors = source("../src/ProfileConnectors.tsx");
 const connectorCompletion = source("../connect-dialog/src/connectorCompletion.ts");
+const playgroundConfig = source("../connect-playground/src/config.ts");
 
 test("Account and embedded Connect render the same identity and connection components", () => {
   assert.match(app, /from "\.\/AccountChooser"/);
@@ -78,6 +79,12 @@ test("embedded Connect requires an explicit final approval after requested accou
   assert.match(app, /onClick=\{approveConnectedAccess\}/);
   const finishAttempt = app.slice(app.indexOf("const finishConnectorAttempt"), app.indexOf("useEffect(() =>", app.indexOf("const finishConnectorAttempt")));
   assert.doesNotMatch(finishAttempt, /setMcpConnections\(undefined\)/);
+});
+
+test("the Connect playground grants its managed agent the history and memory tools it presents", () => {
+  assert.match(playgroundConfig, /"urn:nanocodex:history:read"/);
+  assert.match(playgroundConfig, /"urn:nanocodex:memory:read"/);
+  assert.match(playgroundConfig, /"urn:nanocodex:memory:write"/);
 });
 
 function source(path: string): string {
