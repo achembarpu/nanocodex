@@ -44,10 +44,24 @@ export type JustBashRuntime = Readonly<{
    * this handle so Bash's bounded metadata view remains synchronized.
    */
   filesystem: Workspace;
-  /** Fixed model instructions describing the virtual shell boundary. */
+  /** Model instructions derived from the actual shell descriptor. */
   instructions: string;
+  /** Exact command, workspace, limit, network, and escalation boundary. */
+  descriptor: JustBashDescriptor;
   /** One-shot, cancellable `exec_command` tool backed by Just Bash. */
   tool: NamedTool;
+}>;
+
+export type JustBashDescriptor = Readonly<{
+  shell: "nanocodex-just-bash";
+  commands: readonly string[];
+  customCommands: readonly string[];
+  cwd: string;
+  limits: Readonly<Record<string, number>>;
+  network: Readonly<{ enabled: boolean; mode: string }>;
+  pty: false;
+  sessions: false;
+  sandboxEscalation: false;
 }>;
 
 /**
@@ -63,6 +77,8 @@ export function justBash(options: {
   maxEntries?: number | undefined;
   maxOutputTokens?: number | undefined;
   network?: false | JustBashNetworkOptions | undefined;
+  /** Stable host-owned name for the actual network boundary exposed in the descriptor. */
+  networkMode?: string | undefined;
   /** Host-owned fetch boundary used by curl and app-owned commands. */
   fetch?: JustBashFetch | undefined;
   /** Application commands registered directly in the embedded interpreter. */

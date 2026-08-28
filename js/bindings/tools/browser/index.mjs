@@ -122,7 +122,7 @@ export function bindBrowser(prepared, options = {}) {
     projectInstructions: shell.projectInstructions,
     tools: Object.freeze([
       standard.namedTool("exec_command", shell.execTool),
-      browserRuntimeInfoTool(account),
+      browserRuntimeInfoTool(account, shell.descriptor),
       browserAccountInfoTool(account),
       standard.web(web),
       standard.imageGeneration({

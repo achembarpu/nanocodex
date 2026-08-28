@@ -42,13 +42,6 @@ const EXEC_OUTPUT = Object.freeze({
   additionalProperties: false,
 });
 
-const INSTRUCTIONS = `You have an in-process Bash interpreter and a persistent virtual filesystem rooted at /workspace.
-Use exec_command for shell work such as ls, cat, find, grep, sed, and awk. Use /workspace/tmp,
-not /tmp, for temporary files. Commands run
-without a host process, container, PTY, or access outside /workspace. The shell is one-shot per call,
-but files persist across calls and agent restarts. Network commands are unavailable unless the host
-explicitly enables them, and model subscription credentials are never exposed to the shell.`;
-
 export async function justBash(options) {
   if (!options || typeof options !== "object" || Array.isArray(options)) {
     throw new TypeError("Just Bash options must be an object");
@@ -67,24 +60,25 @@ export async function justBash(options) {
   const shellFilesystem = new WorkspaceShellFileSystem(options.filesystem, maxEntries);
   await shellFilesystem.open();
   const filesystem = shellFilesystem.workspace();
-  const { Bash } = await import("just-bash/browser");
-  const bash = new Bash({
+  const runtime = await createJustBashRuntime({
+    filesystem: shellFilesystem,
     cwd: filesystem.root,
     env: {
       HOME: filesystem.root,
       PWD: filesystem.root,
       PATH: filesystem.root,
     },
-    fs: shellFilesystem,
-    ...(typeof options.fetch === "function"
-      ? { fetch: options.fetch }
+    fetch: options.fetch,
+    network: options.network,
+    networkMode: options.networkMode ?? (typeof options.fetch === "function"
+      ? "host-fetch"
       : options.network === false || options.network === undefined
-        ? {}
-        : { network: options.network }),
-    ...(options.customCommands === undefined
-      ? {}
-      : { customCommands: [...options.customCommands] }),
-    executionLimitProfile: "hardened",
+        ? undefined
+        : "restricted-http"),
+    customCommands: options.customCommands,
+    executionTimeoutMs,
+    defaultMaxOutputTokens: maxOutputTokens,
+    maxOutputTokens,
     executionLimits: {
       maxCommandCount: 10_000,
       maxExecutionTimeMs: executionTimeoutMs,
@@ -97,9 +91,75 @@ export async function justBash(options) {
       maxTraversalEntries: maxEntries,
     },
   });
+
+  return Object.freeze({ ...runtime, filesystem });
+}
+
+/**
+ * Constructs the common Just Bash interpreter, execution tool, instructions, and descriptor over
+ * a caller-owned Just Bash filesystem adapter. Hosts retain ownership of persistence and locking.
+ */
+export async function createJustBashRuntime(options) {
+  if (!options || typeof options !== "object" || Array.isArray(options)) {
+    throw new TypeError("Just Bash runtime options must be an object");
+  }
+  if (!options.filesystem || typeof options.filesystem !== "object") {
+    throw new TypeError("Just Bash runtime filesystem is required");
+  }
+  const cwd = normalizeRoot(requiredString(options.cwd, "cwd"));
+  const executionTimeoutMs = positiveInteger(
+    options.executionTimeoutMs,
+    DEFAULT_EXECUTION_TIMEOUT_MS,
+    "executionTimeoutMs",
+  );
+  const defaultMaxOutputTokens = positiveInteger(
+    options.defaultMaxOutputTokens,
+    DEFAULT_MAX_OUTPUT_TOKENS,
+    "defaultMaxOutputTokens",
+  );
+  const maxOutputTokens = positiveInteger(
+    options.maxOutputTokens,
+    defaultMaxOutputTokens,
+    "maxOutputTokens",
+  );
+  if (defaultMaxOutputTokens > maxOutputTokens) {
+    throw new RangeError("defaultMaxOutputTokens cannot exceed maxOutputTokens");
+  }
+  const executionLimits = Object.freeze({ ...options.executionLimits });
+  const { Bash, defineCommand } = await import("just-bash/browser");
+  const customCommands = typeof options.customCommands === "function"
+    ? await options.customCommands({ defineCommand })
+    : options.customCommands;
+  const bash = new Bash({
+    cwd,
+    env: options.env,
+    fs: options.filesystem,
+    ...(typeof options.fetch === "function"
+      ? { fetch: options.fetch }
+      : options.network === false || options.network === undefined
+        ? {}
+        : { network: options.network }),
+    ...(customCommands === undefined ? {} : { customCommands: [...customCommands] }),
+    executionLimitProfile: "hardened",
+    executionLimits,
+  });
+  const descriptor = describeRuntime({
+    bash,
+    cwd,
+    customCommands,
+    executionLimits,
+    networkMode: options.networkMode,
+    networkEnabled: typeof options.fetch === "function" || options.network !== false && options.network !== undefined,
+  });
+  const instructions = typeof options.instructions === "function"
+    ? options.instructions(descriptor)
+    : defaultInstructions(descriptor);
   let executionTail = Promise.resolve();
 
   const tool = namedTool("exec_command", {
+    ...(options.supportsParallelToolCalls === undefined
+      ? {}
+      : { supportsParallelToolCalls: options.supportsParallelToolCalls }),
     description: "Runs a shell command, returning output or a session ID for ongoing interaction.",
     parameters: EXEC_PARAMETERS,
     outputSchema: EXEC_OUTPUT,
@@ -107,10 +167,14 @@ export async function justBash(options) {
       const execute = () => executeCommand({
         bash,
         input,
-        root: filesystem.root,
+        root: cwd,
         signal: context?.signal,
         executionTimeoutMs,
+        defaultMaxOutputTokens,
         maxOutputTokens,
+        aroundExecute: options.aroundExecute,
+        outputTruncationNotice: options.outputTruncationNotice,
+        retainNoticeWithinLimit: options.retainNoticeWithinLimit,
       });
       const result = executionTail.then(execute, execute);
       executionTail = result.then(() => undefined, () => undefined);
@@ -118,7 +182,7 @@ export async function justBash(options) {
     },
   });
 
-  return Object.freeze({ filesystem, instructions: INSTRUCTIONS, tool });
+  return Object.freeze({ bash, descriptor, instructions, tool, exec: tool.handler });
 }
 
 async function executeCommand({
@@ -127,7 +191,11 @@ async function executeCommand({
   root,
   signal,
   executionTimeoutMs,
+  defaultMaxOutputTokens,
   maxOutputTokens,
+  aroundExecute,
+  outputTruncationNotice = OUTPUT_TRUNCATION_NOTICE,
+  retainNoticeWithinLimit = true,
 }) {
   if (!input || typeof input !== "object" || Array.isArray(input)) {
     throw new TypeError("exec_command input must be an object");
@@ -147,7 +215,7 @@ async function executeCommand({
     : resolvePath(root, root, requiredString(input.workdir, "workdir"));
   const outputTokens = Math.min(
     maxOutputTokens,
-    positiveInteger(input.max_output_tokens, maxOutputTokens, "max_output_tokens"),
+    positiveInteger(input.max_output_tokens, defaultMaxOutputTokens, "max_output_tokens"),
   );
   const deadline = new AbortController();
   const abort = () => deadline.abort(signal?.reason);
@@ -160,7 +228,10 @@ async function executeCommand({
   const startedAt = now();
   let result;
   try {
-    result = await bash.exec(input.cmd, { cwd: workdir, signal: deadline.signal });
+    const execute = () => bash.exec(input.cmd, { cwd: workdir, signal: deadline.signal });
+    result = typeof aroundExecute === "function"
+      ? await aroundExecute({ execute, signal: deadline.signal })
+      : await execute();
   } finally {
     clearTimeout(timeout);
     signal?.removeEventListener("abort", abort);
@@ -168,17 +239,55 @@ async function executeCommand({
   const combined = `${result.stdout}${result.stderr}`;
   const maxCharacters = outputTokens * 4;
   const truncated = combined.length > maxCharacters;
-  const retainedCharacters = Math.max(0, maxCharacters - OUTPUT_TRUNCATION_NOTICE.length);
+  const retainedCharacters = retainNoticeWithinLimit
+    ? Math.max(0, maxCharacters - outputTruncationNotice.length)
+    : maxCharacters;
   return {
     output: truncated
-      ? maxCharacters >= OUTPUT_TRUNCATION_NOTICE.length
-        ? `${combined.slice(0, retainedCharacters)}${OUTPUT_TRUNCATION_NOTICE}`
+      ? !retainNoticeWithinLimit || maxCharacters >= outputTruncationNotice.length
+        ? `${combined.slice(0, retainedCharacters)}${outputTruncationNotice}`
         : combined.slice(0, maxCharacters)
       : combined,
     wall_time_seconds: (now() - startedAt) / 1000,
     exit_code: result.exitCode,
     ...(truncated ? { original_token_count: Math.ceil(combined.length / 4) } : {}),
   };
+}
+
+function describeRuntime({
+  bash,
+  cwd,
+  customCommands,
+  executionLimits,
+  networkEnabled,
+  networkMode,
+}) {
+  const customCommandNames = [...customCommands ?? []].map(({ name }) => name);
+  return Object.freeze({
+    shell: "nanocodex-just-bash",
+    commands: Object.freeze([...bash.commands.keys()].sort()),
+    customCommands: Object.freeze(customCommandNames.sort()),
+    cwd,
+    limits: executionLimits,
+    network: Object.freeze({
+      enabled: networkEnabled,
+      mode: networkMode ?? (networkEnabled ? "http" : "disabled"),
+    }),
+    pty: false,
+    sessions: false,
+    sandboxEscalation: false,
+  });
+}
+
+function defaultInstructions(descriptor) {
+  const network = descriptor.network.enabled
+    ? `HTTP is available through the host-owned ${descriptor.network.mode} fetch boundary.`
+    : "Network commands are unavailable.";
+  return `You have an in-process Bash interpreter and a persistent virtual filesystem rooted at ${descriptor.cwd}.
+Use exec_command for shell work. Available commands: ${descriptor.commands.join(", ")}. Use ${descriptor.cwd}/tmp,
+not /tmp, for temporary files. Commands run without a host process, container, PTY, session, or sandbox
+escalation, and cannot access paths outside ${descriptor.cwd}. The shell is one-shot per call, but files persist
+across calls and agent restarts. ${network} Model subscription credentials are never exposed to the shell.`;
 }
 
 class WorkspaceShellFileSystem {

@@ -13,6 +13,18 @@ const context = Object.freeze({
   signal: new AbortController().signal,
 });
 
+const shellDescriptor = Object.freeze({
+  shell: "nanocodex-just-bash",
+  commands: Object.freeze(["curl", "gh", "git", "python3"]),
+  customCommands: Object.freeze(["gh", "git", "python3"]),
+  cwd: "/workspace",
+  limits: Object.freeze({ maxFileSystemBytes: 256 * 1024 * 1024 }),
+  network: Object.freeze({ enabled: true, mode: "connector-http-gateway" }),
+  pty: false,
+  sessions: false,
+  sandboxEscalation: false,
+});
+
 test("the default browser harness exposes one exact model-visible tool set", async () => {
   const requests = [];
   const workspace = {
@@ -38,6 +50,7 @@ test("the default browser harness exposes one exact model-visible tool set", asy
     standard,
     threadId: "browser-harness-thread",
     shell: {
+      descriptor: shellDescriptor,
       artifactTool: namedTool("render_artifact", {
         description: "Render an artifact.",
         handler: async () => ({ artifactId: "ui" }),
@@ -98,7 +111,17 @@ test("the default browser harness exposes one exact model-visible tool set", asy
     stablecoins: [],
     authorizations: [],
   });
-  assert.deepEqual((await byName.runtimeInfo.handler({}, context)).account, accountInfo);
+  const runtimeInfo = await byName.runtimeInfo.handler({}, context);
+  assert.deepEqual(runtimeInfo.account, accountInfo);
+  assert.equal(runtimeInfo.shell, shellDescriptor.shell);
+  assert.equal(runtimeInfo.shell_network, shellDescriptor.network.mode);
+  assert.equal(runtimeInfo.workspace, shellDescriptor.cwd);
+  assert.deepEqual(runtimeInfo.commands, shellDescriptor.commands);
+  assert.deepEqual(runtimeInfo.custom_commands, shellDescriptor.customCommands);
+  assert.deepEqual(runtimeInfo.limits, shellDescriptor.limits);
+  assert.equal(runtimeInfo.pty, false);
+  assert.equal(runtimeInfo.sessions, false);
+  assert.equal(runtimeInfo.sandbox_escalation, false);
   assert.equal(await byName.web__run.handler({ time: [{ utc_offset: "+03:00" }] }, context), "searched");
   assert.deepEqual(await byName.image_gen__imagegen.handler({ prompt: "draw" }, context), {
     image_url: "data:image/png;base64,Z2VuZXJhdGVk",
@@ -235,6 +258,7 @@ function preparedBrowser() {
     standard,
     threadId: "browser-harness-overrides",
     shell: {
+      descriptor: shellDescriptor,
       artifactTool: namedTool("render_artifact", {
         description: "Render an artifact.",
         handler: async () => ({ artifactId: "ui" }),

@@ -1,5 +1,6 @@
 import type { Workspace } from "../../runtime/workspace.mjs";
 import type { NamedTool } from "../../types.mjs";
+import type { JustBashDescriptor } from "../bash.mjs";
 import type { DatasetOptions, JsonToolOptions } from "../index.mjs";
 
 export type BrowserThread = Readonly<{
@@ -195,7 +196,10 @@ export function createBrowserBash(
   options?: Record<string, unknown>,
 ): Promise<{
   bash: BrowserBash;
+  descriptor: JustBashDescriptor;
   filesystem: BrowserShellFileSystem;
+  instructions: string;
+  tool: NamedTool;
   exec(
     input: Record<string, unknown>,
     context?: { signal?: AbortSignal },

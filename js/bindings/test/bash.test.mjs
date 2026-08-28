@@ -4,12 +4,26 @@ import test from "node:test";
 import { justBash } from "../tools/bash.mjs";
 
 test("Just Bash advertises its cloud workspace execution", async () => {
-  const { tool } = await justBash({ filesystem: memoryWorkspace() });
+  const { descriptor, instructions, tool } = await justBash({ filesystem: memoryWorkspace() });
   assert.equal(tool.provider, undefined);
   assert.equal(
     tool.description,
     "Runs a shell command, returning output or a session ID for ongoing interaction.",
   );
+  assert.equal(descriptor.cwd, "/workspace");
+  assert.equal(descriptor.shell, "nanocodex-just-bash");
+  assert.equal(descriptor.network.enabled, false);
+  assert.equal(descriptor.network.mode, "disabled");
+  assert.equal(descriptor.pty, false);
+  assert.equal(descriptor.sessions, false);
+  assert.equal(descriptor.sandboxEscalation, false);
+  assert.equal(descriptor.limits.maxFileSystemBytes, 64 * 1024 * 1024);
+  assert.equal(descriptor.limits.maxTraversalEntries, 2_000);
+  assert(descriptor.commands.includes("grep"));
+  assert(!descriptor.commands.includes("curl"));
+  assert(!descriptor.commands.includes("wget"));
+  assert.match(instructions, /Available commands:/);
+  assert.doesNotMatch(instructions, /\bwget\b/);
 });
 
 test("Just Bash mounts one persistent workspace without a process sandbox", async () => {
@@ -114,6 +128,11 @@ test("the host can inject one secure fetch boundary and app-owned commands", asy
       },
     }],
   });
+  assert.equal(runtime.descriptor.network.enabled, true);
+  assert.equal(runtime.descriptor.network.mode, "host-fetch");
+  assert(runtime.descriptor.commands.includes("curl"));
+  assert(runtime.descriptor.commands.includes("mock-tool"));
+  assert.deepEqual(runtime.descriptor.customCommands, ["mock-tool"]);
 
   const custom = await runtime.tool.handler({ cmd: "mock-tool one two" }, context());
   assert.equal(custom.exit_code, 0);

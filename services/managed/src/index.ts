@@ -16,9 +16,6 @@ import type {
 } from "nanocodex";
 import { Agent as CloudflareAgent } from "nanocodex/cloudflare";
 import { imageGeneration, updatePlan, viewImage, web } from "nanocodex/tools";
-import { justBash } from "nanocodex/tools/bash";
-import type { Workspace } from "nanocodex/workspace";
-import { createComputerFilesystem } from "./computer-workspace";
 import { managedCodeEvaluator } from "./code-evaluator";
 import { createDefaultManagedTools } from "./default-mcp";
 import { HostedToolsBroker } from "./hosted-tools-broker";
@@ -28,11 +25,7 @@ import {
 } from "./capacity";
 import { fetchResponseWithDeadline, withHardDeadline } from "./deadline";
 import { drainRuntimeForDeletion } from "./deletion-runtime";
-import {
-  createManagedGitCommand,
-  createManagedGhCommand,
-  createManagedShellFetch,
-} from "./computer-shell";
+import { createManagedComputerRuntime } from "./computer-runtime";
 import type { ManagedEgressConnectorId } from "./managed-egress";
 import {
   DurableEventLog,
@@ -3881,37 +3874,15 @@ export class NanocodexSession extends DurableComputerSession {
     const multiplayer = session.runtime_profile === "multiplayer";
     if (!multiplayer) await this.#ensureCredentialBinding(session);
     const workspace = await getWorkspace(this);
-    const sourceFilesystem = await createComputerFilesystem(workspace);
-    let workspaceDisposed = false;
-    const disposeWorkspace = () => {
-      if (workspaceDisposed) return;
-      workspaceDisposed = true;
-      workspace[Symbol.dispose]();
-    };
     // Shared-room members can all admit turns. Never attach the room owner's
     // connector capability to that shared tool runtime: provider destinations
     // fail closed without a subject, while ordinary public HTTP remains usable.
-    const shellFetch = createManagedShellFetch(
-      this.env.NANOCODEX,
-      multiplayer ? undefined : this.ctx.id.toString(),
-      (connector) => this.#activeTurnConnectorAllowed(connector),
-    );
-    let mountedShellFilesystem: Workspace | undefined;
-    const shell = await justBash({
-      filesystem: sourceFilesystem,
-      maxEntries: 20_000,
-      maxOutputTokens: 10_000,
-      fetch: shellFetch,
-      customCommands: [
-        createManagedGitCommand(shellFetch, () => {
-          if (!mountedShellFilesystem) throw new Error("managed shell filesystem is not mounted");
-          return mountedShellFilesystem;
-        }),
-        createManagedGhCommand(shellFetch),
-      ],
+    const computer = await createManagedComputerRuntime({
+      computer: workspace,
+      egress: this.env.NANOCODEX,
+      ...(multiplayer ? {} : { subject: this.ctx.id.toString() }),
+      connectorAllowed: (connector) => this.#activeTurnConnectorAllowed(connector),
     });
-    mountedShellFilesystem = shell.filesystem;
-    const execCommand = Object.freeze({ ...shell.tool, dispose: disposeWorkspace });
     const currentAccountInfo = () => {
       const authorization = this.#activeTurnAuthorization();
       return accountInfo(
@@ -3929,7 +3900,7 @@ export class NanocodexSession extends DurableComputerSession {
       toolProviders: [hostedProvider],
     };
     const cloudTools: NamedTool[] = [
-      execCommand,
+      computer.tool,
       ...(multiplayer ? [] : [{
         name: "phone",
         description: "Read current phone state or perform a phone operation on the currently attached Android device. This has no cloud fallback; inspect ok and status before claiming success.",
@@ -3958,9 +3929,9 @@ export class NanocodexSession extends DurableComputerSession {
       imageGeneration({
         url: "https://managed-tools.internal/image-generation",
         fetch: managedImageFetch(this.env, this.ctx.id.toString()),
-        workspace: shell.filesystem,
+        workspace: computer.filesystem,
       }),
-      viewImage({ workspace: shell.filesystem }),
+      viewImage({ workspace: computer.filesystem }),
       updatePlan(),
       {
         name: "runtimeInfo",
@@ -3968,11 +3939,16 @@ export class NanocodexSession extends DurableComputerSession {
         parameters: { type: "object", additionalProperties: false },
         handler: async () => ({
           runtime: "cloudflare-durable-object",
-          shell: "nanocodex-just-bash",
-          shell_network: multiplayer ? "public-http-only" : "connector-http-gateway",
+          shell: computer.descriptor.shell,
+          shell_network: computer.descriptor.network.mode,
           sandbox: "disabled",
-          workspace: "/workspace",
-          custom_commands: ["git", "gh"],
+          workspace: computer.descriptor.cwd,
+          commands: computer.descriptor.commands,
+          custom_commands: computer.descriptor.customCommands,
+          limits: computer.descriptor.limits,
+          pty: computer.descriptor.pty,
+          sessions: computer.descriptor.sessions,
+          sandbox_escalation: computer.descriptor.sandboxEscalation,
           account: await currentAccountInfo(),
         }),
       },
@@ -4068,6 +4044,8 @@ export class NanocodexSession extends DurableComputerSession {
             "Reply conversationally and concisely to the room message. Use the normal Nanocodex tools when they materially help answer the room.",
             "GitHub, Gmail, Google Drive, and other account connectors are unavailable in shared rooms.",
             "Never claim to have performed an external action unless its tool completed successfully, and never expose internal runtime, routing, credential, or correlation identifiers.",
+            computer.instructions,
+            "No process sandbox is attached. Bounded Just Bash is the complete local execution boundary.",
           ].join("\n\n")
           : [
             "You are Nanocodex running as a durable managed agent on Cloudflare Workers.",
@@ -4078,7 +4056,7 @@ export class NanocodexSession extends DurableComputerSession {
             "Never claim that a phone action happened unless the phone tool returned ok=true and status=completed. Report failed, unavailable, and ambiguous phone outcomes accurately.",
             "Your /workspace filesystem is durable Cloudflare Computer storage backed by this agent's Durable Object.",
             "Call accountInfo to see the current identities, stablecoin balances, and app authorization boundaries, then use gh or curl normally through transparent authenticated egress. accountInfo is a tool, not a shell command.",
-            shell!.instructions,
+            computer.instructions,
             "No process sandbox is attached. Bounded Just Bash is the complete local execution boundary.",
             MEMORY_INSTRUCTIONS,
           ].join("\n\n"),
@@ -4095,7 +4073,7 @@ export class NanocodexSession extends DurableComputerSession {
       } catch (failure) {
         cleanupError = failure;
       }
-      disposeWorkspace();
+      computer.dispose();
       if (cleanupError !== undefined) {
         throw new AggregateError(
           [error, cleanupError],

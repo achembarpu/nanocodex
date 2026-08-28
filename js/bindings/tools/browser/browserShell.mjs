@@ -2,6 +2,7 @@ import "./browserBuffer.mjs";
 import git from "isomorphic-git";
 import http from "isomorphic-git/http/web";
 import { artifact } from "../artifact.mjs";
+import { createJustBashRuntime } from "../bash.mjs";
 import { createBrowserEgressFetch } from "./browserEgress.mjs";
 import { browserThread, notifyThreadGitChanged, prepareThreadGit, THREAD_GIT_AUTHOR, THREAD_GIT_DIRECTORY, withThreadGitLock, } from "./threadGit.mjs";
 import { openThreadWorkspace } from "./workspace.mjs";
@@ -16,32 +17,6 @@ const MAX_INDEXED_PATHS = 100_000;
 const MAX_PROJECT_INSTRUCTIONS_BYTES = 32 * 1024;
 const PROJECT_INSTRUCTION_FILES = ["AGENTS.override.md", "AGENTS.md"];
 const DIFF_TRUNCATION_NOTICE = "\n[diff truncated by browser git]\n";
-const UNIFIED_EXEC_OUTPUT_SCHEMA = {
-    type: "object",
-    properties: {
-        chunk_id: { type: "string", description: "Chunk identifier included when the response reports one." },
-        wall_time_seconds: { type: "number", description: "Elapsed wall time spent waiting for output in seconds." },
-        exit_code: { type: "number", description: "Process exit code when the command finished during this call." },
-        session_id: { type: "number", description: "Session identifier to pass to write_stdin when the process is still running." },
-        original_token_count: { type: "number", description: "Approximate token count before output truncation." },
-        output: { type: "string", description: "Command output text, possibly truncated." },
-    },
-    required: ["wall_time_seconds", "output"],
-    additionalProperties: false,
-};
-const AGENT_INSTRUCTIONS = `You are working in a persistent browser filesystem rooted at /workspace.
-Use exec_command for bash commands such as ls, cat, find, grep, git, curl, wget, and python3. The
-shell and Python runtime execute entirely in browser sandboxes, so they have no host process or PTY.
-curl, wget, and the gh compatibility command use one thread-scoped, same-origin egress gateway.
-Destination policy and connected-account credentials stay outside the browser runtime. The
-clang, clang++, gcc, g++, cc, and c++ compile C/C++ sources to WASI WebAssembly in a lazy worker.
-Browser SSH is noninteractive and requires a wss:// endpoint that carries raw SSH because browsers
-cannot open TCP sockets. The repository's only publish branch is nanocodex;
-publish with git add, git commit -m "...", and git push origin nanocodex. Use the standard Rust
-apply_patch tool for focused edits. Create or update custom React interfaces with the
-render_artifact tool. Its source defines function App({ sendPrompt }); React and the html tagged
-template helper are already in scope.`;
-
 export function validateBrowserArtifactSource(source) {
     try {
         // Compile with the exact bindings and strict wrapper used by the
@@ -60,42 +35,7 @@ export async function prepareBrowserShell(threadId, origin, fetch, headers) {
     ]);
     const projectInstructions = await loadBrowserProjectInstructions(rawFs);
     let shellFs;
-    let shellDirty = false;
-    let shellRequest;
-    const loadShell = () => {
-        if (shellRequest)
-            return shellRequest;
-        // The shell's first path scan observes every mutation completed before
-        // creation. Only mutations racing that scan require a second refresh.
-        shellDirty = false;
-        const loading = createBrowserBash(rawFs, thread, {
-            workspaceRoot,
-            origin,
-            fetch,
-            headers,
-        }).then(async (shell) => {
-            shellFs = shell.filesystem;
-            if (shellDirty) {
-                shellDirty = false;
-                await shellFs.refreshPaths();
-            }
-            return shell;
-        }).catch((error) => {
-            if (shellRequest === loading) {
-                shellRequest = undefined;
-                shellFs = undefined;
-                shellDirty = true;
-            }
-            throw error;
-        });
-        shellRequest = loading;
-        return loading;
-    };
     const recordShellMutation = (operation, path) => {
-        if (!shellFs) {
-            shellDirty = true;
-            return;
-        }
         shellFs[operation](path);
     };
     const notifyingWorkspace = Object.freeze({
@@ -130,28 +70,23 @@ export async function prepareBrowserShell(threadId, origin, fetch, headers) {
             }
         },
     });
+    const shell = await createBrowserBash(rawFs, thread, {
+        workspaceRoot,
+        origin,
+        fetch,
+        headers,
+    });
+    shellFs = shell.filesystem;
     return {
-        instructions: AGENT_INSTRUCTIONS,
+        descriptor: shell.descriptor,
+        instructions: shell.instructions,
         projectInstructions,
         workspace: notifyingWorkspace,
         artifactTool: artifact({
             workspace: notifyingWorkspace,
             validateSource: validateBrowserArtifactSource,
         }),
-        execTool: {
-            supportsParallelToolCalls: true,
-            description: "Run a bash command in the browser thread workspace.",
-            parameters: {
-                type: "object",
-                properties: { cmd: { type: "string" }, workdir: { type: "string" } },
-                required: ["cmd"],
-                additionalProperties: true,
-            },
-            outputSchema: UNIFIED_EXEC_OUTPUT_SCHEMA,
-            async handler(input, context) {
-                return (await loadShell()).exec(input, context);
-            },
-        },
+        execTool: shell.tool,
     };
 }
 /** Captures the root project instructions using the native Nanocodex precedence and budget. */
@@ -192,10 +127,7 @@ export async function loadBrowserProjectInstructions(rawFs) {
 }
 /** Builds the browser shell over an already-open OPFS Git adapter. */
 export async function createBrowserBash(rawFs, thread, options = {}) {
-    const [{ Bash, defineCommand }, { createTwoFilesPatch }] = await Promise.all([
-        import("just-bash/browser"),
-        import("diff"),
-    ]);
+    const { createTwoFilesPatch } = await import("diff");
     const filesystem = new OpfsShellFileSystem(rawFs);
     await filesystem.refreshPaths();
     const executionTimeoutMs = options.executionTimeoutMs ?? MAX_EXECUTION_MS;
@@ -222,7 +154,8 @@ export async function createBrowserBash(rawFs, thread, options = {}) {
             : undefined;
         return module.createPythonCommand(name, pythonRuntime, filesystem);
     };
-    const bash = new Bash({
+    const runtime = await createJustBashRuntime({
+        filesystem,
         cwd: THREAD_GIT_DIRECTORY,
         env: {
             HOME: THREAD_GIT_DIRECTORY,
@@ -233,32 +166,34 @@ export async function createBrowserBash(rawFs, thread, options = {}) {
             GIT_COMMITTER_EMAIL: THREAD_GIT_AUTHOR.email,
             PATH: THREAD_GIT_DIRECTORY,
         },
-        fs: filesystem,
         fetch: shellFetch,
-        customCommands: [
-            gitCommand(rawFs, thread, filesystem, defineCommand, createTwoFilesPatch),
-            createGhCompatibilityCommand(rawFs, thread, defineCommand, {
-                fetch: shellFetch,
-            }),
-            unameCommand(defineCommand),
-            ...["python3", "python"].map((name) => ({
-                name,
-                load: () => loadPython(name),
-            })),
-            {
-                name: "ssh",
-                load: async () => (await import("./browserSsh.mjs")).createSshCommand(filesystem),
-            },
-            ...["clang", "clang++", "gcc", "g++", "cc", "c++"].map((name) => ({
-                name,
-                load: async () => (await import("./browserCompiler.mjs")).createCompilerCommand(
-                    name,
-                    filesystem,
-                    workerEgress,
-                ),
-            })),
+        networkMode: "connector-http-gateway",
+        customCommands: ({ defineCommand }) => [
+          gitCommand(rawFs, thread, filesystem, defineCommand, createTwoFilesPatch),
+          createGhCompatibilityCommand(rawFs, thread, defineCommand, {
+              fetch: shellFetch,
+          }),
+          unameCommand(defineCommand),
+          ...["python3", "python"].map((name) => ({
+              name,
+              load: () => loadPython(name),
+          })),
+          {
+              name: "ssh",
+              load: async () => (await import("./browserSsh.mjs")).createSshCommand(filesystem),
+          },
+          ...["clang", "clang++", "gcc", "g++", "cc", "c++"].map((name) => ({
+              name,
+              load: async () => (await import("./browserCompiler.mjs")).createCompilerCommand(
+                  name,
+                  filesystem,
+                  workerEgress,
+              ),
+          })),
         ],
-        executionLimitProfile: "hardened",
+        executionTimeoutMs,
+        defaultMaxOutputTokens: 10_000,
+        maxOutputTokens: 100_000,
         executionLimits: {
             maxCommandCount: 10_000,
             maxExecutionTimeMs: executionTimeoutMs,
@@ -270,12 +205,22 @@ export async function createBrowserBash(rawFs, thread, options = {}) {
             maxStringLength: 16 * 1024 * 1024,
             maxTraversalEntries: 100_000,
         },
+        supportsParallelToolCalls: true,
+        instructions: browserInstructions,
+        outputTruncationNotice: "\n[output truncated by browser exec_command]",
+        retainNoticeWithinLimit: false,
+        aroundExecute: ({ execute, signal }) => withThreadGitLock(thread, async () => {
+            const mutationVersion = filesystem.mutationVersion;
+            try {
+                return await execute();
+            }
+            finally {
+                if (filesystem.mutationVersion !== mutationVersion)
+                    (options.onChanged ?? (() => notifyThreadGitChanged(thread)))();
+            }
+        }, signal),
     });
-    return {
-        bash,
-        filesystem,
-        exec: (input, context) => execute(bash, filesystem, thread, input, options.onChanged ?? (() => notifyThreadGitChanged(thread)), context?.signal, executionTimeoutMs),
-    };
+    return Object.freeze({ ...runtime, filesystem });
 }
 const unavailableBrowserEgress = async () => {
     throw new Error("browser egress is unavailable outside the Nanocodex browser host");
@@ -314,55 +259,18 @@ function unameCommand(defineCommand) {
         return ok(`${[...new Set(requested)].map((key) => fields[key]).join(" ")}\n`);
     });
 }
-async function execute(bash, shellFs, thread, input, onChanged, signal, executionTimeoutMs = MAX_EXECUTION_MS) {
-    if (typeof input?.cmd !== "string" || !input.cmd.trim()) {
-        throw new TypeError("exec_command.cmd must be a non-empty string");
-    }
-    if (input.tty === true)
-        throw new Error("browser bash does not provide PTY sessions");
-    if (input.sandbox_permissions === "require_escalated") {
-        throw new Error("browser bash cannot escape its OPFS workspace sandbox");
-    }
-    if (input.shell !== undefined && input.shell !== "bash" && input.shell !== "/bin/bash") {
-        throw new Error("browser exec_command supports only its embedded bash interpreter");
-    }
-    const workdir = input.workdir === undefined ? THREAD_GIT_DIRECTORY : requireString(input.workdir, "workdir");
-    const maxTokens = optionalPositiveInteger(input.max_output_tokens, 10_000);
-    const startedAt = performance.now();
-    const deadline = new AbortController();
-    const abort = () => deadline.abort(signal?.reason);
-    signal?.addEventListener("abort", abort, { once: true });
-    if (signal?.aborted)
-        abort();
-    const timeout = setTimeout(() => deadline.abort(new Error(`browser exec_command exceeded ${executionTimeoutMs} milliseconds`)), executionTimeoutMs);
-    let result;
-    try {
-        result = await withThreadGitLock(thread, async () => {
-            const mutationVersion = shellFs.mutationVersion;
-            try {
-                return await bash.exec(input.cmd, { cwd: workdir, signal: deadline.signal });
-            }
-            finally {
-                if (shellFs.mutationVersion !== mutationVersion)
-                    onChanged();
-            }
-        }, deadline.signal);
-    }
-    finally {
-        clearTimeout(timeout);
-        signal?.removeEventListener("abort", abort);
-    }
-    const combined = `${result.stdout}${result.stderr}`;
-    const maxCharacters = maxTokens * 4;
-    const truncated = combined.length > maxCharacters;
-    return {
-        output: truncated
-            ? `${combined.slice(0, maxCharacters)}\n[output truncated by browser exec_command]`
-            : combined,
-        wall_time_seconds: (performance.now() - startedAt) / 1000,
-        exit_code: result.exitCode,
-        ...(truncated ? { original_token_count: Math.ceil(combined.length / 4) } : {}),
-    };
+function browserInstructions(descriptor) {
+    return `You are working in a persistent browser filesystem rooted at ${descriptor.cwd}.
+Use exec_command for shell work. Available commands: ${descriptor.commands.join(", ")}. The shell,
+Python runtime, and compilers execute entirely in browser sandboxes, with no host process, PTY,
+session, or sandbox escalation. HTTP commands use one thread-scoped, same-origin egress gateway.
+Destination policy and connected-account credentials stay outside the browser runtime. The C/C++
+commands compile sources to WASI WebAssembly in a lazy worker. Browser SSH is noninteractive and
+requires a wss:// endpoint that carries raw SSH because browsers cannot open TCP sockets. The
+repository's only publish branch is nanocodex; publish with git add, git commit -m "...", and git
+push origin nanocodex. Use the standard Rust apply_patch tool for focused edits. Create or update
+custom React interfaces with the render_artifact tool. Its source defines function App({ sendPrompt });
+React and the html tagged template helper are already in scope.`;
 }
 function gitCommand(fs, thread, shellFs, defineCommand, createTwoFilesPatch) {
     return defineCommand("git", async (args, context) => {
@@ -1144,18 +1052,6 @@ function bytesToLatin1(bytes) {
         output += String.fromCharCode(...bytes.subarray(offset, offset + 32_768));
     }
     return output;
-}
-function requireString(value, name) {
-    if (typeof value !== "string" || !value.trim())
-        throw new TypeError(`${name} must be a non-empty string`);
-    return value;
-}
-function optionalPositiveInteger(value, fallback) {
-    if (value === undefined)
-        return fallback;
-    if (!Number.isInteger(value) || value <= 0)
-        throw new TypeError("max_output_tokens must be positive");
-    return Math.min(value, 100_000);
 }
 function firstLine(value) {
     return value.trim().split("\n", 1)[0] ?? "";

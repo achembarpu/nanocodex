@@ -122,18 +122,26 @@ export function browserAccountInfoTool(options) {
   });
 }
 
-export function browserRuntimeInfoTool(options) {
+export function browserRuntimeInfoTool(options, descriptor) {
+  if (!descriptor || typeof descriptor !== "object" || Array.isArray(descriptor)) {
+    throw new TypeError("browser runtime info requires a shell descriptor");
+  }
   return namedTool("runtimeInfo", {
     description: "Return information about the browser agent runtime and connected accounts.",
     parameters: { type: "object", additionalProperties: false },
     async handler(_input, context) {
       return {
         runtime: "browser-worker",
-        shell: "nanocodex-just-bash",
-        shell_network: "connector-http-gateway",
+        shell: descriptor.shell,
+        shell_network: descriptor.network.mode,
         sandbox: "browser",
-        workspace: "/workspace",
-        custom_commands: ["gh"],
+        workspace: descriptor.cwd,
+        commands: descriptor.commands,
+        custom_commands: descriptor.customCommands,
+        limits: descriptor.limits,
+        pty: descriptor.pty,
+        sessions: descriptor.sessions,
+        sandbox_escalation: descriptor.sandboxEscalation,
         account: await browserAccountInfo(options, context?.signal),
       };
     },
