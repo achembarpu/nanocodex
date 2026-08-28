@@ -1017,13 +1017,13 @@ function connectorAudit(
   connector: ConnectorId,
   detail: Readonly<Record<string, boolean | number | string>>,
 ): void {
-  console.log(JSON.stringify({
+  console.log({
     type: "connector.audit",
     action,
     outcome,
     connector,
     ...detail,
-  }));
+  });
 }
 
 class ConnectorFailure extends Error {

@@ -385,6 +385,8 @@ export async function deployProductionManaged(environment = process.env) {
       revision,
       "--message",
       `gakonst/nanocodex@${revision}`,
+      "--var",
+      `DEPLOYMENT_SHA:${revision}`,
       "--secrets-file",
       paths["managed-secrets.json"],
     ], {

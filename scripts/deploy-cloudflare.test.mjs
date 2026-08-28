@@ -26,6 +26,14 @@ import {
 
 const revision = "a".repeat(40);
 const databaseId = "11111111-2222-4333-8444-555555555555";
+const productionWranglerDefinitions = [
+  ["website", "web/wrangler.jsonc", true, false],
+  ["managed-agent", "services/managed/wrangler.jsonc", true, true],
+  ["egress-broker", "services/egress/wrangler.broker.jsonc", true, true],
+  ["connect-api", "services/connect-api/wrangler.jsonc", true, false],
+  ["connect-dialog", "web/connect-dialog/wrangler.jsonc", false, true],
+  ["connect-playground", "web/connect-playground/wrangler.jsonc", false, true],
+];
 
 function productionEnvironment() {
   return {
@@ -229,15 +237,7 @@ test("production resource topology covers the real checked-in Wrangler configs",
 });
 
 test("production service bindings form the complete deployment graph", async () => {
-  const definitions = [
-    ["website", "web/wrangler.jsonc"],
-    ["managed-agent", "services/managed/wrangler.jsonc"],
-    ["egress-broker", "services/egress/wrangler.broker.jsonc"],
-    ["connect-api", "services/connect-api/wrangler.jsonc"],
-    ["connect-dialog", "web/connect-dialog/wrangler.jsonc"],
-    ["connect-playground", "web/connect-playground/wrangler.jsonc"],
-  ];
-  const configurations = await Promise.all(definitions.map(async ([label, path]) => ({
+  const configurations = await Promise.all(productionWranglerDefinitions.map(async ([label, path]) => ({
     config: JSON.parse(await readFile(new URL(`../${path}`, import.meta.url), "utf8")),
     label,
   })));
@@ -249,6 +249,43 @@ test("production service bindings form the complete deployment graph", async () 
     () => assertProductionServiceBindings(broken),
     /connect-api service bindings/,
   );
+});
+
+test("production Workers persist native telemetry only outside credential-bearing callback ingress", async () => {
+  const expectedObservability = {
+    enabled: true,
+    logs: {
+      enabled: true,
+      head_sampling_rate: 1,
+      invocation_logs: true,
+      persist: true,
+    },
+    traces: {
+      enabled: true,
+      head_sampling_rate: 1,
+      persist: true,
+    },
+  };
+  for (const [label, path, hasServerSource, persistsNativeTelemetry] of productionWranglerDefinitions) {
+    const config = JSON.parse(await readFile(new URL(`../${path}`, import.meta.url), "utf8"));
+    assert.deepEqual(
+      config.observability,
+      persistsNativeTelemetry ? expectedObservability : { enabled: false },
+      `${label} observability`,
+    );
+    assert.equal(config.upload_source_maps, hasServerSource ? true : undefined, `${label} source maps`);
+  }
+});
+
+test("every production code deploy projects the exact Git revision into Worker logs", async () => {
+  const [rootDeploy, managedDeploy, brokerDeploy] = await Promise.all([
+    readFile(new URL("./deploy-cloudflare.mjs", import.meta.url), "utf8"),
+    readFile(new URL("../services/managed/scripts/production-rollout.mjs", import.meta.url), "utf8"),
+    readFile(new URL("../services/egress/scripts/production-broker.mjs", import.meta.url), "utf8"),
+  ]);
+  for (const source of [rootDeploy, managedDeploy, brokerDeploy]) {
+    assert.match(source, /"--var",\s*`DEPLOYMENT_SHA:\$\{revision\}`/);
+  }
 });
 
 test("Wrangler resource list formats are parsed fail-closed", () => {

@@ -230,6 +230,7 @@ export interface Env extends AccountAuthEnv {
   MANAGED_EVENT_ARCHIVE_THRESHOLD_BYTES?: string;
   MANAGED_TURN_ARCHIVE_RECENT_TURNS?: string;
   MANAGED_REALTIME_ARCHIVE_RECENT_OPERATIONS?: string;
+  DEPLOYMENT_SHA?: string;
 }
 
 type SessionRow = {
@@ -516,6 +517,26 @@ function accountConnectorProjection(
   );
 }
 
+function observeManagedPrincipal(
+  env: Env,
+  type: string,
+  principal: Principal,
+  detail: Record<string, unknown> = {},
+): void {
+  console.info({
+    type,
+    user_id: principal.userId,
+    organization_id: principal.organizationId,
+    team_id: principal.teamId,
+    auth_kind: principal.kind,
+    ...(principal.connectGrant === undefined
+      ? {}
+      : { grant_id: principal.connectGrant.grantId }),
+    ...(env.DEPLOYMENT_SHA === undefined ? {} : { deployment_sha: env.DEPLOYMENT_SHA }),
+    ...detail,
+  });
+}
+
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
@@ -637,6 +658,9 @@ export default {
     if (request.method === "POST" && url.pathname === "/v1/agents") {
       const principal = await authenticate(request, env, url);
       if (!principal) return json({ error: "unauthorized" }, { status: 401 });
+      observeManagedPrincipal(env, "managed.agent.create_requested", principal, {
+        method: request.method,
+      });
       if (!principal.capabilities.includes("agents:write")) return json({ error: "forbidden" }, { status: 403 });
       const originFailure = requireSameOriginMutation(request, url, principal);
       if (originFailure) return originFailure;
@@ -738,6 +762,11 @@ export default {
       const routeBase = "/v1/agents";
       const websocketUrl = new URL(`${routeBase}/${agentId}/ws`, url);
       websocketUrl.protocol = websocketUrl.protocol === "https:" ? "wss:" : "ws:";
+      observeManagedPrincipal(env, "managed.agent.created", principal, {
+        agent_id: agentId,
+        thread_id: agentId,
+        outcome: "success",
+      });
       return json({
         agent_id: agentId,
         session_id: agentId,
@@ -755,6 +784,14 @@ export default {
     const resource = match[2] ?? "";
     const principal = await authenticate(request, env, url);
     if (!principal) return json({ error: "unauthorized" }, { status: 401 });
+    const routedTurnId = resource.match(/^turns\/([^/]+)/)?.[1];
+    observeManagedPrincipal(env, "managed.agent.request", principal, {
+      agent_id: agentId,
+      thread_id: agentId,
+      method: request.method,
+      resource: resource === "" ? "state" : resource.split("/")[0],
+      ...(routedTurnId === undefined ? {} : { turn_id: routedTurnId }),
+    });
     const stub = env.NANOCODEX_SESSIONS.getByName(agentId);
     const sessionHeaders = new Headers(request.headers);
     forwardPrincipalAssertions(sessionHeaders, principal);
@@ -2522,9 +2559,24 @@ export class NanocodexSession extends DurableComputerSession {
           return this.#routeRealtimeDelegation(agent, parsed, requestHash, authorization);
         },
       );
+      this.#observe("managed.realtime.operation", {
+        operation_kind: kind,
+        operation_id: parsed.operationId,
+        voice_session_id: parsed.voiceSessionId,
+        outcome: "success",
+      });
       return json(result, { status: kind === "delegate" ? 202 : 200 });
     } catch (error) {
-      return managedErrorResponse(error, `realtime_${kind}_failed`);
+      const failure = managedHttpError(error, `realtime_${kind}_failed`);
+      this.#observe("managed.realtime.operation", {
+        operation_kind: kind,
+        operation_id: parsed.operationId,
+        voice_session_id: parsed.voiceSessionId,
+        outcome: "failure",
+        error_code: failure.code,
+        status: failure.status,
+      });
+      return json({ error: failure.code, message: failure.message }, { status: failure.status });
     }
   }
 
@@ -2946,6 +2998,15 @@ export class NanocodexSession extends DurableComputerSession {
       );
     });
     this.#publish(event!);
+    this.#observe("managed.turn.accepted", {
+      turn_id: id,
+      transport: "realtime",
+      operation_id: request.operationId,
+      voice_session_id: request.voiceSessionId,
+      ...(authorization.connectGrant === undefined
+        ? {}
+        : { grant_id: authorization.connectGrant.grantId }),
+    });
     const row = this.#managedTurn(id);
     if (!row)
       throw new Error("routed managed turn disappeared after acceptance");
@@ -3030,6 +3091,13 @@ export class NanocodexSession extends DurableComputerSession {
           this.#scheduleRecovery();
         }
       }
+      this.#observe("managed.turn.replayed", {
+        turn_id: existing.id,
+        state: existing.state,
+        ...(authorization.connectGrant === undefined
+          ? {}
+          : { grant_id: authorization.connectGrant.grantId }),
+      });
       return { created: false, row: existing };
     }
     if (this.#streamError) {
@@ -3083,6 +3151,13 @@ export class NanocodexSession extends DurableComputerSession {
       );
     });
     this.#publish(event!);
+    this.#observe("managed.turn.accepted", {
+      turn_id: id,
+      transport: "managed",
+      ...(authorization.connectGrant === undefined
+        ? {}
+        : { grant_id: authorization.connectGrant.grantId }),
+    });
     const row = this.#managedTurn(id);
     if (!row) throw new Error("managed turn disappeared after acceptance");
     this.#scheduleRecovery();
@@ -4438,6 +4513,21 @@ export class NanocodexSession extends DurableComputerSession {
     });
     if (event) {
       this.#publish(event);
+      this.#observe("managed.turn.transition", {
+        turn_id: id,
+        state: committed.state,
+        status: committed.state,
+        outcome: committed.state === "completed"
+          ? "success"
+          : committed.state === "cancelled"
+          ? "cancelled"
+          : committed.state === "failed" || committed.state === "blocked"
+          ? "failure"
+          : "pending",
+        message_type: event.message.type,
+        attempt_count: committed.attempt_count,
+        terminal: isTerminalState(committed.state),
+      });
       if (isTerminalState(committed.state)) {
         this.#maybeLogTerminalCapacity();
         if (this.#turnArchive.needsSeal()) {
@@ -4463,12 +4553,12 @@ export class NanocodexSession extends DurableComputerSession {
     reason: "agent_constructed" | "archive_seal" | "idle_shutdown" | "terminal_milestone",
     dimensions: Record<string, number> = {},
   ): void {
-    const sessionId = this.#sessionId();
-    if (!sessionId) return;
+    const session = this.#session();
+    if (!session) return;
     try {
       const capacity: ManagedCapacitySnapshot = managedCapacitySnapshot(
         this.ctx.storage,
-        sessionId,
+        session.session_id,
         this.#eventArchive.capacity(),
         this.#turnArchive.capacity(),
         this.#realtimeArchive.capacity(),
@@ -4476,12 +4566,44 @@ export class NanocodexSession extends DurableComputerSession {
       console.info({
         type: "managed.capacity",
         reason,
-        agent_id: sessionId,
+        user_id: session.owner_id,
+        organization_id: session.organization_id,
+        team_id: session.team_id,
+        agent_id: session.session_id,
+        thread_id: session.session_id,
+        ...(this.env.DEPLOYMENT_SHA === undefined
+          ? {}
+          : { deployment_sha: this.env.DEPLOYMENT_SHA }),
         ...dimensions,
         ...capacity,
       });
-    } catch (error) {
-      console.warn("managed capacity snapshot failed", errorMessage(error));
+    } catch {
+      this.#observe("managed.capacity_failed", { outcome: "failure" }, "warn");
+    }
+  }
+
+  #observe(
+    type: string,
+    detail: Record<string, unknown> = {},
+    level: "info" | "warn" | "error" = "info",
+  ): void {
+    try {
+      const session = this.#session();
+      if (!session) return;
+      console[level]({
+        type,
+        user_id: session.owner_id,
+        organization_id: session.organization_id,
+        team_id: session.team_id,
+        agent_id: session.session_id,
+        thread_id: session.session_id,
+        ...(this.env.DEPLOYMENT_SHA === undefined
+          ? {}
+          : { deployment_sha: this.env.DEPLOYMENT_SHA }),
+        ...detail,
+      });
+    } catch {
+      // Observability must never change durable-agent behavior.
     }
   }
 
@@ -4606,7 +4728,10 @@ export class NanocodexSession extends DurableComputerSession {
     if (this.#streamError) return;
     const detail = `event projection failed: ${errorMessage(error)}`;
     this.#streamError = detail;
-    console.error(detail);
+    this.#observe("managed.event_stream_failed", {
+      outcome: "failure",
+      error_kind: error instanceof Error ? error.name : typeof error,
+    }, "error");
     let event: DurableEvent<StreamMessage> | undefined;
     try {
       this.ctx.storage.transactionSync(() => {
@@ -4618,7 +4743,10 @@ export class NanocodexSession extends DurableComputerSession {
         event = this.#eventLog.append({ type: "stream_failed", error: detail }, null, true);
       });
     } catch (projectionError) {
-      console.error("failed to persist event stream failure", errorMessage(projectionError));
+      this.#observe("managed.event_stream_persist_failed", {
+        outcome: "failure",
+        error_kind: projectionError instanceof Error ? projectionError.name : typeof projectionError,
+      }, "error");
       return;
     }
     this.#publish(event!);

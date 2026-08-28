@@ -169,6 +169,49 @@ describe("managed agents REST and resumable SSE", () => {
     ]));
   });
 
+  it("indexes managed lifecycle logs by account, team, thread, and turn without prompt data", async () => {
+    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+    const prompt = "OBSERVABILITY_PROMPT_MUST_NOT_BE_LOGGED";
+    try {
+      const agent = await createAgent();
+      const turnId = "turn-observability-coordinates";
+      await submit(agent, turnId, prompt);
+      await waitForTurnState(agent, turnId, "completed", 10_000);
+
+      const entries = info.mock.calls.flatMap(([entry]) => (
+        entry && typeof entry === "object" ? [entry as Record<string, unknown>] : []
+      ));
+      expect(entries).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          type: "managed.agent.created",
+          user_id: USER_ID,
+          organization_id: expect.stringMatching(/^[0-9a-f-]{36}$/),
+          team_id: expect.stringMatching(/^[0-9a-f-]{36}$/),
+          agent_id: agent.agent_id,
+          thread_id: agent.agent_id,
+        }),
+        expect.objectContaining({
+          type: "managed.turn.accepted",
+          user_id: USER_ID,
+          agent_id: agent.agent_id,
+          thread_id: agent.agent_id,
+          turn_id: turnId,
+        }),
+        expect.objectContaining({
+          type: "managed.turn.transition",
+          user_id: USER_ID,
+          agent_id: agent.agent_id,
+          turn_id: turnId,
+          state: "completed",
+          terminal: true,
+        }),
+      ]));
+      expect(JSON.stringify(entries)).not.toContain(prompt);
+    } finally {
+      info.mockRestore();
+    }
+  });
+
   it("accounts for each independently growing per-agent durable payload", async () => {
     const agent = await createAgent();
     await submit(agent, "turn-capacity", "CAPACITY_ACCOUNTING");

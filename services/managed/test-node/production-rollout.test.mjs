@@ -198,6 +198,8 @@ test("managed production config retains the exact private eight-DO topology", as
   assert.equal(config.name, "nanocodex-durable-agent");
   assert.equal(config.workers_dev, false);
   assert.equal(config.main, "/fixed/managed.ts");
+  assert.equal(config.upload_source_maps, true);
+  assert.deepEqual(config.observability, base.observability);
   assert.deepEqual(config.compatibility_flags, ["nodejs_compat", "global_fetch_strictly_public"]);
   assert.equal(config.worker_loaders, undefined);
   assert.deepEqual(config.services, [
@@ -230,6 +232,8 @@ test("boundary probe and website configs preserve the private service chain", ()
     name: "nanocodex",
     keep_vars: true,
     main: "index.js",
+    upload_source_maps: true,
+    observability: { enabled: false },
     assets: { directory: "../client" },
     services: [
       { binding: "EGRESS", service: "nanocodex-egress" },
@@ -253,6 +257,8 @@ test("boundary probe and website configs preserve the private service chain", ()
     },
   });
   assert.equal(website.main, "/artifact/nanocodex/index.js");
+  assert.equal(website.upload_source_maps, true);
+  assert.deepEqual(website.observability, { enabled: false });
   assert.equal(website.assets.directory, "/artifact/client");
   assert.equal(website.containers[0].image, "/current/web/container/Dockerfile");
   assert.equal(

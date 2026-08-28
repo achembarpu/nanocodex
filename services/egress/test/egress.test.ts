@@ -1522,11 +1522,9 @@ describe("private connector data plane", () => {
       })).status).toBe(204);
 
       const entries = log.mock.calls.flatMap(([value]) => {
-        if (typeof value !== "string") return [];
-        try {
-          const entry = JSON.parse(value) as Record<string, unknown>;
-          return entry.type === "connector.audit" ? [entry] : [];
-        } catch { return []; }
+        if (!value || typeof value !== "object") return [];
+        const entry = value as Record<string, unknown>;
+        return entry.type === "connector.audit" ? [entry] : [];
       });
       expect(entries).toEqual(expect.arrayContaining([
         expect.objectContaining({ action: "authorize_start", outcome: "allow", connector: "github" }),
@@ -1550,14 +1548,38 @@ describe("private connector data plane", () => {
         /connector-access|connector-refresh|authorization-code-must-not-be-logged|invalid-state-must-not-be-logged|NANOCODEX_PROVIDER_CREDENTIAL/,
       );
       const egressEntries = log.mock.calls.flatMap(([value]) => {
-        if (typeof value !== "string") return [];
-        try {
-          const entry = JSON.parse(value) as Record<string, unknown>;
-          return entry.type === "egress.request" && entry.rule === "github" ? [entry] : [];
-        } catch { return []; }
+        if (!value || typeof value !== "object") return [];
+        const entry = value as Record<string, unknown>;
+        return entry.type === "egress.request" && entry.rule === "github" ? [entry] : [];
       });
-      expect(egressEntries).toContainEqual(expect.objectContaining({ path: "/provider-api" }));
+      expect(egressEntries).toContainEqual(expect.objectContaining({
+        path: "/provider-api",
+        user_id: user,
+        connector: "github",
+      }));
       expect(JSON.stringify(egressEntries)).not.toContain("/repos/nanocodex/sdk");
+      const controlEntries = log.mock.calls.flatMap(([value]) => {
+        if (!value || typeof value !== "object") return [];
+        const entry = value as Record<string, unknown>;
+        return entry.type === "egress.control" ? [entry] : [];
+      });
+      expect(controlEntries).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          action: "allow",
+          connector: "github",
+          operation: "connectors",
+          user_id: user,
+        }),
+        expect.objectContaining({
+          action: "deny",
+          connector: "gmail",
+          operation: "connectors",
+          user_id: user,
+        }),
+      ]));
+      expect(JSON.stringify(controlEntries)).not.toMatch(
+        /connector-access|connector-refresh|authorization-code-must-not-be-logged|invalid-state-must-not-be-logged/,
+      );
     } finally {
       log.mockRestore();
     }

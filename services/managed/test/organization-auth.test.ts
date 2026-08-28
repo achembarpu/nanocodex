@@ -223,12 +223,24 @@ describe("organization authorization foundation", () => {
   });
 
   it("resolves stale owners with canonical capabilities while preserving API-key snapshots", async () => {
-    const owner = await provisionOwner();
+    const account = await SELF.fetch("https://example.test/v1/me");
+    const cookie = account.headers.get("set-cookie")?.split(";", 1)[0];
+    expect(cookie).toBeTruthy();
+    const identity = await account.json<{
+      user: { id: string };
+      organization: { id: string };
+    }>();
+    const owner = {
+      userId: identity.user.id,
+      organization: testEnv.NANOCODEX_ORGANIZATIONS.getByName(identity.organization.id),
+    };
     await replaceMembership(owner, "owner", LEGACY_OWNER_CAPABILITIES);
 
-    const principal = await authenticate(connectRequest(owner.userId), testEnv);
+    const principal = await authenticate(new Request("https://example.test/v1/me", {
+      headers: { cookie: cookie! },
+    }), testEnv);
     expect(principal).toMatchObject({
-      kind: "connect_grant",
+      kind: "account_session",
       role: "owner",
       capabilities: OWNER_CAPABILITIES,
     });
@@ -274,7 +286,7 @@ describe("organization authorization foundation", () => {
     const capabilities = ["agents:read", "history:read"] as const;
     await replaceMembership(member, "writer", capabilities);
 
-    const principal = await authenticate(connectRequest(member.userId), testEnv);
+    const principal = await authenticate(connectRequest(member.userId, capabilities), testEnv);
     expect(principal).toMatchObject({
       kind: "connect_grant",
       role: "writer",
@@ -315,9 +327,18 @@ async function replaceMembership(
   });
 }
 
-function connectRequest(userId: string): Request {
+function connectRequest(
+  userId: string,
+  capabilities: readonly OrganizationCapability[],
+): Request {
   return new Request("https://nanocodex.internal/v1/me", {
-    headers: { "x-nanocodex-connect-user": userId },
+    headers: {
+      "x-nanocodex-connect-user": userId,
+      "x-nanocodex-connect-grant-id": `0x${"a".repeat(64)}`,
+      "x-nanocodex-connect-capabilities": JSON.stringify(capabilities),
+      "x-nanocodex-connect-connectors": "[]",
+      "x-nanocodex-connect-mcp-ids": "[]",
+    },
   });
 }
 

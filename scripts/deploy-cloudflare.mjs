@@ -1029,6 +1029,8 @@ async function deployConfiguredWorker({
     revision,
     "--message",
     `gakonst/nanocodex@${revision}`,
+    "--var",
+    `DEPLOYMENT_SHA:${revision}`,
     ...extraArguments,
   ], {
     environment,

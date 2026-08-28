@@ -128,6 +128,8 @@ test("Wrangler child environment can use the local OAuth session", () => {
 test("the base and generated production configs keep every required DO binding", async () => {
   const base = JSON.parse(await readFile(new URL("../wrangler.broker.jsonc", import.meta.url)));
   const config = buildProductionBrokerConfig(base, { mainPath: "/fixed/egress.ts" });
+  assert.equal(config.upload_source_maps, true);
+  assert.deepEqual(config.observability, base.observability);
   assert.equal(config.workers_dev, false);
   assert.equal(config.routes, undefined);
   assert.deepEqual(config.vars, { ENVIRONMENT: "production" });
@@ -203,6 +205,10 @@ test("production broker deploy uses the injected pinned-runner boundary with red
   assert.equal(invocation.arguments_[0], "deploy");
   assert.ok(invocation.arguments_.includes("--strict"));
   assert.ok(invocation.arguments_.includes("a".repeat(40)));
+  assert.deepEqual(
+    invocation.arguments_.slice(invocation.arguments_.indexOf("--var"), invocation.arguments_.indexOf("--var") + 2),
+    ["--var", `DEPLOYMENT_SHA:${"a".repeat(40)}`],
+  );
   assert.equal(invocation.options.environment.CLOUDFLARE_API_TOKEN, "cloudflare-token");
   for (const secret of ["cloudflare-token", encryptionKey, probeToken, ...Object.values(connectorSecrets)]) {
     assert.ok(invocation.options.redactions.includes(secret));

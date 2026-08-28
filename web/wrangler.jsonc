@@ -4,23 +4,11 @@
   "compatibility_date": "2026-05-22",
   "compatibility_flags": ["nodejs_compat"],
   "main": "./worker/entry.ts",
+  "upload_source_maps": true,
   "workers_dev": true,
   "preview_urls": true,
   "keep_vars": true,
-  "observability": {
-    "enabled": true,
-    "logs": {
-      "enabled": true,
-      "head_sampling_rate": 1,
-      "invocation_logs": true,
-      "persist": true
-    },
-    "traces": {
-      "enabled": true,
-      "head_sampling_rate": 1,
-      "persist": true
-    }
-  },
+  "observability": { "enabled": false },
   "assets": {
     "binding": "ASSETS",
     "not_found_handling": "none",

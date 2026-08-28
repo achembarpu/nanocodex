@@ -2,6 +2,7 @@
   "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "nanocodex-connect-api",
   "main": "./src/index.ts",
+  "upload_source_maps": true,
   "compatibility_date": "2026-08-23",
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": true,
@@ -24,5 +25,5 @@
       ]
     }
   ],
-  "observability": { "enabled": true }
+  "observability": { "enabled": false }
 }

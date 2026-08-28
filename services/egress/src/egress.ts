@@ -88,6 +88,7 @@ export interface EgressEnv extends BrokerEnv, ConnectorBrokerEnv {
   CODEX_RELAY_URL?: string;
   ALLOW_INSECURE_LOOPBACK_RELAY?: string;
   NANOCODEX_BROKER_PROBE_TOKEN?: string;
+  DEPLOYMENT_SHA?: string;
 }
 
 type ModelOperation = Readonly<{
@@ -183,7 +184,9 @@ export async function handleEgress(
   if (url.search) return jsonError(403, "destination_denied");
 
   if (url.pathname.startsWith("/subjects/") || url.pathname.startsWith("/users/")) {
-    return handleControl(request, url, env);
+    const response = await handleControl(request, url, env);
+    auditControl(request, url, response.status, started, env.DEPLOYMENT_SHA);
+    return response;
   }
   if (url.pathname === BROKER_READINESS_PATH) return handleReadiness(request, env);
   if (url.pathname === MODEL_STATUS_PATH) return handleModelStatus(request, env);
@@ -218,11 +221,15 @@ export async function handleEgress(
     return auditedError(403, "required_header_mismatch", request, url, operation.id, started);
   }
 
+  let userId: string | undefined;
   try {
-    const userId = await resolveSubject(env, subject);
+    userId = await resolveSubject(env, subject);
     let credential = await resolveCredential(env, userId, false);
     if (operation.chatGptOnly && credential.kind !== "chatgpt") {
-      return auditedError(409, "chatgpt_credential_required", request, url, operation.id, started);
+      return auditedError(409, "chatgpt_credential_required", request, url, operation.id, started, {
+        user_id: userId,
+        deployment_sha: env.DEPLOYMENT_SHA,
+      });
     }
     const body = await replayableBody(request, operation);
     let upstream = await fetchUpstream(
@@ -238,7 +245,10 @@ export async function handleEgress(
       await cancelResponseBody(upstream);
       credential = await resolveCredential(env, userId, true, credential.revision);
       if (operation.chatGptOnly && credential.kind !== "chatgpt") {
-        return auditedError(409, "chatgpt_credential_required", request, url, operation.id, started);
+        return auditedError(409, "chatgpt_credential_required", request, url, operation.id, started, {
+          user_id: userId,
+          deployment_sha: env.DEPLOYMENT_SHA,
+        });
       }
       upstream = await fetchUpstream(
         env,
@@ -252,7 +262,10 @@ export async function handleEgress(
     }
     if (REDIRECT_STATUS.has(upstream.status)) {
       await cancelResponseBody(upstream);
-      return auditedError(502, "upstream_redirect_blocked", request, url, operation.id, started);
+      return auditedError(502, "upstream_redirect_blocked", request, url, operation.id, started, {
+        user_id: userId,
+        deployment_sha: env.DEPLOYMENT_SHA,
+      });
     }
     if (upstream.status >= 400) {
       const upstreamStatus = upstream.status;
@@ -264,10 +277,19 @@ export async function handleEgress(
         url,
         operation.id,
         started,
-        { upstream_status: upstreamStatus },
+        {
+          upstream_status: upstreamStatus,
+          user_id: userId,
+          deployment_sha: env.DEPLOYMENT_SHA,
+        },
       );
     }
-    audit("allow", request, url, operation.id, started, { status: upstream.status, recovered });
+    audit("allow", request, url, operation.id, started, {
+      status: upstream.status,
+      recovered,
+      user_id: userId,
+      deployment_sha: env.DEPLOYMENT_SHA,
+    });
     return sanitizeUpstreamResponse(upstream);
   } catch (error) {
     const problem = egressFailure(error);
@@ -276,7 +298,11 @@ export async function handleEgress(
       diagnostics?.upstreamException(detail);
       console.error(JSON.stringify({ type: "egress.upstream_exception", ...detail }));
     }
-    return auditedError(problem.status, problem.code, request, url, operation.id, started);
+    return auditedError(problem.status, problem.code, request, url, operation.id, started,
+      {
+        ...(userId === undefined ? {} : { user_id: userId }),
+        deployment_sha: env.DEPLOYMENT_SHA,
+      });
   }
 }
 
@@ -298,11 +324,16 @@ async function handleMcpEgress(
     || request.headers.has("proxy-authorization")) {
     return auditedError(403, "caller_credential_forbidden", request, url, "mcp", started);
   }
+  let userId: string | undefined;
   try {
-    const userId = await resolveSubject(env, subject);
+    userId = await resolveSubject(env, subject);
     const owner = await resolveMcpConnectionOwner(env, connectionId);
     if (owner !== userId) {
-      return auditedError(403, "mcp_connection_owner_mismatch", request, url, "mcp", started);
+      return auditedError(403, "mcp_connection_owner_mismatch", request, url, "mcp", started, {
+        user_id: userId,
+        mcp_connection_id: connectionId,
+        deployment_sha: env.DEPLOYMENT_SHA,
+      });
     }
     const headers = new Headers();
     for (const name of [
@@ -326,11 +357,20 @@ async function handleMcpEgress(
       },
     ));
     audit(response.status >= 500 ? "error" : response.status >= 400 ? "deny" : "allow",
-      request, url, "mcp", started, { status: response.status });
+      request, url, "mcp", started, {
+        status: response.status,
+        user_id: userId,
+        mcp_connection_id: connectionId,
+        deployment_sha: env.DEPLOYMENT_SHA,
+      });
     return response;
   } catch (error) {
     const problem = egressFailure(error);
-    return auditedError(problem.status, problem.code, request, url, "mcp", started);
+    return auditedError(problem.status, problem.code, request, url, "mcp", started, {
+      ...(userId === undefined ? {} : { user_id: userId }),
+      mcp_connection_id: connectionId,
+      deployment_sha: env.DEPLOYMENT_SHA,
+    });
   }
 }
 
@@ -358,15 +398,25 @@ async function handleConnectorEgress(
   if (request.headers.get("authorization") !== PROVIDER_PLACEHOLDER) {
     return auditedError(403, "credential_placeholder_mismatch", request, url, connector.id, started);
   }
+  let userId: string | undefined;
   try {
-    const userId = await resolveSubject(env, subject);
+    userId = await resolveSubject(env, subject);
     const response = await connectorBroker(env, userId).fetch(request);
     audit(response.status >= 500 ? "error" : response.status >= 400 ? "deny" : "allow",
-      request, url, connector.id, started, { status: response.status });
+      request, url, connector.id, started, {
+        status: response.status,
+        user_id: userId,
+        connector: connector.id,
+        deployment_sha: env.DEPLOYMENT_SHA,
+      });
     return sanitizeUpstreamResponse(response);
   } catch (error) {
     const problem = egressFailure(error);
-    return auditedError(problem.status, problem.code, request, url, connector.id, started);
+    return auditedError(problem.status, problem.code, request, url, connector.id, started, {
+      ...(userId === undefined ? {} : { user_id: userId }),
+      connector: connector.id,
+      deployment_sha: env.DEPLOYMENT_SHA,
+    });
   }
 }
 
@@ -925,6 +975,39 @@ function auditedError(
   });
   return jsonError(status, code);
 }
+
+function auditControl(
+  request: Request,
+  url: URL,
+  status: number,
+  started: number,
+  deploymentSha: string | undefined,
+): void {
+  const user = url.pathname.match(
+    /^\/users\/([A-Za-z0-9][A-Za-z0-9._:-]{0,127})\/(mcp-connections|connectors|credentials)(?:\/(.*))?$/,
+  );
+  const subject = url.pathname.startsWith("/subjects/");
+  const tail = user?.[3];
+  const connector = user?.[2] === "connectors"
+    ? tail?.match(/^(github|gmail|gdrive|x)/)?.[1]
+    : undefined;
+  const mcpConnectionId = user?.[2] === "mcp-connections"
+    ? tail?.match(/^([A-Za-z0-9_-]{43})/)?.[1]
+    : undefined;
+  console.log({
+    type: "egress.control",
+    action: status >= 500 ? "error" : status >= 400 ? "deny" : "allow",
+    method: request.method,
+    operation: subject ? "subject" : user?.[2] ?? "unknown",
+    status,
+    duration_ms: Date.now() - started,
+    ...(deploymentSha === undefined ? {} : { deployment_sha: deploymentSha }),
+    ...(user === null ? {} : { user_id: user[1] }),
+    ...(connector === undefined ? {} : { connector }),
+    ...(mcpConnectionId === undefined ? {} : { mcp_connection_id: mcpConnectionId }),
+  });
+}
+
 function audit(
   action: "allow" | "deny" | "error",
   request: Request,
@@ -935,7 +1018,7 @@ function audit(
 ): void {
   const connector = rule === "github" || rule === "gmail" || rule === "gdrive"
     || rule === "x" || rule === "mcp";
-  console.log(JSON.stringify({
+  console.log({
     type: "egress.request",
     action,
     rule,
@@ -944,5 +1027,5 @@ function audit(
     path: connector ? "/provider-api" : url.pathname,
     duration_ms: Date.now() - started,
     ...detail,
-  }));
+  });
 }

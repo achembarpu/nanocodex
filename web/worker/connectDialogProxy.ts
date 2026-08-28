@@ -60,8 +60,8 @@ export async function routeConnectDialog(
       type: "connect_dialog.backend_failure",
       path: url.pathname,
       error: error instanceof Error
-        ? { name: error.name, message: error.message }
-        : { name: typeof error, message: String(error) },
+        ? { name: error.name }
+        : { name: typeof error },
     }));
     return json({ error: "connect_dialog_unavailable" }, { status: 503 });
   }

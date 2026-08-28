@@ -252,12 +252,21 @@ type WorkerContext = Readonly<{
   waitUntil(promise: Promise<unknown>): void;
 }>;
 
+type ConnectLogContext = Readonly<{
+  deployment_sha?: string;
+  user_id?: string;
+  account_id?: `0x${string}`;
+  connector?: ConnectorId;
+  mcp_connection_id?: string;
+}>;
+
 type Env = Readonly<{
   ACCOUNTS: Fetcher;
   CONNECT_STATE: Kv.durableObject.Namespace;
   EGRESS: Fetcher;
   NANOCODEX: Fetcher;
   NANOCODEX_LOCAL_OAUTH_RELAY_HMAC_KEY?: string;
+  DEPLOYMENT_SHA?: string;
 }>;
 
 type GrantRecord = Readonly<{
@@ -330,6 +339,9 @@ type ToolHostTicket = Readonly<{
 export default {
   async fetch(request: Request, env: Env, context: WorkerContext): Promise<Response> {
     if (request.method === "OPTIONS") return cors(new Response(null, { status: 204 }), request);
+    let logContext: ConnectLogContext = {
+      ...(env.DEPLOYMENT_SHA === undefined ? {} : { deployment_sha: env.DEPLOYMENT_SHA }),
+    };
     try {
       const url = new URL(request.url);
       const store = Kv.durableObject(env.CONNECT_STATE);
@@ -380,7 +392,11 @@ export default {
           return error(request, 413, "diagnostic_too_large", "Client diagnostics are limited to 256 bytes.");
         }
         const diagnostic = parseClientDiagnostic(encoded);
-        console.log("connect-client-diagnostic", diagnostic);
+        console.log({
+          type: "connect.client.diagnostic",
+          outcome: "success",
+          status: diagnostic.stage,
+        });
         return cors(new Response(null, { status: 204 }), request);
       }
       const modelSocket = url.pathname.match(/^\/v1\/grants\/(0x[0-9a-fA-F]{64})\/model$/);
@@ -556,6 +572,7 @@ export default {
 
       if (request.method === "GET" && url.pathname === "/v1/connectors") {
         const identity = await brokerIdentity(env, accountAddress);
+        logContext = { ...logContext, user_id: identity.userId, account_id: accountAddress };
         return cors(Response.json({
           ...(await connectorStatuses(env, identity.userId)),
           profile: { linked: identity.linked },
@@ -564,6 +581,7 @@ export default {
 
       if (request.method === "GET" && url.pathname === "/v1/mcp-connections") {
         const identity = await brokerIdentity(env, accountAddress);
+        logContext = { ...logContext, user_id: identity.userId, account_id: accountAddress };
         return cors(Response.json({ mcp_connections: await mcpConnectionStatuses(env, identity.userId) }), request);
       }
 
@@ -571,18 +589,37 @@ export default {
       if (mcpConnectionRoute) {
         const identity = await brokerIdentity(env, accountAddress);
         const connectionId = mcpConnectionRoute[1]!;
+        logContext = {
+          ...logContext,
+          user_id: identity.userId,
+          account_id: accountAddress,
+          mcp_connection_id: connectionId,
+        };
         if (request.method === "POST") {
-          return cors(await startMcpConnection(
+          const response = await startMcpConnection(
             env,
             store,
             request,
             accountAddress,
             identity.userId,
             connectionId,
-          ), request);
+          );
+          console.info({
+            type: "connect.mcp.start",
+            outcome: "success",
+            ...logContext,
+            status: "accepted",
+          });
+          return cors(response, request);
         }
         if (request.method === "DELETE") {
           await disconnectMcpConnection(env, identity.userId, connectionId);
+          console.info({
+            type: "connect.mcp.disconnect",
+            outcome: "success",
+            ...logContext,
+            status: "disconnected",
+          });
           return cors(new Response(null, { status: 204 }), request);
         }
         return error(request, 405, "method_not_allowed", "Unsupported MCP connection operation.");
@@ -592,11 +629,30 @@ export default {
       if (connectorRoute) {
         const connector = connectorRoute[1] as ConnectorId;
         const identity = await brokerIdentity(env, accountAddress);
+        logContext = {
+          ...logContext,
+          user_id: identity.userId,
+          account_id: accountAddress,
+          connector,
+        };
         if (request.method === "POST") {
-          return cors(await startConnector(env, store, request, accountAddress, identity.userId, connector), request);
+          const response = await startConnector(env, store, request, accountAddress, identity.userId, connector);
+          console.info({
+            type: "connect.connector.start",
+            outcome: "success",
+            ...logContext,
+            status: "accepted",
+          });
+          return cors(response, request);
         }
         if (request.method === "DELETE") {
           await disconnectConnector(env, identity.userId, connector);
+          console.info({
+            type: "connect.connector.disconnect",
+            outcome: "success",
+            ...logContext,
+            status: "disconnected",
+          });
           return cors(new Response(null, { status: 204 }), request);
         }
         if (request.method === "GET" && connector === "chatgpt") {
@@ -607,12 +663,20 @@ export default {
 
       return error(request, 404, "not_found", "Route not found.");
     } catch (cause) {
-      if (!(cause instanceof ApiFailure)) {
-        console.error("Unexpected Connect API failure", cause);
-      }
       const failure = cause instanceof ApiFailure
         ? cause
         : new ApiFailure(500, "internal_error", "Unexpected Connect API failure.");
+      const event = {
+        type: "connect.api.failure",
+        outcome: "failure",
+        ...logContext,
+        status: failure.code,
+      };
+      if (cause instanceof ApiFailure) {
+        if (logContext.user_id && logContext.account_id) console.warn(event);
+      } else {
+        console.error(event);
+      }
       return error(request, failure.status, failure.code, failure.message);
     }
   },
@@ -708,6 +772,10 @@ class ApiFailure extends Error {
   ) {
     super(message);
   }
+}
+
+function failureStatus(cause: unknown): string {
+  return cause instanceof ApiFailure ? cause.code : "internal_error";
 }
 
 async function createMcpIntent(request: Request, store: Kv.Kv): Promise<Response> {
@@ -1242,14 +1310,48 @@ async function createConnection(
       throw new ApiFailure(500, "grant_token_unavailable", "The grant session could not be created.");
     }
     mark("grant");
-    context.waitUntil(appendGrantIndex(store, grant.accountAddress, grant.id).catch((cause) => {
-      console.error("Nanocodex Connect grant index update failed", cause);
+    console.info({
+      type: "connect.grant.create",
+      outcome: "success",
+      user_id: grant.brokerUserId,
+      account_id: grant.accountAddress,
+      grant_id: grant.id,
+      agent_id: grant.agentId,
+      app_id: grant.appId,
+      ...(env.DEPLOYMENT_SHA === undefined ? {} : { deployment_sha: env.DEPLOYMENT_SHA }),
+      status: grant.status,
+    });
+    context.waitUntil(appendGrantIndex(store, grant.accountAddress, grant.id).catch(() => {
+      console.error({
+        type: "connect.grant.index",
+        outcome: "failure",
+        user_id: grant.brokerUserId,
+        account_id: grant.accountAddress,
+        grant_id: grant.id,
+        agent_id: grant.agentId,
+        app_id: grant.appId,
+        ...(env.DEPLOYMENT_SHA === undefined ? {} : { deployment_sha: env.DEPLOYMENT_SHA }),
+        status: "index_update_failed",
+      });
     }));
     return Response.json(wireResult, {
       status: 201,
       headers: { "server-timing": serverTiming(startedAt, timings) },
     });
   } catch (cause) {
+    const event = {
+      type: "connect.grant.create",
+      outcome: "failure",
+      user_id: grant.brokerUserId,
+      account_id: grant.accountAddress,
+      grant_id: grant.id,
+      agent_id: grant.agentId,
+      app_id: grant.appId,
+      ...(env.DEPLOYMENT_SHA === undefined ? {} : { deployment_sha: env.DEPLOYMENT_SHA }),
+      status: failureStatus(cause),
+    };
+    if (cause instanceof ApiFailure) console.warn(event);
+    else console.error(event);
     const cleanup: Promise<unknown>[] = [
       store.delete(`grant:${grant.id}`),
       store.delete(`grant-token:${grantToken}`),
@@ -3428,6 +3530,7 @@ async function completeConnectorCallback(
   for (const name of ["code", "state", "error", "error_description"] as const) {
     const value = url.searchParams.get(name);
     if (value !== null && value.length > 4_096) {
+      logConnectorCallback(correlation, provider, "failure", "invalid_callback", env.DEPLOYMENT_SHA);
       return correlation.returnTo
         ? connectorCompletionRedirect(provider, correlation.returnTo, "failed", "invalid_callback")
         : connectorCompletionPage(provider, 400, correlation.dialogOrigin, "invalid_callback");
@@ -3447,6 +3550,7 @@ async function completeConnectorCallback(
       },
     );
   } catch {
+    logConnectorCallback(correlation, provider, "failure", "connector_broker_unavailable", env.DEPLOYMENT_SHA);
     return correlation.returnTo
       ? connectorCompletionRedirect(provider, correlation.returnTo, "failed", "connector_broker_unavailable")
       : connectorCompletionPage(provider, 502, correlation.dialogOrigin, "connector_broker_unavailable");
@@ -3455,6 +3559,7 @@ async function completeConnectorCallback(
   try {
     text = await boundedResponseText(response, MAX_BROKER_BODY_BYTES);
   } catch {
+    logConnectorCallback(correlation, provider, "failure", "connector_broker_invalid", env.DEPLOYMENT_SHA);
     return correlation.returnTo
       ? connectorCompletionRedirect(provider, correlation.returnTo, "failed", "connector_broker_invalid")
       : connectorCompletionPage(provider, 502, correlation.dialogOrigin, "connector_broker_invalid");
@@ -3470,6 +3575,13 @@ async function completeConnectorCallback(
       result = "failed";
     }
   }
+  logConnectorCallback(
+    correlation,
+    provider,
+    result === "connected" ? "success" : result === "cancelled" ? "cancelled" : "failure",
+    result === "failed" ? "connector_broker_failed" : result,
+    env.DEPLOYMENT_SHA,
+  );
   if (correlation.returnTo) {
     return connectorCompletionRedirect(
       provider,
@@ -3505,6 +3617,7 @@ async function completeMcpConnectionCallback(
   for (const name of ["code", "state", "error", "error_description"] as const) {
     const value = url.searchParams.get(name);
     if (value !== null && value.length > 4_096) {
+      logMcpCallback(correlation, "failure", "invalid_callback", env.DEPLOYMENT_SHA);
       return mcpCompletionResult(correlation, "failed", "invalid_callback");
     }
     callback[name] = value;
@@ -3537,11 +3650,56 @@ async function completeMcpConnectionCallback(
   } catch {
     result = "failed";
   }
+  logMcpCallback(
+    correlation,
+    result === "connected" ? "success" : result === "cancelled" ? "cancelled" : "failure",
+    result === "failed" ? "mcp_broker_failed" : result,
+    env.DEPLOYMENT_SHA,
+  );
   return mcpCompletionResult(
     correlation,
     result,
     result === "failed" ? "mcp_broker_failed" : undefined,
   );
+}
+
+function logConnectorCallback(
+  correlation: ConnectorState,
+  connector: OAuthConnectorId,
+  outcome: "success" | "cancelled" | "failure",
+  status: string,
+  deploymentSha: string | undefined,
+): void {
+  const event = {
+    type: "connect.connector.callback",
+    outcome,
+    user_id: correlation.brokerUserId,
+    account_id: correlation.accountAddress,
+    connector,
+    ...(deploymentSha === undefined ? {} : { deployment_sha: deploymentSha }),
+    status,
+  };
+  if (outcome === "success") console.info(event);
+  else console.warn(event);
+}
+
+function logMcpCallback(
+  correlation: McpConnectionState,
+  outcome: "success" | "cancelled" | "failure",
+  status: string,
+  deploymentSha: string | undefined,
+): void {
+  const event = {
+    type: "connect.mcp.callback",
+    outcome,
+    user_id: correlation.brokerUserId,
+    account_id: correlation.accountAddress,
+    mcp_connection_id: correlation.connectionId,
+    ...(deploymentSha === undefined ? {} : { deployment_sha: deploymentSha }),
+    status,
+  };
+  if (outcome === "success") console.info(event);
+  else console.warn(event);
 }
 
 function mcpCompletionResult(

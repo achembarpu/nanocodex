@@ -24,7 +24,7 @@ export async function routeLocalConnectorCallbackReturn(
     console.error(JSON.stringify({
       type: "connector_callback.backend_failure",
       flow: returned.flow,
-      error: error instanceof Error ? error.message : String(error),
+      error: { name: error instanceof Error ? error.name : typeof error },
     }));
     return unavailable(returned.flow);
   }

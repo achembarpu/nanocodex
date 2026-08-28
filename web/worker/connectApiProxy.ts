@@ -37,8 +37,8 @@ export async function routeConnectApi(
       type: "connect_api.backend_failure",
       path: url.pathname,
       error: error instanceof Error
-        ? { name: error.name, message: error.message }
-        : { name: typeof error, message: String(error) },
+        ? { name: error.name }
+        : { name: typeof error },
     }));
     return Response.json({ error: "connect_api_unavailable" }, {
       status: 503,
