@@ -1,5 +1,5 @@
-const productionApiOrigin = "https://nanocodex.gakonst.workers.dev";
-const productionSiteOrigin = productionApiOrigin;
+const productionApiOrigin = "https://nanocodex-connect-api.gakonst.workers.dev";
+const productionSiteOrigin = "https://nanocodex.gakonst.workers.dev";
 
 export function deviceVerificationUrl(apiOrigin, userCode) {
   const siteOrigin = apiOrigin === productionApiOrigin

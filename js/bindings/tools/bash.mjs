@@ -284,8 +284,12 @@ function defaultInstructions(descriptor) {
     ? `HTTP is available through the host-owned ${descriptor.network.mode} fetch boundary.`
     : "Network commands are unavailable.";
   return `You have an in-process Bash interpreter and a persistent virtual filesystem rooted at ${descriptor.cwd}.
-Use exec_command for shell work. Available commands: ${descriptor.commands.join(", ")}. Use ${descriptor.cwd}/tmp,
-not /tmp, for temporary files. Commands run without a host process, container, PTY, session, or sandbox
+Use exec_command for shell work. When the user requests an explicit shell operation that maps directly to an
+available command, call exec_command immediately and once with the complete command. Do not inspect the runtime,
+account, or workspace, search for another tool, or split the operation into exploratory calls before trying it.
+For example, clone OWNER/REPO with gh repo clone OWNER/REPO, and clone an explicit URL with git clone URL.
+Only investigate after that direct command fails or when the user explicitly asks for investigation.
+Available commands: ${descriptor.commands.join(", ")}. Use ${descriptor.cwd}/tmp, not /tmp, for temporary files. Commands run without a host process, container, PTY, session, or sandbox
 escalation, and cannot access paths outside ${descriptor.cwd}. The shell is one-shot per call, but files persist
 across calls and agent restarts. ${network} Model subscription credentials are never exposed to the shell.`;
 }

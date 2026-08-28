@@ -35,6 +35,10 @@ describe("managed Computer runtime", () => {
       output: expect.stringContaining("tool-filegit: not a git repository"),
     });
     expect(runtime.commandNames).toEqual(["gh", "git"]);
+    expect(runtime.instructions).toContain(
+      "call exec_command immediately and once with the complete command",
+    );
+    expect(runtime.instructions).toContain("gh repo clone OWNER/REPO");
 
     runtime.dispose();
     runtime.dispose();

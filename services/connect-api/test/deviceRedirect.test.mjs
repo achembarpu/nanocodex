@@ -6,10 +6,10 @@ import { connectAuthOrigin, deviceVerificationUrl } from "../src/deviceRedirect.
 test("production device verification opens the first-class main-site route", () => {
   assert.equal(
     deviceVerificationUrl(
-      "https://nanocodex.gakonst.workers.dev",
+      "https://nanocodex-connect-api.gakonst.workers.dev",
       "ABCDWXYZ",
     ).href,
-    "https://nanocodex.gakonst.workers.dev/connect?api_origin=https%3A%2F%2Fnanocodex.gakonst.workers.dev&user_code=ABCDWXYZ",
+    "https://nanocodex.gakonst.workers.dev/connect?api_origin=https%3A%2F%2Fnanocodex-connect-api.gakonst.workers.dev&user_code=ABCDWXYZ",
   );
 });
 
@@ -27,8 +27,8 @@ test("local device verification stays on the exact local API origin", () => {
 
 test("Connect authentication binds production and local ceremonies to exact trusted origins", () => {
   assert.equal(
-    connectAuthOrigin("https://nanocodex.gakonst.workers.dev"),
-    "https://nanocodex.gakonst.workers.dev",
+    connectAuthOrigin("https://nanocodex-connect-api.gakonst.workers.dev"),
+    "https://nanocodex-connect-api.gakonst.workers.dev",
   );
   assert.equal(
     connectAuthOrigin("http://review.nanocodex.localhost:20735"),

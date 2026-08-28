@@ -23,6 +23,12 @@ test("Just Bash advertises its cloud workspace execution", async () => {
   assert(!descriptor.commands.includes("curl"));
   assert(!descriptor.commands.includes("wget"));
   assert.match(instructions, /Available commands:/);
+  assert.match(
+    instructions,
+    /call exec_command immediately and once with the complete command/,
+  );
+  assert.match(instructions, /gh repo clone OWNER\/REPO/);
+  assert.match(instructions, /git clone URL/);
   assert.doesNotMatch(instructions, /\bwget\b/);
 });
 
