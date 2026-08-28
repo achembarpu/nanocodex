@@ -3,9 +3,108 @@ import test from "node:test";
 import { gzipSync } from "node:zlib";
 
 import { handleGitRequest, readGitProtocolRequest } from "./gitRoutes.ts";
+import { encodePacketLine, parsePacketLines } from "./gitProtocol.ts";
 
 const head = "a".repeat(40);
 const packHash = "b".repeat(40);
+
+function repositoryPublication(generation: string) {
+  const prefix = `generations/${generation}`;
+  return {
+    version: 1 as const,
+    head: generation,
+    branch: "master",
+    refs: [{ name: "refs/heads/master", oid: generation }],
+    snapshotKey: `${prefix}/repository.json`,
+    commitsKey: `${prefix}/commits.json`,
+    commitPatchParts: [{ key: `${prefix}/commit-patches/0000.diff`, size: 1 }],
+    commitPatchSize: 1,
+    inventoryKey: `${prefix}/inventory.json`,
+    packParts: [{ key: `${prefix}/packs/${packHash}/0000.pack`, size: 1 }],
+    packSize: 1,
+    objectManifestKey: `${prefix}/objects.json`,
+    packHash,
+    publishedAt: "2026-08-28T00:00:00.000Z",
+  };
+}
+
+function concatenateTestPackets(parts: Uint8Array[]): Uint8Array {
+  const size = parts.reduce((total, part) => total + part.byteLength, 0);
+  const output = new Uint8Array(size);
+  let offset = 0;
+  for (const part of parts) {
+    output.set(part, offset);
+    offset += part.byteLength;
+  }
+  return output;
+}
+
+test("generation-pinned smart HTTP never reads mutable publication state", async () => {
+  const publication = repositoryPublication(head);
+  const requestedKeys: string[] = [];
+  let publicationReads = 0;
+  const bucket = {
+    get: async (key: string) => {
+      requestedKeys.push(key);
+      if (key === `generations/${head}/repository.json`) {
+        return { json: async () => publication };
+      }
+      return null;
+    },
+  } as unknown as R2Bucket;
+  const namespace = {
+    idFromName: () => ({}) as DurableObjectId,
+    get: () => ({
+      fetch: async () => {
+        publicationReads += 1;
+        return new Response(null, { status: 500 });
+      },
+    }),
+  } as unknown as DurableObjectNamespace;
+  const body = concatenateTestPackets([
+    encodePacketLine("command=ls-refs\n"),
+    new TextEncoder().encode("0001"),
+    encodePacketLine("ref-prefix refs/heads/\n"),
+    new TextEncoder().encode("0000"),
+  ]);
+  const request = new Request(
+    `https://nanocodex.example/git/${head}/git-upload-pack`,
+    { method: "POST", body: body.buffer as ArrayBuffer },
+  );
+
+  const response = await handleGitRequest(
+    request,
+    { GIT_OBJECTS: bucket, GIT_REPOSITORY: namespace },
+    new URL(request.url),
+  );
+
+  assert.equal(response?.status, 200);
+  assert.equal(publicationReads, 0);
+  assert.deepEqual(requestedKeys, [`generations/${head}/repository.json`]);
+  const packets = parsePacketLines(new Uint8Array(await response!.arrayBuffer()));
+  const text = packets
+    .filter((packet) => packet.kind === "data")
+    .map((packet) => new TextDecoder().decode(packet.data))
+    .join("");
+  assert.match(text, new RegExp(`${head} refs/heads/master`));
+});
+
+test("generation-pinned smart HTTP rejects an absent immutable publication", async () => {
+  const request = new Request(
+    `https://nanocodex.example/git/${"c".repeat(40)}/git-upload-pack`,
+    {
+      method: "POST",
+      body: encodePacketLine("command=ls-refs\n").buffer as ArrayBuffer,
+    },
+  );
+  const response = await handleGitRequest(
+    request,
+    { GIT_OBJECTS: { get: async () => null } as unknown as R2Bucket },
+    new URL(request.url),
+  );
+  assert.equal(response?.status, 404);
+  assert.deepEqual(await response?.json(), { error: "repository_generation_not_found" });
+});
 
 for (const [route, name] of [
   ["snapshot", "repository.json"],

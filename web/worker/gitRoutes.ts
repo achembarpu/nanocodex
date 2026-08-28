@@ -273,7 +273,8 @@ export async function handleGitRequest(
     });
   }
 
-  if (url.pathname === "/git/info/refs" && request.method === "GET") {
+  const smartRoute = gitSmartRoute(url.pathname);
+  if (smartRoute?.operation === "info-refs" && request.method === "GET") {
     if (url.searchParams.get("service") !== "git-upload-pack") {
       return new Response("unsupported service\n", { status: 400 });
     }
@@ -285,8 +286,10 @@ export async function handleGitRequest(
     });
   }
 
-  if (url.pathname === "/git/git-upload-pack" && request.method === "POST") {
-    const publication = await getPublication(env);
+  if (smartRoute?.operation === "upload-pack" && request.method === "POST") {
+    const publication = smartRoute.generation == null
+      ? await getPublication(env)
+      : await getGenerationPublication(env, smartRoute.generation);
     if (publication instanceof Response) return publication;
     let command: ReturnType<typeof parseV2Command>;
     try {
@@ -354,6 +357,29 @@ export async function handleGitRequest(
   }
 
   return undefined;
+}
+
+type GitSmartRoute = Readonly<{
+  generation?: string;
+  operation: "info-refs" | "upload-pack";
+}>;
+
+/**
+ * `/git/<head>` pins a complete smart-HTTP negotiation to one immutable
+ * publication. Repository materializers resolve the current head once, then
+ * clone this route so a concurrent publish cannot mix generations.
+ */
+function gitSmartRoute(pathname: string): GitSmartRoute | undefined {
+  if (pathname === "/git/info/refs") return { operation: "info-refs" };
+  if (pathname === "/git/git-upload-pack") return { operation: "upload-pack" };
+  const match = pathname.match(
+    /^\/git\/([a-f0-9]{40})\/(info\/refs|git-upload-pack)$/,
+  );
+  if (!match) return undefined;
+  return {
+    generation: match[1],
+    operation: match[2] === "info/refs" ? "info-refs" : "upload-pack",
+  };
 }
 
 function servePinnedGeneration(
@@ -641,6 +667,39 @@ async function getPublication(env: GitStorageEnv): Promise<RepositoryPublication
   return isRepositoryPublication(publication)
     ? publication
     : storageFailure("repository publication is invalid");
+}
+
+const generationPublicationMemo = new WeakMap<object, Map<string, RepositoryPublication>>();
+
+async function getGenerationPublication(
+  env: GitStorageEnv,
+  generation: string,
+): Promise<RepositoryPublication | Response> {
+  if (!env.GIT_OBJECTS) return storageFailure("repository storage is not configured");
+  const bucket = env.GIT_OBJECTS;
+  let publications = generationPublicationMemo.get(bucket as object);
+  const cached = publications?.get(generation);
+  if (cached != null) return cached;
+  const stored = await bucket.get(`generations/${generation}/repository.json`);
+  if (stored == null) {
+    return Response.json({ error: "repository_generation_not_found" }, { status: 404 });
+  }
+  let value: unknown;
+  try {
+    value = await stored.json();
+  } catch {
+    return storageFailure("repository generation is invalid");
+  }
+  if (!isRepositoryPublication(value) || value.head !== generation) {
+    return storageFailure("repository generation is invalid");
+  }
+  if (publications == null) {
+    publications = new Map();
+    generationPublicationMemo.set(bucket as object, publications);
+  }
+  publications.set(generation, value);
+  while (publications.size > 2) publications.delete(publications.keys().next().value!);
+  return value;
 }
 
 const objectManifestMemo = new WeakMap<object, Map<string, GitObjectManifest>>();

@@ -67,6 +67,12 @@ test("stock Git clones, incrementally fetches, and deepens R2 publications", asy
     const cloneBytes = transferBytes.reduce((total, size) => total + size, 0);
     assert.ok(cloneBytes > 16 * 1024 * 1024, `expected a multipart full clone, got ${cloneBytes}`);
 
+    const pinned = resolve(directory, "pinned");
+    await git([
+      "-c", "protocol.version=2", "clone", "-q", `${remote}/${firstHead}`, pinned,
+    ], directory);
+    assert.equal(await git(["rev-parse", "HEAD"], pinned), firstHead);
+
     await writeFile(resolve(source, "src", "main.rs"), "fn main() { println!(\"small\"); }\n");
     await git(["add", "src/main.rs"], source);
     await git(["commit", "-qm", "small fourth commit"], source);
@@ -87,6 +93,12 @@ test("stock Git clones, incrementally fetches, and deepens R2 publications", asy
     await git(["-c", "fetch.unpackLimit=1", "fetch", "-q", "origin"], full);
     await git(["fsck", "--strict"], full);
     assert.equal(await git(["rev-parse", "origin/main"], full), secondHead);
+    await git(["fetch", "-q", "origin"], pinned);
+    assert.equal(
+      await git(["rev-parse", "origin/main"], pinned),
+      firstHead,
+      "a generation-pinned remote must not advance with mutable publication state",
+    );
     const incrementalBytes = transferBytes.reduce((total, size) => total + size, 0);
     assert.ok(
       incrementalBytes < cloneBytes / 10,
@@ -179,6 +191,10 @@ class MemoryR2Bucket {
 }
 
 async function storeArtifacts(bucket, current, artifacts) {
+  await bucket.putBytes(
+    current.snapshotKey,
+    new TextEncoder().encode(JSON.stringify(current)),
+  );
   const pack = await readFile(artifacts.packPath);
   for (const part of artifacts.packParts) {
     await bucket.putBytes(
