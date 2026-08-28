@@ -19,6 +19,7 @@ import {
   preflightEnvironment,
   prepareProductionResources,
   productionMutationPlan,
+  productionProbeMaxBytes,
   productionResourceTopology,
   runProductionPhases,
 } from "./deploy-cloudflare.mjs";
@@ -486,6 +487,11 @@ test("repository health requires the exact production generation", () => {
     { repository: { head: "b".repeat(40) } },
     revision,
   ), /deployed SHA/);
+});
+
+test("repository health permits the bounded full-tree snapshot", () => {
+  assert.equal(productionProbeMaxBytes("root-health"), 64 * 1024);
+  assert.equal(productionProbeMaxBytes("repository"), 8 * 1024 * 1024);
 });
 
 function resourceTopology() {

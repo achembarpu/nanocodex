@@ -734,6 +734,10 @@ export function assertLiveResponse(probe, response, body, revision) {
   throw new Error(`unknown production health probe ${probe}`);
 }
 
+export function productionProbeMaxBytes(probe) {
+  return probe === "repository" ? 8 * 1024 * 1024 : 64 * 1024;
+}
+
 async function main(environment = process.env) {
   requireLocalTool("node", ["--version"]);
   requireLocalTool("npm", ["--version"]);
@@ -1041,8 +1045,9 @@ async function waitForProductionHealth(revision, fetchImpl = globalThis.fetch) {
           signal: AbortSignal.any([abortController.signal, AbortSignal.timeout(5_000)]),
         });
         const encoded = await response.text();
-        if (Buffer.byteLength(encoded) > 64 * 1024) {
-          throw new Error(`${probe} returned more than 64 KiB`);
+        const maxBytes = productionProbeMaxBytes(probe);
+        if (Buffer.byteLength(encoded) > maxBytes) {
+          throw new Error(`${probe} returned more than ${maxBytes} bytes`);
         }
         let body = encoded;
         if (encoding === "json") {
