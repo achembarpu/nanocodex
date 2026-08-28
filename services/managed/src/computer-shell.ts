@@ -310,7 +310,7 @@ async function cloneRepository(
   cwd: unknown,
 ): Promise<string> {
   const depthValue = option(args, "--depth", "-") ?? joinedOption(args, "--depth");
-  const depth = depthValue === undefined ? undefined : positiveInteger(depthValue, "--depth");
+  const depth = depthValue === undefined ? 1 : positiveInteger(depthValue, "--depth");
   const branch = option(args, "--branch", "-b") ?? joinedOption(args, "--branch");
   const positionals = gitPositionals(args);
   const remote = positionals[0];
@@ -320,11 +320,16 @@ async function cloneRepository(
     throw new Error("--branch must name one branch or tag");
   }
   const repository = match[1]!;
-  const destination = positionals[1] ?? repository.slice(repository.indexOf("/") + 1);
+  const requestedDestination = positionals[1] ?? repository.slice(repository.indexOf("/") + 1);
+  const absoluteWorkspaceDestination = requestedDestination.startsWith(`${workspace.root}/`);
+  const destination = absoluteWorkspaceDestination
+    ? requestedDestination.slice(workspace.root.length + 1)
+    : requestedDestination;
   if (!/^[A-Za-z0-9_.-]+$/.test(destination) || destination === "." || destination === "..") {
     throw new Error("clone destination must be one workspace directory name");
   }
-  const root = typeof cwd === "string" && cwd.startsWith(`${workspace.root}/`)
+  const root = !absoluteWorkspaceDestination
+    && typeof cwd === "string" && cwd.startsWith(`${workspace.root}/`)
     ? cwd
     : workspace.root;
   const dir = `${root}/${destination}`;
@@ -335,9 +340,10 @@ async function cloneRepository(
       http: managedGitHttp(fetch),
       dir,
       url: `https://github.com/${repository}.git`,
-      singleBranch: branch !== undefined,
+      depth,
+      noTags: true,
+      singleBranch: true,
       ...(branch === undefined ? {} : { ref: branch }),
-      ...(depth === undefined ? {} : { depth }),
     });
   } catch (error) {
     if (await workspaceEntry(workspace, dir)) {

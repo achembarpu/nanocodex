@@ -70,7 +70,42 @@ describe("managed Computer runtime", () => {
     expect(clone).toHaveBeenCalledWith(expect.objectContaining({
       depth: 1,
       dir: "/workspace/centaur",
+      noTags: true,
+      singleBranch: true,
       url: "https://github.com/paradigmxyz/centaur.git",
+    }));
+
+    runtime.dispose();
+  });
+
+  it("accepts an exact absolute workspace child and materializes a bounded default branch snapshot", async () => {
+    const clone = vi.spyOn(git, "clone").mockImplementation(async (options) => {
+      const fs = options.fs as PromiseFsClient;
+      await fs.promises.mkdir(`${options.dir}/.git`, { recursive: true });
+      await fs.promises.writeFile(`${options.dir}/README.md`, "centaur\n");
+    });
+    const runtime = await createManagedComputerRuntime({
+      computer: memoryComputer(),
+      egress: { fetch: vi.fn() } as unknown as Fetcher,
+    });
+
+    expect(await runtime.tool.handler({
+      cmd: "gh repo clone paradigmxyz/centaur /workspace/centaur",
+      workdir: "/workspace",
+    }, {
+      callId: "absolute-clone-centaur",
+      parentCallId: "",
+      sessionId: "test",
+      signal: new AbortController().signal,
+    })).toMatchObject({
+      exit_code: 0,
+      output: "Cloning into 'centaur'...\n",
+    });
+    expect(clone).toHaveBeenCalledWith(expect.objectContaining({
+      depth: 1,
+      dir: "/workspace/centaur",
+      noTags: true,
+      singleBranch: true,
     }));
 
     runtime.dispose();
