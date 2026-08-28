@@ -1041,8 +1041,9 @@ async function deployConfiguredWorker({
 }
 
 async function waitForProductionHealth(revision, fetchImpl = globalThis.fetch) {
+  const attempts = 30;
   let failure;
-  for (let attempt = 0; attempt < 8; attempt += 1) {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
     try {
       const probes = [
         ["root-health", new URL("/api/health", PRODUCTION_ORIGINS.root), "json"],
@@ -1103,7 +1104,7 @@ async function waitForProductionHealth(revision, fetchImpl = globalThis.fetch) {
       return;
     } catch (error) {
       failure = error;
-      if (attempt < 7) await new Promise((resolvePromise) => setTimeout(resolvePromise, 2_000));
+      if (attempt + 1 < attempts) await new Promise((resolvePromise) => setTimeout(resolvePromise, 2_000));
     }
   }
   throw new Error(`production health did not converge for ${revision}`, { cause: failure });
