@@ -324,6 +324,9 @@ function gitCommand(fs, thread, shellFs, defineCommand, createTwoFilesPatch) {
 export function createGhCompatibilityCommand(fs, thread, defineCommand, options = {}) {
     return defineCommand("gh", async (args) => {
         try {
+            if (!args.length || args[0] === "help" || args[0] === "--help") {
+                return ok(ghHelp());
+            }
             if (args[0] === "repo" && args[1] === "view") {
                 const repository = repositoryArgument(args.slice(2));
                 if (repository) {
@@ -365,26 +368,28 @@ export function createGhCompatibilityCommand(fs, thread, defineCommand, options 
                     textField(pull, "head", "ref"),
                 ].join("\t")).join("\n") + (pulls.length ? "\n" : ""));
             }
-            return ok([
-                "gh (Nanocodex browser compatibility command)",
-                "",
-                "Supported commands:",
-                "  gh auth status",
-                "  gh api [--method METHOD] [-f key=value] ENDPOINT",
-                "  gh repo view [OWNER/REPO]",
-                "  gh pr list --repo OWNER/REPO [--limit N]",
-                "",
-                "Connected GitHub calls use the permissions granted in Profile.",
-                "",
-            ].join("\n"));
+            return fail(`gh: unsupported browser operation '${args.join(" ")}'\n${ghHelp()}`, 1);
         }
         catch (error) {
             return fail(`gh: ${errorMessage(error)}\n`, 1);
         }
     });
 }
+function ghHelp() {
+    return [
+        "gh (Nanocodex browser compatibility command)",
+        "",
+        "Supported commands:",
+        "  gh auth status",
+        "  gh api [--method METHOD] [-f key=value] ENDPOINT",
+        "  gh repo view [OWNER/REPO]",
+        "  gh pr list --repo OWNER/REPO [--limit N]",
+        "",
+        "Connected GitHub calls use the permissions granted in Profile.",
+        "",
+    ].join("\n");
+}
 async function githubApi(options, args) {
-    const method = (optionValue(args, "--method", "-X") ?? "GET").toUpperCase();
     const endpoint = args.find((arg, index) => !arg.startsWith("-")
         && args[index - 1] !== "--method" && args[index - 1] !== "-X"
         && !["-f", "-F", "--field", "--raw-field"].includes(args[index - 1]));
@@ -400,9 +405,17 @@ async function githubApi(options, args) {
     if (url.origin !== "https://api.github.com")
         throw new Error("browser gh api permits only api.github.com endpoints");
     const fields = githubApiFields(args);
+    const hasFields = Object.keys(fields).length > 0;
+    const method = (optionValue(args, "--method", "-X") ?? (hasFields ? "POST" : "GET")).toUpperCase();
+    if (method === "GET" || method === "HEAD") {
+        for (const [key, value] of Object.entries(fields))
+            url.searchParams.set(key, value);
+    }
     return githubConnectorJson(options, `${url.pathname}${url.search}`, {
         method,
-        ...(Object.keys(fields).length ? { body: JSON.stringify(fields) } : {}),
+        ...(hasFields && method !== "GET" && method !== "HEAD"
+            ? { body: JSON.stringify(fields) }
+            : {}),
     });
 }
 async function githubConnectorJson(options, path, request = {}) {

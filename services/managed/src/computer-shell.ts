@@ -69,15 +69,25 @@ export function createManagedGhCommand(fetch: ManagedShellFetch) {
           return ok(`Logged in to github.com as ${text(user, "login")} through the connected account.\n`);
         }
         if (args[0] === "api") {
-          const method = (option(args, "--method", "-X") ?? "GET").toUpperCase();
-          const endpoint = args.find((value, index) => !value.startsWith("-")
-            && index > 0 && args[index - 1] !== "--method" && args[index - 1] !== "-X");
-          if (!endpoint) throw new Error("gh api requires an endpoint");
-          const path = endpoint.startsWith("/") ? endpoint : `/${endpoint}`;
           const fields = apiFields(args);
+          const explicitMethod = option(args, "--method", "-X");
+          const method = (explicitMethod ?? (Object.keys(fields).length ? "POST" : "GET")).toUpperCase();
+          const endpoint = positional(args.slice(1), [
+            "--method", "-X", "-f", "-F", "--field", "--raw-field",
+          ]);
+          if (!endpoint) throw new Error("gh api requires an endpoint");
+          let path = endpoint.startsWith("/") ? endpoint : `/${endpoint}`;
+          const hasFields = Object.keys(fields).length > 0;
+          if (hasFields && (method === "GET" || method === "HEAD")) {
+            const target = new URL(path, "https://api.github.com");
+            for (const [name, value] of Object.entries(fields)) target.searchParams.set(name, value);
+            path = `${target.pathname}${target.search}`;
+          }
           return ok(`${JSON.stringify(await github(fetch, path, {
             method,
-            ...(Object.keys(fields).length ? { body: JSON.stringify(fields) } : {}),
+            ...(hasFields && method !== "GET" && method !== "HEAD"
+              ? { body: JSON.stringify(fields) }
+              : {}),
           }), null, 2)}\n`);
         }
         if (args[0] === "repo" && args[1] === "view") {
@@ -174,9 +184,9 @@ export function createManagedGitCommand(
           const matrix = await git.statusMatrix({ fs, dir });
           const changed = matrix.filter(([, head, workdir, stage]) => head !== workdir || head !== stage);
           if (args.includes("--short") || args.includes("-s") || args.includes("--porcelain")) {
-            return ok(changed.map(([path, head, workdir, stage]) => (
-              `${head === 0 ? "?" : stage === head ? " " : "M"}${workdir === stage ? " " : "M"} ${path}`
-            )).join("\n") + (changed.length ? "\n" : ""));
+            const lines = changed.flatMap(([path, head, workdir, stage]) =>
+              shortStatusCodes(head, workdir, stage).map((code) => `${code} ${path}`));
+            return ok(lines.join("\n") + (lines.length ? "\n" : ""));
           }
           const branch = await git.currentBranch({ fs, dir, fullname: false });
           return ok(`On branch ${branch ?? "HEAD"}\n${changed.length ? `${changed.length} changed path(s)\n` : "nothing to commit, working tree clean\n"}`);
@@ -206,7 +216,7 @@ export function createManagedGitCommand(
         if (command === "remote" && (args.length === 1 || args.includes("-v"))) {
           const remotes = await git.listRemotes({ fs, dir });
           return ok(remotes.flatMap(({ remote, url }) => args.includes("-v")
-            ? [`${remote}\t${url} (fetch)`, `${remote}\t${url} (push)`]
+            ? [`${remote}\t${url} (fetch)`]
             : [remote]).join("\n") + (remotes.length ? "\n" : ""));
         }
         if (command === "ls-files") {
@@ -223,6 +233,17 @@ export function createManagedGitCommand(
       }
     },
   };
+}
+
+function shortStatusCodes(head: number, workdir: number, stage: number): string[] {
+  if (head === 0 && stage === 0) return workdir === 0 ? [] : ["??"];
+  if (head === 1 && stage === 0) return workdir === 0
+    ? ["D "]
+    : ["D ", "??"];
+
+  const index = head === 0 ? "A" : stage === head ? " " : "M";
+  const workingTree = workdir === stage ? " " : workdir === 0 ? "D" : "M";
+  return index === " " && workingTree === " " ? [] : [`${index}${workingTree}`];
 }
 
 async function gitDirectory(workspace: Workspace, cwd: unknown): Promise<string> {

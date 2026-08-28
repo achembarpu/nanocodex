@@ -1,4 +1,5 @@
-import { describe, expect, it, vi } from "vitest";
+import git from "isomorphic-git";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { justBash } from "nanocodex/tools/bash";
 import type { Workspace } from "nanocodex/workspace";
 
@@ -10,6 +11,8 @@ import {
 } from "../src/computer-shell";
 
 const SUBJECT = "s".repeat(43);
+
+afterEach(() => vi.restoreAllMocks());
 
 describe("Nanocodex managed Just Bash commands", () => {
   it("routes Drive curl through the managed connector boundary", async () => {
@@ -128,14 +131,27 @@ describe("Nanocodex managed Just Bash commands", () => {
       stdout: expect.stringContaining("gakonst/nanocodex\tsmall agents\tprivate"),
     });
     expect(await gh.execute([
-      "api", "--method", "POST", "repos/gakonst/nanocodex/issues", "-f", "title=hello",
+      "api",
+      "-f", "title=hello",
+      "-F", "count=2",
+      "--field", "kind=bug",
+      "--raw-field", "body=details",
+      "repos/gakonst/nanocodex/issues",
     ])).toMatchObject({
       exitCode: 0,
       stdout: expect.stringContaining("gakonst/nanocodex"),
     });
     expect(fetch).toHaveBeenCalledWith(
       "https://api.github.com/repos/gakonst/nanocodex/issues",
-      expect.objectContaining({ method: "POST", body: JSON.stringify({ title: "hello" }) }),
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ title: "hello", count: "2", kind: "bug", body: "details" }),
+      }),
+    );
+    await gh.execute(["api", "-f", "page=1", "-X", "GET", "user"]);
+    expect(fetch).toHaveBeenLastCalledWith(
+      "https://api.github.com/user?page=1",
+      expect.objectContaining({ method: "GET", body: undefined }),
     );
     expect(await gh.execute(["repo", "clone", "gakonst/nanocodex"])).toMatchObject({
       exitCode: 1,
@@ -155,6 +171,61 @@ describe("Nanocodex managed Just Bash commands", () => {
       stderr: expect.stringContaining("https://github.com/OWNER/REPO"),
     });
   });
+
+  it("renders managed git short status from the isomorphic-git matrix", async () => {
+    vi.spyOn(git, "statusMatrix").mockResolvedValue([
+      ["added-deleted.txt", 0, 0, 3],
+      ["added-modified.txt", 0, 2, 3],
+      ["added.txt", 0, 2, 2],
+      ["deleted-recreated.txt", 1, 2, 0],
+      ["deleted-staged.txt", 1, 0, 0],
+      ["deleted.txt", 1, 0, 1],
+      ["modified-deleted.txt", 1, 0, 3],
+      ["modified-staged.txt", 1, 2, 2],
+      ["modified.txt", 1, 2, 1],
+      ["untracked.txt", 0, 2, 0],
+    ]);
+    const command = createManagedGitCommand(
+      vi.fn() as ManagedShellFetch,
+      () => memoryWorkspace({ "/workspace/.git": "" }),
+    );
+
+    expect(await command.execute(["status", "--short"])).toEqual({
+      exitCode: 0,
+      stderr: "",
+      stdout: [
+        "AD added-deleted.txt",
+        "AM added-modified.txt",
+        "A  added.txt",
+        "D  deleted-recreated.txt",
+        "?? deleted-recreated.txt",
+        "D  deleted-staged.txt",
+        " D deleted.txt",
+        "MD modified-deleted.txt",
+        "M  modified-staged.txt",
+        " M modified.txt",
+        "?? untracked.txt",
+        "",
+      ].join("\n"),
+    });
+  });
+
+  it("does not advertise a push URL for managed read-only remotes", async () => {
+    vi.spyOn(git, "listRemotes").mockResolvedValue([{
+      remote: "origin",
+      url: "https://github.com/gakonst/nanocodex.git",
+    }]);
+    const command = createManagedGitCommand(
+      vi.fn() as ManagedShellFetch,
+      () => memoryWorkspace({ "/workspace/.git": "" }),
+    );
+
+    expect(await command.execute(["remote", "-v"])).toEqual({
+      exitCode: 0,
+      stderr: "",
+      stdout: "origin\thttps://github.com/gakonst/nanocodex.git (fetch)\n",
+    });
+  });
 });
 
 function response(value: unknown) {
@@ -167,8 +238,9 @@ function response(value: unknown) {
   };
 }
 
-function memoryWorkspace(): Workspace {
-  const files = new Map<string, Uint8Array>();
+function memoryWorkspace(initialFiles: Readonly<Record<string, string>> = {}): Workspace {
+  const files = new Map(Object.entries(initialFiles)
+    .map(([path, contents]) => [path, new TextEncoder().encode(contents)]));
   return {
     root: "/workspace",
     async list() {

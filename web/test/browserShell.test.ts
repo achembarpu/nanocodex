@@ -359,7 +359,7 @@ test("browser python commands use the isolated runtime boundary", async () => {
   const root = new MemoryDirectory();
   const fs = createOpfsGitFs(root as unknown as FileSystemDirectoryHandle);
   await git.init({ fs, dir: "/workspace", defaultBranch: "nanocodex" });
-  const executions: Array<{ args: string[]; cwd: string; stdin: string }> = [];
+  const executions: Array<Record<string, unknown>> = [];
   const shell = await createBrowserBash(fs, thread, {
     pythonRuntime: {
       async execute(input) {
@@ -373,10 +373,71 @@ test("browser python commands use the isolated runtime boundary", async () => {
   assert.equal(result.exit_code, 0);
   assert.equal(result.output, "42\n");
   assert.deepEqual(executions, [{
-    args: ["-c", "print(6 * 7)"],
+    source: "print(6 * 7)",
+    moduleName: null,
+    filename: "<string>",
+    argv: ["-c"],
     cwd: "/workspace",
     stdin: "",
   }]);
+});
+
+test("browser Python keeps aliases in diagnostics and only recognizes leading help and version options", async () => {
+  const root = new MemoryDirectory();
+  const fs = createOpfsGitFs(root as unknown as FileSystemDirectoryHandle);
+  await git.init({ fs, dir: "/workspace", defaultBranch: "nanocodex" });
+  const executions: Array<Record<string, unknown>> = [];
+  const shell = await createBrowserBash(fs, thread, {
+    pythonRuntime: {
+      async execute(input) {
+        executions.push(input);
+        return { stdout: "script ran\n", stderr: "", exitCode: 0 };
+      },
+    },
+  });
+
+  const invalid = await shell.exec({ cmd: "python --unknown" });
+  assert.equal(invalid.exit_code, 2);
+  assert.match(invalid.output, /^python: unrecognized option '--unknown'/);
+
+  const invalidPython3 = await shell.exec({ cmd: "python3 --unknown" });
+  assert.equal(invalidPython3.exit_code, 2);
+  assert.match(invalidPython3.output, /^python3: unrecognized option '--unknown'/);
+
+  const help = await shell.exec({ cmd: "python --help" });
+  assert.equal(help.exit_code, 0);
+  assert.match(help.output, /^usage: python /);
+
+  const version = await shell.exec({ cmd: "python3 --version" });
+  assert.equal(version.exit_code, 0);
+  assert.equal(version.output, "Python 3 (Pyodide)\n");
+
+  const scriptArgs = await shell.exec({ cmd: "python script.py --help --version" });
+  assert.equal(scriptArgs.exit_code, 0);
+  assert.equal(scriptArgs.output, "script ran\n");
+  assert.deepEqual(executions, [{
+    source: null,
+    moduleName: null,
+    filename: "script.py",
+    argv: ["script.py", "--help", "--version"],
+    cwd: "/workspace",
+    stdin: "",
+  }]);
+});
+
+test("browser compiler rejects multi-source compile-only invocations", async () => {
+  const root = new MemoryDirectory();
+  const fs = createOpfsGitFs(root as unknown as FileSystemDirectoryHandle);
+  await git.init({ fs, dir: "/workspace", defaultBranch: "nanocodex" });
+  await fs.promises.writeFile("/workspace/one.c", "int one(void) { return 1; }\n");
+  await fs.promises.writeFile("/workspace/two.c", "int two(void) { return 2; }\n");
+  const shell = await createBrowserBash(fs, thread);
+
+  const result = await shell.exec({ cmd: "cc -c one.c two.c" });
+  assert.equal(result.exit_code, 1);
+  assert.match(result.output, /does not support -c with multiple source files/);
+  await assert.rejects(fs.promises.stat("/workspace/one.o"), /cannot stat/);
+  await assert.rejects(fs.promises.stat("/workspace/two.o"), /cannot stat/);
 });
 
 test("elaborate Code Mode scripts compose concurrent browser commands into an artifact", async () => {
@@ -465,7 +526,7 @@ test("browser ssh documents its direct WebSocket-only transport", async () => {
   const shell = await createBrowserBash(fs, thread);
 
   const result = await shell.exec({ cmd: "ssh --help" });
-  assert.equal(result.exit_code, 2);
+  assert.equal(result.exit_code, 0);
   assert.match(result.output, /wss:\/\/SSH-GATEWAY/);
   assert.match(result.output, /browsers cannot open TCP port 22/);
 });

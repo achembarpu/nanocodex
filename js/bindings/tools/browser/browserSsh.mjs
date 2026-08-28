@@ -4,6 +4,8 @@ import { importKey } from "@microsoft/dev-tunnels-ssh-keys";
 import { defineCommand, } from "just-bash/browser";
 export function createSshCommand(filesystem) {
     return defineCommand("ssh", async (args, context) => {
+        if (args[0] === "--help")
+            return ok(`${usage()}\n`);
         const parsed = parseArguments(args);
         if ("error" in parsed)
             return fail(`${parsed.error}\n`, 2);
@@ -99,7 +101,7 @@ async function authenticateHost(publicKey, expected, acceptUnknown) {
     return actual === normalized ? {} : null;
 }
 function parseArguments(args) {
-    if (!args.length || args.includes("--help"))
+    if (!args.length)
         return { error: usage() };
     let username = "";
     let identityFile = "";
@@ -193,4 +195,7 @@ function usage() {
 }
 function fail(stderr, exitCode) {
     return { stdout: "", stderr, exitCode };
+}
+function ok(stdout) {
+    return { stdout, stderr: "", exitCode: 0 };
 }

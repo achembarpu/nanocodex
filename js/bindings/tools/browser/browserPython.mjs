@@ -72,16 +72,19 @@ export class BrowserPythonRuntime {
 }
 export function createPythonCommand(name, runtime, filesystem) {
     const execute = async (args, context) => {
+        const parsed = parsePythonArguments(name, args, String(context.stdin));
+        if ("result" in parsed)
+            return parsed.result;
         if (!runtime) {
             return {
                 stdout: "",
-                stderr: "python3: browser Python is unavailable without an OPFS workspace\n",
+                stderr: `${name}: browser Python is unavailable without an OPFS workspace\n`,
                 exitCode: 1,
             };
         }
         try {
             const result = await runtime.execute({
-                args,
+                ...parsed,
                 cwd: context.cwd,
                 stdin: String(context.stdin),
             }, context.signal);
@@ -92,10 +95,39 @@ export function createPythonCommand(name, runtime, filesystem) {
         catch (error) {
             return {
                 stdout: "",
-                stderr: `python3: ${error instanceof Error ? error.message : String(error)}\n`,
+                stderr: `${name}: ${error instanceof Error ? error.message : String(error)}\n`,
                 exitCode: context.signal?.aborted ? 124 : 1,
             };
         }
     };
     return defineCommand(name, execute);
+}
+export function parsePythonArguments(name, args, stdin) {
+    if (args[0] === "--help" || args[0] === "-h") {
+        return { result: { stdout: `usage: ${name} [-c code | -m module | script | -] [args...]\n`, stderr: "", exitCode: 0 } };
+    }
+    if (args[0] === "--version" || args[0] === "-V") {
+        return { result: { stdout: "Python 3 (Pyodide)\n", stderr: "", exitCode: 0 } };
+    }
+    if (args[0] === "-c") {
+        if (args[1] === undefined)
+            return pythonArgumentError(name, "argument expected for -c");
+        return { source: args[1], moduleName: null, filename: "<string>", argv: ["-c", ...args.slice(2)] };
+    }
+    if (args[0] === "-m") {
+        if (args[1] === undefined)
+            return pythonArgumentError(name, "argument expected for -m");
+        return { source: null, moduleName: args[1], filename: args[1], argv: [args[1], ...args.slice(2)] };
+    }
+    if (!args.length || args[0] === "-") {
+        if (!stdin)
+            return pythonArgumentError(name, "no input provided (use -c, -m, a script, or stdin)");
+        return { source: stdin, moduleName: null, filename: "<stdin>", argv: ["-", ...args.slice(1)] };
+    }
+    if (args[0].startsWith("-"))
+        return pythonArgumentError(name, `unrecognized option '${args[0]}'`);
+    return { source: null, moduleName: null, filename: args[0], argv: [args[0], ...args.slice(1)] };
+}
+function pythonArgumentError(name, message) {
+    return { result: { stdout: "", stderr: `${name}: ${message}\n`, exitCode: 2 } };
 }

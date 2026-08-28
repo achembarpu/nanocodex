@@ -116,6 +116,36 @@ test("browser gh makes useful GitHub calls through the same-origin connector", a
   assert.equal(requests[4].method, "POST");
   assert.equal(requests[4].body, JSON.stringify({ title: "hello" }));
   assert.equal(requests[4].authorization, null);
+
+  const inferredWrite = await command([
+    "api", "/repos/gakonst/nanocodex/issues", "-f", "title=inferred",
+  ]);
+  assert.equal(inferredWrite.exitCode, 0);
+  assert.equal(requests[5].method, "POST");
+  assert.equal(requests[5].body, JSON.stringify({ title: "inferred" }));
+
+  const explicitGet = await command([
+    "api", "--method", "GET", "/search/issues?sort=updated", "-f", "q=browser shim",
+  ]);
+  assert.equal(explicitGet.exitCode, 0);
+  assert.equal(requests[6].method, "GET");
+  assert.equal(requests[6].body, undefined);
+  const getUrl = new URL(requests[6].url);
+  assert.equal(getUrl.searchParams.get("sort"), "updated");
+  assert.equal(getUrl.searchParams.get("q"), "browser shim");
+});
+
+test("browser gh rejects unsupported operations instead of presenting successful help", async () => {
+  const command = createGhCompatibilityCommand({}, {}, (_name, handler) => handler);
+
+  const unsupported = await command(["issue", "list"]);
+  assert.equal(unsupported.exitCode, 1);
+  assert.match(unsupported.stderr, /unsupported browser operation 'issue list'/);
+  assert.match(unsupported.stderr, /Supported commands:/);
+
+  const help = await command(["--help"]);
+  assert.equal(help.exitCode, 0);
+  assert.match(help.stdout, /Supported commands:/);
 });
 
 function secureJson(url, value) {

@@ -18,11 +18,7 @@ self.addEventListener("message", (event) => {
 });
 async function execute(id, input) {
     try {
-        const parsed = parseArguments(input.args, input.stdin);
-        if ("result" in parsed) {
-            self.postMessage({ id, result: parsed.result });
-            return;
-        }
+        const parsed = input;
         const { pyodide, nativeFs } = await runtime();
         await nativeFs.syncfs();
         let stdout = "";
@@ -92,35 +88,6 @@ async function runtime() {
         })();
     }
     return runtimePromise;
-}
-function parseArguments(args, stdin) {
-    if (args.includes("--help") || args.includes("-h")) {
-        return { result: { stdout: "usage: python3 [-c code | -m module | script | -] [args...]\n", stderr: "", exitCode: 0 } };
-    }
-    if (args.includes("--version") || args.includes("-V")) {
-        return { result: { stdout: "Python 3 (Pyodide)\n", stderr: "", exitCode: 0 } };
-    }
-    if (args[0] === "-c") {
-        if (args[1] === undefined)
-            return argumentError("argument expected for -c");
-        return { source: args[1], moduleName: null, filename: "<string>", argv: ["-c", ...args.slice(2)] };
-    }
-    if (args[0] === "-m") {
-        if (args[1] === undefined)
-            return argumentError("argument expected for -m");
-        return { source: null, moduleName: args[1], filename: args[1], argv: [args[1], ...args.slice(2)] };
-    }
-    if (!args.length || args[0] === "-") {
-        if (!stdin)
-            return argumentError("no input provided (use -c, -m, a script, or stdin)");
-        return { source: stdin, moduleName: null, filename: "<stdin>", argv: ["-", ...args.slice(1)] };
-    }
-    if (args[0].startsWith("-"))
-        return argumentError(`unrecognized option '${args[0]}'`);
-    return { source: null, moduleName: null, filename: args[0], argv: [args[0], ...args.slice(1)] };
-}
-function argumentError(message) {
-    return { result: { stdout: "", stderr: `python3: ${message}\n`, exitCode: 2 } };
 }
 function formatPythonError(error) {
     const message = error instanceof Error ? error.message : String(error);

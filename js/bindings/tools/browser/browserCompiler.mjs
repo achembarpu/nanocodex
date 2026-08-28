@@ -112,8 +112,8 @@ function parseArguments(name, args, context) {
     }
     if (!sources.length)
         return { result: fail(`${name}: no input files\n`, 1) };
-    if (compileOnly && sources.length > 1 && outputWasSet) {
-        return { result: fail(`${name}: cannot use -o with -c and multiple source files\n`, 1) };
+    if (compileOnly && sources.length > 1) {
+        return { result: fail(`${name}: browser compilation does not support -c with multiple source files; compile one source at a time\n`, 1) };
     }
     if (!output.startsWith("/"))
         output = context.fs.resolvePath(context.cwd, output);
