@@ -19,6 +19,7 @@ import {
   preflightEnvironment,
   prepareProductionResources,
   productionMutationPlan,
+  productionProbeHeaders,
   productionProbeMaxBytes,
   productionResourceTopology,
   runProductionPhases,
@@ -565,6 +566,17 @@ test("Connect device deep-link health requires an HTML document", () => {
     "Not found",
     revision,
   ), /HTTP 200/);
+});
+
+test("Connect device health reproduces a browser document navigation", () => {
+  assert.deepEqual(productionProbeHeaders("root-connect-device", "text"), {
+    accept: "text/html",
+    "sec-fetch-dest": "document",
+    "sec-fetch-mode": "navigate",
+  });
+  assert.deepEqual(productionProbeHeaders("root-health", "json"), {
+    accept: "application/json",
+  });
 });
 
 function resourceTopology() {

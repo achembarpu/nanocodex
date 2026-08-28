@@ -752,6 +752,19 @@ export function productionProbeMaxBytes(probe) {
   return probe === "repository" ? 8 * 1024 * 1024 : 64 * 1024;
 }
 
+export function productionProbeHeaders(probe, encoding, existing = {}) {
+  return {
+    ...existing,
+    accept: probe === "repository-git"
+      ? "application/x-git-upload-pack-result"
+      : encoding === "json" ? "application/json" : "text/html",
+    ...(probe === "root-connect-device" ? {
+      "sec-fetch-dest": "document",
+      "sec-fetch-mode": "navigate",
+    } : {}),
+  };
+}
+
 async function main(environment = process.env) {
   requireLocalTool("node", ["--version"]);
   requireLocalTool("npm", ["--version"]);
@@ -1078,12 +1091,7 @@ async function waitForProductionHealth(revision, fetchImpl = globalThis.fetch) {
         const response = await fetchImpl(url, {
           ...init,
           cache: "no-store",
-          headers: {
-            ...init?.headers,
-            accept: probe === "repository-git"
-              ? "application/x-git-upload-pack-result"
-              : encoding === "json" ? "application/json" : "text/html",
-          },
+          headers: productionProbeHeaders(probe, encoding, init?.headers),
           signal: AbortSignal.any([abortController.signal, AbortSignal.timeout(5_000)]),
         });
         const encoded = await response.text();
