@@ -12,6 +12,7 @@ import {
   buildWebProductionConfig,
   managedSecretPayload,
   productionWranglerEnvironment,
+  webSecretPayload,
   withPrivateRolloutFiles,
 } from "../scripts/production-rollout.mjs";
 import {
@@ -206,6 +207,9 @@ test("managed production config retains the exact private eight-DO topology", as
   assert.deepEqual(config.migrations.map(({ tag }) => tag), ["v1", "v2", "v3", "v4"]);
   assert.doesNotMatch(JSON.stringify(config), /NANOCODEX_AUTH_MODE|OPENAI_API_KEY|CODEX_OAUTH_BOOTSTRAP|CODEX_RELAY_URL/);
   assert.deepEqual(managedSecretPayload(adminToken), { NANOCODEX_ADMIN_TOKEN: adminToken });
+  assert.deepEqual(webSecretPayload("g".repeat(43)), {
+    GIT_MIRROR_TOKEN: "g".repeat(43),
+  });
   assert.throws(
     () => buildManagedProductionConfig({ ...base, name: "nanocodex-durable-agent" }),
     /non-production template name/,

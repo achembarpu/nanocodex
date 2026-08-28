@@ -190,6 +190,11 @@ export function managedSecretPayload(adminToken) {
   return { NANOCODEX_ADMIN_TOKEN: adminToken };
 }
 
+export function webSecretPayload(gitMirrorToken) {
+  assertTokenStrength(gitMirrorToken, "NANOCODEX_GIT_TOKEN");
+  return { GIT_MIRROR_TOKEN: gitMirrorToken };
+}
+
 export function buildBoundaryProbeConfig({
   name,
   revision,
@@ -518,10 +523,12 @@ export async function deployProductionWeb(environment = process.env, {
     artifactDirectory: dirname(webArtifactConfigPath),
     d1DatabaseIds: d1DatabaseIds ?? {},
   });
-  const redactions = [cloudflare.apiToken];
+  const gitMirrorToken = requiredSecret(environment, "NANOCODEX_GIT_TOKEN");
+  const redactions = [cloudflare.apiToken, gitMirrorToken];
 
   await withPrivateRolloutFiles({
     "web-config.json": config,
+    "web-secrets.json": webSecretPayload(gitMirrorToken),
   }, async (paths) => {
     await runWrangler([
       "deploy",
@@ -536,6 +543,8 @@ export async function deployProductionWeb(environment = process.env, {
       containersRollout,
       "--var",
       `DEPLOYMENT_SHA:${revision}`,
+      "--secrets-file",
+      paths["web-secrets.json"],
     ], {
       cwd: webRoot,
       environment: productionWranglerEnvironment(environment, cloudflare),
