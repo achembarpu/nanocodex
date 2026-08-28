@@ -489,6 +489,24 @@ test("repository health requires the exact production generation", () => {
   ), /deployed SHA/);
 });
 
+test("repository health requires stock Git advertisement for the exact SHA", () => {
+  const response = new Response(`003d${revision} refs/heads/master\n0000`, {
+    headers: { "content-type": "application/x-git-upload-pack-result" },
+  });
+  assert.doesNotThrow(() => assertLiveResponse(
+    "repository-git",
+    response,
+    `003d${revision} refs/heads/master\n0000`,
+    revision,
+  ));
+  assert.throws(() => assertLiveResponse(
+    "repository-git",
+    response,
+    `003d${"b".repeat(40)} refs/heads/master\n0000`,
+    revision,
+  ), /deployed SHA/);
+});
+
 test("repository health permits the bounded full-tree snapshot", () => {
   assert.equal(productionProbeMaxBytes("root-health"), 64 * 1024);
   assert.equal(productionProbeMaxBytes("repository"), 8 * 1024 * 1024);

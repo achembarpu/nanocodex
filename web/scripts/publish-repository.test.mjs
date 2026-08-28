@@ -124,6 +124,13 @@ test("the publisher CLI initializes its module before building a generation", as
     assert.deepEqual(publication.publication.refs, [
       { name: "refs/heads/master", oid: head },
     ]);
+    const immutablePublicationUpload = requests.find(({ url }) =>
+      url === `/api/git/objects/generations/${head}/publication.json`
+    );
+    assert.deepEqual(
+      JSON.parse(immutablePublicationUpload.body),
+      publication.publication,
+    );
     assert.equal(publication.publication.commitPatchParts.length, 2);
     assert.equal(
       publication.publication.commitPatchParts.reduce(

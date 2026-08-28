@@ -46,7 +46,7 @@ test("generation-pinned smart HTTP never reads mutable publication state", async
   const bucket = {
     get: async (key: string) => {
       requestedKeys.push(key);
-      if (key === `generations/${head}/repository.json`) {
+      if (key === `generations/${head}/publication.json`) {
         return { json: async () => publication };
       }
       return null;
@@ -80,7 +80,7 @@ test("generation-pinned smart HTTP never reads mutable publication state", async
 
   assert.equal(response?.status, 200);
   assert.equal(publicationReads, 0);
-  assert.deepEqual(requestedKeys, [`generations/${head}/repository.json`]);
+  assert.deepEqual(requestedKeys, [`generations/${head}/publication.json`]);
   const packets = parsePacketLines(new Uint8Array(await response!.arrayBuffer()));
   const text = packets
     .filter((packet) => packet.kind === "data")
@@ -504,7 +504,9 @@ test("repository publication forwards an explicit invalid-state replacement", as
   } as unknown as DurableObjectNamespace;
   const bucket = {
     get: async (key: string) => ({
-      json: async () => key.endsWith("commit-patches.json")
+      json: async () => key.endsWith("publication.json")
+        ? publication
+        : key.endsWith("commit-patches.json")
         ? commitPatchManifest(publication)
         : manifest,
     }),
@@ -583,7 +585,9 @@ test("repository publication gates commit indexes and every metadata page before
     } as unknown as DurableObjectNamespace;
     const bucket = {
       get: async (key: string) => ({
-        json: async () => key.endsWith("commit-patches.json")
+        json: async () => key.endsWith("publication.json")
+          ? publication
+          : key.endsWith("commit-patches.json")
           ? commitPatchManifest(publication)
           : objectManifest,
       }),
@@ -657,7 +661,9 @@ test("repository publication requires every commit patch page before cutover", a
   } as unknown as DurableObjectNamespace;
   const bucket = {
     get: async (key: string) => ({
-      json: async () => key.endsWith("commit-patches.json")
+      json: async () => key.endsWith("publication.json")
+        ? publication
+        : key.endsWith("commit-patches.json")
         ? commitPatchManifest(publication)
         : manifest,
     }),
@@ -694,7 +700,9 @@ test("repository publication requires every commit patch page before cutover", a
 
   const wrongSizeBucket = {
     get: async (key: string) => ({
-      json: async () => key.endsWith("commit-patches.json")
+      json: async () => key.endsWith("publication.json")
+        ? publication
+        : key.endsWith("commit-patches.json")
         ? commitPatchManifest(publication)
         : manifest,
     }),
@@ -760,7 +768,11 @@ test("repository publication rejects pack parts whose stored size changed", asyn
     }),
   } as unknown as DurableObjectNamespace;
   const bucket = {
-    get: async () => ({ json: async () => commitPatchManifest(publication) }),
+    get: async (key: string) => ({
+      json: async () => key.endsWith("publication.json")
+        ? publication
+        : commitPatchManifest(publication),
+    }),
     head: async () => ({
       httpEtag: '"present"',
       size: 1,

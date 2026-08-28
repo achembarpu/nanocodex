@@ -20,7 +20,7 @@ import {
 } from "./gitRepository.ts";
 
 const SHA1_PATTERN = /^[a-f0-9]{40}$/;
-const generationFilePattern = /^(repository\.json|commits\.json|commit-index\.json|commit-patches\.json|inventory\.json|objects\.json)$/;
+const generationFilePattern = /^(publication\.json|repository\.json|commits\.json|commit-index\.json|commit-patches\.json|inventory\.json|objects\.json)$/;
 const generationCommitPagePattern = /^commits\/(\d{4})\.json$/;
 const generationCommitPatchPartPattern = /^commit-patches\/(\d{4})\.diff$/;
 const generationObjectShardPattern = /^objects\/(\d{4})\.pack$/;
@@ -181,12 +181,14 @@ export async function handleGitRequest(
     }
     const publication = body.publication;
     const generationPrefix = `generations/${publication.head}`;
+    const publicationKey = `${generationPrefix}/publication.json`;
     const commitPatchManifestKey = `${generationPrefix}/commit-patches.json`;
     const commitIndexKey = `${generationPrefix}/commit-index.json`;
     const commitPageKeys = publication.commitPatchParts.map(
       (_, index) => `${generationPrefix}/commits/${String(index).padStart(4, "0")}.json`,
     );
     const requiredKeys = [
+      publicationKey,
       publication.snapshotKey,
       publication.commitsKey,
       commitIndexKey,
@@ -205,6 +207,22 @@ export async function handleGitRequest(
     const objectByKey = new Map(
       requiredKeys.map((key, index) => [key, objects[index]] as const),
     );
+    let immutablePublication: unknown;
+    try {
+      const storedPublication = await requireBucket(env).get(publicationKey);
+      immutablePublication = storedPublication == null ? undefined : await storedPublication.json();
+    } catch {
+      return storageFailure("immutable publication metadata is invalid");
+    }
+    if (
+      !isRepositoryPublication(immutablePublication) ||
+      JSON.stringify(immutablePublication) !== JSON.stringify(publication)
+    ) {
+      return Response.json(
+        { error: "publication_metadata_invalid" },
+        { status: 409 },
+      );
+    }
     let commitPatchManifest: unknown;
     try {
       const storedManifest = await requireBucket(env).get(commitPatchManifestKey);
@@ -680,7 +698,7 @@ async function getGenerationPublication(
   let publications = generationPublicationMemo.get(bucket as object);
   const cached = publications?.get(generation);
   if (cached != null) return cached;
-  const stored = await bucket.get(`generations/${generation}/repository.json`);
+  const stored = await bucket.get(`generations/${generation}/publication.json`);
   if (stored == null) {
     return Response.json({ error: "repository_generation_not_found" }, { status: 404 });
   }

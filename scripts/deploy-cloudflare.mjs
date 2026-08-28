@@ -722,6 +722,20 @@ export function assertLiveResponse(probe, response, body, revision) {
     );
     return;
   }
+  if (probe === "repository-git") {
+    assert.equal(response.status, 200, "production Git smart HTTP must return HTTP 200");
+    assert.match(
+      response.headers.get("content-type") ?? "",
+      /^application\/x-git-upload-pack-result\b/,
+      "production Git smart HTTP must return an upload-pack result",
+    );
+    assert.match(
+      body,
+      new RegExp(`${revision} refs/heads/master`),
+      "production Git smart HTTP must advertise the deployed SHA",
+    );
+    return;
+  }
   if (probe === "root-connect-dialog" || probe === "connect-playground") {
     assert.equal(response.status, 200, `${probe} must return HTTP 200`);
     assert.match(
@@ -1033,15 +1047,39 @@ async function waitForProductionHealth(revision, fetchImpl = globalThis.fetch) {
         ["managed-binding", new URL("/v1/me", PRODUCTION_ORIGINS.root), "json"],
         ["connect-api", new URL("/healthz", PRODUCTION_ORIGINS.connectApi), "json"],
         ["repository", new URL("/api/repository/snapshot", PRODUCTION_ORIGINS.root), "json"],
+        [
+          "repository-git",
+          new URL(`/git/${revision}/git-upload-pack`, PRODUCTION_ORIGINS.root),
+          "text",
+          {
+            method: "POST",
+            headers: {
+              "content-type": "application/x-git-upload-pack-request",
+              "git-protocol": "version=2",
+            },
+            body: Buffer.concat([
+              gitPacketLine("command=ls-refs\n"),
+              Buffer.from("0001"),
+              gitPacketLine("ref-prefix refs/heads/\n"),
+              Buffer.from("0000"),
+            ]),
+          },
+        ],
         ["root-connect-dialog", new URL("/connect-dialog/", PRODUCTION_ORIGINS.root), "text"],
         ["connect-playground", new URL("/", PRODUCTION_ORIGINS.playground), "text"],
       ];
-      await Promise.all(probes.map(async ([probe, url, encoding]) => {
+      await Promise.all(probes.map(async ([probe, url, encoding, init]) => {
         url.searchParams.set("revision", revision);
         url.searchParams.set("rollout_attempt", String(attempt));
         const response = await fetchImpl(url, {
+          ...init,
           cache: "no-store",
-          headers: { accept: encoding === "json" ? "application/json" : "text/html" },
+          headers: {
+            ...init?.headers,
+            accept: probe === "repository-git"
+              ? "application/x-git-upload-pack-result"
+              : encoding === "json" ? "application/json" : "text/html",
+          },
           signal: AbortSignal.any([abortController.signal, AbortSignal.timeout(5_000)]),
         });
         const encoded = await response.text();
@@ -1066,6 +1104,14 @@ async function waitForProductionHealth(revision, fetchImpl = globalThis.fetch) {
     }
   }
   throw new Error(`production health did not converge for ${revision}`, { cause: failure });
+}
+
+function gitPacketLine(payload) {
+  const body = Buffer.from(payload);
+  return Buffer.concat([
+    Buffer.from((body.length + 4).toString(16).padStart(4, "0")),
+    body,
+  ]);
 }
 
 function checkoutState() {

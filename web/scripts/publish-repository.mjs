@@ -151,17 +151,36 @@ async function main() {
     const generationPrefix = `generations/${head}`;
     const inventoryPath = resolve(temporaryDirectory, "inventory.json");
     const commitPatchManifestPath = resolve(temporaryDirectory, "commit-patches.json");
+    const publicationPath = resolve(temporaryDirectory, "publication.json");
     const commitPatchManifest = {
       version: 1,
       head,
       parts: commitPatchParts.map(({ key, size }) => ({ key, size })),
       size: commitPatchSize,
     };
+    const publication = {
+      version: 1,
+      head,
+      branch: publicationBranch,
+      refs,
+      snapshotKey: `${generationPrefix}/repository.json`,
+      commitsKey: `${generationPrefix}/commits.json`,
+      commitPatchParts: commitPatchParts.map(({ key, size }) => ({ key, size })),
+      commitPatchSize,
+      inventoryKey: `${generationPrefix}/inventory.json`,
+      packParts: gitArtifacts.packParts.map(({ key, size }) => ({ key, size })),
+      packSize: gitArtifacts.packSize,
+      objectManifestKey: `${generationPrefix}/objects.json`,
+      packHash: gitArtifacts.packHash,
+      publishedAt: new Date().toISOString(),
+    };
     await Promise.all([
       writeFile(inventoryPath, `${JSON.stringify(inventory)}\n`),
       writeFile(commitPatchManifestPath, `${JSON.stringify(commitPatchManifest)}\n`),
+      writeFile(publicationPath, `${JSON.stringify(publication)}\n`),
     ]);
     await Promise.all([
+      uploadFile(origin, token, `${generationPrefix}/publication.json`, publicationPath),
       uploadFile(origin, token, `${generationPrefix}/repository.json`, resolve(dataDirectory, "repository.json")),
       uploadFile(origin, token, `${generationPrefix}/commits.json`, resolve(dataDirectory, "commits.json")),
       uploadFile(origin, token, `${generationPrefix}/commit-index.json`, resolve(dataDirectory, "commit-index.json")),
@@ -184,22 +203,6 @@ async function main() {
           resolve(dataDirectory, "commit-pages", `${name}.json`),
         )),
     ]);
-    const publication = {
-      version: 1,
-      head,
-      branch: publicationBranch,
-      refs,
-      snapshotKey: `${generationPrefix}/repository.json`,
-      commitsKey: `${generationPrefix}/commits.json`,
-      commitPatchParts: commitPatchParts.map(({ key, size }) => ({ key, size })),
-      commitPatchSize,
-      inventoryKey: `${generationPrefix}/inventory.json`,
-      packParts: gitArtifacts.packParts.map(({ key, size }) => ({ key, size })),
-      packSize: gitArtifacts.packSize,
-      objectManifestKey: `${generationPrefix}/objects.json`,
-      packHash: gitArtifacts.packHash,
-      publishedAt: new Date().toISOString(),
-    };
     const response = await authenticatedFetch(`${origin}/api/git/publish`, token, {
       method: "PUT",
       headers: { "content-type": "application/json" },
