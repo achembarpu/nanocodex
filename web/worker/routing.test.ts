@@ -17,6 +17,7 @@ test("Cloudflare routes preview documents, images, and protocol endpoints throug
     "/commits",
     "/requests",
     "/connect",
+    "/connect/device",
     "/connect-dialog",
     "/connect-dialog/*",
     "/docs",

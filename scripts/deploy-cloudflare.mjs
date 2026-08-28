@@ -736,7 +736,7 @@ export function assertLiveResponse(probe, response, body, revision) {
     );
     return;
   }
-  if (probe === "root-connect-dialog" || probe === "connect-playground") {
+  if (probe === "root-connect-dialog" || probe === "root-connect-device" || probe === "connect-playground") {
     assert.equal(response.status, 200, `${probe} must return HTTP 200`);
     assert.match(
       response.headers.get("content-type") ?? "",
@@ -1067,6 +1067,7 @@ async function waitForProductionHealth(revision, fetchImpl = globalThis.fetch) {
             ]),
           },
         ],
+        ["root-connect-device", new URL("/connect/device", PRODUCTION_ORIGINS.root), "text"],
         ["root-connect-dialog", new URL("/connect-dialog/", PRODUCTION_ORIGINS.root), "text"],
         ["connect-playground", new URL("/", PRODUCTION_ORIGINS.playground), "text"],
       ];

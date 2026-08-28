@@ -549,6 +549,24 @@ test("repository health permits the bounded full-tree snapshot", () => {
   assert.equal(productionProbeMaxBytes("repository"), 8 * 1024 * 1024);
 });
 
+test("Connect device deep-link health requires an HTML document", () => {
+  const response = new Response("<!doctype html><title>Nanocodex</title>", {
+    headers: { "content-type": "text/html; charset=utf-8" },
+  });
+  assert.doesNotThrow(() => assertLiveResponse(
+    "root-connect-device",
+    response,
+    "<!doctype html><title>Nanocodex</title>",
+    revision,
+  ));
+  assert.throws(() => assertLiveResponse(
+    "root-connect-device",
+    new Response("Not found", { status: 404 }),
+    "Not found",
+    revision,
+  ), /HTTP 200/);
+});
+
 function resourceTopology() {
   return productionResourceTopology([
     {

@@ -23,6 +23,7 @@
       "/commits",
       "/requests",
       "/connect",
+      "/connect/device",
       "/connect-dialog",
       "/connect-dialog/*",
       "/docs",
