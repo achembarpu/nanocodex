@@ -3272,7 +3272,7 @@ async function startConnector(
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
-      redirect_uri: local?.redirectUri ?? `${requestOrigin}/v1/connectors/${connector}/callback`,
+      redirect_uri: local?.redirectUri ?? `${NANOCODEX_ORIGIN}/v1/connectors/${connector}/callback`,
       return_to: "/",
     }),
   });
@@ -3281,9 +3281,7 @@ async function startConnector(
   if (!state || state.length > 512) {
     throw new ApiFailure(502, "connector_broker_invalid", "The connector broker returned an invalid authorization state.");
   }
-  const callbackState = local || requestOrigin !== DIALOG_ORIGIN
-    ? state
-    : scopedConnectConnectorState(state);
+  const callbackState = local ? state : scopedConnectConnectorState(state);
   if (callbackState !== state) authorizationUrl.searchParams.set("state", callbackState);
   if (local) {
     try {
@@ -3342,7 +3340,7 @@ async function startMcpConnection(
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        redirect_uri: local?.redirectUri ?? `${requestOrigin}/v1/mcp-connections/${connectionId}/callback`,
+        redirect_uri: local?.redirectUri ?? `${NANOCODEX_ORIGIN}/v1/mcp-connections/${connectionId}/callback`,
         return_to: "/",
       }),
     },
