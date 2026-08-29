@@ -7,7 +7,8 @@ const accountId = process.env.NANOCODEX_MOCK_CHATGPT_ACCOUNT_ID ?? "local-chatgp
 if (!Number.isFinite(responseDelayMs) || responseDelayMs < 0 || responseDelayMs > 60_000) {
   throw new Error("NANOCODEX_MOCK_DELAY_MS must be between 0 and 60000");
 }
-const accessToken = jwt({ exp: Math.floor(Date.now() / 1000) + 3_600 });
+const accessToken = process.env.NANOCODEX_MOCK_ACCESS_TOKEN
+  ?? jwt({ exp: Math.floor(Date.now() / 1000) + 3_600 });
 const idToken = jwt({
   exp: Math.floor(Date.now() / 1000) + 3_600,
   "https://api.openai.com/auth": {
@@ -123,6 +124,10 @@ sockets.on("connection", (socket) => {
     }
     if (activeEncoded.includes("E2E_MANAGED_CANCEL")) {
       await sendCompleted(socket, messageResponse("MANAGED_CANCEL_TOO_LATE"), 1_500);
+      return;
+    }
+    if (activeEncoded.includes("MULTIPLAYER_AGENT_OK")) {
+      await sendCompleted(socket, messageResponse("MULTIPLAYER_AGENT_OK"));
       return;
     }
     const exactToken = encoded.match(/Reply with exactly ([A-Z0-9_-]{1,128})/)?.[1];

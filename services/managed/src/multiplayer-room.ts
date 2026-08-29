@@ -1207,18 +1207,8 @@ export class MultiplayerRoom extends DurableObject<MultiplayerRoomEnv> {
         await this.#rescheduleAlarm();
         return;
       }
-      if (["accepted", "retryable", "cancelling"].includes(String(turn.state))) {
+      if (["accepted", "cancelling"].includes(String(turn.state))) {
         this.#touchSubmittedJob(job.source_cursor);
-        await this.#rescheduleAlarm();
-        return;
-      }
-      if (turn.state === "blocked") {
-        try {
-          this.#projectAgentFailure(job, "blocked", true);
-        } catch (error) {
-          if (!(error instanceof EventLogCapacityError)) throw error;
-          this.#blockJob(job.source_cursor);
-        }
         await this.#rescheduleAlarm();
         return;
       }
@@ -2280,8 +2270,6 @@ function isManagedTurnState(value: unknown): value is string {
   return [
     "accepted",
     "cancelling",
-    "retryable",
-    "blocked",
     "completed",
     "cancelled",
     "failed",

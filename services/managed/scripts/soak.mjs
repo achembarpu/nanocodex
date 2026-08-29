@@ -3,13 +3,14 @@ import WebSocket from "ws";
 
 import {
   managedAccountFetch,
-  managedAccountWebSocketOptions,
+  managedAccountSessionWebSocketOptions,
   parseManagedAgentReceipt,
-  requireManagedApiKey,
 } from "./managed-account-auth.mjs";
+import { resolveManagedSmokeCredentials } from "./local-smoke-account.mjs";
 
 const baseUrl = process.env.NANOCODEX_WORKER_URL ?? "http://127.0.0.1:8787";
-const apiKey = requireManagedApiKey();
+const credentials = await resolveManagedSmokeCredentials(baseUrl, "managed soak");
+const { accountCookie, apiKey } = credentials;
 const sessionCount = Number(process.env.NANOCODEX_SOAK_SESSIONS ?? 16);
 const timeoutMs = Number(process.env.NANOCODEX_SOAK_TIMEOUT_MS ?? 60_000);
 
@@ -27,7 +28,7 @@ try {
   const clients = await Promise.all(sessions.map(async (agent, index) => {
     const socket = new WebSocket(
       agent.websocket_url,
-      managedAccountWebSocketOptions(apiKey),
+      managedAccountSessionWebSocketOptions(accountCookie, baseUrl),
     );
     sockets.push(socket);
     const inbox = createInbox(socket);
@@ -81,6 +82,7 @@ try {
     `${baseUrl}/v1/agents/${agent.agent_id}`,
     { method: "DELETE" },
   ).catch(() => {})));
+  await credentials.cleanup();
 }
 
 async function createAgent() {

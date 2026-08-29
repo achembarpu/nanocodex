@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { realpathSync } from "node:fs";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -43,11 +43,16 @@ async function main() {
   }
   const brokerProbeToken = randomBytes(32).toString("base64url");
   const temporaryDirectory = await mkdtemp(join(tmpdir(), "nanocodex-brokered-dev-"));
+  const externalStateRoot = process.env.NANOCODEX_DEV_STATE_ROOT?.trim()
+    ? resolve(process.env.NANOCODEX_DEV_STATE_ROOT)
+    : undefined;
+  if (externalStateRoot) await mkdir(externalStateRoot, { recursive: true, mode: 0o700 });
   const brokerEnvPath = join(temporaryDirectory, "broker.env");
   const agentEnvPath = join(temporaryDirectory, "agent.env");
-  const brokerStatePath = join(temporaryDirectory, "broker-state");
-  const agentStatePath = join(temporaryDirectory, "agent-state");
+  const brokerStatePath = join(externalStateRoot ?? temporaryDirectory, "broker-state");
+  const agentStatePath = join(externalStateRoot ?? temporaryDirectory, "agent-state");
   const managedConfigPath = join(temporaryDirectory, "wrangler.managed.json");
+  const localManagedConfigPath = join(workersRoot, "wrangler.test.jsonc");
   const processHandles = [];
   const children = [];
   const exits = [];
@@ -78,7 +83,16 @@ async function main() {
       );
       const configuredRelayUrl = process.env.NANOCODEX_CODEX_RELAY_URL?.trim();
       if (configuredRelayUrl) {
+        let relay;
+        try {
+          relay = new URL(configuredRelayUrl);
+        } catch {
+          throw new Error("NANOCODEX_CODEX_RELAY_URL must be a valid URL");
+        }
         brokerEnvironment.push(envLine("CODEX_RELAY_URL", configuredRelayUrl));
+        if (relay.protocol === "http:" && relay.hostname === "127.0.0.1" && relay.port) {
+          brokerEnvironment.push(envLine("ALLOW_INSECURE_LOOPBACK_RELAY", "true"));
+        }
       } else {
         localRelay = await startLocalChatGptRelay();
         brokerEnvironment.push(
@@ -97,7 +111,7 @@ async function main() {
     const historyAiSearchInstance = process.env.NANOCODEX_HISTORY_AI_SEARCH_INSTANCE?.trim();
     let managedConfig;
     if (!brokerOnly && historyAiSearchInstance) {
-      const base = JSON.parse(await readFile(join(workersRoot, "wrangler.jsonc"), "utf8"));
+      const base = JSON.parse(await readFile(localManagedConfigPath, "utf8"));
       managedConfig = managedDevConfig(base, historyAiSearchInstance);
     }
     const environmentWrites = [
@@ -167,7 +181,8 @@ async function main() {
       const managedHandle = spawnProcessGroup(process.execPath, [
         agentWrangler,
         "dev",
-        ...(managedConfig ? ["-c", managedConfigPath] : []),
+        "-c",
+        managedConfig ? managedConfigPath : localManagedConfigPath,
         "--env-file",
         agentEnvPath,
         "--persist-to",

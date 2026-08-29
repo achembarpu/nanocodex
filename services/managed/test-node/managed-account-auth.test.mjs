@@ -3,12 +3,15 @@ import { test } from "node:test";
 
 import {
   managedAccountHeaders,
+  managedAccountSessionWebSocketOptions,
   parseManagedAgentReceipt,
   parseManagedReplState,
+  requireManagedAccountCookie,
   requireManagedApiKey,
 } from "../scripts/managed-account-auth.mjs";
 
 const API_KEY = `ncx_live_${"i".repeat(12)}_${"s".repeat(43)}`;
+const ACCOUNT_COOKIE = `nanocodex_account=${"c".repeat(64)}`;
 const RECEIPT = {
   agent_id: "0198d3b9-a02a-7000-8000-000000000001",
   session_id: "0198d3b9-a02a-7000-8000-000000000001",
@@ -33,6 +36,27 @@ test("managed account headers override caller authorization", () => {
   });
   assert.equal(headers.get("authorization"), `Bearer ${API_KEY}`);
   assert.equal(headers.get("x-test"), "preserved");
+});
+
+test("managed WebSockets use a same-origin passkey session and strip bearer authority", () => {
+  assert.equal(
+    requireManagedAccountCookie({ NANOCODEX_ACCOUNT_COOKIE: ACCOUNT_COOKIE }),
+    ACCOUNT_COOKIE,
+  );
+  const options = managedAccountSessionWebSocketOptions(
+    ACCOUNT_COOKIE,
+    "https://worker.example/path",
+    { headers: { authorization: `Bearer ${API_KEY}`, "x-test": "preserved" } },
+  );
+  assert.deepEqual(options.headers, {
+    cookie: ACCOUNT_COOKIE,
+    origin: "https://worker.example",
+    "x-test": "preserved",
+  });
+  assert.throws(
+    () => requireManagedAccountCookie({ NANOCODEX_ACCOUNT_COOKIE: API_KEY }),
+    /must be one exact passkey session cookie/,
+  );
 });
 
 test("managed agent receipts are token-free and exact", () => {

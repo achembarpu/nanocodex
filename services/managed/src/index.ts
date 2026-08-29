@@ -90,7 +90,8 @@ import {
 } from "./device-host-protocol";
 import {
   classifyTurnFailure,
-  materializeTurnTerminal,
+  materializeTurnResolution,
+  type TurnResolution,
   type TurnTerminal,
 } from "./turn-completion";
 import {
@@ -152,6 +153,7 @@ export { ApiKeyRecord, NonceStorage, Organization, UserAccount } from "./account
 
 const MAX_CLIENT_MESSAGE_BYTES = 1024 * 1024;
 const MAX_ACTIVE_TURNS = 16;
+const MAX_PRE_ADMISSION_CANCELLATIONS = 64;
 const MAX_CLIENT_CONNECTIONS = 64;
 const MAX_REQUEST_BODY_BYTES = 1024 * 1024;
 const MAX_REALTIME_REQUEST_BYTES = 64 * 1024;
@@ -181,7 +183,7 @@ const DEFAULT_MULTIPLAYER_IO_TIMEOUT_MS = 10_000;
 const MAX_CLEANUP_RETRY_MS = 60_000;
 const SESSION_OWNER_ASSERTION = "x-nanocodex-owner-id";
 // Exact completed-turn receipts are retained by ManagedTurnArchive, so the
-// runtime journal does not need to duplicate them in each compacted checkpoint.
+// runtime state does not need to duplicate them in each compacted checkpoint.
 const MANAGED_TERMINAL_RECEIPT_RETENTION = 0;
 const SESSION_ORGANIZATION_ASSERTION = "x-nanocodex-session-organization-id";
 const SESSION_TEAM_ASSERTION = "x-nanocodex-session-team-id";
@@ -214,7 +216,7 @@ const MEMORY_REVIEW_CHECKPOINT = [
 ].join("\n");
 
 export interface Env extends AccountAuthEnv {
-  NANOCODEX_SESSIONS: DurableObjectNamespace<NanocodexSession>;
+  NANOCODEX_SESSIONS: DurableObjectNamespace<DurableAgentSession>;
   NANOCODEX_ROOMS: DurableObjectNamespace<MultiplayerRoom>;
   NANOCODEX_MULTIPLAYER_QUOTA: DurableObjectNamespace<MultiplayerQuota>;
   NANOCODEX_MEMORY: DurableObjectNamespace<MemoryScope>;
@@ -294,8 +296,6 @@ type InitialAccountContext = Readonly<{
 type ManagedTurnState =
   | "accepted"
   | "cancelling"
-  | "retryable"
-  | "blocked"
   | "completed"
   | "cancelled"
   | "failed";
@@ -327,7 +327,6 @@ type StreamMessage = Extract<ServerMessage,
   | { type: "turn_completed" }
   | { type: "turn_cancelled" }
   | { type: "turn_retryable" }
-  | { type: "turn_blocked" }
   | { type: "turn_failed" }
   | { type: "event" }
   | { type: "stream_failed" }
@@ -368,8 +367,9 @@ type ManagedRealtimeRouteResult = Readonly<{
   voice_session_id: string;
 }>;
 
-type ManagedTransition =
-  TurnTerminal | Extract<StreamMessage, { type: "turn_cancelling" }>;
+type ManagedTransition = TurnTerminal | Extract<StreamMessage, {
+  type: "turn_cancelling" | "turn_retryable";
+}>;
 
 type TurnAuthorization = Readonly<{
   capabilities: readonly OrganizationCapability[];
@@ -993,7 +993,7 @@ const DurableComputerSession = withWorkspace(
   }),
 );
 
-export class NanocodexSession extends DurableComputerSession {
+export class DurableAgentSession extends DurableComputerSession {
   #agent?: CloudflareAgent.Agent;
   #agentPromise?: Promise<CloudflareAgent.Agent>;
   #agentConstruction?: AgentConstructionOwnership;
@@ -1038,8 +1038,6 @@ export class NanocodexSession extends DurableComputerSession {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.ctx.storage.sql.exec(`
-      DROP TABLE IF EXISTS terminal_turns;
-      DROP TABLE IF EXISTS completed_operations;
       CREATE TABLE IF NOT EXISTS session_state (
         singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
         session_id TEXT NOT NULL UNIQUE,
@@ -1070,7 +1068,7 @@ export class NanocodexSession extends DurableComputerSession {
         dispatch_input_chunks INTEGER CHECK (dispatch_input_chunks IS NULL OR dispatch_input_chunks > 0),
         authorization_json TEXT NOT NULL,
         state TEXT NOT NULL CHECK (
-          state IN ('accepted', 'cancelling', 'retryable', 'blocked', 'completed', 'cancelled', 'failed')
+          state IN ('accepted', 'cancelling', 'completed', 'cancelled', 'failed')
         ),
         accepted_cursor INTEGER NOT NULL,
         terminal_json TEXT,
@@ -1085,6 +1083,10 @@ export class NanocodexSession extends DurableComputerSession {
       );
       CREATE UNIQUE INDEX IF NOT EXISTS managed_turns_request_key
         ON managed_turns(request_key) WHERE request_key IS NOT NULL;
+      CREATE TABLE IF NOT EXISTS managed_turn_cancel_intents (
+        turn_id TEXT PRIMARY KEY,
+        created_at INTEGER NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS managed_turn_dispatch_chunks (
         turn_id TEXT NOT NULL,
         chunk_index INTEGER NOT NULL,
@@ -1172,137 +1174,7 @@ export class NanocodexSession extends DurableComputerSession {
       this.ctx.id.toString(),
       optionalPositiveInteger(this.env.MANAGED_REALTIME_ARCHIVE_RECENT_OPERATIONS),
     );
-    const sessionColumns = new Set(
-      this.ctx.storage.sql
-        .exec<{ name: string }>("PRAGMA table_info(session_state)")
-        .toArray()
-        .map((column) => column.name),
-    );
-    if (!sessionColumns.has("public_origin")) {
-      this.ctx.storage.sql.exec(
-        "ALTER TABLE session_state ADD COLUMN public_origin TEXT NOT NULL DEFAULT ''",
-      );
-    }
-    if (!sessionColumns.has("owner_id")) {
-      this.ctx.storage.sql.exec(
-        "ALTER TABLE session_state ADD COLUMN owner_id TEXT NOT NULL DEFAULT ''",
-      );
-    }
-    if (!sessionColumns.has("organization_id")) {
-      this.ctx.storage.sql.exec(
-        "ALTER TABLE session_state ADD COLUMN organization_id TEXT NOT NULL DEFAULT ''",
-      );
-    }
-    if (!sessionColumns.has("team_id")) {
-      this.ctx.storage.sql.exec(
-        "ALTER TABLE session_state ADD COLUMN team_id TEXT NOT NULL DEFAULT ''",
-      );
-    }
-    if (!sessionColumns.has("authorization_epoch")) {
-      this.ctx.storage.sql.exec(
-        "ALTER TABLE session_state ADD COLUMN authorization_epoch INTEGER NOT NULL DEFAULT 0",
-      );
-    }
-    if (!sessionColumns.has("stream_error")) {
-      this.ctx.storage.sql.exec("ALTER TABLE session_state ADD COLUMN stream_error TEXT");
-    }
-    if (!sessionColumns.has("runtime_profile")) {
-      this.ctx.storage.sql.exec(
-        "ALTER TABLE session_state ADD COLUMN runtime_profile TEXT NOT NULL DEFAULT 'managed'",
-      );
-    }
-    if (!sessionColumns.has("accepted_turns")) {
-      this.ctx.storage.sql.exec(
-        "ALTER TABLE session_state ADD COLUMN accepted_turns INTEGER NOT NULL DEFAULT 0 CHECK (accepted_turns >= 0)",
-      );
-      this.ctx.storage.sql.exec(
-        "UPDATE session_state SET accepted_turns = (SELECT COUNT(*) FROM managed_turns)",
-      );
-    }
-    if (!sessionColumns.has("first_prompt")) {
-      this.ctx.storage.sql.exec(
-        "ALTER TABLE session_state ADD COLUMN first_prompt TEXT NOT NULL DEFAULT ''",
-      );
-      const retainedFirstPrompt = this.ctx.storage.sql.exec<{ input_json: string }>(
-        "SELECT input_json FROM managed_turns ORDER BY created_at, id LIMIT 1",
-      ).toArray()[0]?.input_json;
-      if (retainedFirstPrompt !== undefined) {
-        try {
-          this.ctx.storage.sql.exec(
-            "UPDATE session_state SET first_prompt = ? WHERE singleton = 1",
-            promptInputText(JSON.parse(retainedFirstPrompt) as PromptInput),
-          );
-        } catch { /* Invalid retained input fails through its normal recovery path. */ }
-      }
-    }
-    const managedTurnColumns = new Set(this.ctx.storage.sql.exec<{ name: string }>(
-      "PRAGMA table_info(managed_turns)",
-    ).toArray().map((column) => column.name));
-    if (!managedTurnColumns.has("may_have_inner_operation")) {
-      // Pre-upgrade unfinished rows may already own an inner Rust journal
-      // operation. Conservatively replay them instead of orphaning that work.
-      this.ctx.storage.sql.exec(
-        "ALTER TABLE managed_turns ADD COLUMN may_have_inner_operation INTEGER NOT NULL DEFAULT 1 CHECK (may_have_inner_operation IN (0, 1))",
-      );
-    }
-    if (!managedTurnColumns.has("dispatch_input_chunks")) {
-      this.ctx.storage.sql.exec(
-        "ALTER TABLE managed_turns ADD COLUMN dispatch_input_chunks INTEGER CHECK (dispatch_input_chunks IS NULL OR dispatch_input_chunks > 0)",
-      );
-    }
-    const realtimeOperationColumns = new Set(
-      this.ctx.storage.sql
-        .exec<{ name: string }>("PRAGMA table_info(managed_realtime_operations)")
-        .toArray()
-        .map((column) => column.name),
-    );
-    if (!realtimeOperationColumns.has("blocked")) {
-      this.ctx.storage.sql.exec(
-        "ALTER TABLE managed_realtime_operations ADD COLUMN blocked INTEGER NOT NULL DEFAULT 0 CHECK (blocked IN (0, 1))",
-      );
-    }
-    const realtimeSessionColumns = new Set(
-      this.ctx.storage.sql
-        .exec<{ name: string }>("PRAGMA table_info(managed_realtime_session)")
-        .toArray()
-        .map((column) => column.name),
-    );
-    if (!realtimeSessionColumns.has("authorization_json")) {
-      this.ctx.storage.sql.exec(
-        `ALTER TABLE managed_realtime_session ADD COLUMN authorization_json TEXT NOT NULL
-         DEFAULT '{"capabilities":[]}'`,
-      );
-    }
-    const migrationNow = Date.now();
-    this.ctx.storage.sql.exec(
-      `UPDATE managed_realtime_operations
-       SET blocked = 1, updated_at = ?
-       WHERE state = 'pending' AND blocked = 0`,
-      migrationNow,
-    );
-    // Older realtime routing persisted a synthetic managed ID while Rust
-    // admitted the operation under a different generated UUID. There is no
-    // retained authoritative mapping between them, so replay must fail closed
-    // instead of admitting duplicate work under the synthetic ID.
-    this.ctx.storage.sql.exec(
-      `UPDATE managed_turns
-       SET state = 'blocked', retry_at = NULL,
-           error = 'pre-upgrade realtime turn has an indeterminate durable operation identity',
-           updated_at = ?
-       WHERE request_key LIKE 'realtime:%'
-         AND length(id) = 57
-         AND substr(id, 1, 9) = 'realtime:'
-         AND substr(id, 10) NOT GLOB '*[^0-9a-f]*'
-         AND state IN ('accepted', 'cancelling', 'retryable')`,
-      migrationNow,
-    );
     this.#deleted = this.#initializationOwnership()?.state === "deleted";
-    if (!managedTurnColumns.has("authorization_json")) {
-      this.ctx.storage.sql.exec(
-        `ALTER TABLE managed_turns ADD COLUMN authorization_json TEXT NOT NULL
-         DEFAULT '{"capabilities":[]}'`,
-      );
-    }
     this.#streamError = this.#session()?.stream_error ?? undefined;
     this.ctx.blockConcurrencyWhile(async () => {
       const [deleting, credentialBinding, deletionGeneration] = await Promise.all([
@@ -2858,19 +2730,15 @@ export class NanocodexSession extends DurableComputerSession {
     let row: ManagedTurnRow | undefined;
     try { row = await this.#findManagedTurn(id); }
     catch (error) { return managedErrorResponse(error, "turn_archive_unavailable"); }
-    if (!row) return json({ error: "turn_not_found" }, { status: 404 });
-    if (isTerminalState(row.state)) return json(managedTurnView(row));
-    if (row.state === "blocked") {
-      return json(
-        {
-          error: "turn_blocked",
-          message:
-            row.error ??
-            "the durable operation requires explicit reconciliation",
-        },
-        { status: 409 },
-      );
+    if (!row) {
+      try {
+        row = this.#reservePreAdmissionCancellation(id);
+      } catch (error) {
+        return managedErrorResponse(error, "cancel_failed");
+      }
+      if (!row) return json({ turn_id: id, state: "cancelling" }, { status: 202 });
     }
+    if (isTerminalState(row.state)) return json(managedTurnView(row));
     try {
       const cancelling = this.#markCancelling(id);
       this.#scheduleCancellation(cancelling.id);
@@ -2893,16 +2761,6 @@ export class NanocodexSession extends DurableComputerSession {
         503,
         "event_stream_failed",
         this.#streamError,
-      );
-    }
-    const blocked = this.#managedTurns(
-      "WHERE state = 'blocked' ORDER BY updated_at LIMIT 1",
-    )[0];
-    if (blocked) {
-      throw new ManagedRequestError(
-        409,
-        "agent_blocked",
-        `turn ${blocked.id} requires reconciliation before new work`,
       );
     }
     if (this.#unfinishedTurnCount() >= MAX_ACTIVE_TURNS) {
@@ -3032,7 +2890,7 @@ export class NanocodexSession extends DurableComputerSession {
       turn.dispose();
       if (this.#deleting) return;
       const failure = classifyTurnFailure(id, error);
-      this.#commitManagedFailure(id, error, false, failure.terminal);
+      this.#commitManagedResolution(id, failure);
       if (failure.reopenAgent) await this.#reopenAgent(id);
       this.#scheduleRecovery();
       await this.#scheduleNextAlarm();
@@ -3079,9 +2937,8 @@ export class NanocodexSession extends DurableComputerSession {
       }
       if (existing.state === "cancelling") {
         this.#scheduleCancellation(existing.id);
-      } else if (!isTerminalState(existing.state) && existing.state !== "blocked") {
-        if (existing.state === "retryable"
-          && existing.retry_at !== null
+      } else if (!isTerminalState(existing.state)) {
+        if (existing.retry_at !== null
           && existing.retry_at > Date.now()) {
           // Idempotent polling must preserve the retained retry deadline. It
           // may race the recovery task that just wrote the row, so install the
@@ -3103,14 +2960,6 @@ export class NanocodexSession extends DurableComputerSession {
     if (this.#streamError) {
       throw new ManagedRequestError(503, "event_stream_failed", this.#streamError);
     }
-    const blocked = this.#managedTurns("WHERE state = 'blocked' ORDER BY updated_at LIMIT 1")[0];
-    if (blocked) {
-      throw new ManagedRequestError(
-        409,
-        "agent_blocked",
-        `turn ${blocked.id} requires reconciliation before new work`,
-      );
-    }
     if (this.#unfinishedTurnCount() >= MAX_ACTIVE_TURNS) {
       throw new ManagedRequestError(429, "turn_queue_full", `at most ${MAX_ACTIVE_TURNS} turns may be unfinished`);
     }
@@ -3122,26 +2971,42 @@ export class NanocodexSession extends DurableComputerSession {
     const accepted: StreamMessage = { type: "turn_accepted", id, input, replayed: false };
     const firstPrompt = promptInputText(input);
     let event: DurableEvent<StreamMessage> | undefined;
+    let cancellingEvent: DurableEvent<StreamMessage> | undefined;
+    let cancellationRequested = false;
     this.ctx.storage.transactionSync(() => {
       if (this.#deleting || !this.#sessionId()) {
         throw new ManagedRequestError(409, "agent_deleting", "the agent is being deleted");
       }
+      cancellationRequested = this.ctx.storage.sql.exec<{ turn_id: string }>(
+        "SELECT turn_id FROM managed_turn_cancel_intents WHERE turn_id = ?",
+        id,
+      ).toArray()[0] !== undefined;
       event = this.#eventLog.append(accepted, id);
+      if (cancellationRequested) {
+        cancellingEvent = this.#eventLog.append({ type: "turn_cancelling", id }, id, true);
+      }
       this.ctx.storage.sql.exec(
         `INSERT INTO managed_turns (
            id, request_key, request_hash, input_json, authorization_json, state,
            accepted_cursor, may_have_inner_operation, created_at, accepted_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, 'accepted', CAST(? AS INTEGER), 0, ?, ?, ?)`,
+         ) VALUES (?, ?, ?, ?, ?, ?, CAST(? AS INTEGER), 0, ?, ?, ?)`,
         id,
         requestKey,
         requestHash,
         JSON.stringify(input),
         JSON.stringify(authorization),
+        cancellationRequested ? "cancelling" : "accepted",
         event.cursor,
         now,
         now,
         now,
       );
+      if (cancellationRequested) {
+        this.ctx.storage.sql.exec(
+          "DELETE FROM managed_turn_cancel_intents WHERE turn_id = ?",
+          id,
+        );
+      }
       this.ctx.storage.sql.exec(
         `UPDATE session_state
          SET accepted_turns = accepted_turns + 1,
@@ -3151,6 +3016,7 @@ export class NanocodexSession extends DurableComputerSession {
       );
     });
     this.#publish(event!);
+    if (cancellingEvent) this.#publish(cancellingEvent);
     this.#observe("managed.turn.accepted", {
       turn_id: id,
       transport: "managed",
@@ -3160,17 +3026,44 @@ export class NanocodexSession extends DurableComputerSession {
     });
     const row = this.#managedTurn(id);
     if (!row) throw new Error("managed turn disappeared after acceptance");
-    this.#scheduleRecovery();
+    if (cancellationRequested) this.#scheduleCancellation(id);
+    else this.#scheduleRecovery();
     return { created: true, row };
+  }
+
+  #reservePreAdmissionCancellation(id: string): ManagedTurnRow | undefined {
+    let concurrent: ManagedTurnRow | undefined;
+    this.ctx.storage.transactionSync(() => {
+      concurrent = this.#managedTurn(id);
+      if (concurrent) return;
+      const existing = this.ctx.storage.sql.exec<{ turn_id: string }>(
+        "SELECT turn_id FROM managed_turn_cancel_intents WHERE turn_id = ?",
+        id,
+      ).toArray()[0];
+      if (existing) return;
+      const count = this.ctx.storage.sql.exec<{ count: number }>(
+        "SELECT COUNT(*) AS count FROM managed_turn_cancel_intents",
+      ).one().count;
+      if (count >= MAX_PRE_ADMISSION_CANCELLATIONS) {
+        throw new ManagedRequestError(
+          429,
+          "cancellation_queue_full",
+          `at most ${MAX_PRE_ADMISSION_CANCELLATIONS} pre-admission cancellations may be retained`,
+        );
+      }
+      this.ctx.storage.sql.exec(
+        "INSERT INTO managed_turn_cancel_intents (turn_id, created_at) VALUES (?, ?)",
+        id,
+        Date.now(),
+      );
+    });
+    return concurrent;
   }
 
   #markCancelling(id: string): ManagedTurnRow {
     const current = this.#managedTurn(id);
     if (!current) throw new ManagedRequestError(404, "turn_not_found", `turn ${id} does not exist`);
     if (isTerminalState(current.state) || current.state === "cancelling") return current;
-    if (current.state === "blocked") {
-      throw new ManagedRequestError(409, "turn_blocked", current.error ?? "turn requires reconciliation");
-    }
     const message: StreamMessage = { type: "turn_cancelling", id };
     let event: DurableEvent<StreamMessage> | undefined;
     this.ctx.storage.transactionSync(() => {
@@ -3180,7 +3073,7 @@ export class NanocodexSession extends DurableComputerSession {
       this.ctx.storage.sql.exec(
         `UPDATE managed_turns
          SET state = 'cancelling', error = NULL, retry_at = NULL, updated_at = ?
-         WHERE id = ? AND state IN ('accepted', 'retryable')`,
+         WHERE id = ? AND state = 'accepted'`,
         Date.now(),
         id,
       );
@@ -3204,7 +3097,7 @@ export class NanocodexSession extends DurableComputerSession {
 
   async #cancelManagedTurn(id: string): Promise<void> {
     let row = this.#managedTurn(id);
-    if (!row || isTerminalState(row.state) || row.state === "blocked") return;
+    if (!row || isTerminalState(row.state)) return;
     if (row.state === "cancelling" && row.retry_at !== null && row.retry_at > Date.now()) {
       await this.#scheduleNextAlarm();
       return;
@@ -3212,7 +3105,7 @@ export class NanocodexSession extends DurableComputerSession {
     const admission = this.#admissionTasks.get(id);
     if (admission) await admission;
     row = this.#managedTurn(id);
-    if (!row || isTerminalState(row.state) || row.state === "blocked") return;
+    if (!row || isTerminalState(row.state)) return;
     let turn = this.#turns.get(id);
     if (!turn && row.may_have_inner_operation === 0) {
       this.#commitManagedMessage(id, { type: "turn_cancelled", id });
@@ -3221,7 +3114,7 @@ export class NanocodexSession extends DurableComputerSession {
     }
     if (!turn) {
       row = await this.#admitManagedTurn(row, true);
-      if (isTerminalState(row.state) || row.state === "blocked") return;
+      if (isTerminalState(row.state)) return;
       turn = this.#turns.get(id);
     }
     if (!turn) {
@@ -3232,7 +3125,7 @@ export class NanocodexSession extends DurableComputerSession {
       await turn.cancel();
     } catch (error) {
       if (this.#managedTurn(id)?.state === "cancelling") {
-        this.#commitManagedFailure(id, error, true);
+        this.#commitManagedResolution(id, classifyTurnFailure(id, error));
       }
       throw error;
     }
@@ -3255,8 +3148,8 @@ export class NanocodexSession extends DurableComputerSession {
 
   async #startManagedTurn(row: ManagedTurnRow, replayed: boolean): Promise<ManagedTurnRow> {
     const latest = this.#managedTurn(row.id);
-    if (!latest || isTerminalState(latest.state) || latest.state === "blocked") return latest ?? row;
-    if (latest.state === "retryable" && latest.retry_at !== null && latest.retry_at > Date.now()) {
+    if (!latest || isTerminalState(latest.state)) return latest ?? row;
+    if (latest.retry_at !== null && latest.retry_at > Date.now()) {
       await this.#scheduleNextAlarm();
       return latest;
     }
@@ -3269,7 +3162,6 @@ export class NanocodexSession extends DurableComputerSession {
       const agent = await this.#ensureAgent();
       if (this.#deleting || this.#agent !== agent) throw retryableError("agent became unavailable during admission");
       let dispatchInputJson = this.#managedDispatchInput(row);
-      let legacyDispatchCandidates: string[] | undefined;
       if (dispatchInputJson === undefined) {
         const initialAccountContext = await this.#initialAccountContext();
         const accountInput = initialAccountContext?.turn_id === row.id
@@ -3280,17 +3172,9 @@ export class NanocodexSession extends DurableComputerSession {
         const checkpointed = initialAccountContext !== undefined
           && initialAccountContext.turn_id !== row.id;
         dispatchInputJson = checkpointed ? checkpointInputJson : plainInputJson;
-        if (row.may_have_inner_operation === 1) {
-          // Before dispatch freezing, ordinary turns used either enriched
-          // form. Rust's exact durable-input check selects the historical form
-          // that already owns this operation.
-          legacyDispatchCandidates = checkpointed
-            ? [checkpointInputJson, plainInputJson]
-            : [plainInputJson, checkpointInputJson];
-        }
       }
       const dispatchable = this.#managedTurn(row.id);
-      if (!dispatchable || isTerminalState(dispatchable.state) || dispatchable.state === "blocked") {
+      if (!dispatchable || isTerminalState(dispatchable.state)) {
         this.#pendingTurnIds.delete(row.id);
         this.#turnInputs.delete(row.id);
         return dispatchable ?? row;
@@ -3302,47 +3186,15 @@ export class NanocodexSession extends DurableComputerSession {
       }
       dispatchInputJson = this.#managedDispatchInput(dispatchable) ?? dispatchInputJson;
       this.#eventTurnQueue.push(row.id);
-      if (legacyDispatchCandidates === undefined) {
-        // This transaction must stay immediately before prompt dispatch with
-        // no await between them. It freezes the exact Rust admission input
-        // before the operation can exist. A false positive is safely
-        // replayable; a false negative could orphan an accepted operation.
-        this.#freezeManagedDispatchInput(row.id, dispatchInputJson);
-      }
-      const candidates = legacyDispatchCandidates ?? [dispatchInputJson];
-      let durableId: string | undefined;
-      let acceptedInputJson: string | undefined;
-      for (let index = 0; index < candidates.length; index += 1) {
-        const candidate = candidates[index]!;
-        turn = agent.turn.prompt({
-          id: row.id,
-          input: JSON.parse(candidate) as PromptInput,
-        });
-        this.#turns.set(row.id, turn);
-        try {
-          durableId = await turn.accepted();
-          acceptedInputJson = candidate;
-          break;
-        } catch (error) {
-          if (legacyDispatchCandidates === undefined
-            || index === candidates.length - 1
-            || !isDurableInputConflict(error)) {
-            throw error;
-          }
-          if (this.#turns.get(row.id) === turn) this.#turns.delete(row.id);
-          turn.dispose();
-          turn = undefined;
-        }
-      }
-      if (acceptedInputJson === undefined || !turn) {
-        throw new Error(`durable admission did not settle turn ${row.id}`);
-      }
-      if (legacyDispatchCandidates !== undefined) {
-        // The operation predates this schema, so Rust is authoritative for
-        // which historical enrichment form was admitted. Freeze the exact
-        // candidate it accepted for every later replay.
-        this.#freezeManagedDispatchInput(row.id, acceptedInputJson);
-      }
+      // Freeze the exact Rust admission input immediately before dispatch.
+      // This is the only accepted representation of a managed operation.
+      this.#freezeManagedDispatchInput(row.id, dispatchInputJson);
+      turn = agent.turn.prompt({
+        id: row.id,
+        input: JSON.parse(dispatchInputJson) as PromptInput,
+      });
+      this.#turns.set(row.id, turn);
+      const durableId = await turn.accepted();
       if (durableId !== undefined && durableId !== row.id) {
         throw new Error(`durable admission returned unexpected turn id ${durableId}`);
       }
@@ -3353,15 +3205,11 @@ export class NanocodexSession extends DurableComputerSession {
       this.#pendingTurnIds.delete(row.id);
       this.ctx.storage.sql.exec(
         `UPDATE managed_turns
-         SET state = CASE
-               WHEN state = 'cancelling' THEN 'cancelling'
-               WHEN state = 'retryable' THEN 'retryable'
-               ELSE 'accepted'
-             END,
-             error = CASE WHEN state = 'retryable' THEN error ELSE NULL END,
-             retry_at = CASE WHEN state = 'retryable' THEN retry_at ELSE NULL END,
+         SET state = CASE WHEN state = 'cancelling' THEN 'cancelling' ELSE 'accepted' END,
+             error = NULL,
+             retry_at = NULL,
              updated_at = ?
-         WHERE id = ? AND state IN ('accepted', 'retryable', 'cancelling')`,
+         WHERE id = ? AND state IN ('accepted', 'cancelling')`,
         Date.now(),
         row.id,
       );
@@ -3376,7 +3224,7 @@ export class NanocodexSession extends DurableComputerSession {
       this.#turnInputs.delete(row.id);
       if (this.#deleting) return this.#managedTurn(row.id) ?? row;
       const failure = classifyTurnFailure(row.id, error);
-      const failed = this.#commitManagedFailure(row.id, error, replayed, failure.terminal);
+      const failed = this.#commitManagedResolution(row.id, failure);
       if (failure.reopenAgent) await this.#reopenAgent(row.id);
       return failed;
     }
@@ -3488,7 +3336,7 @@ export class NanocodexSession extends DurableComputerSession {
     });
     // A socket or admission event may have resumed while external cleanup was
     // awaited. The durable deletion marker makes those paths fail closed; close
-    // once more before dropping the owned journal and event history.
+    // once more before dropping the owned state and event history.
     for (const socket of this.ctx.getWebSockets()) closeSocket(socket, 1000, "session deleted");
     this.#assertDeletionGeneration(generation);
     while (this.#eventArchiveTask || this.#turnArchiveTask || this.#realtimeArchiveTask) {
@@ -3508,6 +3356,7 @@ export class NanocodexSession extends DurableComputerSession {
     this.ctx.storage.transactionSync(() => {
       this.ctx.storage.sql.exec("DELETE FROM managed_turn_dispatch_chunks");
       this.ctx.storage.sql.exec("DELETE FROM managed_turns");
+      this.ctx.storage.sql.exec("DELETE FROM managed_turn_cancel_intents");
       this.ctx.storage.sql.exec("DELETE FROM history_projection_outbox");
       this.ctx.storage.sql.exec("DELETE FROM turn_history_citations");
       this.#eventLog.clear();
@@ -3627,16 +3476,14 @@ export class NanocodexSession extends DurableComputerSession {
   async #runRecovery(observedAt: number): Promise<void> {
     if (this.#deleting || !this.#sessionId() || this.#streamError) return;
     const rows = this.#managedTurns(
-      `WHERE state IN ('accepted', 'cancelling', 'retryable', 'blocked')
+      `WHERE state IN ('accepted', 'cancelling')
        ORDER BY created_at, rowid`,
     );
     for (const row of rows) {
       if (this.#deleting) return;
       const current = this.#managedTurn(row.id);
       if (!current || isTerminalState(current.state)) continue;
-      if (current.state === "blocked") break;
-      if ((current.state === "retryable" || current.state === "cancelling")
-        && current.retry_at !== null && current.retry_at > observedAt) break;
+      if (current.retry_at !== null && current.retry_at > observedAt) break;
       if (current.state === "cancelling") {
         const cancellation = this.#cancellationTasks.get(row.id);
         try {
@@ -3661,12 +3508,10 @@ export class NanocodexSession extends DurableComputerSession {
         validatePromptInput(JSON.parse(current.input_json));
         await this.#admitManagedTurn(current, true);
       } catch (error) {
-        this.#commitManagedFailure(current.id, error, true);
+        this.#commitManagedResolution(current.id, classifyTurnFailure(current.id, error));
       }
       const admitted = this.#managedTurn(current.id);
-      if (admitted && (admitted.state === "retryable"
-        || admitted.state === "cancelling"
-        || admitted.state === "blocked")) break;
+      if (admitted && (admitted.state === "cancelling" || admitted.retry_at !== null)) break;
     }
     await this.#scheduleNextAlarm();
   }
@@ -3935,17 +3780,6 @@ export class NanocodexSession extends DurableComputerSession {
     const constructionStartedAt = performance.now();
     const session = this.#session();
     if (!session) throw new Error("session is not initialized");
-    let retainedJournalBatches = 0;
-    try {
-      retainedJournalBatches = this.ctx.storage.sql.exec<{ batches: number }>(
-        "SELECT COUNT(*) AS batches FROM nanocodex_journal_batches",
-      ).one().batches;
-    } catch { /* The first construction has not initialized the journal yet. */ }
-    if (retainedJournalBatches > 1) {
-      await CloudflareAgent.compactDurability(this, {
-        terminalReceiptRetention: MANAGED_TERMINAL_RECEIPT_RETENTION,
-      });
-    }
     const multiplayer = session.runtime_profile === "multiplayer";
     if (!multiplayer) await this.#ensureCredentialBinding(session);
     const workspace = await getWorkspace(this);
@@ -4331,20 +4165,18 @@ export class NanocodexSession extends DurableComputerSession {
   async #complete(id: string, turn: Turn): Promise<void> {
     let reopenAgent = false;
     try {
-      let materialized = await materializeTurnTerminal(id, turn);
+      let materialized = await materializeTurnResolution(id, turn);
       if (this.#deleting) return;
       if (this.#reopenInterruptedTurnIds.has(id)
+        && materialized.kind === "terminal"
         && materialized.terminal.type === "turn_cancelled") {
         materialized = {
-          terminal: {
-            type: "turn_retryable",
-            id,
-            error: "turn was interrupted while reopening the durable Agent",
-          },
+          kind: "retry",
+          error: "turn was interrupted while reopening the durable Agent",
           reopenAgent: false,
         };
       }
-      if (materialized.terminal.type === "turn_completed") {
+      if (materialized.kind === "terminal" && materialized.terminal.type === "turn_completed") {
         materialized = {
           ...materialized,
           terminal: {
@@ -4355,7 +4187,7 @@ export class NanocodexSession extends DurableComputerSession {
       }
       reopenAgent = materialized.reopenAgent;
       try {
-        this.#commitManagedMessage(id, materialized.terminal);
+        this.#commitManagedResolution(id, materialized);
       } catch (error) {
         if (this.#deleting) return;
         try {
@@ -4381,21 +4213,25 @@ export class NanocodexSession extends DurableComputerSession {
     }
   }
 
-  #commitManagedFailure(
-    id: string,
-    error: unknown,
-    _replayed: boolean,
-    classified?: TurnTerminal,
-  ): ManagedTurnRow {
-    const failure = classified ?? classifyTurnFailure(id, error).terminal;
+  #commitManagedResolution(id: string, resolution: TurnResolution): ManagedTurnRow {
     const row = this.#managedTurn(id);
-    if (row?.state === "cancelling"
-      && failure.type !== "turn_cancelled"
-      && failure.type !== "turn_blocked") {
+    if (resolution.kind === "retry") {
+      return this.#commitManagedMessage(id, row?.state === "cancelling" ? {
+        type: "turn_cancelling",
+        id,
+        error: resolution.error,
+      } : {
+        type: "turn_retryable",
+        id,
+        error: resolution.error,
+      });
+    }
+    const failure = resolution.terminal;
+    if (row?.state === "cancelling" && failure.type !== "turn_cancelled") {
       return this.#commitManagedMessage(id, {
         type: "turn_cancelling",
         id,
-        error: "error" in failure ? failure.error : errorMessage(error),
+        error: "error" in failure ? failure.error : "cancellation did not settle",
       });
     }
     return this.#commitManagedMessage(id, failure);
@@ -4410,14 +4246,14 @@ export class NanocodexSession extends DurableComputerSession {
     this.ctx.storage.transactionSync(() => {
       const row = this.#managedTurn(id);
       if (!row) throw new Error(`managed turn ${id} disappeared`);
-      if (isTerminalState(row.state) || row.state === "blocked") {
+      if (isTerminalState(row.state)) {
         committed = row;
         return;
       }
 
       let message: ManagedTransition = requested;
       let state = managedStateForMessage(message);
-      if (row.state === "cancelling" && state === "retryable") {
+      if (row.state === "cancelling" && message.type === "turn_retryable") {
         message = {
           type: "turn_cancelling",
           id,
@@ -4427,7 +4263,7 @@ export class NanocodexSession extends DurableComputerSession {
       }
       let attemptCount = row.attempt_count;
       let retryAt: number | null = null;
-      const retrying = state === "retryable"
+      const retrying = message.type === "turn_retryable"
         || (state === "cancelling" && "error" in message && message.error !== undefined);
       if (retrying) {
         const detail = "error" in message ? message.error ?? null : null;
@@ -4438,25 +4274,6 @@ export class NanocodexSession extends DurableComputerSession {
         attemptCount = Math.min(Number.MAX_SAFE_INTEGER, attemptCount + 1);
         retryAt = now + retryDelayMs(attemptCount);
         if (message.type === "turn_cancelling") message = { ...message, retry_at: retryAt };
-        if (row.state === state) {
-          this.ctx.storage.sql.exec(
-            `UPDATE managed_turns
-             SET error = ?, attempt_count = ?, retry_at = ?, updated_at = ?
-             WHERE id = ? AND state = ?`,
-            detail,
-            attemptCount,
-            retryAt,
-            now,
-            id,
-            state,
-          );
-          this.ctx.storage.sql.exec(
-            "UPDATE session_state SET last_active = ? WHERE singleton = 1",
-            now,
-          );
-          committed = this.#managedTurn(id) ?? row;
-          return;
-        }
       }
 
       const terminal = isTerminalState(state);
@@ -4521,7 +4338,7 @@ export class NanocodexSession extends DurableComputerSession {
           ? "success"
           : committed.state === "cancelled"
           ? "cancelled"
-          : committed.state === "failed" || committed.state === "blocked"
+          : committed.state === "failed"
           ? "failure"
           : "pending",
         message_type: event.message.type,
@@ -5095,7 +4912,7 @@ export class NanocodexSession extends DurableComputerSession {
     const chunks = dispatchInputChunks(inputJson);
     this.ctx.storage.transactionSync(() => {
       const current = this.#managedTurn(id);
-      if (!current || isTerminalState(current.state) || current.state === "blocked") return;
+      if (!current || isTerminalState(current.state)) return;
       const retained = this.#managedDispatchInput(current);
       if (retained !== undefined) {
         if (retained !== inputJson) {
@@ -5116,7 +4933,7 @@ export class NanocodexSession extends DurableComputerSession {
         `UPDATE managed_turns
          SET dispatch_input_chunks = COALESCE(dispatch_input_chunks, ?),
              may_have_inner_operation = 1, updated_at = ?
-         WHERE id = ? AND state IN ('accepted', 'retryable', 'cancelling')`,
+         WHERE id = ? AND state IN ('accepted', 'cancelling')`,
         chunks.length,
         Date.now(),
         id,
@@ -5126,13 +4943,13 @@ export class NanocodexSession extends DurableComputerSession {
 
   #unfinishedTurnCount(): number {
     return this.ctx.storage.sql.exec<{ count: number }>(
-      "SELECT COUNT(*) AS count FROM managed_turns WHERE state IN ('accepted', 'cancelling', 'retryable', 'blocked')",
+      "SELECT COUNT(*) AS count FROM managed_turns WHERE state IN ('accepted', 'cancelling')",
     ).toArray()[0]?.count ?? 0;
   }
 
   #recoverableTurnCount(): number {
     return this.ctx.storage.sql.exec<{ count: number }>(
-      "SELECT COUNT(*) AS count FROM managed_turns WHERE state IN ('accepted', 'cancelling', 'retryable')",
+      "SELECT COUNT(*) AS count FROM managed_turns WHERE state IN ('accepted', 'cancelling')",
     ).toArray()[0]?.count ?? 0;
   }
 
@@ -5161,7 +4978,7 @@ export class NanocodexSession extends DurableComputerSession {
     }
     if (!this.#streamError) {
       for (const row of this.#managedTurns(
-        "WHERE state IN ('accepted', 'cancelling', 'retryable') ORDER BY created_at",
+        "WHERE state IN ('accepted', 'cancelling') ORDER BY created_at",
       )) {
         if (row.state === "cancelling") {
           if (!this.#cancellationTasks.has(row.id)) {
@@ -5177,7 +4994,7 @@ export class NanocodexSession extends DurableComputerSession {
           break;
         }
         if (this.#cancellationTasks.has(row.id)) break;
-        if (row.state === "retryable" && row.retry_at !== null) targets.push(row.retry_at);
+        if (row.retry_at !== null) targets.push(row.retry_at);
         else targets.push(now + 1);
         break;
       }
@@ -5364,10 +5181,6 @@ function dispatchInputChunks(input: string): string[] {
   return chunks;
 }
 
-function isDurableInputConflict(error: unknown): boolean {
-  return /durable operation `[^`]+` already has different input/.test(errorMessage(error));
-}
-
 function isHighSurrogate(codeUnit: number): boolean {
   return codeUnit >= 0xd800 && codeUnit <= 0xdbff;
 }
@@ -5419,11 +5232,8 @@ function messageForManagedTurn(row: ManagedTurnRow): ServerMessage {
     };
   }
   const input = JSON.parse(row.input_json) as PromptInput;
-  if (row.state === "retryable") {
+  if (row.state === "accepted" && row.retry_at !== null) {
     return { type: "turn_retryable", id: row.id, error: row.error ?? "turn will be retried" };
-  }
-  if (row.state === "blocked") {
-    return { type: "turn_blocked", id: row.id, error: row.error ?? "turn requires reconciliation" };
   }
   if (row.state === "cancelling") {
     return {
@@ -5451,8 +5261,7 @@ function managedStateForMessage(message: ManagedTransition): ManagedTurnState {
     case "turn_cancelling": return "cancelling";
     case "turn_completed": return "completed";
     case "turn_cancelled": return "cancelled";
-    case "turn_retryable": return "retryable";
-    case "turn_blocked": return "blocked";
+    case "turn_retryable": return "accepted";
     case "turn_failed": return "failed";
   }
 }
@@ -5486,7 +5295,7 @@ function managedMultiplayerTimeoutMs(env: Env): number {
 }
 
 async function requestSessionCleanup(
-  stub: DurableObjectStub<NanocodexSession>,
+  stub: DurableObjectStub<DurableAgentSession>,
   timeoutMs: number,
 ): Promise<void> {
   try {
@@ -5566,7 +5375,6 @@ function managedHttpError(error: unknown, fallbackCode = "managed_request_failed
   const code = (error as { code?: unknown } | null)?.code;
   if (code === "invalid_request") return { status: 400, code, message: errorMessage(error) };
   if (code === "conflict") return { status: 409, code, message: errorMessage(error) };
-  if (code === "blocked") return { status: 409, code, message: errorMessage(error) };
   if (code === "retryable") return { status: 503, code, message: errorMessage(error) };
   return { status: 500, code: fallbackCode, message: errorMessage(error) };
 }

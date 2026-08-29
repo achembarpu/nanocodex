@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import type { Turn, TurnResult, TurnUsage } from "nanocodex";
-import { classifyTurnFailure, materializeTurnTerminal } from "../src/turn-completion";
+import { classifyTurnFailure, materializeTurnResolution } from "../src/turn-completion";
 
 const usage = {
   input_tokens: 10,
@@ -14,12 +14,13 @@ const usage = {
   cost_status: "usage_not_reported",
 } satisfies TurnUsage;
 
-describe("materializeTurnTerminal", () => {
+describe("materializeTurnResolution", () => {
   it("awaits usage, preserves the protocol shape, and releases the result", async () => {
     const dispose = vi.fn();
     const result = turnResult({ dispose, usage: vi.fn(async () => usage) });
 
-    await expect(materializeTurnTerminal("turn-1", turnWith(result))).resolves.toEqual({
+    await expect(materializeTurnResolution("turn-1", turnWith(result))).resolves.toEqual({
+      kind: "terminal",
       terminal: {
         type: "turn_completed",
         id: "turn-1",
@@ -40,7 +41,8 @@ describe("materializeTurnTerminal", () => {
       usage: vi.fn(async () => { throw new Error("usage payload is invalid"); }),
     });
 
-    await expect(materializeTurnTerminal("turn-2", turnWith(result))).resolves.toEqual({
+    await expect(materializeTurnResolution("turn-2", turnWith(result))).resolves.toEqual({
+      kind: "terminal",
       terminal: {
         type: "turn_completed",
         id: "turn-2",
@@ -64,59 +66,40 @@ describe("materializeTurnTerminal", () => {
       },
     } as unknown as Turn;
 
-    await expect(materializeTurnTerminal("turn-3", turn)).resolves.toEqual({
-      terminal: {
-        type: "turn_retryable",
-        id: "turn-3",
-        error: "Agent connection rejected with HTTP 503: credential_broker_rejected",
-      },
+    await expect(materializeTurnResolution("turn-3", turn)).resolves.toEqual({
+      kind: "retry",
+      error: "Agent connection rejected with HTTP 503: credential_broker_rejected",
       reopenAgent: false,
     });
   });
 
   it.each([
-    ["retryable", "turn_retryable"],
-    ["blocked", "turn_blocked"],
+    ["retryable", "retry"],
     ["failed", "turn_failed"],
   ] as const)("preserves the WASM %s completion class", async (code, type) => {
     const error = Object.assign(new Error(`${code} turn`), { code });
     const turn = { result: async () => { throw error; } } as unknown as Turn;
 
-    await expect(materializeTurnTerminal("turn-4", turn)).resolves.toEqual({
-      terminal: {
-        type,
-        id: "turn-4",
-        error: `${code} turn`,
-      },
+    await expect(materializeTurnResolution("turn-4", turn)).resolves.toEqual(type === "retry" ? {
+      kind: "retry",
+      error: `${code} turn`,
+      reopenAgent: false,
+    } : {
+      kind: "terminal",
+      terminal: { type, id: "turn-4", error: `${code} turn` },
       reopenAgent: false,
     });
   });
 
   it("keeps reopen_required retryable while requiring a fresh Agent", () => {
-    const error = Object.assign(new Error("ambiguous outcome after durability owner was fenced"), {
+    const error = Object.assign(new Error("durability owner was fenced"), {
       code: "reopen_required",
     });
 
     expect(classifyTurnFailure("turn-reopen", error)).toEqual({
-      terminal: {
-        type: "turn_retryable",
-        id: "turn-reopen",
-        error: "ambiguous outcome after durability owner was fenced",
-      },
+      kind: "retry",
+      error: "durability owner was fenced",
       reopenAgent: true,
-    });
-  });
-
-  it("does not conflate blocked with reopen_required", () => {
-    const error = Object.assign(new Error("ambiguous durable step"), { code: "blocked" });
-
-    expect(classifyTurnFailure("turn-blocked", error)).toEqual({
-      terminal: {
-        type: "turn_blocked",
-        id: "turn-blocked",
-        error: "ambiguous durable step",
-      },
-      reopenAgent: false,
     });
   });
 
@@ -133,11 +116,8 @@ describe("materializeTurnTerminal", () => {
     );
 
     expect(classifyTurnFailure("turn-aggregate", aggregate)).toEqual({
-      terminal: {
-        type: "turn_retryable",
-        id: "turn-aggregate",
-        error: "durability owner must reopen",
-      },
+      kind: "retry",
+      error: "durability owner must reopen",
       reopenAgent: true,
     });
   });
@@ -150,11 +130,8 @@ describe("materializeTurnTerminal", () => {
     });
 
     expect(classifyTurnFailure("turn-nested-retry", failed)).toEqual({
-      terminal: {
-        type: "turn_retryable",
-        id: "turn-nested-retry",
-        error: "Agent connection rejected with HTTP 503: broker restarting",
-      },
+      kind: "retry",
+      error: "Agent connection rejected with HTTP 503: broker restarting",
       reopenAgent: false,
     });
   });
@@ -165,11 +142,8 @@ describe("materializeTurnTerminal", () => {
     ["Agent connection rejected with HTTP 503: upstream unavailable", false],
   ] as const)("keeps transient pre-admission failure retryable: %s", (message, reopenAgent) => {
     expect(classifyTurnFailure("turn-pre-admission", new Error(message))).toEqual({
-      terminal: {
-        type: "turn_retryable",
-        id: "turn-pre-admission",
-        error: message,
-      },
+      kind: "retry",
+      error: message,
       reopenAgent,
     });
   });

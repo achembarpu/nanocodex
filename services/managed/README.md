@@ -11,7 +11,7 @@ credentials live in a separate ordinary Worker from the
 object, WASM, browser state, room events, or managed-agent events.
 
 ```text
-N humans -> website proxy -> MultiplayerRoom -> private NanocodexSession
+N humans -> website proxy -> MultiplayerRoom -> private DurableAgentSession
                 |                  |                    |- room conversational profile
                 |                  |                    |- Rust/WASM typed history
                 |                  |                    `- placeholder transport --.
@@ -19,7 +19,7 @@ N humans -> website proxy -> MultiplayerRoom -> private NanocodexSession
                 |                  `- global MultiplayerQuota -----------------------|
                 `- create-only allocator capability                                 |
                                                                                     v
-account-authenticated REST/SSE or WebSocket -> NanocodexSession -> private EGRESS Service Binding
+account-authenticated REST/SSE or WebSocket -> DurableAgentSession -> private EGRESS Service Binding
                                                         |
                                                         v
                                             ordinary credential-broker Worker
@@ -50,11 +50,12 @@ binding other than the private broker capability.
 
 Hot follow-on turns reuse the same WASM agent, cache identity, typed history,
 and upstream socket. The Durable Object supplies only atomic load and
-compare-and-append over opaque batches. Rust/WASM owns operation deduplication,
-typed checkpoints, model-step replay, and tool-step ambiguity. Repeating a
-completed client turn ID returns the Rust-journaled terminal result without
-another model call; an unsafe tool whose completion was not committed is
-reported as ambiguous and is never silently executed twice.
+compare-and-replace over one opaque complete state. Rust/WASM owns operation deduplication,
+typed checkpoints, and recovery for model, warmup, compaction, and tool steps.
+Repeating a completed client turn ID returns the Rust-retained terminal result
+without another model call. An unsafe tool whose completion was not committed
+becomes one in-band unknown-outcome tool result and is never silently executed
+twice.
 
 The managed REST API durably commits a normalized request hash, turn row, and
 `turn_accepted` cursor before returning HTTP 202. Terminal state and its event
@@ -67,7 +68,7 @@ An outbound WebSocket prevents a Durable Object from hibernating while it is
 retained. A one-shot idle alarm therefore shuts down Nanocodex after 30 seconds
 (configurable), closing the OpenAI socket. Client WebSockets use Cloudflare's
 hibernation API and remain connected. Their next command wakes the object and
-rebuilds complete client-owned typed history from the Rust journal in SQLite. See Cloudflare's
+rebuilds complete client-owned typed history from the Rust state in SQLite. See Cloudflare's
 [Durable Object lifecycle](https://developers.cloudflare.com/durable-objects/concepts/durable-object-lifecycle/)
 and [WebSocket hibernation](https://developers.cloudflare.com/durable-objects/best-practices/websockets/)
 documentation for the underlying behavior.
@@ -198,7 +199,7 @@ the next batch, so a cursor-zero client cannot enqueue the whole retained log.
 A member `agent` target also commits an
 outbox row in `quota_pending` state. Only after that local transaction commits
 does the room idempotently admit the deployment-wide turn and submit one stable
-internal managed turn to its private `NanocodexSession`; a failed local commit
+internal managed turn to its private `DurableAgentSession`; a failed local commit
 therefore cannot consume global turn capacity. The room projects only the final
 assistant text or a bounded durable room failure. Projected replies are
 UTF-8-bounded to 16 KiB. A definitive global limit appends `rate_limited` and
@@ -206,7 +207,7 @@ completes that outbox row, so the room can recover after the quota window.
 Ambiguous quota, submit, or observation failures retry with the same stable ID
 and then append a durable `blocked` terminal before fencing the outbox, rather
 than manufacturing success or letting later work pass silently.
-Room deletion deletes exactly that owned agent and its journal before clearing
+Room deletion deletes exactly that owned agent and its durable state before clearing
 room state and releasing the quota lease; the Multiplayer profile never creates
 a Computer workspace.
 
@@ -287,12 +288,15 @@ curl -fsS -X DELETE \
   http://127.0.0.1:8787/v1/agents/<agent-id>
 ```
 
-Cancellation first persists `turn_cancelling`, publishes its cursor, and only
-then returns 202. Retryable admission/cancellation failures retain a durable
-attempt count and exponential retry time; an ambiguous operation becomes
-`turn_blocked` and fences later work until the application explicitly replaces
-the agent. Deletion clears the journal, managed rows, event log, and Computer
-workspace.
+Cancellation first persists its intent and only then returns 202. If it arrives
+before admission, the session reserves that turn ID (up to 64 outstanding
+reservations); a later matching submission enters `turn_cancelling` without
+dispatching model or tool work. An admitted cancellation publishes its
+resumable cursor. Transient admission/cancellation failures remain `accepted`
+or `cancelling` with a durable attempt count and exponential retry time. A
+recovered at-most-once tool with an unknown external outcome becomes a failed
+tool result without replaying the effect. Deletion clears the durable state, managed
+rows, cancellation reservations, event log, and Computer workspace.
 
 ## Organization history and memory
 
@@ -390,9 +394,10 @@ prompt. Set `NANOCODEX_REPL_STATE` to isolate another local REPL state file.
 
 This demonstrates durable client detachment plus step recovery, not a claim
 that arbitrary external effects are magically exactly once. A completed model
-step is replayed from the journal after Worker loss. A tool start without a
-committed completion stops with an explicit ambiguous-outcome error so the
-application can reconcile the external system before retrying.
+step is replayed from retained state after Worker loss. A tool start without a
+committed completion becomes an explicit unknown-outcome tool result; the
+effect is not repeated and the model may inspect or reconcile the external
+system.
 
 `smoke:managed` drives the complete REST/SSE contract: durable acceptance,
 idempotent replay and conflict, strict monotonic cursors, standard
@@ -624,7 +629,6 @@ Client WebSocket commands are JSON objects:
 
 The object streams contractual Nanocodex events as `{ "type": "event", ... }`
 and emits exactly one application terminal message, `turn_completed`,
-`turn_cancelled`, or `turn_failed`, for each accepted client turn. A
-`turn_blocked` state is deliberately nonterminal and fences subsequent work
-because the application must reconcile the ambiguous side effect or replace the
-agent.
+`turn_cancelled`, or `turn_failed`, for each accepted client turn. A transient
+retry emits `turn_retryable` while the row remains `accepted` or `cancelling`;
+the event is scheduling information, not another durable state.

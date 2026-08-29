@@ -262,14 +262,6 @@ function onMessage(message) {
   } else if (message.type === "turn_retryable") {
     setStatus("retrying", "warn");
     setActivity(message.error, true);
-  } else if (message.type === "turn_blocked") {
-    if (!state) return;
-    finishTurn(message.id);
-    state.messages.push({ role: "error", text: message.error, turn_id: message.id });
-    saveState();
-    renderMessages();
-    setStatus("blocked · replace agent", "bad");
-    setActivity(message.error, true);
   } else if (message.type === "error") {
     setActivity(message.code + ": " + message.message, true);
   }

@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { runBoundedProcess } from "./child-process.mjs";
 import { credentialSafeHttpOrigin } from "./credential-origin.mjs";
 import { managedAccountFetch } from "./managed-account-auth.mjs";
+import { createLocalSmokeAccount } from "./local-smoke-account.mjs";
 
 const managedRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const baseUrl = credentialSafeHttpOrigin(
@@ -23,8 +24,7 @@ const alpha = join(root, "alpha");
 const beta = join(root, "beta");
 const home = join(root, "home");
 let apiKey;
-let apiKeyId;
-let browserCookie;
+let credentials;
 let agentId;
 let failure;
 
@@ -35,7 +35,8 @@ try {
     writeFile(join(alpha, "workspace-origin.txt"), "literal-local-workspace-alpha\n"),
     writeFile(join(beta, "workspace-origin.txt"), "literal-local-workspace-beta\n"),
   ]);
-  ({ apiKey, apiKeyId, browserCookie } = await createLocalApiKey());
+  credentials = await createLocalSmokeAccount(baseUrl, "nanocodex2 local smoke");
+  apiKey = credentials.apiKey;
   const environment = {
     ...process.env,
     NANOCODEX_MANAGED_URL: baseUrl.origin,
@@ -97,24 +98,11 @@ try {
         : error;
     });
   }
-  if (apiKeyId && browserCookie) {
-    const revoked = await fetch(new URL(`/v1/api-keys/${apiKeyId}`, baseUrl), {
-      method: "DELETE",
-      headers: { cookie: browserCookie, origin: baseUrl.origin },
-    }).catch((error) => {
-      failure = failure
-        ? new AggregateError([failure, error], "nanocodex2 smoke and credential cleanup failed")
-        : error;
-      return undefined;
-    });
-    if (revoked && revoked.status !== 204 && revoked.status !== 404) {
-      const error = new Error(`local API key cleanup failed with HTTP ${revoked.status}`);
-      failure = failure
-        ? new AggregateError([failure, error], "nanocodex2 smoke and credential cleanup failed")
-        : error;
-    }
-    await revoked?.body?.cancel();
-  }
+  await credentials?.cleanup().catch((error) => {
+    failure = failure
+      ? new AggregateError([failure, error], "nanocodex2 smoke and credential cleanup failed")
+      : error;
+  });
   await rm(root, { recursive: true, force: true });
 }
 
@@ -228,37 +216,6 @@ async function assertAbsent(path) {
     throw error;
   }
   throw new Error(`${path} unexpectedly exists`);
-}
-
-async function createLocalApiKey() {
-  const account = await fetch(new URL("/v1/me", baseUrl));
-  assert(account.ok, `local account bootstrap failed with HTTP ${account.status}`);
-  await account.body?.cancel();
-  const cookie = account.headers.getSetCookie()[0]?.split(";", 1)[0];
-  assert(cookie, "local account bootstrap returned no session cookie");
-  const claim = await fetch(new URL("/v1/credentials/local-claim", baseUrl), {
-    method: "POST",
-    headers: { cookie, origin: baseUrl.origin },
-  });
-  assert(claim.ok, `local credential claim failed with HTTP ${claim.status}`);
-  await claim.body?.cancel();
-  const response = await fetch(new URL("/v1/api-keys", baseUrl), {
-    method: "POST",
-    headers: {
-      cookie,
-      "content-type": "application/json",
-      origin: baseUrl.origin,
-    },
-    body: JSON.stringify({ label: "nanocodex2 local smoke" }),
-  });
-  assert(response.status === 201, `local API key creation failed with HTTP ${response.status}`);
-  const value = await response.json();
-  assert(
-    typeof value.api_key === "string" && /^ncx_live_[A-Za-z0-9_-]{12}_[A-Za-z0-9_-]{43}$/.test(value.api_key),
-    "local API key creation returned an invalid key",
-  );
-  assert(typeof value.key?.id === "string", "local API key creation returned no key id");
-  return { apiKey: value.api_key, apiKeyId: value.key.id, browserCookie: cookie };
 }
 
 async function run(command, arguments_, cwd, env, label) {

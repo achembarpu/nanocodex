@@ -3,18 +3,17 @@ import type { Turn, TurnResult } from "nanocodex";
 import type { ServerMessage, TurnCompleted } from "./protocol";
 
 export type TurnTerminal = Extract<ServerMessage, {
-  type: "turn_completed" | "turn_cancelled" | "turn_retryable" | "turn_blocked" | "turn_failed";
+  type: "turn_completed" | "turn_cancelled" | "turn_failed";
 }>;
 
-export type MaterializedTurnTerminal = Readonly<{
-  terminal: TurnTerminal;
-  reopenAgent: boolean;
-}>;
+export type TurnResolution =
+  | Readonly<{ kind: "terminal"; terminal: TurnTerminal; reopenAgent: false }>
+  | Readonly<{ kind: "retry"; error: string; reopenAgent: boolean }>;
 
-export async function materializeTurnTerminal(
+export async function materializeTurnResolution(
   id: string,
   turn: Turn,
-): Promise<MaterializedTurnTerminal> {
+): Promise<TurnResolution> {
   let result: TurnResult | undefined;
   try {
     result = await turn.result();
@@ -26,6 +25,7 @@ export async function materializeTurnTerminal(
       usageError = errorMessage(error);
     }
     return {
+      kind: "terminal",
       terminal: {
         type: "turn_completed",
         id,
@@ -43,55 +43,26 @@ export async function materializeTurnTerminal(
   }
 }
 
-export function classifyTurnFailure(id: string, error: unknown): MaterializedTurnTerminal {
-  const failures = errorTree(error);
-  const selected = selectFailure(failures);
-  const code = selected.code;
-  const message = selected.message;
-  if (code === "cancelled") {
-    return { terminal: { type: "turn_cancelled", id }, reopenAgent: false };
-  }
-  if (code === "blocked") {
+export function classifyTurnFailure(id: string, error: unknown): TurnResolution {
+  const selected = selectFailure(errorTree(error));
+  if (selected.code === "cancelled" || /\bturn was cancelled\b/i.test(selected.message)) {
     return {
-      terminal: { type: "turn_blocked", id, error: message },
+      kind: "terminal",
+      terminal: { type: "turn_cancelled", id },
       reopenAgent: false,
     };
   }
-  if (code === "reopen_required") {
+  if (isRetryable(selected)) {
     return {
-      terminal: { type: "turn_retryable", id, error: message },
-      reopenAgent: true,
-    };
-  }
-  if (code === "retryable") {
-    return {
-      terminal: { type: "turn_retryable", id, error: message },
-      reopenAgent: false,
-    };
-  }
-  if (/\bagent (?:has been |was |is )?(?:already )?disposed\b/i.test(message)) {
-    return {
-      terminal: { type: "turn_retryable", id, error: message },
-      reopenAgent: true,
-    };
-  }
-  if (/\bturn was cancelled\b/i.test(message)) {
-    return { terminal: { type: "turn_cancelled", id }, reopenAgent: false };
-  }
-  if (/ambiguous outcome/i.test(message)) {
-    return {
-      terminal: { type: "turn_blocked", id, error: message },
-      reopenAgent: false,
-    };
-  }
-  if (/blocked by unfinished operation|already active|agent stopped|turn completed|durability (?:store|driver)|transport|websocket|startup (?:validation )?timed out|connection rejected with HTTP 5\d\d/i.test(message)) {
-    return {
-      terminal: { type: "turn_retryable", id, error: message },
-      reopenAgent: false,
+      kind: "retry",
+      error: selected.message,
+      reopenAgent: selected.code === "reopen_required"
+        || /\bagent (?:has been |was |is )?(?:already )?disposed\b/i.test(selected.message),
     };
   }
   return {
-    terminal: { type: "turn_failed", id, error: message },
+    kind: "terminal",
+    terminal: { type: "turn_failed", id, error: selected.message },
     reopenAgent: false,
   };
 }
@@ -117,26 +88,21 @@ function errorTree(root: unknown): ClassifiedError[] {
 }
 
 function selectFailure(failures: readonly ClassifiedError[]): ClassifiedError {
-  const codePrecedence = ["reopen_required", "blocked", "cancelled", "retryable"];
-  for (const code of codePrecedence) {
+  for (const code of ["reopen_required", "cancelled", "retryable"]) {
     const match = failures.find((failure) => failure.code === code);
     if (match) return match;
   }
-  const reopen = failures.find((failure) =>
-    /\bagent (?:has been |was |is )?(?:already )?disposed\b/i.test(failure.message)
-  );
-  if (reopen) return { code: "reopen_required", message: reopen.message };
-  const blocked = failures.find((failure) => /ambiguous outcome/i.test(failure.message));
-  if (blocked) return { code: "blocked", message: blocked.message };
-  const cancelled = failures.find((failure) => /\bturn was cancelled\b/i.test(failure.message));
-  if (cancelled) return { code: "cancelled", message: cancelled.message };
-  const retryable = failures.find((failure) =>
-    /blocked by unfinished operation|already active|agent stopped|turn completed|durability (?:store|driver)|transport|websocket|startup (?:validation )?timed out|connection rejected with HTTP 5\d\d/i.test(failure.message)
-  );
-  if (retryable) return { code: "retryable", message: retryable.message };
-  const failed = failures.find((failure) => failure.code === "failed");
-  if (failed) return failed;
-  return failures[0] ?? { code: undefined, message: "unknown turn failure" };
+  return failures.find((failure) => isRetryable(failure))
+    ?? failures.find((failure) => /\bturn was cancelled\b/i.test(failure.message))
+    ?? failures.find((failure) => failure.code === "failed")
+    ?? failures[0]
+    ?? { code: undefined, message: "unknown turn failure" };
+}
+
+function isRetryable(failure: ClassifiedError): boolean {
+  return failure.code === "reopen_required"
+    || failure.code === "retryable"
+    || /\bagent (?:has been |was |is )?(?:already )?disposed\b|already active|agent stopped|turn completed|durability (?:store|driver)|transport|websocket|startup (?:validation )?timed out|connection rejected with HTTP 5\d\d/i.test(failure.message);
 }
 
 function errorCode(error: unknown): string | undefined {
@@ -147,3 +113,5 @@ function errorCode(error: unknown): string | undefined {
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
+
+export type { TurnCompleted };

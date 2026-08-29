@@ -5,16 +5,17 @@ import { deleteWith503Retry } from "./cleanup-resource.mjs";
 import { credentialSafeHttpOrigin, credentialSafeUrl } from "./credential-origin.mjs";
 import {
   managedAccountFetch,
-  managedAccountWebSocketOptions,
+  managedAccountSessionWebSocketOptions,
   parseManagedAgentReceipt,
-  requireManagedApiKey,
 } from "./managed-account-auth.mjs";
+import { resolveManagedSmokeCredentials } from "./local-smoke-account.mjs";
 
 const baseUrl = credentialSafeHttpOrigin(
   process.env.NANOCODEX_WORKER_URL ?? "http://127.0.0.1:8787",
   "NANOCODEX_WORKER_URL",
 ).origin;
-const apiKey = requireManagedApiKey();
+const credentials = await resolveManagedSmokeCredentials(baseUrl, "managed live smoke");
+const { accountCookie, apiKey } = credentials;
 const terminalTimeoutMs = Number(process.env.NANOCODEX_SMOKE_TIMEOUT_MS ?? 180_000);
 const idleTimeoutMs = Number(process.env.NANOCODEX_SMOKE_IDLE_TIMEOUT_MS ?? 45_000);
 const cleanupTimeoutMs = positiveInteger("NANOCODEX_SMOKE_CLEANUP_TIMEOUT_MS", 30_000);
@@ -183,6 +184,13 @@ try {
         : error;
     }
   }
+  try {
+    await credentials.cleanup();
+  } catch (error) {
+    failure = failure
+      ? new AggregateError([failure, error], "Live smoke and credential cleanup failed")
+      : error;
+  }
 }
 
 if (failure) throw failure;
@@ -247,7 +255,7 @@ async function pollState(predicate, timeoutMs) {
 function connectClient() {
   const socket = new WebSocket(
     agent.websocket_url,
-    managedAccountWebSocketOptions(apiKey),
+    managedAccountSessionWebSocketOptions(accountCookie, baseUrl),
   );
   const inbox = createInbox(socket, (message) => {
     if (message.type === "event") agentEvents.push(message.event);
@@ -272,12 +280,11 @@ function disconnect(socket) {
 
 async function terminal(inbox, id, timeoutMs) {
   const message = await inbox.next(
-    (candidate) => ["turn_completed", "turn_failed", "turn_blocked", "turn_cancelled"].includes(candidate.type)
+    (candidate) => ["turn_completed", "turn_failed", "turn_cancelled"].includes(candidate.type)
       && candidate.id === id,
     timeoutMs,
   );
   if (message.type === "turn_failed") throw new Error(`turn ${id} failed: ${message.error}`);
-  if (message.type === "turn_blocked") throw new Error(`turn ${id} was blocked: ${message.error}`);
   if (message.type === "turn_cancelled") throw new Error(`turn ${id} was cancelled`);
   return message;
 }

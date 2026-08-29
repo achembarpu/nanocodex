@@ -5,7 +5,7 @@ import {
   observeAgentRelease,
   routePrompt,
 } from "../internal.mjs";
-import { compactDurableSession } from "../pkg-web/nanocodex.js";
+import { pruneDurableReceipts as pruneWasmDurableReceipts } from "../pkg-web/nanocodex.js";
 import * as Transport from "../browser/Transport.mjs";
 import { initializeBrowserEngine } from "../browser/engine.mjs";
 import { createCloudflareDurabilityStore } from "../runtime/cloudflare-durability-store.mjs";
@@ -41,7 +41,7 @@ const lifecycles = new WeakMap();
 /** @internal Binds the package-owned module to the public Cloudflare namespace. */
 export function bindAgent(module, hostAgent = HostAgent) {
   return Object.freeze({
-    compactDurability: (owner, options) => compactDurability(module, owner, options),
+    pruneDurableReceipts: (owner, options) => pruneDurableReceipts(module, owner, options),
     create: (owner, options) => create(module, owner, options, hostAgent),
     createEphemeral: (owner, options) => createEphemeral(module, owner, options),
     destroy,
@@ -70,42 +70,42 @@ export function destroy(owner) {
   const sessionId = storedSessionId(storage);
   storage.transactionSync(() => {
     if (sessionId !== undefined) {
-      const journalId = `cloudflare:${sessionId}`;
+      const stateId = `cloudflare:${sessionId}`;
       const retained = storage.sql.exec(
-        "SELECT fence FROM nanocodex_journal_owners WHERE journal_id = ?",
-        journalId,
+        "SELECT fence FROM nanocodex_durable_owners WHERE state_id = ?",
+        stateId,
       ).toArray();
       const fence = durabilityRevision(
         BigInt(durabilityRevision(retained[0]?.fence ?? "0")) + 1n,
       );
       storage.sql.exec(
-        `INSERT INTO nanocodex_journal_owners (journal_id, owner_id, fence) VALUES (?, ?, ?)
-         ON CONFLICT (journal_id) DO UPDATE SET owner_id = excluded.owner_id, fence = excluded.fence`,
-        journalId,
+        `INSERT INTO nanocodex_durable_owners (state_id, owner_id, fence) VALUES (?, ?, ?)
+         ON CONFLICT (state_id) DO UPDATE SET owner_id = excluded.owner_id, fence = excluded.fence`,
+        stateId,
         `destroy:${globalThis.crypto.randomUUID()}`,
         fence,
       );
       storage.sql.exec(
-        "DELETE FROM nanocodex_journal_batch_chunks WHERE journal_id = ?",
-        journalId,
+        "DELETE FROM nanocodex_durable_chunk_heads WHERE state_id = ?",
+        stateId,
       );
       storage.sql.exec(
-        "DELETE FROM nanocodex_journal_batches WHERE journal_id = ?",
-        journalId,
+        "DELETE FROM nanocodex_durable_state_chunks WHERE state_id = ?",
+        stateId,
       );
       storage.sql.exec(
-        "DELETE FROM nanocodex_journals WHERE journal_id = ?",
-        journalId,
+        "DELETE FROM nanocodex_durable_states WHERE state_id = ?",
+        stateId,
       );
     }
     clearCloudflareEventSocket(context);
   });
 }
 
-/** Compacts retained durable history before constructing the full Agent runtime. */
-export async function compactDurability(module, owner, options = {}) {
+/** Prunes old terminal receipts before constructing the full Agent runtime. */
+export async function pruneDurableReceipts(module, owner, options = {}) {
   if (!options || typeof options !== "object" || Array.isArray(options)) {
-    throw new TypeError("Cloudflare durability compaction options must be an object");
+    throw new TypeError("Cloudflare durability receipt-pruning options must be an object");
   }
   const terminalReceiptRetention = options.terminalReceiptRetention ?? 512;
   if (!Number.isSafeInteger(terminalReceiptRetention)
@@ -119,7 +119,7 @@ export async function compactDurability(module, owner, options = {}) {
     throw new Error("Cloudflare Agent lifecycle operation is already in progress");
   }
   if (lifecycle.active !== undefined) {
-    throw new Error("Cloudflare Agent shutdown must complete before compacting durability");
+    throw new Error("Cloudflare Agent shutdown must complete before pruning durability receipts");
   }
   lifecycle.creating = true;
   try {
@@ -128,17 +128,17 @@ export async function compactDurability(module, owner, options = {}) {
     initializeAgentStorage(storage);
     const sessionId = storedSessionId(storage);
     if (sessionId === undefined) return;
-    const journalId = `cloudflare:${sessionId}`;
+    const stateId = `cloudflare:${sessionId}`;
     const routeHost = {};
     const route = (await loadDurabilityRuntime()).own(
       routeHost,
       durability,
-      journalId,
+      stateId,
     );
     try {
       installHostBridge();
       await initializeBrowserEngine({ module });
-      await compactDurableSession(route.id, journalId, terminalReceiptRetention);
+      await pruneWasmDurableReceipts(route.id, stateId, terminalReceiptRetention);
     } finally {
       route.abandon();
     }

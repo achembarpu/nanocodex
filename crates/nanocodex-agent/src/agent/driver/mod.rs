@@ -1271,10 +1271,6 @@ where
                         checkpoint,
                     ));
                     match error.execution_policy_disposition() {
-                        Some(crate::ExecutionPolicyDisposition::Blocked) => {
-                            self.execution.release_turn(execution_turn).await;
-                            (model.emit_terminal("failed").and(Err(error)), false, None)
-                        }
                         Some(crate::ExecutionPolicyDisposition::Reopen) => {
                             (model.emit_terminal("failed").and(Err(error)), false, None)
                         }
@@ -1306,10 +1302,6 @@ where
                     }
                 }
                 Err(error) => match error.execution_policy_disposition() {
-                    Some(crate::ExecutionPolicyDisposition::Blocked) => {
-                        self.execution.release_turn(execution_turn).await;
-                        (model.emit_terminal("failed").and(Err(error)), false, None)
-                    }
                     Some(crate::ExecutionPolicyDisposition::Reopen) => {
                         (model.emit_terminal("failed").and(Err(error)), false, None)
                     }

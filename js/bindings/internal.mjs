@@ -516,45 +516,20 @@ const hostBridge = Object.freeze({
     // keeps that lookup instance-scoped for roots and Rust-spawned children.
     return requiredDefinitionHost(definitionHostId).toolDefinitions(sessionId);
   },
-  async durabilityAcquire(routeId, journalId, ownerId) {
-    return (await loadDurabilityRuntime()).acquire(routeId, journalId, ownerId);
+  async durabilityAcquire(routeId, stateId, ownerId) {
+    return (await loadDurabilityRuntime()).acquire(routeId, stateId, ownerId);
   },
-  async durabilityAcquirePage(routeId, journalId, ownerId, afterRevision) {
-    return (await loadDurabilityRuntime()).acquirePage(
-      routeId,
-      journalId,
-      ownerId,
-      afterRevision,
-    );
-  },
-  async durabilityAppend(
+  async durabilityReplace(
     routeId,
-    journalId,
+    stateId,
     ownerId,
     fence,
     expectedRevision,
     payload,
   ) {
-    return (await loadDurabilityRuntime()).append(
+    return (await loadDurabilityRuntime()).replace(
       routeId,
-      journalId,
-      ownerId,
-      fence,
-      expectedRevision,
-      payload,
-    );
-  },
-  async durabilityCompact(
-    routeId,
-    journalId,
-    ownerId,
-    fence,
-    expectedRevision,
-    payload,
-  ) {
-    return (await loadDurabilityRuntime()).compact(
-      routeId,
-      journalId,
+      stateId,
       ownerId,
       fence,
       expectedRevision,

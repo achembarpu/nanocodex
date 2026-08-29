@@ -1,283 +1,204 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import test from "node:test";
 
 import {
-  createPostgresDurabilityStore,
   UnknownPostgresCommitOutcomeError,
+  createPostgresDurabilityStore,
 } from "../runtime/postgres-durability-store.mjs";
 
-test("the PostgreSQL durability leaf is dependency-free and cold until first use", () => {
-  let calls = 0;
-  const store = createPostgresDurabilityStore({
-    connect() {
-      calls += 1;
-      throw new Error("cold store connected");
-    },
-    query() {
-      calls += 1;
-      throw new Error("cold store queried");
-    },
-  });
-
-  assert.equal(Object.isFrozen(store), true);
-  assert.equal(calls, 0);
+test("the PostgreSQL durability leaf is cold and validates its pool", async () => {
   assert.throws(
     () => createPostgresDurabilityStore({}),
-    /pool with connect and query methods/,
+    /requires a connection pool/,
   );
+  const pool = new MockPool();
+  const store = createPostgresDurabilityStore(pool);
+  assert.equal(pool.connects, 0);
+  assert.deepEqual(await store.load("state"), { revision: "0", payload: null });
+  assert.equal(pool.connects, 1);
+  await assert.rejects(store.load(""), /state ID must be a non-empty string/);
 });
 
-test("the PostgreSQL commit error retains its definite unknown-outcome identity", () => {
-  const cause = new Error("connection disappeared after COMMIT");
-  const error = new UnknownPostgresCommitOutcomeError("journal-1", cause);
-
-  assert.equal(error.name, "UnknownPostgresCommitOutcomeError");
-  assert.equal(error.cause, cause);
-  assert.match(error.message, /COMMIT outcome is unknown/);
-  assert.match(error.message, /journal-1/);
-});
-
-test("PostgreSQL retains owner fences separately and checks them before revisions", async () => {
-  const database = createPostgresDatabase();
-  const store = createPostgresDurabilityStore(database.pool);
-
-  const firstOwner = await store.acquire("journal-1", { ownerId: "worker-1" });
-  assert.deepEqual(firstOwner, {
-    ownerId: "worker-1",
+test("PostgreSQL fences owners before comparing complete-state revisions", async () => {
+  const pool = new MockPool();
+  const store = createPostgresDurabilityStore(pool);
+  const first = await store.acquire("state", { ownerId: "owner-1" });
+  assert.deepEqual(first, {
+    ownerId: "owner-1",
     fence: "1",
     revision: "0",
-    batches: [],
+    payload: null,
   });
-  assert.deepEqual(await store.append("journal-1", {
-    ownerId: firstOwner.ownerId,
-    fence: firstOwner.fence,
+  assert.deepEqual(await store.replace("state", {
+    ownerId: first.ownerId,
+    fence: first.fence,
     expectedRevision: "0",
     payload: "first",
-  }), { status: "appended", revision: "1" });
-
-  database.resetContent("journal-1");
-  const secondOwner = await store.acquire("journal-1", { ownerId: "worker-2" });
-  assert.deepEqual(secondOwner, {
-    ownerId: "worker-2",
+  }), { status: "replaced", revision: "1" });
+  assert.deepEqual(await store.replace("state", {
+    ownerId: first.ownerId,
+    fence: first.fence,
+    expectedRevision: "0",
+    payload: "conflict",
+  }), { status: "conflict", actualRevision: "1" });
+  const second = await store.acquire("state", { ownerId: "owner-2" });
+  assert.deepEqual(second, {
+    ownerId: "owner-2",
     fence: "2",
-    revision: "0",
-    batches: [],
+    revision: "1",
+    payload: "first",
   });
-
-  const queryBoundary = database.queries.length;
-  assert.deepEqual(await store.append("journal-1", {
-    ownerId: firstOwner.ownerId,
-    fence: firstOwner.fence,
+  assert.deepEqual(await store.replace("state", {
+    ownerId: first.ownerId,
+    fence: first.fence,
     expectedRevision: "999",
     payload: "stale",
   }), { status: "fenced" });
-  assert.deepEqual(
-    database.queries.slice(queryBoundary).map(normalizeSql),
-    [
-      "BEGIN",
-      "SELECT owner_id, fence::text AS fence FROM nanocodex_journal_owners WHERE journal_id = $1 FOR UPDATE",
-      "ROLLBACK",
-    ],
-  );
+});
 
-  assert.deepEqual(await store.append("journal-1", {
-    ownerId: secondOwner.ownerId,
-    fence: secondOwner.fence,
+test("PostgreSQL distinguishes rolled-back writes from unknown COMMIT outcomes", async () => {
+  const pool = new MockPool();
+  const store = createPostgresDurabilityStore(pool);
+  const owner = await store.acquire("state", { ownerId: "owner" });
+  pool.failNextUpsert = true;
+  assert.deepEqual(await store.replace("state", {
+    ...owner,
     expectedRevision: "0",
-    payload: "replacement",
-  }), { status: "appended", revision: "1" });
-  assert.deepEqual(await store.load("journal-1"), {
-    revision: "1",
-    batches: [{ revision: "1", payload: "replacement" }],
-  });
+    payload: "rolled-back",
+  }), { status: "not_committed", message: "injected upsert failure" });
+  assert.deepEqual(await store.load("state"), { revision: "0", payload: null });
+
+  pool.failNextCommit = true;
+  const releasesBefore = pool.releases.length;
+  await assert.rejects(
+    store.replace("state", { ...owner, expectedRevision: "0", payload: "maybe" }),
+    (error) => error instanceof UnknownPostgresCommitOutcomeError
+      && error.cause?.message === "injected commit failure",
+  );
+  assert.equal(pool.releases.length, releasesBefore + 1);
+  assert.equal(pool.releases.at(-1), true, "an ambiguous connection must be discarded once");
 });
 
-test("PostgreSQL rejects CHECK constraints that admit sampled values outside u64 domains", async () => {
-  for (const admittedProbe of [
-    { table: "nanocodex_journal_owners", value: "-1", label: "negative owner fence" },
-    { table: "nanocodex_journal_batches", value: "-1", label: "negative batch revision" },
-    {
-      table: "nanocodex_journals",
-      value: "18446744073709551617",
-      label: "journal revision farther above u64",
-    },
-  ]) {
-    const database = createPostgresDatabase({ admittedProbe });
-    const store = createPostgresDurabilityStore(database.pool);
-    await assert.rejects(
-      store.load("journal-1"),
-      new RegExp(`${admittedProbe.label} was accepted by its CHECK constraint`),
-    );
+test("PostgreSQL initialization rejects tables without the exact state primary keys", async () => {
+  const pool = new MockPool();
+  pool.primaryKeys = [{
+    table_name: "nanocodex_durable_owners",
+    column_name: "state_id",
+    ordinal_position: 1,
+  }];
+  await assert.rejects(
+    createPostgresDurabilityStore(pool).load("state"),
+    /each state_id must be the sole primary key/,
+  );
+});
+
+test("the PostgreSQL commit error retains its exact unknown-outcome identity", () => {
+  const cause = new Error("lost connection");
+  const error = new UnknownPostgresCommitOutcomeError("state", cause);
+  assert.equal(error.name, "UnknownPostgresCommitOutcomeError");
+  assert.equal(error.cause, cause);
+  assert.match(error.message, /state "state"/);
+});
+
+class MockPool {
+  constructor() {
+    this.connects = 0;
+    this.owners = new Map();
+    this.states = new Map();
+    this.failNextCommit = false;
+    this.failNextUpsert = false;
+    this.releases = [];
+    this.primaryKeys = schemaPrimaryKeys();
   }
-});
 
-function createPostgresDatabase({ admittedProbe } = {}) {
-  const owners = new Map();
-  const revisions = new Map();
-  const batches = [];
-  const queries = [];
-  const query = async (sql, args = []) => {
-    queries.push(sql);
-    const normalized = normalizeSql(sql);
-    const [journalId] = args;
-    if (
-      normalized === "BEGIN"
-      || normalized === "COMMIT"
-      || normalized === "ROLLBACK"
-      || normalized.startsWith("SAVEPOINT ")
-      || normalized.startsWith("ROLLBACK TO SAVEPOINT ")
-      || normalized.startsWith("RELEASE SAVEPOINT ")
-      || normalized.startsWith("SELECT pg_advisory_xact_lock")
-      || normalized.startsWith("CREATE TABLE")
-    ) {
+  async connect() {
+    this.connects += 1;
+    return new MockClient(this);
+  }
+
+  query(text, values) {
+    return new MockClient(this).query(text, values);
+  }
+}
+
+class MockClient {
+  constructor(pool) {
+    this.pool = pool;
+  }
+
+  async query(text, values = []) {
+    const sql = text.replace(/\s+/g, " ").trim();
+    if (sql === "BEGIN" || sql === "ROLLBACK" || sql.startsWith("CREATE TABLE")) {
       return { rows: [] };
     }
-    if (normalized.startsWith("SELECT table_name, column_name, data_type, is_nullable")) {
-      return { rows: canonicalPostgresColumns() };
-    }
-    if (normalized.includes("FROM pg_class AS retained_table")
-      && normalized.includes("JOIN pg_index AS retained_index")) {
-      return { rows: canonicalPostgresPrimaryKeys() };
-    }
-    if (normalized.includes("CROSS JOIN LATERAL unnest(retained_constraint.conkey, retained_constraint.confkey)")) {
-      return { rows: [{
-        source_column: "journal_id",
-        target_in_current_schema: true,
-        target_table: "nanocodex_journals",
-        target_column: "journal_id",
-        is_deferrable: false,
-        is_initially_deferred: false,
-      }] };
-    }
-    if (normalized.includes("retained_constraint.conkey = ARRAY[attribute.attnum]::smallint[]")) {
-      return { rows: canonicalPostgresChecks() };
-    }
-    if (typeof journalId === "string" && journalId.startsWith("nanocodex-schema-validator-")) {
-      const value = args[1];
-      const table = normalized.startsWith("INSERT INTO nanocodex_journal_owners")
-        ? "nanocodex_journal_owners"
-        : normalized.startsWith("INSERT INTO nanocodex_journals")
-          ? "nanocodex_journals"
-          : normalized.startsWith("INSERT INTO nanocodex_journal_batches")
-            ? "nanocodex_journal_batches"
-            : undefined;
-      const invalid = normalized.startsWith("INSERT INTO nanocodex_journal_owners")
-        ? ["-1", "0", "18446744073709551616", "18446744073709551617"].includes(value)
-        : normalized.startsWith("INSERT INTO nanocodex_journals")
-          ? ["-1", "18446744073709551616", "18446744073709551617"].includes(value)
-          : normalized.startsWith("INSERT INTO nanocodex_journal_batches")
-            && ["-1", "0", "18446744073709551616", "18446744073709551617"].includes(value);
-      const admitted = table === admittedProbe?.table && value === admittedProbe.value;
-      if (invalid && !admitted) {
-        const error = new Error("schema probe violated a CHECK constraint");
-        error.code = "23514";
-        throw error;
+    if (sql === "COMMIT") {
+      if (this.pool.failNextCommit) {
+        this.pool.failNextCommit = false;
+        throw new Error("injected commit failure");
       }
       return { rows: [] };
     }
-    if (normalized.startsWith("INSERT INTO nanocodex_journal_owners")) {
-      const previous = owners.get(journalId);
-      if (previous?.fence === "18446744073709551615") return { rows: [] };
+    if (sql.startsWith("SELECT pg_advisory_xact_lock")) return { rows: [{}] };
+    if (sql.includes("FROM information_schema.columns")) return { rows: schemaColumns() };
+    if (sql.includes("FROM information_schema.table_constraints")) {
+      return { rows: this.pool.primaryKeys };
+    }
+    if (sql.startsWith("INSERT INTO nanocodex_durable_owners")) {
+      const [stateId, ownerId] = values;
+      const previous = this.pool.owners.get(stateId);
       const fence = String(BigInt(previous?.fence ?? "0") + 1n);
-      owners.set(journalId, { owner_id: args[1], fence });
+      this.pool.owners.set(stateId, { owner_id: ownerId, fence });
       return { rows: [{ fence }] };
     }
-    if (normalized.startsWith("SELECT owner_id, fence::text AS fence")) {
-      const owner = owners.get(journalId);
-      return { rows: owner === undefined ? [] : [{ ...owner }] };
+    if (sql.startsWith("SELECT owner_id, fence::text FROM nanocodex_durable_owners")) {
+      const owner = this.pool.owners.get(values[0]);
+      return { rows: owner ? [owner] : [] };
     }
-    if (normalized.startsWith("INSERT INTO nanocodex_journals")) {
-      if (!revisions.has(journalId)) revisions.set(journalId, "0");
+    if (sql.startsWith("SELECT revision::text, payload FROM nanocodex_durable_states")) {
+      const state = this.pool.states.get(values[0]);
+      return { rows: state ? [state] : [] };
+    }
+    if (sql.startsWith("INSERT INTO nanocodex_durable_states")) {
+      if (this.pool.failNextUpsert) {
+        this.pool.failNextUpsert = false;
+        throw new Error("injected upsert failure");
+      }
+      this.pool.states.set(values[0], { revision: values[1], payload: values[2] });
       return { rows: [] };
     }
-    if (normalized.startsWith("UPDATE nanocodex_journals")) {
-      const expectedRevision = args[1];
-      const actualRevision = revisions.get(journalId);
-      if (actualRevision !== expectedRevision || actualRevision === "18446744073709551615") {
-        return { rows: [] };
-      }
-      const revision = String(BigInt(actualRevision) + 1n);
-      revisions.set(journalId, revision);
-      return { rows: [{ revision }] };
-    }
-    if (normalized.startsWith("SELECT revision::text AS revision")) {
-      const revision = revisions.get(journalId);
-      return { rows: revision === undefined ? [] : [{ revision }] };
-    }
-    if (normalized.startsWith("INSERT INTO nanocodex_journal_batches")) {
-      batches.push({ journalId, revision: args[1], payload: args[2] });
-      return { rows: [] };
-    }
-    if (normalized.startsWith("SELECT journal.revision::text AS head_revision")) {
-      const revision = revisions.get(journalId);
-      if (revision === undefined) return { rows: [] };
-      const storedBatches = batches.filter((batch) => batch.journalId === journalId);
-      return {
-        rows: storedBatches.length === 0
-          ? [{ head_revision: revision, batch_revision: null, payload: null }]
-          : storedBatches.map((batch) => ({
-            head_revision: revision,
-            batch_revision: batch.revision,
-            payload: batch.payload,
-          })),
-      };
-    }
-    throw new Error(`unexpected PostgreSQL query: ${normalized}`);
-  };
-  const client = { query, release() {} };
+    throw new Error(`unexpected SQL: ${sql}`);
+  }
+
+  release(discard = false) {
+    this.pool.releases.push(discard);
+  }
+}
+
+function schemaColumns() {
+  return [
+    column("nanocodex_durable_owners", "state_id", "text"),
+    column("nanocodex_durable_owners", "owner_id", "text"),
+    column("nanocodex_durable_owners", "fence", "numeric", 20, 0),
+    column("nanocodex_durable_states", "state_id", "text"),
+    column("nanocodex_durable_states", "revision", "numeric", 20, 0),
+    column("nanocodex_durable_states", "payload", "text"),
+  ];
+}
+
+function schemaPrimaryKeys() {
+  return [
+    { table_name: "nanocodex_durable_owners", column_name: "state_id", ordinal_position: 1 },
+    { table_name: "nanocodex_durable_states", column_name: "state_id", ordinal_position: 1 },
+  ];
+}
+
+function column(table_name, column_name, data_type, numeric_precision = null, numeric_scale = null) {
   return {
-    pool: { query, connect: async () => client },
-    queries,
-    resetContent(journalId) {
-      revisions.delete(journalId);
-      for (let index = batches.length - 1; index >= 0; index -= 1) {
-        if (batches[index].journalId === journalId) batches.splice(index, 1);
-      }
-    },
-  };
-}
-
-function canonicalPostgresColumns() {
-  return [
-    postgresColumn("nanocodex_journal_batches", "journal_id", "text"),
-    postgresColumn("nanocodex_journal_batches", "revision", "numeric", 20, 0),
-    postgresColumn("nanocodex_journal_batches", "payload", "text"),
-    postgresColumn("nanocodex_journal_owners", "journal_id", "text"),
-    postgresColumn("nanocodex_journal_owners", "owner_id", "text"),
-    postgresColumn("nanocodex_journal_owners", "fence", "numeric", 20, 0),
-    postgresColumn("nanocodex_journals", "journal_id", "text"),
-    postgresColumn("nanocodex_journals", "revision", "numeric", 20, 0),
-  ];
-}
-
-function canonicalPostgresPrimaryKeys() {
-  return [
-    { table_name: "nanocodex_journal_batches", column_name: "journal_id" },
-    { table_name: "nanocodex_journal_batches", column_name: "revision" },
-    { table_name: "nanocodex_journal_owners", column_name: "journal_id" },
-    { table_name: "nanocodex_journals", column_name: "journal_id" },
-  ];
-}
-
-function canonicalPostgresChecks() {
-  return [
-    { table_name: "nanocodex_journal_batches", column_name: "revision" },
-    { table_name: "nanocodex_journal_owners", column_name: "fence" },
-    { table_name: "nanocodex_journals", column_name: "revision" },
-  ];
-}
-
-function postgresColumn(tableName, columnName, dataType, numericPrecision = null, numericScale = null) {
-  return {
-    table_name: tableName,
-    column_name: columnName,
-    data_type: dataType,
+    table_name,
+    column_name,
+    data_type,
     is_nullable: "NO",
-    numeric_precision: numericPrecision,
-    numeric_scale: numericScale,
+    numeric_precision,
+    numeric_scale,
   };
-}
-
-function normalizeSql(sql) {
-  return sql.replace(/\s+/g, " ").trim();
 }

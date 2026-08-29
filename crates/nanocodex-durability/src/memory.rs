@@ -4,28 +4,18 @@ use tokio::sync::{mpsc, oneshot};
 
 #[cfg(not(target_family = "wasm"))]
 use crate::Error;
-use crate::{
-    JournalStore, OwnedJournal, OwnerId, OwnerToken, StoreError, StoreFuture, StoredBatch,
-    StoredJournal,
-};
+use crate::{OwnedState, OwnerId, OwnerToken, StateStore, StoreError, StoreFuture, StoredState};
 
 const COMMAND_CAPACITY: usize = 64;
 
 enum Command {
     AcquireOwner {
-        journal_id: String,
+        state_id: String,
         owner_id: OwnerId,
-        result: oneshot::Sender<Result<OwnedJournal, StoreError>>,
+        result: oneshot::Sender<Result<OwnedState, StoreError>>,
     },
-    Append {
-        journal_id: String,
-        owner: OwnerToken,
-        expected_revision: u64,
-        payload: String,
-        result: oneshot::Sender<Result<u64, StoreError>>,
-    },
-    Compact {
-        journal_id: String,
+    Replace {
+        state_id: String,
         owner: OwnerToken,
         expected_revision: u64,
         payload: String,
@@ -35,7 +25,7 @@ enum Command {
 
 /// Process-local store useful for tests and ephemeral native or WASM sessions.
 ///
-/// One spawned task owns all journal maps. Clones are command handles, allowing
+/// One spawned task owns all state maps. Clones are command handles, allowing
 /// a new [`crate::DurableSession`] driver to reopen the same process-local data
 /// without exposing shared mutable state.
 #[derive(Clone)]
@@ -48,17 +38,17 @@ impl MemoryStore {
     pub fn new() -> crate::Result<Self> {
         let (commands, mut receiver) = mpsc::channel(COMMAND_CAPACITY);
         let driver = async move {
-            let mut journals = HashMap::<String, StoredJournal>::new();
+            let mut states = HashMap::<String, StoredState>::new();
             let mut owners = HashMap::<String, OwnerToken>::new();
             while let Some(command) = receiver.recv().await {
                 match command {
                     Command::AcquireOwner {
-                        journal_id,
+                        state_id,
                         owner_id,
                         result,
                     } => {
                         let fence = owners
-                            .get(&journal_id)
+                            .get(&state_id)
                             .map_or(Some(1), |owner| owner.fence().checked_add(1));
                         let outcome = fence
                             .ok_or_else(|| {
@@ -68,72 +58,41 @@ impl MemoryStore {
                             })
                             .map(|fence| {
                                 let owner = OwnerToken::new(owner_id, fence);
-                                owners.insert(journal_id.clone(), owner.clone());
-                                OwnedJournal {
+                                owners.insert(state_id.clone(), owner.clone());
+                                OwnedState {
                                     owner,
-                                    journal: journals.get(&journal_id).cloned().unwrap_or_default(),
+                                    state: states.get(&state_id).cloned().unwrap_or_default(),
                                 }
                             });
                         drop(result.send(outcome));
                     }
-                    Command::Append {
-                        journal_id,
+                    Command::Replace {
+                        state_id,
                         owner,
                         expected_revision,
                         payload,
                         result,
                     } => {
-                        let outcome = if owners.get(&journal_id) != Some(&owner) {
+                        let outcome = if owners.get(&state_id) != Some(&owner) {
                             Err(StoreError::Fenced)
                         } else {
-                            let journal = journals.entry(journal_id).or_default();
-                            if journal.revision != expected_revision {
+                            let state = states.entry(state_id).or_default();
+                            if state.revision != expected_revision {
                                 Err(StoreError::Conflict {
                                     expected: expected_revision,
-                                    actual: journal.revision,
+                                    actual: state.revision,
                                 })
                             } else {
-                                match journal.revision.checked_add(1) {
+                                match state.revision.checked_add(1) {
                                     Some(revision) => {
-                                        journal.batches.push(StoredBatch { revision, payload });
-                                        journal.revision = revision;
+                                        state.payload = Some(payload);
+                                        state.revision = revision;
                                         Ok(revision)
                                     }
                                     None => Err(StoreError::NotCommitted(
                                         "in-memory durability revision overflow".to_owned(),
                                     )),
                                 }
-                            }
-                        };
-                        drop(result.send(outcome));
-                    }
-                    Command::Compact {
-                        journal_id,
-                        owner,
-                        expected_revision,
-                        payload,
-                        result,
-                    } => {
-                        let outcome = if owners.get(&journal_id) != Some(&owner) {
-                            Err(StoreError::Fenced)
-                        } else {
-                            let journal = journals.entry(journal_id).or_default();
-                            if journal.revision != expected_revision {
-                                Err(StoreError::Conflict {
-                                    expected: expected_revision,
-                                    actual: journal.revision,
-                                })
-                            } else if expected_revision == 0 {
-                                Err(StoreError::NotCommitted(
-                                    "cannot compact an empty in-memory durability journal"
-                                        .to_owned(),
-                                ))
-                            } else {
-                                journal.batches = vec![StoredBatch {
-                                    revision: expected_revision,
-                                    payload,
-                                }];
-                                Ok(expected_revision)
                             }
                         };
                         drop(result.send(outcome));
@@ -146,17 +105,17 @@ impl MemoryStore {
     }
 }
 
-impl JournalStore for MemoryStore {
-    fn acquire_owner<'a>(
+impl StateStore for MemoryStore {
+    fn acquire<'a>(
         &'a mut self,
-        journal_id: &'a str,
+        state_id: &'a str,
         owner_id: OwnerId,
-    ) -> StoreFuture<'a, Result<OwnedJournal, StoreError>> {
+    ) -> StoreFuture<'a, Result<OwnedState, StoreError>> {
         Box::pin(async move {
             let (result, receiver) = oneshot::channel();
             self.commands
                 .send(Command::AcquireOwner {
-                    journal_id: journal_id.to_owned(),
+                    state_id: state_id.to_owned(),
                     owner_id,
                     result,
                 })
@@ -166,9 +125,9 @@ impl JournalStore for MemoryStore {
         })
     }
 
-    fn append<'a>(
+    fn replace<'a>(
         &'a mut self,
-        journal_id: &'a str,
+        state_id: &'a str,
         owner: &'a OwnerToken,
         expected_revision: u64,
         payload: &'a str,
@@ -176,31 +135,8 @@ impl JournalStore for MemoryStore {
         Box::pin(async move {
             let (result, receiver) = oneshot::channel();
             self.commands
-                .send(Command::Append {
-                    journal_id: journal_id.to_owned(),
-                    owner: owner.clone(),
-                    expected_revision,
-                    payload: payload.to_owned(),
-                    result,
-                })
-                .await
-                .map_err(|_| stopped())?;
-            receiver.await.map_err(|_| stopped())?
-        })
-    }
-
-    fn compact<'a>(
-        &'a mut self,
-        journal_id: &'a str,
-        owner: &'a OwnerToken,
-        expected_revision: u64,
-        payload: &'a str,
-    ) -> StoreFuture<'a, Result<u64, StoreError>> {
-        Box::pin(async move {
-            let (result, receiver) = oneshot::channel();
-            self.commands
-                .send(Command::Compact {
-                    journal_id: journal_id.to_owned(),
+                .send(Command::Replace {
+                    state_id: state_id.to_owned(),
                     owner: owner.clone(),
                     expected_revision,
                     payload: payload.to_owned(),
@@ -238,68 +174,43 @@ mod tests {
     async fn acquisition_fences_stale_writer_before_revision_check() {
         let mut first = MemoryStore::new().unwrap();
         let mut second = first.clone();
-        let first_owned = first
-            .acquire_owner("journal", OwnerId::new())
-            .await
-            .unwrap();
+        let first_owned = first.acquire("state", OwnerId::new()).await.unwrap();
         assert_eq!(first_owned.owner.fence(), 1);
         first
-            .append("journal", &first_owned.owner, 0, "first")
+            .replace("state", &first_owned.owner, 0, "first")
             .await
             .unwrap();
 
-        let second_owned = second
-            .acquire_owner("journal", OwnerId::new())
-            .await
-            .unwrap();
+        let second_owned = second.acquire("state", OwnerId::new()).await.unwrap();
         assert_eq!(second_owned.owner.fence(), 2);
-        assert_eq!(second_owned.journal.revision, 1);
-        assert_eq!(second_owned.journal.batches[0].payload, "first");
+        assert_eq!(second_owned.state.revision, 1);
+        assert_eq!(second_owned.state.payload.as_deref(), Some("first"));
         assert_eq!(
             first
-                .append("journal", &first_owned.owner, u64::MAX, "stale")
+                .replace("state", &first_owned.owner, u64::MAX, "stale")
                 .await,
             Err(StoreError::Fenced)
         );
     }
 
     #[tokio::test]
-    async fn compaction_keeps_revision_and_fence_while_replacing_batches() {
+    async fn replace_overwrites_the_complete_value_and_advances_revision() {
         let mut store = MemoryStore::new().unwrap();
-        let owned = store
-            .acquire_owner("journal", OwnerId::new())
+        let owned = store.acquire("state", OwnerId::new()).await.unwrap();
+        store
+            .replace("state", &owned.owner, 0, "first")
             .await
             .unwrap();
         store
-            .append("journal", &owned.owner, 0, "first")
+            .replace("state", &owned.owner, 1, "second")
             .await
             .unwrap();
-        store
-            .append("journal", &owned.owner, 1, "second")
-            .await
-            .unwrap();
+        let reopened = store.acquire("state", OwnerId::new()).await.unwrap();
+        assert_eq!(reopened.state.revision, 2);
+        assert_eq!(reopened.state.payload.as_deref(), Some("second"));
         assert_eq!(
             store
-                .compact("journal", &owned.owner, 2, "checkpoint")
-                .await,
-            Ok(2)
-        );
-
-        let reopened = store
-            .acquire_owner("journal", OwnerId::new())
-            .await
-            .unwrap();
-        assert_eq!(reopened.journal.revision, 2);
-        assert_eq!(
-            reopened.journal.batches,
-            vec![StoredBatch {
-                revision: 2,
-                payload: "checkpoint".to_owned(),
-            }]
-        );
-        assert_eq!(
-            store
-                .compact("journal", &owned.owner, u64::MAX, "stale")
+                .replace("state", &owned.owner, u64::MAX, "stale")
                 .await,
             Err(StoreError::Fenced)
         );

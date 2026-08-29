@@ -1,25 +1,22 @@
-import {
-  createSqliteDurabilityStore,
-  durabilityRevision,
-  sqliteDurabilitySchema,
-} from "./durability-store.mjs";
+import { createSqliteDurabilityStore, sqliteDurabilitySchema } from "./durability-store.mjs";
 
-const ACQUIRE_PAGE_ROWS = 8;
 const DIRECT_PAYLOAD_BYTES = 1_000_000;
 const PAYLOAD_CHUNK_CODE_UNITS = 256_000;
-const MAX_REVISION = 18_446_744_073_709_551_615n;
 const encoder = new TextEncoder();
 
 const cloudflareDurabilitySchema = Object.freeze([
   ...sqliteDurabilitySchema,
-  `CREATE TABLE IF NOT EXISTS nanocodex_journal_batch_chunks (
-     journal_id TEXT NOT NULL,
+  `CREATE TABLE IF NOT EXISTS nanocodex_durable_chunk_heads (
+     state_id TEXT PRIMARY KEY,
+     revision TEXT NOT NULL,
+     chunk_count INTEGER NOT NULL CHECK (chunk_count > 0)
+   )`,
+  `CREATE TABLE IF NOT EXISTS nanocodex_durable_state_chunks (
+     state_id TEXT NOT NULL,
      revision TEXT NOT NULL,
      chunk_index INTEGER NOT NULL,
      payload TEXT NOT NULL,
-     PRIMARY KEY (journal_id, revision, chunk_index),
-     FOREIGN KEY (journal_id, revision)
-       REFERENCES nanocodex_journal_batches(journal_id, revision)
+     PRIMARY KEY (state_id, revision, chunk_index)
    )`,
 ]);
 
@@ -32,159 +29,113 @@ export function createCloudflareDurabilityStore(storage) {
   ) {
     throw new TypeError("Cloudflare durability requires Durable Object storage with SQLite");
   }
-
-  for (const statement of cloudflareDurabilitySchema) storage.sql.exec(statement);
-  const rawQuery = (sql, args) => {
+  const raw = (sql, args) => {
     const cursor = storage.sql.exec(sql, ...args);
     if (typeof cursor?.[Symbol.iterator] !== "function") return cursor.toArray();
-    const rows = [];
-    for (const row of cursor) rows.push(row);
-    return rows;
+    return [...cursor];
   };
+  for (const statement of cloudflareDurabilitySchema) storage.sql.exec(statement);
+  validateSchema(raw);
   const query = (sql, args) => {
-    if (sql.startsWith("INSERT INTO nanocodex_journal_batches")) {
-      return insertBatch(rawQuery, sql, args);
+    if (sql.startsWith("INSERT INTO nanocodex_durable_states")) {
+      return replaceState(raw, sql, args);
     }
-    if (sql.startsWith("DELETE FROM nanocodex_journal_batches")) {
-      rawQuery(
-        "DELETE FROM nanocodex_journal_batch_chunks WHERE journal_id = ?",
-        [args[0]],
-      );
-    }
-    const rows = rawQuery(sql, args);
-    return sql.includes("SELECT revision, payload FROM nanocodex_journal_batches")
-      ? hydrateBatchPayloads(rawQuery, args[0], rows)
+    const rows = raw(sql, args);
+    return sql.startsWith("SELECT revision, payload FROM nanocodex_durable_states")
+      ? hydrateState(raw, args[0], rows)
       : rows;
   };
-  const store = createSqliteDurabilityStore({
+  return createSqliteDurabilityStore({
     transaction: (callback) => storage.transactionSync(() => callback(query)),
-  });
-  return Object.freeze({
-    ...store,
-    acquirePage(journalId, request) {
-      const ownerId = request?.ownerId;
-      if (typeof ownerId !== "string" || !ownerId) {
-        throw new TypeError("durability owner ID must be a non-empty string");
-      }
-      const afterRevision = request?.afterRevision;
-      if (afterRevision !== undefined) durabilityRevision(afterRevision);
-      return storage.transactionSync(() => {
-        let owner;
-        if (afterRevision === undefined) {
-          const retained = query(
-            "SELECT owner_id, fence FROM nanocodex_journal_owners WHERE journal_id = ?",
-            [journalId],
-          )[0];
-          const previousFence = BigInt(durabilityRevision(retained?.fence ?? "0"));
-          if (previousFence === MAX_REVISION) {
-            throw new RangeError("Cloudflare durability fence overflow");
-          }
-          owner = { ownerId, fence: String(previousFence + 1n) };
-          query(
-            `INSERT INTO nanocodex_journal_owners (journal_id, owner_id, fence) VALUES (?, ?, ?)
-             ON CONFLICT (journal_id) DO UPDATE SET owner_id = excluded.owner_id, fence = excluded.fence`,
-            [journalId, owner.ownerId, owner.fence],
-          );
-        } else {
-          const retained = query(
-            "SELECT owner_id, fence FROM nanocodex_journal_owners WHERE journal_id = ?",
-            [journalId],
-          )[0];
-          if (retained?.owner_id !== ownerId) {
-            throw new Error("Cloudflare durability page owner was fenced");
-          }
-          owner = { ownerId, fence: durabilityRevision(retained.fence) };
-        }
-        const journal = query(
-          "SELECT revision FROM nanocodex_journals WHERE journal_id = ?",
-          [journalId],
-        )[0];
-        const revision = durabilityRevision(journal?.revision ?? "0");
-        const bindings = afterRevision === undefined
-          ? [journalId]
-          : [journalId, afterRevision, afterRevision, afterRevision];
-        const rows = query(
-          afterRevision === undefined
-            ? `SELECT revision, payload FROM nanocodex_journal_batches
-               WHERE journal_id = ? ORDER BY length(revision), revision LIMIT 9`
-            : `SELECT revision, payload FROM nanocodex_journal_batches
-               WHERE journal_id = ? AND (
-                 length(revision) > length(?) OR
-                 (length(revision) = length(?) AND revision > ?)
-               ) ORDER BY length(revision), revision LIMIT 9`,
-          bindings,
-        );
-        const hasMore = rows.length > ACQUIRE_PAGE_ROWS;
-        if (hasMore) rows.pop();
-        return {
-          ...owner,
-          revision,
-          batches: rows,
-          hasMore,
-        };
-      });
-    },
   });
 }
 
-function insertBatch(query, sql, args) {
-  const [journalId, revision, payload] = args;
+function validateSchema(query) {
+  const tables = [
+    ["nanocodex_durable_owners", [
+      ["state_id", "TEXT", 0, 1], ["owner_id", "TEXT", 1, 0], ["fence", "TEXT", 1, 0],
+    ]],
+    ["nanocodex_durable_states", [
+      ["state_id", "TEXT", 0, 1], ["revision", "TEXT", 1, 0], ["payload", "TEXT", 1, 0],
+    ]],
+    ["nanocodex_durable_chunk_heads", [
+      ["state_id", "TEXT", 0, 1], ["revision", "TEXT", 1, 0], ["chunk_count", "INTEGER", 1, 0],
+    ]],
+    ["nanocodex_durable_state_chunks", [
+      ["state_id", "TEXT", 1, 1], ["revision", "TEXT", 1, 2],
+      ["chunk_index", "INTEGER", 1, 3], ["payload", "TEXT", 1, 0],
+    ]],
+  ];
+  for (const [table, expected] of tables) {
+    const rows = query(`PRAGMA table_info('${table}')`, []);
+    const valid = rows.length === expected.length && rows.every((row, index) => {
+      const shape = expected[index];
+      return row.name === shape[0]
+        && String(row.type).toUpperCase() === shape[1]
+        && Number(row.notnull) === shape[2]
+        && Number(row.pk) === shape[3];
+    });
+    if (!valid) {
+      throw new Error(`incompatible Cloudflare durability schema for ${table}; recreate it`);
+    }
+  }
+}
+
+function replaceState(query, sql, [stateId, revision, payload]) {
   if (typeof payload !== "string") {
-    throw new TypeError("durability batch payload must be a string");
+    throw new TypeError("durability state payload must be a string");
   }
+  query("DELETE FROM nanocodex_durable_chunk_heads WHERE state_id = ?", [stateId]);
+  query("DELETE FROM nanocodex_durable_state_chunks WHERE state_id = ?", [stateId]);
   if (encoder.encode(payload).byteLength <= DIRECT_PAYLOAD_BYTES) {
-    return query(sql, args);
+    return query(sql, [stateId, revision, payload]);
   }
-  const result = query(sql, [journalId, revision, ""]);
+  const result = query(sql, [stateId, revision, ""]);
   const chunks = payloadChunks(payload);
+  query(
+    `INSERT INTO nanocodex_durable_chunk_heads (state_id, revision, chunk_count)
+     VALUES (?, ?, ?)`,
+    [stateId, revision, chunks.length],
+  );
   for (let index = 0; index < chunks.length; index += 1) {
     query(
-      `INSERT INTO nanocodex_journal_batch_chunks
-         (journal_id, revision, chunk_index, payload) VALUES (?, ?, ?, ?)`,
-      [journalId, revision, index, chunks[index]],
+      `INSERT INTO nanocodex_durable_state_chunks
+       (state_id, revision, chunk_index, payload) VALUES (?, ?, ?, ?)`,
+      [stateId, revision, index, chunks[index]],
     );
   }
   return result;
 }
 
-function hydrateBatchPayloads(query, journalId, batches) {
-  if (batches.length === 0) return batches;
-  const selected = [...new Set(
-    batches.map((batch) => durabilityRevision(batch.revision)),
-  )];
-  const payloads = new Map();
-  for (let offset = 0; offset < selected.length; offset += 99) {
-    const revisions = selected.slice(offset, offset + 99);
-    const placeholders = revisions.map(() => "?").join(", ");
-    const chunks = query(
-      `SELECT revision, chunk_index, payload FROM nanocodex_journal_batch_chunks
-       WHERE journal_id = ? AND revision IN (${placeholders})
-       ORDER BY length(revision), revision, chunk_index`,
-      [journalId, ...revisions],
-    );
-    for (const chunk of chunks) {
-      const revision = durabilityRevision(chunk.revision);
-      const retained = payloads.get(revision) ?? [];
-      if (chunk.chunk_index !== retained.length || typeof chunk.payload !== "string") {
-        throw new Error(`invalid Cloudflare durability chunks for revision ${revision}`);
-      }
-      retained.push(chunk.payload);
-      payloads.set(revision, retained);
+function hydrateState(query, stateId, rows) {
+  if (rows.length === 0) return rows;
+  if (rows.length !== 1) throw new Error("Cloudflare durability retained duplicate states");
+  const row = rows[0];
+  const head = query(
+    `SELECT revision, chunk_count FROM nanocodex_durable_chunk_heads
+     WHERE state_id = ?`,
+    [stateId],
+  )[0];
+  if (!head) return rows;
+  if (head.revision !== row.revision || row.payload !== "") {
+    throw new Error("invalid Cloudflare durability chunk head");
+  }
+  const chunks = query(
+    `SELECT revision, chunk_index, payload FROM nanocodex_durable_state_chunks
+     WHERE state_id = ? ORDER BY chunk_index`,
+    [stateId],
+  );
+  if (chunks.length !== head.chunk_count) {
+    throw new Error(`missing Cloudflare durability chunks for revision ${row.revision}`);
+  }
+  for (let index = 0; index < chunks.length; index += 1) {
+    const chunk = chunks[index];
+    if (chunk.revision !== row.revision || chunk.chunk_index !== index
+      || typeof chunk.payload !== "string") {
+      throw new Error(`invalid Cloudflare durability chunks for revision ${row.revision}`);
     }
   }
-  return batches.map((batch) => {
-    const chunks = payloads.get(durabilityRevision(batch.revision));
-    if (chunks === undefined) {
-      if (batch.payload === "") {
-        throw new Error(`missing Cloudflare durability chunks for revision ${batch.revision}`);
-      }
-      return batch;
-    }
-    if (batch.payload !== "") {
-      throw new Error(`invalid Cloudflare durability chunk head for revision ${batch.revision}`);
-    }
-    return { ...batch, payload: chunks.join("") };
-  });
+  return [{ ...row, payload: chunks.map((chunk) => chunk.payload).join("") }];
 }
 
 function payloadChunks(payload) {

@@ -121,6 +121,11 @@ where
             {
                 crate::agent::ExecutionStep::Execute => None,
                 crate::agent::ExecutionStep::Replay(output) => Some(output),
+                crate::agent::ExecutionStep::Unknown => {
+                    return Err(NanocodexError::InvalidAttemptState {
+                        detail: "idempotent model call was recovered as unknown",
+                    });
+                }
             }
         } else {
             None

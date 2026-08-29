@@ -3,19 +3,15 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 mod agent;
-mod journal;
 mod memory;
 #[cfg(all(feature = "postgres", not(target_family = "wasm")))]
 mod postgres;
 mod session;
 #[cfg(all(feature = "sqlite", not(target_family = "wasm")))]
 mod sqlite;
+mod state;
 mod store;
 
-pub use journal::{
-    EncodedPayload, Entry, JournalState, OperationState, OperationStatus, RetryPolicy, StepState,
-    StepStatus,
-};
 pub use memory::MemoryStore;
 #[cfg(all(feature = "postgres", not(target_family = "wasm")))]
 #[cfg_attr(
@@ -27,9 +23,12 @@ pub use session::{Admission, AutomaticAdmission, BeginStep, DurableSession};
 #[cfg(all(feature = "sqlite", not(target_family = "wasm")))]
 #[cfg_attr(docsrs, doc(cfg(all(feature = "sqlite", not(target_family = "wasm")))))]
 pub use sqlite::SqliteStore;
+pub use state::{
+    DurableState, EncodedPayload, OperationState, OperationStatus, RetryPolicy, StepState,
+    StepStatus, Transition,
+};
 pub use store::{
-    JournalStore, OwnedJournal, OwnerId, OwnerToken, StoreError, StoreFuture, StoredBatch,
-    StoredJournal,
+    OwnedState, OwnerId, OwnerToken, StateStore, StoreError, StoreFuture, StoredState,
 };
 
 /// Result returned by durability operations.
@@ -41,18 +40,18 @@ pub enum Error {
     /// The host store rejected or failed an operation.
     #[error(transparent)]
     Store(#[from] StoreError),
-    /// A stored journal batch could not be decoded.
-    #[error("durability journal batch {revision} is invalid: {source}")]
+    /// Stored state could not be decoded.
+    #[error("durability state at revision {revision} is invalid: {source}")]
     Decode {
-        /// Revision containing the invalid batch.
+        /// Revision containing the invalid state transition.
         revision: u64,
         /// JSON decoding failure.
         #[source]
         source: serde_json::Error,
     },
-    /// An entry violated the append-only journal state machine.
-    #[error("invalid durability journal: {0}")]
-    InvalidJournal(String),
+    /// Retained state violated the durability state machine.
+    #[error("invalid durability state: {0}")]
+    InvalidState(String),
     /// An operation ID was reused with different input.
     #[error("durable operation `{operation_id}` already has different input")]
     OperationConflict {
@@ -75,14 +74,6 @@ pub enum Error {
         /// Missing step.
         step_id: String,
     },
-    /// A step may have performed external side effects before the worker died.
-    #[error("durable step `{step_id}` in operation `{operation_id}` has an ambiguous outcome")]
-    AmbiguousStep {
-        /// Owning operation.
-        operation_id: String,
-        /// Ambiguous step.
-        step_id: String,
-    },
     /// A terminal operation cannot be changed.
     #[error("durable operation `{operation_id}` is already terminal")]
     OperationTerminal {
@@ -95,8 +86,8 @@ pub enum Error {
         /// Active operation identity.
         operation_id: String,
     },
-    /// A direct journal caller attempted to mutate state while an Agent owns it.
-    #[error("durability journal has a live authoritative model owner")]
+    /// A direct state caller attempted to mutate state while an Agent owns it.
+    #[error("durability state has a live authoritative model owner")]
     ModelOwnerActive,
     /// A superseded Agent attempted to use its stale model-owner capability.
     #[error("durability model owner was fenced by a newer owner")]
@@ -117,6 +108,12 @@ pub enum Error {
     #[error("durable operation `{operation_id}` already has an active attempt")]
     AttemptActive {
         /// Operation with a live attempt.
+        operation_id: String,
+    },
+    /// Active cancellation omitted the safe interrupted checkpoint.
+    #[error("active durable operation `{operation_id}` cancellation requires a checkpoint")]
+    CancellationCheckpointRequired {
+        /// Active operation that cannot be cancelled without a checkpoint.
         operation_id: String,
     },
     /// A native owner task was created without an active Tokio runtime.

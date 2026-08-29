@@ -124,19 +124,30 @@ test("the packed package ships and resolves every public entry point", async () 
         );
       }
       assert.equal(durabilityRevision(1n), "1");
-      assert.equal(createMemoryDurabilityStore("package-journal").journalId, "package-journal");
+      assert.equal(createMemoryDurabilityStore("package-state").stateId, "package-state");
       let cloudflareSchemaStatements = 0;
       const cloudflareStore = createCloudflareDurabilityStore({
         sql: {
-          exec() {
-            cloudflareSchemaStatements += 1;
-            return { toArray: () => [] };
+          exec(sql) {
+            if (sql.startsWith("CREATE TABLE")) cloudflareSchemaStatements += 1;
+            let rows = [];
+            if (sql.startsWith("PRAGMA table_info")) {
+              const shapes = sql.includes("nanocodex_durable_owners")
+                ? [["state_id", "TEXT", 0, 1], ["owner_id", "TEXT", 1, 0], ["fence", "TEXT", 1, 0]]
+                : sql.includes("nanocodex_durable_states")
+                  ? [["state_id", "TEXT", 0, 1], ["revision", "TEXT", 1, 0], ["payload", "TEXT", 1, 0]]
+                  : sql.includes("nanocodex_durable_chunk_heads")
+                    ? [["state_id", "TEXT", 0, 1], ["revision", "TEXT", 1, 0], ["chunk_count", "INTEGER", 1, 0]]
+                    : [["state_id", "TEXT", 1, 1], ["revision", "TEXT", 1, 2], ["chunk_index", "INTEGER", 1, 3], ["payload", "TEXT", 1, 0]];
+              rows = shapes.map(([name, type, notnull, pk], cid) => ({ cid, name, type, notnull, pk }));
+            }
+            return { toArray: () => rows };
           },
         },
         transactionSync(callback) { return callback(); },
       });
       assert.equal(Object.isFrozen(cloudflareStore), true);
-      assert.equal(cloudflareSchemaStatements, sqliteDurabilitySchema.length + 1);
+      assert.equal(cloudflareSchemaStatements, sqliteDurabilitySchema.length + 2);
       let postgresCalls = 0;
       const postgresStore = createPostgresDurabilityStore({
         connect() {

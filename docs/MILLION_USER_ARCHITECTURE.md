@@ -8,11 +8,11 @@ split between live coordination state and retained history.
 
 The initial instrumented Worker test proved four things:
 
-- one ordinary completed managed turn populated the append-only Rust durability
-  journal, the managed cursor log, and the managed turn receipt;
+- one ordinary completed managed turn replaced the single opaque Rust durable
+  state, populated the managed cursor log, and stored the managed turn receipt;
 - the same raw model/tool event content was retained in both the Cloudflare SDK
   event table and the managed cursor table;
-- the runtime journal ID is derived from the adapter's retained
+- the runtime state ID is derived from the adapter's retained
   `nanocodex_cloudflare_agent.session_id`, not the public managed agent ID; and
 - SQLite database size materially exceeds known JSON payload bytes, so indexes,
   workspace state, and page overhead must stay visible as an unattributed
@@ -31,13 +31,13 @@ The current implementation:
 - fixes `Agent.extend()` so nested adapter actions such as `events.connect` and
   `turn.route` are actually merged at runtime instead of existing only in the
   type declarations;
-- compacts 64 or more terminal Rust journal batches into one fenced checkpoint
-  batch without rewinding the revision, while retaining exact completed-ID
-  replay receipts and every unresolved operation; and
+- prunes old terminal receipts by replacing the complete fenced Rust state,
+  without rewinding the revision, while retaining the selected completed-ID
+  replay window and every unresolved operation; and
 - prevents a cold alarm from taking the idle-shutdown path while SQLite still
   owns accepted, cancelling, or retryable work. A real browser detach/reconnect
   run exposed this race: the outer turn remained accepted while repeated idle
-  shutdowns fenced admission before the first journal revision. The corrected
+  shutdowns fenced admission before the first state revision. The corrected
   run recovered that same accepted turn and committed its terminal after the
   browser re-authorized the reconnect.
 - seals old managed cursor events into immutable, checksum-verified R2
@@ -79,7 +79,7 @@ The hot durability head is now bounded by explicit policy. Model checkpoints,
 unresolved operations, ambiguous steps, recent exact receipts, recent managed
 events, and the small manifest head remain in SQLite. Closed cursor history and
 old exact receipts are immutable R2 data. The durable workspace remains a
-separate caller-visible storage budget; it is not journal history and is never
+separate caller-visible storage budget; it is not runtime state history and is never
 silently moved or expired.
 
 ## Production scale evidence
@@ -122,7 +122,7 @@ The governing rule is simple:
 
 > Every independently operating identity routes directly to its own atom of
 > coordination. No product request consults a global directory, allocator,
-> quota actor, journal owner, or deployment owner.
+> quota actor, durable-state owner, or deployment owner.
 
 ## Current topology
 
@@ -144,7 +144,7 @@ The governing rule is simple:
                   |                                      |                   |
                   v                                      v                   v
        +----------------------+              +------------------+   +------------------+
-       | Fixed-name auth DOs  |              | UserAccountDO    |   | NanocodexSession |
+       | Fixed-name auth DOs  |              | UserAccountDO    |   | DurableAgentSession |
        | account / webauthn / |              | keyed by user    |   | keyed by agent   |
        | account-link state   |              +------------------+   +---------+--------+
        +----------------------+              | one SQL row per  |             |
@@ -160,9 +160,8 @@ The governing rule is simple:
                  |  managed_realtime_operations pending + recent exact    |
                  |  archive manifests          bounded R2 ownership heads |
                  |  nanocodex_cloudflare_events disabled for managed mode |
-                 |  nanocodex_journal_owners   current fence              |
-                 |  nanocodex_journals         current revision           |
-                 |  nanocodex_journal_batches  checkpoint + recent tail   |
+                 |  nanocodex_durable_owners   current fence              |
+                 |  nanocodex_durable_states   one complete current state |
                  |  workspace / Computer state                            |
                  +--------------------------------------------------------+
                                                                           |
@@ -197,8 +196,8 @@ Current source anchors:
 - `services/managed/src/durable-events.ts` owns managed cursor replay;
 - `js/bindings/cloudflare/Agent.mjs` installs the raw AgentEvent projection;
 - `js/bindings/cloudflare/event-socket.mjs` retains raw AgentEvents;
-- `js/bindings/runtime/durability-store.mjs` retains and reloads journal
-  batches; and
+- `js/bindings/runtime/durability-store.mjs` retains and reloads one complete
+  current-state value; and
 - `services/egress/src/egress.ts` and `services/egress/src/broker.ts` route to
   and own the direct one-subject state machines.
 
@@ -218,19 +217,18 @@ churn is unbounded today. Deleting tombstones without another permanent
 anti-resurrection proof would reintroduce the race, so any compaction must first
 replace their semantic role rather than merely expire rows.
 
-### Durability journal
+### Durable state
 
-`nanocodex_journal_batches` stores one payload for every journal revision.
-Acquisition loads every retained batch in revision order and reduces the whole
-journal in memory. Terminal entries carry safe resumable checkpoints and
-results, so retained bytes can grow faster than the number of turns when those
-checkpoints are large.
+`nanocodex_durable_states` stores exactly one complete Rust-owned payload per
+agent. Acquisition reads that value in the same transaction that installs a
+new owner fence. Every replacement advances its revision; no historical
+storage prefix is loaded or reduced.
 
-The managed policy now compacts a terminal prefix after 64 retained batches
-and keeps only unresolved operations plus the 512 newest exact receipts in the
-live and stored Rust state. The outer managed receipt archive preserves older
-API replay identities. The latest checkpoint itself can still grow with the
-model's retained conversation and remains an explicit hot-head budget.
+The managed policy keeps unresolved operations plus the 512 newest exact
+receipts in the live and stored Rust state. The outer managed receipt archive
+preserves older API replay identities. The latest checkpoint itself can still
+grow with the model's retained conversation and remains an explicit hot-head
+budget.
 
 ### Managed turns and idempotency
 
@@ -262,7 +260,7 @@ opens.
 ### Workspace
 
 The retained Computer filesystem shares the session's Durable Object storage.
-It is not loaded as part of journal recovery, but it contributes independently
+It is not loaded as part of execution recovery, but it contributes independently
 to the per-agent SQLite size and requires its own retention policy.
 
 ## Remaining target topology
@@ -293,7 +291,7 @@ to the per-agent SQLite size and requires its own retention policy.
  | AgentDO(agent ID) -- sole authoritative owner                                    |
  |                                                                                  |
  | SQLite coordination head                                                         |
- |   owner epoch + journal fence                                                     |
+ |   owner epoch + durable-state fence                                               |
  |   latest resumable model checkpoint                                               |
  |   unresolved operations and tool steps                                            |
  |   bounded recent idempotency/terminal receipts                                    |
@@ -324,9 +322,9 @@ owner epoch. Egress verifies the capability statelessly and routes directly to
 
 ## SQLite and R2 boundary
 
-R2 should not become the live journal.
+R2 should not become the live execution state.
 
-The live journal needs atomic revision comparison, current-owner fencing,
+The live state needs atomic revision comparison, current-owner fencing,
 ordered admission, exact unresolved-operation state, and a checkpoint commit
 that agrees with the accepted terminal. Agent-local SQLite already owns those
 properties with the lowest coordination cost.
@@ -345,12 +343,12 @@ Keep only what is required to execute or recover the next operation:
 - unresolved operations and ambiguous tool steps;
 - a bounded recent idempotency and terminal-replay window;
 - recent events needed for reconnect-to-live delivery;
-- the next journal revision and event cursor;
+- the next state revision and event cursor;
 - a bounded recent segment window and immutable archive-index root; and
 - workspace metadata and actively retained files.
 
 Cold Agent construction reads this bounded head only. It never scans R2 and
-never replays the complete lifetime journal.
+never replays a lifetime mutation log because no such log exists.
 
 ### Immutable history body in R2
 
@@ -429,14 +427,14 @@ terminal boundary or from its own alarm.
 R2 should not preserve accidental duplication forever. The order of work is:
 
 1. **Implemented for owned tables:** measure bytes and rows independently for
-   journal batches, managed events, raw AgentEvents, turn receipts, realtime
+   the single Rust state, managed events, raw AgentEvents, turn receipts, realtime
    receipts, and the SQLite remainder. Computer workspace bytes are still part
    of the visible remainder and need a first-class Computer accounting API.
 2. **Implemented:** remove the second full event projection or make the managed
    stream a typed view over one canonical retained event log.
-3. **Implemented for capable stores:** teach the durability journal to
-   checkpoint and discard a closed prefix while retaining the latest
-   checkpoint, unresolved work, and a caller-selected recent replay window.
+3. **Implemented:** replace the total Rust state after pruning terminal
+   receipts, retaining the latest checkpoint, unresolved work, and a
+   caller-selected recent replay window.
 4. **Implemented:** keep recent reconnect and idempotency data locally and move
    older exact receipts to deterministic immutable R2 objects.
 5. **Implemented:** move closed managed-event prefixes into bounded immutable
@@ -448,13 +446,13 @@ Deletion is preferable to moving redundant data.
 
 Emit these dimensions per agent without requiring a global actor:
 
-- journal batch count and encoded bytes;
+- total-state row count and encoded bytes;
 - latest checkpoint bytes and checkpoint growth per completed turn;
 - managed event rows/bytes;
 - raw AgentEvent rows/bytes;
 - managed-turn rows, input bytes, and terminal bytes;
 - workspace file count and retained bytes;
-- cold journal load and reducer time;
+- cold state load and decode time;
 - cold Agent construction and restored upstream-connect time;
 - history-page latency from local SQLite and R2;
 - sealed segment size, upload duration, and compaction duration; and
@@ -470,7 +468,7 @@ them for cold-start and storage cost rather than guesswork.
 Decisions:
 
 - AgentDO SQLite remains the sole live durability authority.
-- R2 stores immutable historical bodies, never the mutable journal head.
+- R2 stores immutable application history, never the mutable execution state.
 - The latest complete resumable checkpoint remains local.
 - Every segment is agent-namespaced and content-addressed.
 - Every AgentDO compacts itself; there is no global compactor.

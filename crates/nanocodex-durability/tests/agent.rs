@@ -24,7 +24,7 @@ use nanocodex_agent::{
 use serde_json::json;
 
 use nanocodex_durability::{
-    DurableAgentExt, DurableSession, JournalStore, MemoryStore, OwnedJournal, OwnerId, OwnerToken,
+    DurableAgentExt, DurableSession, MemoryStore, OwnedState, OwnerId, OwnerToken, StateStore,
     StoreError, StoreFuture,
 };
 
@@ -39,7 +39,7 @@ fn test_session_id() -> SessionId {
 }
 
 #[derive(Clone)]
-struct FailAppendOnce {
+struct FailReplaceOnce {
     inner: crate::MemoryStore,
     expected_revision: u64,
     failed: Arc<std::sync::atomic::AtomicBool>,
@@ -53,33 +53,40 @@ struct FailEntryOnce {
     failed: Arc<AtomicBool>,
 }
 
-impl crate::JournalStore for FailEntryOnce {
-    fn acquire_owner<'a>(
+impl crate::StateStore for FailEntryOnce {
+    fn acquire<'a>(
         &'a mut self,
-        journal_id: &'a str,
+        state_id: &'a str,
         owner_id: crate::OwnerId,
-    ) -> crate::StoreFuture<'a, std::result::Result<crate::OwnedJournal, crate::StoreError>> {
-        self.inner.acquire_owner(journal_id, owner_id)
+    ) -> crate::StoreFuture<'a, std::result::Result<crate::OwnedState, crate::StoreError>> {
+        self.inner.acquire(state_id, owner_id)
     }
 
-    fn append<'a>(
+    fn replace<'a>(
         &'a mut self,
-        journal_id: &'a str,
+        state_id: &'a str,
         owner: &'a crate::OwnerToken,
         expected_revision: u64,
         payload: &'a str,
     ) -> crate::StoreFuture<'a, std::result::Result<u64, crate::StoreError>> {
-        let matches_entry = payload.contains(self.entry_tag)
-            && payload.contains(&format!("\"operation_id\":\"{}\"", self.operation_id));
+        let state: serde_json::Value = serde_json::from_str(payload)
+            .expect("durability fault injection receives a complete state value");
+        let operation_status =
+            &state["nanocodex_durable_state"]["operations"][self.operation_id]["status"];
+        let matches_entry = match self.entry_tag {
+            "\"operation_cancelled\"" => operation_status.get("cancelled").is_some(),
+            "\"operation_completed\"" => operation_status.get("completed").is_some(),
+            other => payload.contains(other),
+        };
         if matches_entry && !self.failed.swap(true, Ordering::SeqCst) {
             return Box::pin(async {
                 Err(crate::StoreError::NotCommitted(
-                    "injected entry append failure".to_owned(),
+                    "injected state replacement failure".to_owned(),
                 ))
             });
         }
         self.inner
-            .append(journal_id, owner, expected_revision, payload)
+            .replace(state_id, owner, expected_revision, payload)
     }
 }
 
@@ -90,50 +97,52 @@ struct GateCompactionAuthorization {
     release: Arc<tokio::sync::Notify>,
 }
 
-impl crate::JournalStore for GateCompactionAuthorization {
-    fn acquire_owner<'a>(
+impl crate::StateStore for GateCompactionAuthorization {
+    fn acquire<'a>(
         &'a mut self,
-        journal_id: &'a str,
+        state_id: &'a str,
         owner_id: crate::OwnerId,
-    ) -> crate::StoreFuture<'a, std::result::Result<crate::OwnedJournal, crate::StoreError>> {
-        self.inner.acquire_owner(journal_id, owner_id)
+    ) -> crate::StoreFuture<'a, std::result::Result<crate::OwnedState, crate::StoreError>> {
+        self.inner.acquire(state_id, owner_id)
     }
 
-    fn append<'a>(
+    fn replace<'a>(
         &'a mut self,
-        journal_id: &'a str,
+        state_id: &'a str,
         owner: &'a crate::OwnerToken,
         expected_revision: u64,
         payload: &'a str,
     ) -> crate::StoreFuture<'a, std::result::Result<u64, crate::StoreError>> {
-        if payload.contains("\"step_started\"") && payload.contains("\"kind\":\"compaction\"") {
+        if payload.contains("\"status\":\"effect_pending\"")
+            && payload.contains("\"kind\":\"compaction\"")
+        {
             let started = Arc::clone(&self.started);
             let release = Arc::clone(&self.release);
             return Box::pin(async move {
                 started.notify_one();
                 release.notified().await;
                 self.inner
-                    .append(journal_id, owner, expected_revision, payload)
+                    .replace(state_id, owner, expected_revision, payload)
                     .await
             });
         }
         self.inner
-            .append(journal_id, owner, expected_revision, payload)
+            .replace(state_id, owner, expected_revision, payload)
     }
 }
 
-impl crate::JournalStore for FailAppendOnce {
-    fn acquire_owner<'a>(
+impl crate::StateStore for FailReplaceOnce {
+    fn acquire<'a>(
         &'a mut self,
-        journal_id: &'a str,
+        state_id: &'a str,
         owner_id: crate::OwnerId,
-    ) -> crate::StoreFuture<'a, std::result::Result<crate::OwnedJournal, crate::StoreError>> {
-        self.inner.acquire_owner(journal_id, owner_id)
+    ) -> crate::StoreFuture<'a, std::result::Result<crate::OwnedState, crate::StoreError>> {
+        self.inner.acquire(state_id, owner_id)
     }
 
-    fn append<'a>(
+    fn replace<'a>(
         &'a mut self,
-        journal_id: &'a str,
+        state_id: &'a str,
         owner: &'a crate::OwnerToken,
         expected_revision: u64,
         payload: &'a str,
@@ -143,12 +152,12 @@ impl crate::JournalStore for FailAppendOnce {
         {
             return Box::pin(async {
                 Err(crate::StoreError::NotCommitted(
-                    "injected append failure".to_owned(),
+                    "injected replacement failure".to_owned(),
                 ))
             });
         }
         self.inner
-            .append(journal_id, owner, expected_revision, payload)
+            .replace(state_id, owner, expected_revision, payload)
     }
 }
 
@@ -927,7 +936,9 @@ impl tower::Service<nanocodex_oai_api::tower::ResponsesAttempt> for DurableToolS
 
     fn call(&mut self, request: nanocodex_oai_api::tower::ResponsesAttempt) -> Self::Future {
         use nanocodex_oai_api::{
-            responses::WarmupResponse,
+            responses::{
+                ContentItem, FunctionOutputBody, MessageRole, ResponseItem, WarmupResponse,
+            },
             tower::{
                 CodeCall, CodeCallKind, GenerationOutput, ResponsePipelineStats,
                 ResponsesAttemptKind, ResponsesOutput, ResponsesServiceResponse,
@@ -939,33 +950,67 @@ impl tower::Service<nanocodex_oai_api::tower::ResponsesAttempt> for DurableToolS
                 usage: None,
             }),
             ResponsesAttemptKind::Generation => {
-                self.generations
+                let generation = self
+                    .generations
                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                let item = serde_json::from_value(json!({
-                    "type": "function_call",
-                    "call_id": "call-count-once",
-                    "name": "count_once",
-                    "arguments": "{}"
-                }))
-                .expect("durable tool call item decodes");
-                ResponsesOutput::Generation(GenerationOutput {
-                    id: "durable-tool-response".to_owned(),
-                    status: "completed".to_owned(),
-                    end_turn: Some(false),
-                    final_message: None,
-                    output_items: vec![item],
-                    code_calls: vec![CodeCall {
-                        call_id: "call-count-once".to_owned(),
-                        name: "count_once".to_owned(),
-                        namespace: None,
-                        input: "{}".to_owned(),
-                        kind: CodeCallKind::Function,
-                    }],
-                    usage: None,
-                    time_to_first_event_ns: 0,
-                    time_to_first_output_ns: None,
-                    pipeline_stats: ResponsePipelineStats::default(),
-                })
+                if generation == 0 {
+                    let item = serde_json::from_value(json!({
+                        "type": "function_call",
+                        "call_id": "call-count-once",
+                        "name": "count_once",
+                        "arguments": "{}"
+                    }))
+                    .expect("durable tool call item decodes");
+                    ResponsesOutput::Generation(GenerationOutput {
+                        id: "durable-tool-response".to_owned(),
+                        status: "completed".to_owned(),
+                        end_turn: Some(false),
+                        final_message: None,
+                        output_items: vec![item],
+                        code_calls: vec![CodeCall {
+                            call_id: "call-count-once".to_owned(),
+                            name: "count_once".to_owned(),
+                            namespace: None,
+                            input: "{}".to_owned(),
+                            kind: CodeCallKind::Function,
+                        }],
+                        usage: None,
+                        time_to_first_event_ns: 0,
+                        time_to_first_output_ns: None,
+                        pipeline_stats: ResponsePipelineStats::default(),
+                    })
+                } else {
+                    let recovered_output = request.input_items().find_map(|item| match item {
+                        ResponseItem::FunctionCallOutput {
+                            call_id,
+                            output: FunctionOutputBody::Text(output),
+                            ..
+                        } if &**call_id == "call-count-once" => Some(output.as_ref()),
+                        _ => None,
+                    });
+                    assert!(
+                        recovered_output
+                            .expect("recovery must include the synthetic tool result")
+                            .contains("external outcome is unknown")
+                    );
+                    ResponsesOutput::Generation(GenerationOutput {
+                        id: "durable-tool-recovered-response".to_owned(),
+                        status: "completed".to_owned(),
+                        end_turn: Some(true),
+                        final_message: Some("recovered without repeating the tool".to_owned()),
+                        output_items: vec![ResponseItem::message(
+                            MessageRole::Assistant,
+                            [ContentItem::output_text(
+                                "recovered without repeating the tool",
+                            )],
+                        )],
+                        code_calls: Vec::new(),
+                        usage: None,
+                        time_to_first_event_ns: 0,
+                        time_to_first_output_ns: None,
+                        pipeline_stats: ResponsePipelineStats::default(),
+                    })
+                }
             }
             kind => panic!("unexpected durable tool attempt: {kind:?}"),
         };
@@ -1048,7 +1093,7 @@ impl tower::Service<nanocodex_oai_api::tower::ResponsesAttempt> for ReplayContin
                             item["type"] == "function_call"
                                 && item["call_id"] == "call-replay-fence"
                         })
-                        .expect("full replay retains the journaled model output");
+                        .expect("full replay retains the durable model output");
                     let tool_index = input
                         .iter()
                         .position(|item| {
@@ -1136,7 +1181,7 @@ impl tower::Service<nanocodex_oai_api::tower::ResponsesAttempt> for DurableRepla
 #[tokio::test]
 async fn durability_attached_builder_is_safe_single_use_across_clones() -> Result<()> {
     let store = MemoryStore::new()?;
-    let journal = DurableSession::open(store, "single-use-builder").await?;
+    let state = DurableSession::open(store, "single-use-builder").await?;
     let generations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let openai = OpenAi::builder("test-key")
         .service({
@@ -1149,7 +1194,7 @@ async fn durability_attached_builder_is_safe_single_use_across_clones() -> Resul
     let workspace = temporary_workspace("durability-single-use-builder")?;
     let builder = Nanocodex::builder(openai)
         .workspace(&workspace)
-        .durability(journal)
+        .durability(state)
         .await?;
     let duplicate = builder.clone();
 
@@ -1167,10 +1212,10 @@ async fn durability_attached_builder_is_safe_single_use_across_clones() -> Resul
 }
 
 #[tokio::test]
-async fn configured_durability_automatically_journals_plain_prompts() -> Result<()> {
+async fn configured_durability_automatically_persists_plain_prompts() -> Result<()> {
     let store = crate::MemoryStore::new()?;
-    let journal = crate::DurableSession::open(store, "automatic-prompt").await?;
-    let journal_state = journal.clone();
+    let state = crate::DurableSession::open(store, "automatic-prompt").await?;
+    let durable_state = state.clone();
     let generations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let openai = OpenAi::builder("test-key")
         .service({
@@ -1184,11 +1229,11 @@ async fn configured_durability_automatically_journals_plain_prompts() -> Result<
     let builder = Nanocodex::builder(openai)
         .workspace(&workspace)
         .session_id(test_session_id())
-        .durability(journal)
+        .durability(state)
         .await?;
     let (agent, events) = builder.build()?;
 
-    let turn = agent.prompt("journal this automatically").await?;
+    let turn = agent.prompt("state this automatically").await?;
     let generated_request_id = turn
         .request_id()
         .ok_or_else(|| eyre!("automatic durable request ID is missing"))?
@@ -1196,7 +1241,7 @@ async fn configured_durability_automatically_journals_plain_prompts() -> Result<
     let result = turn.result().await?;
     assert_eq!(result.final_message(), "durably replayed");
     assert_eq!(result.request_id(), Some(generated_request_id.as_str()));
-    let state = journal_state.state().await?;
+    let state = durable_state.state().await?;
     assert_eq!(state.operations().len(), 1);
     let generated_id = state
         .operations()
@@ -1205,7 +1250,7 @@ async fn configured_durability_automatically_journals_plain_prompts() -> Result<
         .ok_or_else(|| eyre!("automatic durable operation is missing"))?;
     assert_eq!(generated_id, &generated_request_id);
     assert!(generated_request_id.parse::<SessionId>().is_ok());
-    assert!(journal_state.latest_checkpoint().await?.is_some());
+    assert!(durable_state.latest_checkpoint().await?.is_some());
 
     agent.shutdown().await?;
     drop((agent, events));
@@ -1216,7 +1261,7 @@ async fn configured_durability_automatically_journals_plain_prompts() -> Result<
 #[tokio::test]
 async fn acknowledged_developer_context_survives_a_cold_reopen() -> Result<()> {
     let store = crate::MemoryStore::new()?;
-    let journal = crate::DurableSession::open(store.clone(), "durable-developer-context").await?;
+    let state = crate::DurableSession::open(store.clone(), "durable-developer-context").await?;
     let generations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let openai = || {
         let generations = Arc::clone(&generations);
@@ -1229,7 +1274,7 @@ async fn acknowledged_developer_context_survives_a_cold_reopen() -> Result<()> {
     let workspace = temporary_workspace("durable-developer-context")?;
     let (agent, events) = Nanocodex::builder(openai()?)
         .workspace(&workspace)
-        .durability(journal.clone())
+        .durability(state.clone())
         .await?
         .build()?;
 
@@ -1239,7 +1284,7 @@ async fn acknowledged_developer_context_survives_a_cold_reopen() -> Result<()> {
     agent.shutdown().await?;
     drop((agent, events));
 
-    let retained = journal
+    let retained = state
         .latest_checkpoint()
         .await?
         .ok_or_else(|| eyre!("developer context was acknowledged without a checkpoint"))?;
@@ -1290,7 +1335,7 @@ async fn execution_policy_authority_defaults_fail_closed() -> Result<()> {
     assert!(matches!(
         agent.compact().await,
         Err(NanocodexError::ExecutionPolicyCapabilityUnsupported {
-            capability: "authorize_model_effect"
+            capability: "fence_checkpoint_effect"
         })
     ));
     assert!(matches!(
@@ -1311,7 +1356,7 @@ async fn execution_policy_authority_defaults_fail_closed() -> Result<()> {
 #[tokio::test]
 async fn developer_context_during_an_active_turn_acks_only_after_durable_commit() -> Result<()> {
     let store = crate::MemoryStore::new()?;
-    let journal = crate::DurableSession::open(store, "active-developer-context").await?;
+    let state = crate::DurableSession::open(store, "active-developer-context").await?;
     let started = Arc::new(AtomicBool::new(false));
     let openai = OpenAi::builder("test-key")
         .service({
@@ -1324,7 +1369,7 @@ async fn developer_context_during_an_active_turn_acks_only_after_durable_commit(
     let workspace = temporary_workspace("active-developer-context")?;
     let (agent, events) = Nanocodex::builder(openai)
         .workspace(&workspace)
-        .durability(journal.clone())
+        .durability(state.clone())
         .await?
         .build()?;
     let turn = agent.prompt("hold this turn open").await?;
@@ -1351,7 +1396,7 @@ async fn developer_context_during_an_active_turn_acks_only_after_durable_commit(
     ));
     append.await??;
     assert!(
-        journal
+        state
             .latest_checkpoint()
             .await?
             .is_some_and(|checkpoint| checkpoint.json().contains("active durable marker"))
@@ -1366,9 +1411,9 @@ async fn developer_context_during_an_active_turn_acks_only_after_durable_commit(
 #[tokio::test]
 async fn queued_developer_context_waits_for_an_exact_id_retry_to_terminalize() -> Result<()> {
     let store = crate::MemoryStore::new()?;
-    let failing = FailAppendOnce {
+    let failing = FailReplaceOnce {
         inner: store.clone(),
-        expected_revision: 4,
+        expected_revision: 6,
         failed: Arc::new(AtomicBool::new(false)),
     };
     let generations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -1387,10 +1432,10 @@ async fn queued_developer_context_waits_for_an_exact_id_retry_to_terminalize() -
             .build()
     };
     let workspace = temporary_workspace("developer-context-retry-barrier")?;
-    let journal = DurableSession::open(failing, "developer-context-retry-barrier").await?;
+    let state = DurableSession::open(failing, "developer-context-retry-barrier").await?;
     let (agent, events) = Nanocodex::builder(openai()?)
         .workspace(&workspace)
-        .durability(journal.clone())
+        .durability(state.clone())
         .await?
         .build()?;
 
@@ -1413,7 +1458,7 @@ async fn queued_developer_context_waits_for_an_exact_id_retry_to_terminalize() -
         .result()
         .await
         .expect_err("the first model-step completion must be retryable");
-    assert!(first.to_string().contains("injected append failure"));
+    assert!(first.to_string().contains("injected replacement failure"));
     assert!(
         !append.is_finished(),
         "developer context must remain unacknowledged while the operation is pending"
@@ -1426,8 +1471,12 @@ async fn queued_developer_context_waits_for_an_exact_id_retry_to_terminalize() -
         .await?;
     assert_eq!(recovered.final_message(), "durably replayed");
     append.await??;
-    assert_eq!(generations.load(Ordering::SeqCst), 2);
-    let checkpoint = journal
+    assert_eq!(
+        generations.load(Ordering::SeqCst),
+        1,
+        "a staged model outcome must materialize without repeating the provider effect",
+    );
+    let checkpoint = state
         .latest_checkpoint()
         .await?
         .ok_or_else(|| eyre!("developer acknowledgment omitted its checkpoint"))?;
@@ -1453,8 +1502,8 @@ async fn queued_developer_context_waits_for_an_exact_id_retry_to_terminalize() -
 #[tokio::test]
 async fn idle_routed_prompt_is_durably_admitted_and_checkpointed() -> Result<()> {
     let store = crate::MemoryStore::new()?;
-    let journal = crate::DurableSession::open(store, "automatic-routed-prompt").await?;
-    let journal_state = journal.clone();
+    let state = crate::DurableSession::open(store, "automatic-routed-prompt").await?;
+    let durable_state = state.clone();
     let generations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let openai = OpenAi::builder("test-key")
         .service({
@@ -1468,11 +1517,11 @@ async fn idle_routed_prompt_is_durably_admitted_and_checkpointed() -> Result<()>
     let (agent, events) = Nanocodex::builder(openai)
         .workspace(&workspace)
         .session_id(test_session_id())
-        .durability(journal)
+        .durability(state)
         .await?
         .build()?;
 
-    let turn = match agent.route_prompt("journal this routed prompt").await? {
+    let turn = match agent.route_prompt("state this routed prompt").await? {
         PromptRoute::Started(turn) => turn,
         PromptRoute::Steered => return Err(eyre!("idle durable input unexpectedly steered")),
     };
@@ -1486,13 +1535,13 @@ async fn idle_routed_prompt_is_durably_admitted_and_checkpointed() -> Result<()>
         .request_id()
         .ok_or_else(|| eyre!("routed durable result is missing its request ID"))?;
     assert_eq!(accepted_request_id, request_id);
-    let state = journal_state.state().await?;
+    let state = durable_state.state().await?;
     assert!(
         state
             .operation(request_id)
             .is_some_and(|operation| operation.status.is_terminal())
     );
-    assert!(journal_state.latest_checkpoint().await?.is_some());
+    assert!(durable_state.latest_checkpoint().await?.is_some());
     assert_eq!(generations.load(Ordering::SeqCst), 1);
 
     agent.shutdown().await?;
@@ -1504,9 +1553,9 @@ async fn idle_routed_prompt_is_durably_admitted_and_checkpointed() -> Result<()>
 #[tokio::test]
 async fn cold_reopen_recovers_idle_routed_prompt_without_a_second_model_call() -> Result<()> {
     let store = crate::MemoryStore::new()?;
-    let failing_store = FailAppendOnce {
+    let failing_store = FailReplaceOnce {
         inner: store.clone(),
-        expected_revision: 5,
+        expected_revision: 7,
         failed: Arc::new(AtomicBool::new(false)),
     };
     let generations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -1520,11 +1569,11 @@ async fn cold_reopen_recovers_idle_routed_prompt_without_a_second_model_call() -
     };
     let workspace = temporary_workspace("routed-durability-cold-reopen")?;
 
-    let journal = crate::DurableSession::open(failing_store, "routed-cold-reopen").await?;
+    let state = crate::DurableSession::open(failing_store, "routed-cold-reopen").await?;
     let (first, first_events) = Nanocodex::builder(openai()?)
         .workspace(&workspace)
         .session_id(test_session_id())
-        .durability(journal)
+        .durability(state)
         .await?
         .build()?;
     let first_turn = match first.route_prompt("recover routed input").await? {
@@ -1534,16 +1583,20 @@ async fn cold_reopen_recovers_idle_routed_prompt_without_a_second_model_call() -
     let first_error = first_turn
         .result()
         .await
-        .expect_err("the injected terminal append must fail the routed attempt");
-    assert!(first_error.to_string().contains("injected append failure"));
+        .expect_err("the injected terminal replacement must fail the routed attempt");
+    assert!(
+        first_error
+            .to_string()
+            .contains("injected replacement failure")
+    );
     first.shutdown().await?;
     drop((first, first_events));
 
-    let journal = crate::DurableSession::open(store, "routed-cold-reopen").await?;
+    let state = crate::DurableSession::open(store, "routed-cold-reopen").await?;
     let (reopened, reopened_events) = Nanocodex::builder(openai()?)
         .workspace(&workspace)
         .session_id(test_session_id())
-        .durability(journal.clone())
+        .durability(state.clone())
         .await?
         .build()?;
     let recovered_turn = match reopened.route_prompt("recover routed input").await? {
@@ -1555,9 +1608,9 @@ async fn cold_reopen_recovers_idle_routed_prompt_without_a_second_model_call() -
     assert_eq!(
         generations.load(Ordering::SeqCst),
         1,
-        "cold recovery must replay the journaled model output",
+        "cold recovery must replay the durable model output",
     );
-    assert!(journal.latest_checkpoint().await?.is_some());
+    assert!(state.latest_checkpoint().await?.is_some());
 
     reopened.shutdown().await?;
     drop((reopened, reopened_events));
@@ -1568,7 +1621,7 @@ async fn cold_reopen_recovers_idle_routed_prompt_without_a_second_model_call() -
 #[tokio::test]
 async fn active_routed_input_is_retained_in_the_durable_checkpoint() -> Result<()> {
     let store = crate::MemoryStore::new()?;
-    let journal = crate::DurableSession::open(store, "active-routed-input").await?;
+    let state = crate::DurableSession::open(store, "active-routed-input").await?;
     let generations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let started = Arc::new(AtomicBool::new(false));
     let release_first = Arc::new(tokio::sync::Notify::new());
@@ -1591,7 +1644,7 @@ async fn active_routed_input_is_retained_in_the_durable_checkpoint() -> Result<(
     let (agent, events) = Nanocodex::builder(openai)
         .workspace(&workspace)
         .session_id(test_session_id())
-        .durability(journal.clone())
+        .durability(state.clone())
         .await?
         .build()?;
 
@@ -1610,7 +1663,7 @@ async fn active_routed_input_is_retained_in_the_durable_checkpoint() -> Result<(
     assert_eq!(turn.result().await?.final_message(), "steer retained");
     assert!(observed_steer.load(Ordering::Acquire));
     assert_eq!(generations.load(Ordering::SeqCst), 2);
-    let checkpoint = journal
+    let checkpoint = state
         .latest_checkpoint()
         .await?
         .ok_or_else(|| eyre!("active routed turn did not commit a checkpoint"))?
@@ -1626,9 +1679,9 @@ async fn active_routed_input_is_retained_in_the_durable_checkpoint() -> Result<(
 #[tokio::test]
 async fn shutdown_reclaims_a_definitely_uncommitted_queued_terminalization() -> Result<()> {
     let store = crate::MemoryStore::new()?;
-    let failing = FailAppendOnce {
+    let failing = FailReplaceOnce {
         inner: store.clone(),
-        expected_revision: 6,
+        expected_revision: 8,
         failed: Arc::new(AtomicBool::new(false)),
     };
     let started = Arc::new(AtomicBool::new(false));
@@ -1641,10 +1694,10 @@ async fn shutdown_reclaims_a_definitely_uncommitted_queued_terminalization() -> 
         })
         .build()?;
     let workspace = temporary_workspace("durable-shutdown-failure")?;
-    let journal = DurableSession::open(failing, "shutdown-failure").await?;
+    let state = DurableSession::open(failing, "shutdown-failure").await?;
     let (agent, events) = Nanocodex::builder(openai)
         .workspace(&workspace)
-        .durability(journal)
+        .durability(state)
         .await?
         .build()?;
     let active = agent
@@ -1684,7 +1737,7 @@ async fn shutdown_reclaims_a_definitely_uncommitted_queued_terminalization() -> 
 #[tokio::test]
 async fn durable_terminal_replays_emit_one_terminal_without_model_execution() -> Result<()> {
     let store = crate::MemoryStore::new()?;
-    let journal = crate::DurableSession::open(store, "terminal-replay-events").await?;
+    let state = crate::DurableSession::open(store, "terminal-replay-events").await?;
     let generations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let openai = || {
         let generations = Arc::clone(&generations);
@@ -1698,7 +1751,7 @@ async fn durable_terminal_replays_emit_one_terminal_without_model_execution() ->
 
     let (seed, seed_events) = Nanocodex::builder(openai()?)
         .workspace(&workspace)
-        .durability(journal.clone())
+        .durability(state.clone())
         .await?
         .build()?;
     let completed = seed
@@ -1714,18 +1767,18 @@ async fn durable_terminal_replays_emit_one_terminal_without_model_execution() ->
     drop((seed, seed_events));
 
     let failed_prompt = Prompt::from("failed replay");
-    journal.admit("failed-replay", &failed_prompt).await?;
-    journal.begin_attempt("failed-replay").await?;
-    journal
+    state.admit("failed-replay", &failed_prompt).await?;
+    state.begin_attempt("failed-replay").await?;
+    state
         .fail("failed-replay", &snapshot, "retained failure")
         .await?;
     let cancelled_prompt = Prompt::from("cancelled replay");
-    journal.admit("cancelled-replay", &cancelled_prompt).await?;
-    journal.cancel("cancelled-replay").await?;
+    state.admit("cancelled-replay", &cancelled_prompt).await?;
+    state.cancel("cancelled-replay").await?;
 
     let (resumed, mut events) = Nanocodex::builder(openai()?)
         .workspace(&workspace)
-        .durability(journal)
+        .durability(state)
         .await?
         .build()?;
 
@@ -1793,7 +1846,7 @@ fn assert_replay_terminal(
 #[tokio::test]
 async fn newer_agent_acquisition_fences_an_older_live_model_before_execution() -> Result<()> {
     let store = crate::MemoryStore::new()?;
-    let journal = crate::DurableSession::open(store, "fenced-live-agents").await?;
+    let state = crate::DurableSession::open(store, "fenced-live-agents").await?;
     let generations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let openai = || {
         let generations = Arc::clone(&generations);
@@ -1807,12 +1860,12 @@ async fn newer_agent_acquisition_fences_an_older_live_model_before_execution() -
 
     let (older, older_events) = Nanocodex::builder(openai()?)
         .workspace(&workspace)
-        .durability(journal.clone())
+        .durability(state.clone())
         .await?
         .build()?;
     let (newer, newer_events) = Nanocodex::builder(openai()?)
         .workspace(&workspace)
-        .durability(journal.clone())
+        .durability(state.clone())
         .await?
         .build()?;
 
@@ -1855,11 +1908,53 @@ async fn newer_agent_acquisition_fences_an_older_live_model_before_execution() -
         .await?;
     assert_eq!(result.final_message(), "durably replayed");
     assert_eq!(generations.load(std::sync::atomic::Ordering::SeqCst), 1);
-    assert_eq!(journal.state().await?.operations().len(), 1);
+    assert_eq!(state.state().await?.operations().len(), 1);
 
-    older.shutdown().await?;
+    let _ = older.shutdown().await;
     newer.shutdown().await?;
     drop((older, older_events, newer, newer_events));
+    std::fs::remove_dir_all(workspace)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn independent_session_takeover_fences_standalone_compaction_before_execution() -> Result<()>
+{
+    let store = crate::MemoryStore::new()?;
+    let state = crate::DurableSession::open(store.clone(), "independent-compaction-fence").await?;
+    let generations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let openai = OpenAi::builder("test-key")
+        .service({
+            let generations = Arc::clone(&generations);
+            move || DurableReplayService {
+                generations: Arc::clone(&generations),
+            }
+        })
+        .build()?;
+    let workspace = temporary_workspace("independent-compaction-fence")?;
+    let (older, events) = Nanocodex::builder(openai)
+        .workspace(&workspace)
+        .durability(state)
+        .await?
+        .build()?;
+
+    let takeover = crate::DurableSession::open(store, "independent-compaction-fence").await?;
+    let error = older
+        .compact()
+        .await
+        .expect_err("the independently fenced owner must not enter compaction");
+    assert_eq!(
+        error.execution_policy_disposition(),
+        Some(ExecutionPolicyDisposition::Reopen)
+    );
+    assert_eq!(
+        generations.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "store-fenced compaction must fail before calling the model service",
+    );
+
+    let _ = older.shutdown().await;
+    drop((older, events, takeover));
     std::fs::remove_dir_all(workspace)?;
     Ok(())
 }
@@ -1868,7 +1963,7 @@ async fn newer_agent_acquisition_fences_an_older_live_model_before_execution() -
 async fn takeover_after_warmup_authorization_fences_the_result_not_the_in_flight_call() -> Result<()>
 {
     let store = crate::MemoryStore::new()?;
-    let journal = DurableSession::open(store, "warmup-authorization-takeover").await?;
+    let state = DurableSession::open(store, "warmup-authorization-takeover").await?;
     let warmups = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let generations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let started = Arc::new(tokio::sync::Notify::new());
@@ -1890,7 +1985,7 @@ async fn takeover_after_warmup_authorization_fences_the_result_not_the_in_flight
     let workspace = temporary_workspace("warmup-authorization-takeover")?;
     let (older, older_events) = Nanocodex::builder(openai()?)
         .workspace(&workspace)
-        .durability(journal.clone())
+        .durability(state.clone())
         .await?
         .build()?;
     let turn = older.prompt("authorize warmup then take over").await?;
@@ -1899,7 +1994,7 @@ async fn takeover_after_warmup_authorization_fences_the_result_not_the_in_flight
 
     let (newer, newer_events) = Nanocodex::builder(openai()?)
         .workspace(&workspace)
-        .durability(journal)
+        .durability(state)
         .await?
         .build()?;
     release.notify_one();
@@ -1924,7 +2019,7 @@ async fn takeover_after_warmup_authorization_fences_the_result_not_the_in_flight
 #[tokio::test]
 async fn sequential_model_owners_preserve_history_and_cache_lineage() -> Result<()> {
     let store = crate::MemoryStore::new()?;
-    let journal = crate::DurableSession::open(store, "sequential-model-owners").await?;
+    let state = crate::DurableSession::open(store, "sequential-model-owners").await?;
     let generations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let openai = || {
         let generations = Arc::clone(&generations);
@@ -1938,11 +2033,11 @@ async fn sequential_model_owners_preserve_history_and_cache_lineage() -> Result<
 
     let (first, first_events) = Nanocodex::builder(openai()?)
         .workspace(&workspace)
-        .durability(journal.clone())
+        .durability(state.clone())
         .await?
         .build()?;
     first.prompt("first retained turn").await?.result().await?;
-    let first_checkpoint = journal
+    let first_checkpoint = state
         .latest_checkpoint()
         .await?
         .ok_or_else(|| eyre!("first owner did not commit a checkpoint"))?
@@ -1957,7 +2052,7 @@ async fn sequential_model_owners_preserve_history_and_cache_lineage() -> Result<
 
     let (second, second_events) = Nanocodex::builder(openai()?)
         .workspace(&workspace)
-        .durability(journal.clone())
+        .durability(state.clone())
         .await?
         .build()?;
     second
@@ -1965,7 +2060,7 @@ async fn sequential_model_owners_preserve_history_and_cache_lineage() -> Result<
         .await?
         .result()
         .await?;
-    let second_checkpoint = journal
+    let second_checkpoint = state
         .latest_checkpoint()
         .await?
         .ok_or_else(|| eyre!("second owner did not commit a checkpoint"))?
@@ -1987,9 +2082,9 @@ async fn sequential_model_owners_preserve_history_and_cache_lineage() -> Result<
 async fn failed_completed_compaction_persistence_restores_the_committed_live_boundary() -> Result<()>
 {
     let store = MemoryStore::new()?;
-    let failing = FailAppendOnce {
+    let failing = FailReplaceOnce {
         inner: store.clone(),
-        expected_revision: 7,
+        expected_revision: 8,
         failed: Arc::new(AtomicBool::new(false)),
     };
     let openai = || {
@@ -1998,10 +2093,10 @@ async fn failed_completed_compaction_persistence_restores_the_committed_live_bou
             .build()
     };
     let workspace = temporary_workspace("completed-compaction-rollback")?;
-    let journal = DurableSession::open(failing, "completed-compaction-rollback").await?;
+    let state = DurableSession::open(failing, "completed-compaction-rollback").await?;
     let (agent, events) = Nanocodex::builder(openai()?)
         .workspace(&workspace)
-        .durability(journal)
+        .durability(state)
         .await?
         .build()?;
     agent
@@ -2014,8 +2109,8 @@ async fn failed_completed_compaction_persistence_restores_the_committed_live_bou
     let error = agent
         .compact()
         .await
-        .expect_err("the completed compaction checkpoint append must fail once");
-    assert!(error.to_string().contains("injected append failure"));
+        .expect_err("the completed compaction checkpoint replacement must fail once");
+    assert!(error.to_string().contains("injected replacement failure"));
     assert_eq!(
         serde_json::to_value(agent.context().await?.history())?,
         committed_history,
@@ -2066,10 +2161,10 @@ async fn active_cancel_reclaims_a_definitely_uncommitted_terminal_before_follow_
         })
         .build()?;
     let workspace = temporary_workspace("active-cancel-not-committed")?;
-    let journal = DurableSession::open(failing, "active-cancel-not-committed").await?;
+    let state = DurableSession::open(failing, "active-cancel-not-committed").await?;
     let (agent, events) = Nanocodex::builder(openai)
         .workspace(&workspace)
-        .durability(journal)
+        .durability(state)
         .await?
         .build()?;
     let turn = agent
@@ -2130,10 +2225,10 @@ async fn queued_cancel_reclaims_a_definitely_uncommitted_terminal_before_follow_
         })
         .build()?;
     let workspace = temporary_workspace("queued-cancel-not-committed")?;
-    let journal = DurableSession::open(failing, "queued-cancel-not-committed").await?;
+    let state = DurableSession::open(failing, "queued-cancel-not-committed").await?;
     let (agent, events) = Nanocodex::builder(openai)
         .workspace(&workspace)
-        .durability(journal)
+        .durability(state)
         .await?
         .build()?;
     let active = agent
@@ -2188,10 +2283,10 @@ async fn automatic_compaction_replays_a_after_terminal_not_committed_instead_of_
         })
         .build()?;
     let workspace = temporary_workspace("automatic-compaction-terminal-retry")?;
-    let journal = DurableSession::open(failing, "automatic-compaction-terminal-retry").await?;
+    let state = DurableSession::open(failing, "automatic-compaction-terminal-retry").await?;
     let (agent, events) = Nanocodex::builder(openai)
         .workspace(&workspace)
-        .durability(journal)
+        .durability(state)
         .await?
         .build()?;
     agent
@@ -2200,16 +2295,24 @@ async fn automatic_compaction_replays_a_after_terminal_not_committed_instead_of_
         .result()
         .await?;
 
-    let first = agent
+    let first = match agent
         .prompt(
             PromptRequest::new("reuse the exact compaction")
                 .request_id("compaction-terminal-retry"),
         )
-        .await?
-        .result()
         .await
-        .expect_err("the first terminal append must be definitely uncommitted");
-    assert!(first.to_string().contains("injected entry append failure"));
+    {
+        Ok(turn) => turn
+            .result()
+            .await
+            .expect_err("the first terminal write must be definitely uncommitted"),
+        Err(error) => error,
+    };
+    assert!(
+        first
+            .to_string()
+            .contains("injected state replacement failure")
+    );
     assert_eq!(compactions.load(Ordering::SeqCst), 1);
     assert_eq!(generations.load(Ordering::SeqCst), 2);
 
@@ -2266,10 +2369,10 @@ async fn takeover_during_automatic_compaction_authorization_fences_before_provid
             .build()
     };
     let workspace = temporary_workspace("automatic-compaction-takeover")?;
-    let older_journal = DurableSession::open(gated, "automatic-compaction-takeover").await?;
+    let older_state = DurableSession::open(gated, "automatic-compaction-takeover").await?;
     let (older, older_events) = Nanocodex::builder(openai()?)
         .workspace(&workspace)
-        .durability(older_journal)
+        .durability(older_state)
         .await?
         .build()?;
     older
@@ -2285,10 +2388,10 @@ async fn takeover_during_automatic_compaction_authorization_fences_before_provid
         .await?;
     authorization_started.notified().await;
 
-    let newer_journal = DurableSession::open(store, "automatic-compaction-takeover").await?;
+    let newer_state = DurableSession::open(store, "automatic-compaction-takeover").await?;
     let (newer, newer_events) = Nanocodex::builder(openai()?)
         .workspace(&workspace)
-        .durability(newer_journal)
+        .durability(newer_state)
         .await?
         .build()?;
     authorization_release.notify_one();
@@ -2327,9 +2430,9 @@ async fn takeover_during_automatic_compaction_authorization_fences_before_provid
 
 async fn assert_cold_model_replay_forces_full_history(store_responses: bool) -> Result<()> {
     let store = crate::MemoryStore::new()?;
-    let failing_store = FailAppendOnce {
+    let failing_store = FailReplaceOnce {
         inner: store.clone(),
-        expected_revision: 5,
+        expected_revision: 7,
         failed: Arc::new(AtomicBool::new(false)),
     };
     let generations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -2356,15 +2459,15 @@ async fn assert_cold_model_replay_forces_full_history(store_responses: bool) -> 
     } else {
         "ephemeral"
     };
-    let journal_id = format!("cold-model-replay-{suffix}");
-    let workspace = temporary_workspace(&journal_id)?;
+    let state_id = format!("cold-model-replay-{suffix}");
+    let workspace = temporary_workspace(&state_id)?;
 
-    let journal = crate::DurableSession::open(failing_store, journal_id.clone()).await?;
+    let state = crate::DurableSession::open(failing_store, state_id.clone()).await?;
     let (first, first_events) = Nanocodex::builder(openai()?)
         .workspace(&workspace)
         .session_id(test_session_id())
         .tools(tools()?)
-        .durability(journal)
+        .durability(state)
         .await?
         .build()?;
     let error = first
@@ -2375,19 +2478,19 @@ async fn assert_cold_model_replay_forces_full_history(store_responses: bool) -> 
         .await?
         .result()
         .await
-        .expect_err("the injected tool-step append must fail the first owner");
-    assert!(error.to_string().contains("injected append failure"));
+        .expect_err("the injected tool-step replacement must fail the first owner");
+    assert!(error.to_string().contains("injected replacement failure"));
     assert_eq!(generations.load(Ordering::SeqCst), 1);
     assert_eq!(tool_calls.load(Ordering::SeqCst), 0);
     first.shutdown().await?;
     drop((first, first_events));
 
-    let journal = crate::DurableSession::open(store, journal_id).await?;
+    let state = crate::DurableSession::open(store, state_id).await?;
     let (reopened, reopened_events) = Nanocodex::builder(openai()?)
         .workspace(&workspace)
         .session_id(test_session_id())
         .tools(tools()?)
-        .durability(journal)
+        .durability(state)
         .await?
         .build()?;
     let result = reopened
@@ -2549,12 +2652,12 @@ async fn abandoned_routed_terminal_replay_emits_no_terminal_event() -> Result<()
 }
 
 #[tokio::test]
-async fn portable_journal_replays_a_completed_model_step_after_terminal_commit_failure()
--> Result<()> {
+async fn portable_state_replays_a_completed_model_step_after_terminal_commit_failure() -> Result<()>
+{
     let store = crate::MemoryStore::new()?;
-    let failing_store = FailAppendOnce {
+    let failing_store = FailReplaceOnce {
         inner: store.clone(),
-        expected_revision: 5,
+        expected_revision: 7,
         failed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
     let generations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -2567,11 +2670,11 @@ async fn portable_journal_replays_a_completed_model_step_after_terminal_commit_f
             .build()
     };
     let workspace = temporary_workspace("portable-durability-model-replay")?;
-    let journal = crate::DurableSession::open(failing_store, "portable-model-replay").await?;
+    let state = crate::DurableSession::open(failing_store, "portable-model-replay").await?;
     let builder = Nanocodex::builder(openai()?)
         .workspace(&workspace)
         .session_id(test_session_id())
-        .durability(journal)
+        .durability(state)
         .await?;
     let (agent, mut events) = builder.build()?;
     let first_turn = agent.prompt("replay this exact turn").await?;
@@ -2582,8 +2685,8 @@ async fn portable_journal_replays_a_completed_model_step_after_terminal_commit_f
     let error = first_turn
         .result()
         .await
-        .expect_err("the injected terminal append must fail the first attempt");
-    assert!(error.to_string().contains("injected append failure"));
+        .expect_err("the injected terminal replacement must fail the first attempt");
+    assert!(error.to_string().contains("injected replacement failure"));
     let terminals = std::iter::from_fn(|| events.try_recv_timed())
         .filter(|event| event.event.kind.is_terminal())
         .collect::<Vec<_>>();
@@ -2596,11 +2699,11 @@ async fn portable_journal_replays_a_completed_model_step_after_terminal_commit_f
     agent.shutdown().await?;
     drop((agent, events));
 
-    let journal = crate::DurableSession::open(store, "portable-model-replay").await?;
+    let state = crate::DurableSession::open(store, "portable-model-replay").await?;
     let builder = Nanocodex::builder(openai()?)
         .workspace(&workspace)
         .session_id(test_session_id())
-        .durability(journal)
+        .durability(state)
         .await?;
     let (resumed, resumed_events) = builder.build()?;
     let recovered_turn = resumed.prompt("replay this exact turn").await?;
@@ -2611,7 +2714,7 @@ async fn portable_journal_replays_a_completed_model_step_after_terminal_commit_f
     assert_eq!(
         generations.load(std::sync::atomic::Ordering::SeqCst),
         1,
-        "the recovered operation must use the Rust-journaled model output",
+        "the recovered operation must use the Rust-durable model output",
     );
     resumed.shutdown().await?;
     drop((resumed, resumed_events));
@@ -2620,11 +2723,11 @@ async fn portable_journal_replays_a_completed_model_step_after_terminal_commit_f
 }
 
 #[tokio::test]
-async fn exact_id_retry_reclaims_a_definitely_uncommitted_terminal_append() -> Result<()> {
+async fn exact_id_retry_reclaims_a_definitely_uncommitted_terminal_replace() -> Result<()> {
     let store = crate::MemoryStore::new()?;
-    let failing_store = FailAppendOnce {
+    let failing_store = FailReplaceOnce {
         inner: store,
-        expected_revision: 5,
+        expected_revision: 7,
         failed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
     let generations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -2637,11 +2740,11 @@ async fn exact_id_retry_reclaims_a_definitely_uncommitted_terminal_append() -> R
             .build()?
     };
     let workspace = temporary_workspace("portable-durability-live-retry")?;
-    let journal = crate::DurableSession::open(failing_store, "portable-model-live-retry").await?;
+    let state = crate::DurableSession::open(failing_store, "portable-model-live-retry").await?;
     let builder = Nanocodex::builder(openai)
         .workspace(&workspace)
         .session_id(test_session_id())
-        .durability(journal)
+        .durability(state)
         .await?;
     let (agent, events) = builder.build()?;
 
@@ -2650,8 +2753,8 @@ async fn exact_id_retry_reclaims_a_definitely_uncommitted_terminal_append() -> R
         .await?
         .result()
         .await
-        .expect_err("the injected terminal append must fail the first attempt");
-    assert!(first.to_string().contains("injected append failure"));
+        .expect_err("the injected terminal replacement must fail the first attempt");
+    assert!(first.to_string().contains("injected replacement failure"));
 
     let recovered = agent
         .prompt(PromptRequest::new("replay this exact turn").request_id("exact-live-retry"))
@@ -2662,7 +2765,7 @@ async fn exact_id_retry_reclaims_a_definitely_uncommitted_terminal_append() -> R
     assert_eq!(
         generations.load(std::sync::atomic::Ordering::SeqCst),
         1,
-        "the live owner must roll back before replaying the journaled model output",
+        "the live owner must roll back before replaying the durable model output",
     );
 
     agent.shutdown().await?;
@@ -2672,11 +2775,11 @@ async fn exact_id_retry_reclaims_a_definitely_uncommitted_terminal_append() -> R
 }
 
 #[tokio::test]
-async fn portable_journal_refuses_to_repeat_a_tool_with_an_ambiguous_completion() -> Result<()> {
+async fn portable_state_continues_after_an_ambiguous_tool_without_repeating_it() -> Result<()> {
     let store = crate::MemoryStore::new()?;
-    let failing_store = FailAppendOnce {
+    let failing_store = FailReplaceOnce {
         inner: store.clone(),
-        expected_revision: 6,
+        expected_revision: 8,
         failed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
     let generations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -2698,12 +2801,12 @@ async fn portable_journal_refuses_to_repeat_a_tool_with_an_ambiguous_completion(
             .build()
     };
     let workspace = temporary_workspace("portable-durability-ambiguous-tool")?;
-    let journal = crate::DurableSession::open(failing_store, "ambiguous-tool").await?;
+    let state = crate::DurableSession::open(failing_store, "ambiguous-tool").await?;
     let builder = Nanocodex::builder(openai()?)
         .workspace(&workspace)
         .session_id(test_session_id())
         .tools(tools()?)
-        .durability(journal)
+        .durability(state)
         .await?;
     let (agent, events) = builder.build()?;
     let first_turn = agent
@@ -2713,32 +2816,61 @@ async fn portable_journal_refuses_to_repeat_a_tool_with_an_ambiguous_completion(
     let first = first_turn
         .result()
         .await
-        .expect_err("the injected tool completion append must fail");
-    assert!(first.to_string().contains("injected append failure"));
+        .expect_err("the injected tool completion replacement must fail");
+    assert!(first.to_string().contains("injected replacement failure"));
     agent.shutdown().await?;
     drop((agent, events));
 
-    let journal = crate::DurableSession::open(store, "ambiguous-tool").await?;
+    let state = crate::DurableSession::open(store.clone(), "ambiguous-tool").await?;
     let builder = Nanocodex::builder(openai()?)
         .workspace(&workspace)
         .session_id(test_session_id())
         .tools(tools()?)
-        .durability(journal)
+        .durability(state)
         .await?;
     let (resumed, resumed_events) = builder.build()?;
     let recovered_turn = resumed
         .prompt(PromptRequest::new("run the counter").request_id("turn-1"))
         .await?;
     assert_eq!(recovered_turn.request_id(), Some("turn-1"));
-    let recovered = recovered_turn
-        .result()
-        .await
-        .expect_err("an unsafe unfinished tool must remain ambiguous");
-    assert!(recovered.to_string().contains("ambiguous outcome"));
+    let recovered = recovered_turn.result().await?;
+    assert_eq!(
+        recovered.final_message(),
+        "recovered without repeating the tool"
+    );
     assert_eq!(tool_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
-    assert_eq!(generations.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(generations.load(std::sync::atomic::Ordering::SeqCst), 2);
     resumed.shutdown().await?;
     drop((resumed, resumed_events));
+
+    let state = crate::DurableSession::open(store, "ambiguous-tool").await?;
+    let builder = Nanocodex::builder(openai()?)
+        .workspace(&workspace)
+        .session_id(test_session_id())
+        .tools(tools()?)
+        .durability(state)
+        .await?;
+    let (reopened, reopened_events) = builder.build()?;
+    let replayed = reopened
+        .prompt(PromptRequest::new("run the counter").request_id("turn-1"))
+        .await?
+        .result()
+        .await?;
+    assert_eq!(
+        replayed.final_message(),
+        "recovered without repeating the tool"
+    );
+    assert_eq!(generations.load(std::sync::atomic::Ordering::SeqCst), 2);
+    let next = reopened
+        .prompt(PromptRequest::new("continue").request_id("turn-2"))
+        .await?
+        .result()
+        .await?;
+    assert_eq!(next.final_message(), "recovered without repeating the tool");
+    assert_eq!(tool_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(generations.load(std::sync::atomic::Ordering::SeqCst), 3);
+    reopened.shutdown().await?;
+    drop((reopened, reopened_events));
     std::fs::remove_dir_all(workspace)?;
     Ok(())
 }
@@ -2746,9 +2878,9 @@ async fn portable_journal_refuses_to_repeat_a_tool_with_an_ambiguous_completion(
 #[tokio::test]
 async fn changed_tool_profile_blocks_replay_after_spawn_without_creating_a_ghost() -> Result<()> {
     let store = crate::MemoryStore::new()?;
-    let failing_store = FailAppendOnce {
+    let failing_store = FailReplaceOnce {
         inner: store.clone(),
-        expected_revision: 7,
+        expected_revision: 9,
         failed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
     let generations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -2768,12 +2900,12 @@ async fn changed_tool_profile_blocks_replay_after_spawn_without_creating_a_ghost
             calls: Arc::clone(&spawn_calls),
         })
         .build()?;
-    let journal = crate::DurableSession::open(failing_store, "spawn-recovery").await?;
+    let state = crate::DurableSession::open(failing_store, "spawn-recovery").await?;
     let builder = Nanocodex::builder(openai()?)
         .workspace(&workspace)
         .session_id(test_session_id())
         .tools(first_tools)
-        .durability(journal)
+        .durability(state)
         .await?;
     let (agent, events) = builder.build()?;
 
@@ -2783,7 +2915,7 @@ async fn changed_tool_profile_blocks_replay_after_spawn_without_creating_a_ghost
         .result()
         .await
         .expect_err("the injected crash boundary must stop before the wait model call");
-    assert!(first.to_string().contains("injected append failure"));
+    assert!(first.to_string().contains("injected replacement failure"));
     assert_eq!(
         spawn_calls.load(std::sync::atomic::Ordering::SeqCst),
         1,
@@ -2797,13 +2929,13 @@ async fn changed_tool_profile_blocks_replay_after_spawn_without_creating_a_ghost
     agent.shutdown().await?;
     drop((agent, events));
 
-    let journal = crate::DurableSession::open(store, "spawn-recovery").await?;
+    let state = crate::DurableSession::open(store, "spawn-recovery").await?;
     let recovered_tools = Tools::builder().without_defaults().build()?;
     let builder = Nanocodex::builder(openai()?)
         .workspace(&workspace)
         .session_id(test_session_id())
         .tools(recovered_tools)
-        .durability(journal)
+        .durability(state)
         .await?;
     let (recovered, recovered_events) = builder.build()?;
     let error = recovered
@@ -2833,7 +2965,7 @@ async fn changed_tool_profile_blocks_replay_after_spawn_without_creating_a_ghost
 #[tokio::test]
 async fn attached_execution_policy_spawns_a_nondurable_clean_child() -> Result<()> {
     let store = crate::MemoryStore::new()?;
-    let journal = crate::DurableSession::open(store, "spawn-policy").await?;
+    let state = crate::DurableSession::open(store, "spawn-policy").await?;
     let service_factories = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let generations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let openai = OpenAi::builder("test-key")
@@ -2852,7 +2984,7 @@ async fn attached_execution_policy_spawns_a_nondurable_clean_child() -> Result<(
     let builder = Nanocodex::builder(openai)
         .workspace(&workspace)
         .session_id(test_session_id())
-        .durability(journal)
+        .durability(state)
         .await?;
     let (agent, events) = builder.build()?;
 

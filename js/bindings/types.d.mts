@@ -47,67 +47,50 @@ export type DurabilityFence = string & {
   readonly [durabilityFenceBrand]: "NanocodexDurabilityFence";
 };
 
-export type DurabilityStoredBatch = Readonly<{
+export type DurabilityStoredState = Readonly<{
   revision: DurabilityRevision;
-  payload: string;
-}>;
-
-export type DurabilityStoredJournal = Readonly<{
-  revision: DurabilityRevision;
-  batches: readonly DurabilityStoredBatch[];
+  payload: string | null;
 }>;
 
 export type DurabilityAcquireRequest = Readonly<{
   ownerId: string;
 }>;
 
-export type DurabilityAcquiredJournal = DurabilityStoredJournal & Readonly<{
+export type DurabilityAcquiredState = DurabilityStoredState & Readonly<{
   ownerId: string;
   fence: DurabilityFence;
 }>;
 
-export type DurabilityAppendRequest = Readonly<{
+export type DurabilityReplaceRequest = Readonly<{
   ownerId: string;
   fence: DurabilityFence;
   expectedRevision: DurabilityRevision;
   payload: string;
 }>;
 
-export type DurabilityAppendResult =
-  | Readonly<{ status: "appended"; revision: DurabilityRevision }>
-  | Readonly<{ status: "fenced" }>
-  | Readonly<{ status: "conflict"; actualRevision: DurabilityRevision }>
-  | Readonly<{ status: "not_committed"; message: string }>;
-
-export type DurabilityCompactRequest = DurabilityAppendRequest;
-
-export type DurabilityCompactResult =
-  | Readonly<{ status: "compacted"; revision: DurabilityRevision }>
+export type DurabilityReplaceResult =
+  | Readonly<{ status: "replaced"; revision: DurabilityRevision }>
   | Readonly<{ status: "fenced" }>
   | Readonly<{ status: "conflict"; actualRevision: DurabilityRevision }>
   | Readonly<{ status: "not_committed"; message: string }>;
 
 /** Host capability consumed by the Rust/WASM durability driver. */
 export type DurabilityStore = Readonly<{
-  load(journalId: string): DurabilityStoredJournal | Promise<DurabilityStoredJournal>;
+  load(stateId: string): DurabilityStoredState | Promise<DurabilityStoredState>;
   acquire(
-    journalId: string,
+    stateId: string,
     request: DurabilityAcquireRequest,
-  ): DurabilityAcquiredJournal | Promise<DurabilityAcquiredJournal>;
-  append(
-    journalId: string,
-    request: DurabilityAppendRequest,
-  ): DurabilityAppendResult | Promise<DurabilityAppendResult>;
-  compact?(
-    journalId: string,
-    request: DurabilityCompactRequest,
-  ): DurabilityCompactResult | Promise<DurabilityCompactResult>;
+  ): DurabilityAcquiredState | Promise<DurabilityAcquiredState>;
+  replace(
+    stateId: string,
+    request: DurabilityReplaceRequest,
+  ): DurabilityReplaceResult | Promise<DurabilityReplaceResult>;
 }>;
 
 /** In-process store for hosts that carry its snapshot across durable steps. */
 export type MemoryDurabilityStore = DurabilityStore & Readonly<{
-  journalId: string;
-  snapshot(): DurabilityStoredJournal;
+  stateId: string;
+  snapshot(): DurabilityStoredState;
 }>;
 
 /**

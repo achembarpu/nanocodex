@@ -6,14 +6,15 @@ import {
   managedAccountFetch,
   managedAccountHeaders,
   parseManagedAgentReceipt,
-  requireManagedApiKey,
 } from "./managed-account-auth.mjs";
+import { resolveManagedSmokeCredentials } from "./local-smoke-account.mjs";
 
 const baseUrl = credentialSafeHttpOrigin(
   process.env.NANOCODEX_WORKER_URL ?? "http://127.0.0.1:8787",
   "NANOCODEX_WORKER_URL",
 );
-const apiKey = requireManagedApiKey();
+const credentials = await resolveManagedSmokeCredentials(baseUrl, "managed REST smoke");
+const { apiKey } = credentials;
 const terminalTimeoutMs = numberFromEnv("NANOCODEX_SMOKE_TIMEOUT_MS", 180_000);
 const idleTimeoutMs = numberFromEnv("NANOCODEX_SMOKE_IDLE_TIMEOUT_MS", 45_000);
 const cleanupTimeoutMs = numberFromEnv("NANOCODEX_SMOKE_CLEANUP_TIMEOUT_MS", 30_000);
@@ -198,6 +199,13 @@ try {
         : error;
     }
   }
+  try {
+    await credentials.cleanup();
+  } catch (error) {
+    failure = failure
+      ? new AggregateError([failure, error], "Managed API smoke and credential cleanup failed")
+      : error;
+  }
 }
 
 if (failure) throw failure;
@@ -265,7 +273,7 @@ async function waitForTerminal(reader, turnId, startedAt, timeoutMs) {
       }
     }
     if (message.id !== turnId) continue;
-    if (["turn_completed", "turn_cancelled", "turn_failed", "turn_blocked"].includes(message.type)) {
+    if (["turn_completed", "turn_cancelled", "turn_failed"].includes(message.type)) {
       return {
         terminal: message,
         messages,

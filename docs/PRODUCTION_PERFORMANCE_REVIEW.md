@@ -16,7 +16,7 @@ model latency dominates time to first token.
 
 The normal live prompt-cache path is also structurally sound: one agent keeps a
 stable cache lineage and uses `previous_response_id` for compatible incremental
-requests. Portable durability now defaults the cache key to the stable journal
+requests. Portable durability now defaults the cache key to the stable state
 ID. Cold reopen retains that key but deliberately omits the remote response ID,
 so the first request replays complete client-owned typed history. Durable model
 steps bind that key, instructions, tools, model, request controls, immutable
@@ -309,7 +309,7 @@ Live managed Worker logs repeatedly emitted:
 
 ```text
 managed agent prewarm failed
-Nanocodex durability journal is already active: cloudflare:01a02eba-...
+Nanocodex durability state is already active: cloudflare:01a02eba-...
 ```
 
 Observed behavior:
@@ -330,7 +330,7 @@ Two boundaries interacted to produce the storm in the measured deployment:
    subscriber remains. The next alarm clears and retries the failed promise.
    This bypasses the bounded exponential turn retry policy.
 2. The deployed durability path relied on a process-local strong map keyed by
-   journal ID. Explicit shutdown released it, but Durable Object incarnation
+   state ID. Explicit shutdown released it, but Durable Object incarnation
    loss had no authoritative cross-incarnation stale-writer boundary.
 
 The stale owner may originate from Durable Object incarnation loss or a
@@ -340,15 +340,15 @@ rollback boundary through final decoration and awaiting session shutdown.
 
 The correctness fix is store-authoritative rather than process-local.
 Memory, SQLite, Postgres, IndexedDB, and Cloudflare Durable Object storage now
-persist a monotonic fence separately from the journal revision.
-`acquire_owner` installs the new authority and reads one journal snapshot in the
-same transaction. Every append checks the complete owner token before the
+persist a monotonic fence separately from the state revision. `acquire`
+installs the new authority and reads the one total state in the same
+transaction. Every `replace` checks the complete owner token before the
 revision. A newer opener therefore fences every older Agent before it can
 regress history or cache lineage.
 
 This authority is non-expiring and is not a lease: there is no heartbeat or
 TTL. Acquisition is last-opener-wins ownership handoff. `Fenced`, `Conflict`,
-and unknown `Backend` outcomes require a fresh Agent and full journal reopen;
+and unknown `Backend` outcomes require a fresh Agent and full state reload;
 only a definite `NotCommitted` result is safe to retry on the same owner.
 
 ### Correct fix boundary
@@ -357,8 +357,8 @@ only a definite `NotCommitted` result is safe to retry on the same owner.
    decoration setup. Every failure before publication awaits
    `agent.session.shutdown()`.
 2. **Implemented:** persist a monotonic owner fence in every host store,
-   atomically return its same-snapshot `OwnedJournal`, and check authority
-   before revision on every append.
+   atomically return its same-snapshot `OwnedState`, and check authority before
+   revision on every replacement.
 3. **Implemented:** remove fixed one-second passive retry. One attempt per
    subscriber transition is sufficient; real turns already own bounded typed
    retry. Structural ownership errors enter actionable `reopen_required` state
@@ -497,7 +497,7 @@ Current browser performance marks are useful but incomplete:
 - Provider usage is not split into total, cached, and cache-write input tokens
   in this production comparison.
 - There is no retained measurement of first-request bytes after direct
-  snapshot, portable-journal, or Codex-rollout recovery.
+  snapshot, portable-state, or Codex-rollout recovery.
 
 Add runtime-labelled switch, acceptance, run-start, first-token, history-visible,
 and completion timings before the next comparative performance pass. Add a
@@ -515,13 +515,13 @@ review are implemented:
    effort controls, fast/store and transport configuration, endpoints, and
    typed history. Any semantic change rejects replay.
 2. Active cancellation commits its safe interrupted checkpoint to the portable
-   journal, preserving restored history and cache prefix.
+   durable state, preserving restored history and cache prefix.
 3. Successful standalone compaction commits a model-only portable checkpoint,
    preserving the smaller replacement history across a cold reopen.
-4. Durable attachment defaults the prompt-cache key to journal ID. Sequential
+4. Durable attachment defaults the prompt-cache key to state ID. Sequential
    owners retain it; cold reopen sends full typed history without a retained
    provider response ID.
-5. A journal-replayed model step explicitly invalidates its old transport
+5. A state-replayed model step explicitly invalidates its old transport
    response ID. The next model/compaction request is a full typed-history replay
    under both `store(false)` and `store(true)`.
 6. Idle routed prompts now pass through durable admission; terminal replay

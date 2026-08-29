@@ -186,11 +186,11 @@ test("a duplicate durable session rejects without fencing the live Agent", async
   const stored = createMemoryDurabilityStore(durabilityId);
   let authorityAcquisitions = 0;
   const durability = {
-    acquire(journalId, request) {
+    acquire(stateId, request) {
       authorityAcquisitions += 1;
-      return stored.acquire(journalId, request);
+      return stored.acquire(stateId, request);
     },
-    append: (journalId, request) => stored.append(journalId, request),
+    replace: (stateId, request) => stored.replace(stateId, request),
   };
   const options = {
     transport: Transport.openAi({ apiKey: "test-key", websocketUrl: server.url }),
@@ -235,15 +235,15 @@ test("durability store failures preserve reopen and retry-safe dispositions", as
       "retryable",
     ],
   ];
-  for (const [name, appendOutcome, expectedCode] of cases) {
+  for (const [name, replaceOutcome, expectedCode] of cases) {
     const durabilityId = `lifecycle-store-${name}`;
     const durability = {
-      acquire(_journalId, { ownerId }) {
-        return { ownerId, fence: "1", revision: "0", batches: [] };
+      acquire(_stateId, { ownerId }) {
+        return { ownerId, fence: "1", revision: "0", payload: null };
       },
-      append() {
-        if (appendOutcome instanceof Error) throw appendOutcome;
-        return appendOutcome;
+      replace() {
+        if (replaceOutcome instanceof Error) throw replaceOutcome;
+        return replaceOutcome;
       },
     };
     const agent = await Agent.create({

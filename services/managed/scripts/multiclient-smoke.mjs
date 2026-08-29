@@ -3,13 +3,14 @@ import WebSocket from "ws";
 
 import {
   managedAccountFetch,
-  managedAccountWebSocketOptions,
+  managedAccountSessionWebSocketOptions,
   parseManagedAgentReceipt,
-  requireManagedApiKey,
 } from "./managed-account-auth.mjs";
+import { resolveManagedSmokeCredentials } from "./local-smoke-account.mjs";
 
 const baseUrl = process.env.NANOCODEX_WORKER_URL ?? "http://127.0.0.1:8787";
-const apiKey = requireManagedApiKey();
+const credentials = await resolveManagedSmokeCredentials(baseUrl, "managed multiclient smoke");
+const { accountCookie, apiKey } = credentials;
 const clientCount = Number(process.env.NANOCODEX_MULTICLIENT_CLIENTS ?? 2);
 const timeoutMs = Number(process.env.NANOCODEX_MULTICLIENT_TIMEOUT_MS ?? 120_000);
 
@@ -28,7 +29,7 @@ try {
   const receivers = await Promise.all(Array.from({ length: clientCount }, async () => {
     const socket = new WebSocket(
       agent.websocket_url,
-      managedAccountWebSocketOptions(apiKey),
+      managedAccountSessionWebSocketOptions(accountCookie, baseUrl),
     );
     sockets.push(socket);
     const ready = deferred();
@@ -88,6 +89,7 @@ try {
   await managedAccountFetch(apiKey, `${baseUrl}/v1/agents/${agent.agent_id}`, {
     method: "DELETE",
   }).catch(() => {});
+  await credentials.cleanup();
 }
 
 function deferred() {

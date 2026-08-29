@@ -12,7 +12,6 @@ const UTF8 = new TextEncoder();
 const TERMINAL_TYPES = new Set([
   "turn_completed",
   "turn_cancelled",
-  "turn_blocked",
   "turn_failed",
 ]);
 const TERMINAL_CACHE_CAPACITY = 256;

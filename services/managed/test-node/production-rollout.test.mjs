@@ -206,7 +206,16 @@ test("managed production config retains the exact private eight-DO topology", as
     { binding: "NANOCODEX", service: "nanocodex-egress" },
   ]);
   assert.equal(config.durable_objects.bindings.length, 8);
-  assert.deepEqual(config.migrations.map(({ tag }) => tag), ["v1", "v2", "v3", "v4"]);
+  assert.deepEqual(
+    config.durable_objects.bindings.find(({ name }) => name === "NANOCODEX_SESSIONS"),
+    { name: "NANOCODEX_SESSIONS", class_name: "DurableAgentSession" },
+  );
+  assert.deepEqual(config.migrations.map(({ tag }) => tag), ["v1", "v2", "v3", "v4", "v5"]);
+  assert.deepEqual(config.migrations.at(-1), {
+    tag: "v5",
+    new_sqlite_classes: ["DurableAgentSession"],
+    deleted_classes: ["NanocodexSession"],
+  });
   assert.doesNotMatch(JSON.stringify(config), /NANOCODEX_AUTH_MODE|OPENAI_API_KEY|CODEX_OAUTH_BOOTSTRAP|CODEX_RELAY_URL/);
   assert.deepEqual(managedSecretPayload(adminToken), { NANOCODEX_ADMIN_TOKEN: adminToken });
   assert.deepEqual(webSecretPayload("g".repeat(43)), {

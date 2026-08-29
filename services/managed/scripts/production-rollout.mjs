@@ -38,19 +38,32 @@ const BROKER_NAME = "nanocodex-egress";
 const MANAGED_TEMPLATE_NAME = "nanocodex-managed-development";
 const MANAGED_NAME = "nanocodex-durable-agent";
 const WEB_NAME = "nanocodex";
+const MANAGED_DURABLE_OBJECT_BINDINGS = [
+  ["NANOCODEX_SESSIONS", "DurableAgentSession"],
+  ["NANOCODEX_ROOMS", "MultiplayerRoom"],
+  ["NANOCODEX_MULTIPLAYER_QUOTA", "MultiplayerQuota"],
+  ["NANOCODEX_AUTH", "NonceStorage"],
+  ["NANOCODEX_USERS", "UserAccount"],
+  ["NANOCODEX_API_KEYS", "ApiKeyRecord"],
+  ["NANOCODEX_MEMORY", "MemoryScope"],
+  ["NANOCODEX_ORGANIZATIONS", "Organization"],
+];
 const MANAGED_DURABLE_OBJECT_MIGRATIONS = [
-  ["v1", [
-    ["NANOCODEX_SESSIONS", "NanocodexSession"],
-    ["NANOCODEX_ROOMS", "MultiplayerRoom"],
-    ["NANOCODEX_MULTIPLAYER_QUOTA", "MultiplayerQuota"],
-  ]],
-  ["v2", [
-    ["NANOCODEX_AUTH", "NonceStorage"],
-    ["NANOCODEX_USERS", "UserAccount"],
-    ["NANOCODEX_API_KEYS", "ApiKeyRecord"],
-  ]],
-  ["v3", [["NANOCODEX_MEMORY", "MemoryScope"]]],
-  ["v4", [["NANOCODEX_ORGANIZATIONS", "Organization"]]],
+  {
+    tag: "v1",
+    new_sqlite_classes: ["NanocodexSession", "MultiplayerRoom", "MultiplayerQuota"],
+  },
+  {
+    tag: "v2",
+    new_sqlite_classes: ["NonceStorage", "UserAccount", "ApiKeyRecord"],
+  },
+  { tag: "v3", new_sqlite_classes: ["MemoryScope"] },
+  { tag: "v4", new_sqlite_classes: ["Organization"] },
+  {
+    tag: "v5",
+    new_sqlite_classes: ["DurableAgentSession"],
+    deleted_classes: ["NanocodexSession"],
+  },
 ];
 const PROVIDER_NAMES = [
   "NANOCODEX_MANAGED_AUTH_MODE",
@@ -154,7 +167,7 @@ export function buildManagedProductionConfig(baseConfig, {
       binding?.class_name,
     ]),
   );
-  const expectedBindings = MANAGED_DURABLE_OBJECT_MIGRATIONS.flatMap(([, bindings]) => bindings);
+  const expectedBindings = MANAGED_DURABLE_OBJECT_BINDINGS;
   if ((baseConfig.durable_objects?.bindings ?? []).length !== expectedBindings.length
     || durableObjects.size !== expectedBindings.length) {
     throw new Error("production managed Worker has an unexpected Durable Object binding");
@@ -165,15 +178,14 @@ export function buildManagedProductionConfig(baseConfig, {
     }
   }
   const migrationTags = baseConfig.migrations?.map((migration) => migration?.tag);
-  const expectedTags = MANAGED_DURABLE_OBJECT_MIGRATIONS.map(([tag]) => tag);
+  const expectedTags = MANAGED_DURABLE_OBJECT_MIGRATIONS.map(({ tag }) => tag);
   if (JSON.stringify(migrationTags) !== JSON.stringify(expectedTags)) {
     throw new Error("production managed Worker requires the complete ordered migration history");
   }
-  for (const [index, [tag, bindings]] of MANAGED_DURABLE_OBJECT_MIGRATIONS.entries()) {
-    const actual = baseConfig.migrations[index]?.new_sqlite_classes;
-    const expected = bindings.map(([, className]) => className);
+  for (const [index, expected] of MANAGED_DURABLE_OBJECT_MIGRATIONS.entries()) {
+    const actual = baseConfig.migrations[index];
     if (JSON.stringify(actual) !== JSON.stringify(expected)) {
-      throw new Error(`production managed Worker requires the exact ${tag} SQLite migration`);
+      throw new Error(`production managed Worker requires the exact ${expected.tag} SQLite migration`);
     }
   }
   assertNoProviderConfiguration(baseConfig, "managed config");

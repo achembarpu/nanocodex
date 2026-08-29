@@ -49,8 +49,8 @@ export type Agent<extended extends object = {}> =
 /** Removes the package-owned durable history for one Cloudflare Agent. */
 export function destroy(owner: DurableObjectOwner): void;
 
-/** Compacts retained durable history before constructing the full Agent runtime. */
-export function compactDurability(
+/** Prunes old terminal receipts before constructing the full Agent runtime. */
+export function pruneDurableReceipts(
   owner: DurableObjectOwner,
   options?: Readonly<{ terminalReceiptRetention?: number | undefined }>,
 ): Promise<void>;
@@ -73,7 +73,7 @@ export declare namespace create {
     eventPersistence?: "durable" | "caller" | undefined;
     instructions?: string | undefined;
     /**
-     * Bounds terminal receipts retained in the hot Rust journal checkpoint.
+     * Bounds terminal receipts retained in the hot Rust state checkpoint.
      * The caller must preserve older exact-ID results before selecting this.
      */
     terminalReceiptRetention?: number | undefined;

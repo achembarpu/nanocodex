@@ -15,8 +15,7 @@ use nanocodex::{
     agent::{
         AgentHandle, ExecutionEnvironment, PromptRequest, SpawnOptions,
         durability::{
-            JournalStore, OwnedJournal, OwnerId, OwnerToken, StoreError, StoreFuture, StoredBatch,
-            StoredJournal,
+            OwnedState, OwnerId, OwnerToken, StateStore, StoreError, StoreFuture, StoredState,
         },
         input::{Prompt, UserInput},
         session::{SessionId, SessionSnapshot},
@@ -60,9 +59,9 @@ mod transport;
 
 use transport::JavaScriptResponsesHost;
 
-/// Compacts a durable session before its full Agent runtime is constructed.
-#[wasm_bindgen(js_name = compactDurableSession)]
-pub async fn compact_durable_session(
+/// Prunes old replay receipts before the full Agent runtime is constructed.
+#[wasm_bindgen(js_name = pruneDurableReceipts)]
+pub async fn prune_durable_receipts(
     durability_host_id: &str,
     durability_id: &str,
     terminal_receipt_limit: u32,
@@ -87,7 +86,7 @@ pub async fn compact_durable_session(
     )
     .await
     .map_err(js_error)?;
-    session.compact().await.map_err(js_error)
+    session.prune_receipts().await.map_err(js_error)
 }
 
 #[wasm_bindgen]
@@ -127,32 +126,14 @@ extern "C" {
     #[wasm_bindgen(catch, js_namespace = ["globalThis", "nanocodexHost"], js_name = durabilityAcquire)]
     fn host_durability_acquire(
         route_id: &str,
-        journal_id: &str,
+        state_id: &str,
         owner_id: &str,
     ) -> Result<Promise, JsValue>;
 
-    #[wasm_bindgen(catch, js_namespace = ["globalThis", "nanocodexHost"], js_name = durabilityAcquirePage)]
-    fn host_durability_acquire_page(
+    #[wasm_bindgen(catch, js_namespace = ["globalThis", "nanocodexHost"], js_name = durabilityReplace)]
+    fn host_durability_replace(
         route_id: &str,
-        journal_id: &str,
-        owner_id: &str,
-        after_revision: &str,
-    ) -> Result<Promise, JsValue>;
-
-    #[wasm_bindgen(catch, js_namespace = ["globalThis", "nanocodexHost"], js_name = durabilityAppend)]
-    fn host_durability_append(
-        route_id: &str,
-        journal_id: &str,
-        owner_id: &str,
-        fence: &str,
-        expected_revision: &str,
-        payload: &str,
-    ) -> Result<Promise, JsValue>;
-
-    #[wasm_bindgen(catch, js_namespace = ["globalThis", "nanocodexHost"], js_name = durabilityCompact)]
-    fn host_durability_compact(
-        route_id: &str,
-        journal_id: &str,
+        state_id: &str,
         owner_id: &str,
         fence: &str,
         expected_revision: &str,
@@ -330,140 +311,68 @@ struct JavaScriptDurabilityStore {
 }
 
 #[derive(Deserialize)]
-struct JavaScriptOwnedJournal {
+struct JavaScriptOwnedState {
     owner_id: String,
     fence: String,
     revision: String,
-    batches: Vec<JavaScriptStoredBatch>,
-    has_more: bool,
-}
-
-#[derive(Deserialize)]
-struct JavaScriptStoredBatch {
-    revision: String,
-    payload: String,
+    payload: Option<String>,
 }
 
 #[derive(Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
-enum JavaScriptAppendResult {
-    Appended { revision: String },
+enum JavaScriptReplaceResult {
+    Replaced { revision: String },
     Conflict { actual_revision: String },
     Fenced,
     NotCommitted { message: String },
 }
 
-#[derive(Deserialize)]
-#[serde(tag = "status", rename_all = "snake_case")]
-enum JavaScriptCompactResult {
-    Compacted { revision: String },
-    Conflict { actual_revision: String },
-    Fenced,
-    NotCommitted { message: String },
-}
-
-impl JournalStore for JavaScriptDurabilityStore {
-    fn acquire_owner<'a>(
+impl StateStore for JavaScriptDurabilityStore {
+    fn acquire<'a>(
         &'a mut self,
-        journal_id: &'a str,
+        state_id: &'a str,
         owner_id: OwnerId,
-    ) -> StoreFuture<'a, Result<OwnedJournal, StoreError>> {
+    ) -> StoreFuture<'a, Result<OwnedState, StoreError>> {
         Box::pin(async move {
-            let mut after_revision = String::new();
-            let mut acquired_fence = None;
-            let mut acquired_revision = None;
-            let mut batches = Vec::new();
-            loop {
-                let promise = host_durability_acquire_page(
-                    &self.route_id,
-                    journal_id,
-                    owner_id.as_str(),
-                    &after_revision,
-                )
+            let promise = host_durability_acquire(&self.route_id, state_id, owner_id.as_str())
                 .map_err(|error| StoreError::Backend(host_error_message(&error)))?;
-                let value = JsFuture::from(promise)
-                    .await
-                    .map_err(|error| StoreError::Backend(host_error_message(&error)))?;
-                let encoded = value.as_string().ok_or_else(|| {
-                    StoreError::Backend(
-                        "JavaScript durability acquire page returned a non-string".to_owned(),
-                    )
+            let value = JsFuture::from(promise)
+                .await
+                .map_err(|error| StoreError::Backend(host_error_message(&error)))?;
+            let encoded = value.as_string().ok_or_else(|| {
+                StoreError::Backend(
+                    "JavaScript durability acquire returned a non-string".to_owned(),
+                )
+            })?;
+            let stored =
+                serde_json::from_str::<JavaScriptOwnedState>(&encoded).map_err(|error| {
+                    StoreError::Backend(format!("invalid durability acquire result: {error}"))
                 })?;
-                let stored =
-                    serde_json::from_str::<JavaScriptOwnedJournal>(&encoded).map_err(|error| {
-                        StoreError::Backend(format!("invalid durability acquire page: {error}"))
-                    })?;
-                if stored.owner_id != owner_id.as_str() {
-                    return Err(StoreError::Backend(
-                        "JavaScript durability acquire returned a different owner ID".to_owned(),
-                    ));
-                }
-                let fence = parse_revision(&stored.fence)?;
-                let revision = parse_revision(&stored.revision)?;
-                if acquired_fence.is_some_and(|retained| retained != fence)
-                    || acquired_revision.is_some_and(|retained| retained != revision)
-                {
-                    return Err(StoreError::Backend(
-                        "JavaScript durability acquisition changed between pages".to_owned(),
-                    ));
-                }
-                acquired_fence = Some(fence);
-                acquired_revision = Some(revision);
-                let page = stored
-                    .batches
-                    .into_iter()
-                    .map(|batch| {
-                        Ok(StoredBatch {
-                            revision: parse_revision(&batch.revision)?,
-                            payload: batch.payload,
-                        })
-                    })
-                    .collect::<Result<Vec<_>, StoreError>>()?;
-                if page
-                    .windows(2)
-                    .any(|pair| pair[0].revision >= pair[1].revision)
-                    || batches.last().is_some_and(|retained: &StoredBatch| {
-                        page.first()
-                            .is_some_and(|candidate| candidate.revision <= retained.revision)
-                    })
-                {
-                    return Err(StoreError::Backend(
-                        "JavaScript durability acquisition revisions did not advance".to_owned(),
-                    ));
-                }
-                if stored.has_more {
-                    let next = page.last().ok_or_else(|| {
-                        StoreError::Backend(
-                            "JavaScript durability acquisition returned an empty continued page"
-                                .to_owned(),
-                        )
-                    })?;
-                    let next = next.revision.to_string();
-                    if next == after_revision {
-                        return Err(StoreError::Backend(
-                            "JavaScript durability acquisition cursor did not advance".to_owned(),
-                        ));
-                    }
-                    after_revision = next;
-                }
-                batches.extend(page);
-                if !stored.has_more {
-                    break;
-                }
+            if stored.owner_id != owner_id.as_str() {
+                return Err(StoreError::Backend(
+                    "JavaScript durability acquire returned a different owner ID".to_owned(),
+                ));
             }
-            Ok(OwnedJournal {
-                owner: OwnerToken::new(owner_id, acquired_fence.unwrap_or_default()),
-                journal: StoredJournal {
-                    revision: acquired_revision.unwrap_or_default(),
-                    batches,
+            let fence = parse_revision(&stored.fence)?;
+            let revision = parse_revision(&stored.revision)?;
+            if (revision == 0) != stored.payload.is_none() {
+                return Err(StoreError::Backend(
+                    "JavaScript durability acquire returned inconsistent state".to_owned(),
+                ));
+            }
+            Ok(OwnedState {
+                owner: OwnerToken::new(owner_id, fence),
+                state: StoredState {
+                    revision,
+                    payload: stored.payload,
                 },
             })
         })
     }
 
-    fn append<'a>(
+    fn replace<'a>(
         &'a mut self,
-        journal_id: &'a str,
+        state_id: &'a str,
         owner: &'a OwnerToken,
         expected_revision: u64,
         payload: &'a str,
@@ -471,50 +380,9 @@ impl JournalStore for JavaScriptDurabilityStore {
         Box::pin(async move {
             let fence = owner.fence().to_string();
             let expected = expected_revision.to_string();
-            let promise = host_durability_append(
+            let promise = host_durability_replace(
                 &self.route_id,
-                journal_id,
-                owner.owner_id().as_str(),
-                &fence,
-                &expected,
-                payload,
-            )
-            .map_err(|error| StoreError::Backend(host_error_message(&error)))?;
-            let value = JsFuture::from(promise)
-                .await
-                .map_err(|error| StoreError::Backend(host_error_message(&error)))?;
-            let encoded = value.as_string().ok_or_else(|| {
-                StoreError::Backend("JavaScript durability append returned a non-string".to_owned())
-            })?;
-            match serde_json::from_str::<JavaScriptAppendResult>(&encoded).map_err(|error| {
-                StoreError::Backend(format!("invalid durability append result: {error}"))
-            })? {
-                JavaScriptAppendResult::Appended { revision } => parse_revision(&revision),
-                JavaScriptAppendResult::Conflict { actual_revision } => Err(StoreError::Conflict {
-                    expected: expected_revision,
-                    actual: parse_revision(&actual_revision)?,
-                }),
-                JavaScriptAppendResult::Fenced => Err(StoreError::Fenced),
-                JavaScriptAppendResult::NotCommitted { message } => {
-                    Err(StoreError::NotCommitted(message))
-                }
-            }
-        })
-    }
-
-    fn compact<'a>(
-        &'a mut self,
-        journal_id: &'a str,
-        owner: &'a OwnerToken,
-        expected_revision: u64,
-        payload: &'a str,
-    ) -> StoreFuture<'a, Result<u64, StoreError>> {
-        Box::pin(async move {
-            let fence = owner.fence().to_string();
-            let expected = expected_revision.to_string();
-            let promise = host_durability_compact(
-                &self.route_id,
-                journal_id,
+                state_id,
                 owner.owner_id().as_str(),
                 &fence,
                 &expected,
@@ -526,21 +394,21 @@ impl JournalStore for JavaScriptDurabilityStore {
                 .map_err(|error| StoreError::Backend(host_error_message(&error)))?;
             let encoded = value.as_string().ok_or_else(|| {
                 StoreError::Backend(
-                    "JavaScript durability compact returned a non-string".to_owned(),
+                    "JavaScript durability replace returned a non-string".to_owned(),
                 )
             })?;
-            match serde_json::from_str::<JavaScriptCompactResult>(&encoded).map_err(|error| {
-                StoreError::Backend(format!("invalid durability compact result: {error}"))
+            match serde_json::from_str::<JavaScriptReplaceResult>(&encoded).map_err(|error| {
+                StoreError::Backend(format!("invalid durability replace result: {error}"))
             })? {
-                JavaScriptCompactResult::Compacted { revision } => parse_revision(&revision),
-                JavaScriptCompactResult::Conflict { actual_revision } => {
+                JavaScriptReplaceResult::Replaced { revision } => parse_revision(&revision),
+                JavaScriptReplaceResult::Conflict { actual_revision } => {
                     Err(StoreError::Conflict {
                         expected: expected_revision,
                         actual: parse_revision(&actual_revision)?,
                     })
                 }
-                JavaScriptCompactResult::Fenced => Err(StoreError::Fenced),
-                JavaScriptCompactResult::NotCommitted { message } => {
+                JavaScriptReplaceResult::Fenced => Err(StoreError::Fenced),
+                JavaScriptReplaceResult::NotCommitted { message } => {
                     Err(StoreError::NotCommitted(message))
                 }
             }
@@ -1266,25 +1134,24 @@ impl WasmNanocodex {
         if let Some(resume) = config.resume {
             builder = builder.resume(resume);
         }
-        if let (Some(route_id), Some(journal_id)) =
-            (config.durability_host_id, config.durability_id)
+        if let (Some(route_id), Some(state_id)) = (config.durability_host_id, config.durability_id)
         {
             let store = JavaScriptDurabilityStore { route_id };
-            let journal = if let Some(limit) = config.terminal_receipt_retention {
+            let durable_state = if let Some(limit) = config.terminal_receipt_retention {
                 if limit > 4_096 {
                     return Err(js_error(
                         "terminal_receipt_retention must be from 0 through 4096",
                     ));
                 }
                 nanocodex::agent::durability::DurableSession::open_with_terminal_receipt_limit(
-                    store, journal_id, limit,
+                    store, state_id, limit,
                 )
                 .await
             } else {
-                nanocodex::agent::durability::DurableSession::open(store, journal_id).await
+                nanocodex::agent::durability::DurableSession::open(store, state_id).await
             }
             .map_err(js_error)?;
-            builder = builder.durability(journal).await.map_err(js_error)?;
+            builder = builder.durability(durable_state).await.map_err(js_error)?;
         }
         let (inner, events) = builder.build().map_err(js_error)?;
         Ok(Self::from_parts(inner, events, subagents))
@@ -2699,7 +2566,6 @@ const fn execution_policy_failure_code(
 
     match disposition {
         ExecutionPolicyDisposition::Retry => "retryable",
-        ExecutionPolicyDisposition::Blocked => "blocked",
         ExecutionPolicyDisposition::Reopen => "reopen_required",
         ExecutionPolicyDisposition::Fatal => "failed",
     }
@@ -2927,7 +2793,7 @@ fn validate(config: &WasmConfig) -> Result<(), JsValue> {
     if config
         .durability_id
         .as_deref()
-        .is_some_and(|journal_id| journal_id.trim().is_empty())
+        .is_some_and(|state_id| state_id.trim().is_empty())
     {
         return Err(js_error("durability_id must not be empty"));
     }

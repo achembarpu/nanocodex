@@ -1,23 +1,18 @@
 const hosts = new Map();
 let nextRouteId = 1n;
-const ACQUIRE_PAGE_ROWS = 8;
 
-export function own(host, store, journalId) {
-  if ((store === undefined) !== (journalId === undefined)) {
+export function own(host, store, stateId) {
+  if ((store === undefined) !== (stateId === undefined)) {
     throw new TypeError("durability and durabilityId must be supplied together");
   }
   const routeId = `durability-route-${nextRouteId++}`;
-  bind(routeId, host, store, journalId);
+  hosts.set(routeId, { host, store, stateId, references: 0 });
   return Object.freeze({
     id: routeId,
     abandon: () => abandon(host, routeId),
     retain: () => retain(host, routeId),
     release: () => release(host, routeId),
   });
-}
-
-function bind(routeId, host, store, journalId) {
-  hosts.set(routeId, { host, store, journalId, references: 0 });
 }
 
 export function retain(host, routeId) {
@@ -40,186 +35,118 @@ export function abandon(host, routeId) {
   if (ownership?.host === host && ownership.references === 0) hosts.delete(routeId);
 }
 
-export async function acquire(routeId, journalId, ownerId) {
-  const stored = await requiredRoute(routeId, journalId).store.acquire(
-    journalId,
-    { ownerId },
-  );
-  if (!stored || typeof stored !== "object" || !Array.isArray(stored.batches)) {
-    throw new TypeError("durability.acquire() must return { ownerId, fence, revision, batches }");
+export async function acquire(routeId, stateId, ownerId) {
+  const stored = await requiredRoute(routeId, stateId).store.acquire(stateId, { ownerId });
+  if (!stored || typeof stored !== "object" || Array.isArray(stored)) {
+    throw new TypeError("durability.acquire() must return an acquired state object");
   }
-  const acquiredOwnerId = requiredString(stored.ownerId, "durability owner ID");
+  exactKeys(stored, ["ownerId", "fence", "revision", "payload"], "durability acquired state");
+  const acquiredOwnerId = nonempty(stored.ownerId, "durability owner ID");
   if (acquiredOwnerId !== ownerId) {
     throw new TypeError("durability.acquire() must return the requested owner ID");
   }
-  return JSON.stringify({
-    owner_id: acquiredOwnerId,
-    fence: revision(stored.fence, "durability owner fence"),
-    revision: revision(stored.revision, "durability load revision"),
-    batches: stored.batches.map((batch) => ({
-      revision: revision(batch?.revision, "durability batch revision"),
-      payload: requiredString(batch?.payload, "durability batch payload"),
-    })),
-  });
-}
-
-export async function acquirePage(routeId, journalId, ownerId, afterRevision) {
-  const route = requiredRoute(routeId, journalId);
-  const store = route.store;
-  let stored;
-  if (typeof store.acquirePage === "function") {
-    stored = await store.acquirePage(journalId, {
-      ownerId,
-      ...(afterRevision === "" ? {} : { afterRevision }),
-      limit: ACQUIRE_PAGE_ROWS,
-    });
-  } else {
-    if (afterRevision === "") {
-      route.acquisition = await store.acquire(journalId, { ownerId });
-    }
-    const acquired = route.acquisition;
-    if (!acquired || acquired.ownerId !== ownerId) {
-      throw new Error("durability acquisition page has no retained owner");
-    }
-    const start = afterRevision === ""
-      ? 0
-      : acquired.batches.findIndex((batch) => batch.revision === afterRevision) + 1;
-    if (start <= 0 && afterRevision !== "") {
-      throw new Error("durability acquisition cursor is not retained");
-    }
-    const batches = acquired.batches.slice(start, start + ACQUIRE_PAGE_ROWS);
-    const hasMore = start + batches.length < acquired.batches.length;
-    stored = { ...acquired, batches, hasMore };
-    if (!hasMore) route.acquisition = undefined;
-  }
-  if (!stored || typeof stored !== "object" || !Array.isArray(stored.batches)) {
-    throw new TypeError("durability.acquirePage() must return an acquired journal page");
-  }
-  const acquiredOwnerId = requiredString(stored.ownerId, "durability owner ID");
-  if (acquiredOwnerId !== ownerId) {
-    throw new TypeError("durability.acquirePage() must return the requested owner ID");
-  }
-  if (typeof stored.hasMore !== "boolean") {
-    throw new TypeError("durability.acquirePage() must return hasMore");
+  const retainedRevision = uint64(stored.revision, "durability state revision");
+  const payload = stored.payload === null
+    ? null
+    : string(stored.payload, "durability state payload");
+  if ((retainedRevision === "0") !== (payload === null)) {
+    throw new TypeError("durability.acquire() returned inconsistent revision and payload");
   }
   return JSON.stringify({
     owner_id: acquiredOwnerId,
-    fence: revision(stored.fence, "durability owner fence"),
-    revision: revision(stored.revision, "durability load revision"),
-    batches: stored.batches.map((batch) => ({
-      revision: revision(batch?.revision, "durability batch revision"),
-      payload: requiredString(batch?.payload, "durability batch payload"),
-    })),
-    has_more: stored.hasMore,
+    fence: uint64(stored.fence, "durability owner fence"),
+    revision: retainedRevision,
+    payload,
   });
 }
 
-export async function append(
+export async function replace(
   routeId,
-  journalId,
+  stateId,
   ownerId,
   fence,
   expectedRevision,
   payload,
 ) {
-  const result = await requiredRoute(routeId, journalId).store.append(journalId, {
+  const result = await requiredRoute(routeId, stateId).store.replace(stateId, {
     ownerId,
     fence,
     expectedRevision,
     payload,
   });
-  if (result?.status === "appended") {
+  if (result?.status === "replaced") {
+    exactKeys(result, ["status", "revision"], "durability replaced result");
     return JSON.stringify({
-      status: "appended",
-      revision: revision(result.revision, "durability append revision"),
+      status: "replaced",
+      revision: uint64(result.revision, "durability replace revision"),
     });
   }
   if (result?.status === "conflict") {
+    exactKeys(result, ["status", "actualRevision"], "durability conflict result");
     return JSON.stringify({
       status: "conflict",
-      actual_revision: revision(result.actualRevision, "durability conflict revision"),
+      actual_revision: uint64(result.actualRevision, "durability conflict revision"),
     });
   }
   if (result?.status === "not_committed") {
+    exactKeys(result, ["status", "message"], "durability not-committed result");
     return JSON.stringify({
       status: "not_committed",
-      message: requiredString(result.message, "durability not-committed message"),
+      message: nonempty(result.message, "durability not-committed message"),
     });
   }
   if (result?.status === "fenced") {
+    exactKeys(result, ["status"], "durability fenced result");
     return JSON.stringify({ status: "fenced" });
   }
   throw new TypeError(
-    "durability.append() must return an appended, conflict, fenced, or not_committed result",
+    "durability.replace() must return a replaced, conflict, fenced, or not_committed result",
   );
 }
 
-export async function compact(
-  routeId,
-  journalId,
-  ownerId,
-  fence,
-  expectedRevision,
-  payload,
-) {
-  const store = requiredRoute(routeId, journalId).store;
-  if (typeof store.compact !== "function") {
-    return JSON.stringify({
-      status: "not_committed",
-      message: "durability store does not support journal compaction",
-    });
-  }
-  const result = await store.compact(journalId, {
-    ownerId,
-    fence,
-    expectedRevision,
-    payload,
-  });
-  if (result?.status === "compacted") {
-    return JSON.stringify({
-      status: "compacted",
-      revision: revision(result.revision, "durability compact revision"),
-    });
-  }
-  if (result?.status === "conflict") {
-    return JSON.stringify({
-      status: "conflict",
-      actual_revision: revision(result.actualRevision, "durability conflict revision"),
-    });
-  }
-  if (result?.status === "not_committed") {
-    return JSON.stringify({
-      status: "not_committed",
-      message: requiredString(result.message, "durability not-committed message"),
-    });
-  }
-  if (result?.status === "fenced") return JSON.stringify({ status: "fenced" });
-  throw new TypeError(
-    "durability.compact() must return a compacted, conflict, fenced, or not_committed result",
-  );
-}
-
-function requiredRoute(routeId, journalId) {
+function requiredRoute(routeId, stateId) {
   const route = hosts.get(routeId);
   if (!route) throw new Error(`no Nanocodex host owns durability route: ${routeId}`);
-  if (route.journalId !== journalId) {
-    throw new Error(`Nanocodex durability route does not own journal: ${journalId}`);
+  if (route.stateId !== stateId) {
+    throw new Error(`Nanocodex durability route does not own state: ${stateId}`);
   }
   const store = route.store;
-  if (!store || typeof store.acquire !== "function" || typeof store.append !== "function") {
-    throw new TypeError("the selected Nanocodex host must define a durability store");
+  if (!store || typeof store.acquire !== "function" || typeof store.replace !== "function") {
+    throw new TypeError("the selected Nanocodex host must define a durability state store");
   }
   return route;
 }
 
-function revision(value, name) {
-  if (typeof value !== "string" || !/^(0|[1-9][0-9]*)$/.test(value)) {
-    throw new TypeError(`${name} must be an unsigned decimal string`);
+function uint64(value, name) {
+  if (
+    typeof value !== "string"
+    || !/^(0|[1-9][0-9]*)$/.test(value)
+    || BigInt(value) > 18_446_744_073_709_551_615n
+  ) {
+    throw new TypeError(`${name} must be an unsigned 64-bit decimal string`);
   }
   return value;
 }
 
-function requiredString(value, name) {
+function string(value, name) {
   if (typeof value !== "string") throw new TypeError(`${name} must be a string`);
   return value;
+}
+
+function nonempty(value, name) {
+  if (typeof value !== "string" || !value.trim()) {
+    throw new TypeError(`${name} must be a non-empty string`);
+  }
+  return value;
+}
+
+function exactKeys(value, expected, name) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError(`${name} must be an object`);
+  }
+  const actual = Object.keys(value).sort();
+  const required = [...expected].sort();
+  if (actual.length !== required.length || actual.some((key, index) => key !== required[index])) {
+    throw new TypeError(`${name} must contain exactly ${required.join(", ")}`);
+  }
 }

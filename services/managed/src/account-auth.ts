@@ -14,7 +14,7 @@ const USER_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const API_KEY = /^ncx_live_([A-Za-z0-9_-]{12})_([A-Za-z0-9_-]{43})$/;
 const ANONYMOUS_SESSION_TOKEN = /^a_[A-Za-z0-9_-]{43}$/;
-const PASSKEY_SESSION_TOKEN = /^[A-Za-z0-9_-]{43}$/;
+const PASSKEY_SESSION_TOKEN = /^[0-9a-f]{64}$/;
 const PORTABLE_CREDENTIAL_ID = /^[A-Za-z0-9_-]{1,512}$/;
 const PORTABLE_PUBLIC_KEY = /^0x(?:[0-9a-fA-F]{2}){1,1024}$/;
 const BASE64_URL = /^[A-Za-z0-9_-]+$/;
@@ -410,7 +410,7 @@ export async function authenticate(
         `account_session:${await sha256(cookie)}`,
       );
     }
-  } else {
+  } else if (cookie && PASSKEY_SESSION_TOKEN.test(cookie)) {
     const passkey = await webAuthnHandler(env, url).getSession(request);
     const passkeyUserId = passkey?.userId ? decodeUserId(passkey.userId) : undefined;
     if (isUserId(passkeyUserId)) {
@@ -1078,7 +1078,8 @@ function decodeUserId(value: string): string | undefined {
 
 function cookieValue(request: Request, name: string): string | undefined {
   const cookie = rawCookie(request, name);
-  return cookie.present && /^(?:a_)?[A-Za-z0-9_-]{43}$/.test(cookie.value)
+  return cookie.present
+    && (ANONYMOUS_SESSION_TOKEN.test(cookie.value) || PASSKEY_SESSION_TOKEN.test(cookie.value))
     ? cookie.value
     : undefined;
 }
@@ -1240,12 +1241,10 @@ export async function revokeApiKey(
 }
 
 export class UserAccount extends DurableObject<AccountAuthEnv> {
-  readonly #registryReady: Promise<void>;
-
   constructor(ctx: DurableObjectState, env: AccountAuthEnv) {
     super(ctx, env);
     ctx.storage.sql.exec(`
-      CREATE TABLE IF NOT EXISTS user_agents (
+      CREATE TABLE IF NOT EXISTS agent_registry (
         id TEXT PRIMARY KEY,
         title TEXT NOT NULL DEFAULT '',
         created_at INTEGER NOT NULL,
@@ -1253,14 +1252,12 @@ export class UserAccount extends DurableObject<AccountAuthEnv> {
         turn_count INTEGER NOT NULL DEFAULT 0 CHECK (turn_count >= 0),
         deleted_at INTEGER
       );
-      CREATE INDEX IF NOT EXISTS user_agents_active_created
-        ON user_agents (created_at, id) WHERE deleted_at IS NULL;
+      CREATE INDEX IF NOT EXISTS agent_registry_active_created
+        ON agent_registry (created_at, id) WHERE deleted_at IS NULL;
     `);
-    this.#registryReady = ctx.blockConcurrencyWhile(() => this.#adoptLegacyAgentRegistry());
   }
 
   async fetch(request: Request): Promise<Response> {
-    await this.#registryReady;
     const url = new URL(request.url);
     if (url.pathname === "/account") {
       if (request.method === "PUT") {
@@ -1342,7 +1339,7 @@ export class UserAccount extends DurableObject<AccountAuthEnv> {
       if (request.method === "GET") {
         return json(this.ctx.storage.sql.exec<AgentRegistryRow>(
           `SELECT id, title, created_at, updated_at, turn_count, deleted_at
-           FROM user_agents
+           FROM agent_registry
            WHERE deleted_at IS NULL
            ORDER BY created_at, id`,
         ).toArray().map(agentSummary));
@@ -1354,7 +1351,7 @@ export class UserAccount extends DurableObject<AccountAuthEnv> {
           return json({ error: "invalid_agent" }, { status: 400 });
         }
         const existing = this.ctx.storage.sql.exec<{ deleted_at: number | null }>(
-          "SELECT deleted_at FROM user_agents WHERE id = ?",
+          "SELECT deleted_at FROM agent_registry WHERE id = ?",
           agentId,
         ).toArray()[0];
         if (existing?.deleted_at !== null && existing !== undefined) {
@@ -1363,7 +1360,7 @@ export class UserAccount extends DurableObject<AccountAuthEnv> {
         if (!existing) {
           const now = Date.now();
           this.ctx.storage.sql.exec(
-            `INSERT INTO user_agents
+            `INSERT INTO agent_registry
                (id, title, created_at, updated_at, turn_count, deleted_at)
              VALUES (?, '', ?, ?, 0, NULL)`,
             agentId,
@@ -1383,7 +1380,7 @@ export class UserAccount extends DurableObject<AccountAuthEnv> {
         ? Number(body.turnCount) : undefined;
       if (turnCount === undefined) return json({ error: "invalid_activity" }, { status: 400 });
       const updated = this.ctx.storage.sql.exec(
-        `UPDATE user_agents
+        `UPDATE agent_registry
          SET title = CASE WHEN title = '' THEN ? ELSE title END,
              updated_at = ?,
              turn_count = MAX(turn_count, ?)
@@ -1401,10 +1398,10 @@ export class UserAccount extends DurableObject<AccountAuthEnv> {
       const agentId = agentMatch[1]!;
       const now = Date.now();
       this.ctx.storage.sql.exec(
-        `INSERT INTO user_agents
+        `INSERT INTO agent_registry
            (id, title, created_at, updated_at, turn_count, deleted_at)
          VALUES (?, '', ?, ?, 0, ?)
-         ON CONFLICT(id) DO UPDATE SET deleted_at = COALESCE(user_agents.deleted_at, excluded.deleted_at)`,
+         ON CONFLICT(id) DO UPDATE SET deleted_at = COALESCE(agent_registry.deleted_at, excluded.deleted_at)`,
         agentId,
         now,
         now,
@@ -1415,56 +1412,6 @@ export class UserAccount extends DurableObject<AccountAuthEnv> {
     return json({ error: "not_found" }, { status: 404 });
   }
 
-  async #adoptLegacyAgentRegistry(): Promise<void> {
-    const [agents, summaries] = await Promise.all([
-      this.ctx.storage.get<string[]>("agents"),
-      this.ctx.storage.get<Record<string, AgentSummary>>("agentSummaries"),
-    ]);
-    for (const id of agents ?? []) {
-      const summary = summaries?.[id];
-      const now = Date.now();
-      this.ctx.storage.sql.exec(
-        `INSERT OR IGNORE INTO user_agents
-           (id, title, created_at, updated_at, turn_count, deleted_at)
-         VALUES (?, ?, ?, ?, ?, NULL)`,
-        id,
-        summary?.title ?? "",
-        summary?.createdAt ?? now,
-        summary?.updatedAt ?? now,
-        summary?.turnCount ?? 0,
-      );
-    }
-    await this.ctx.storage.delete(["agents", "agentSummaries"]);
-
-    let startAfter: string | undefined;
-    while (true) {
-      const tombstones = await this.ctx.storage.list({
-        prefix: "agent-tombstone:",
-        limit: 1_000,
-        ...(startAfter === undefined ? {} : { startAfter }),
-      });
-      if (tombstones.size === 0) break;
-      const now = Date.now();
-      for (const key of tombstones.keys()) {
-        const id = key.slice("agent-tombstone:".length);
-        if (/^[0-9a-f-]{36}$/.test(id)) {
-          this.ctx.storage.sql.exec(
-            `INSERT INTO user_agents
-               (id, title, created_at, updated_at, turn_count, deleted_at)
-             VALUES (?, '', ?, ?, 0, ?)
-             ON CONFLICT(id) DO UPDATE SET deleted_at = COALESCE(user_agents.deleted_at, excluded.deleted_at)`,
-            id,
-            now,
-            now,
-            now,
-          );
-        }
-        startAfter = key;
-      }
-      await this.ctx.storage.delete([...tombstones.keys()]);
-      if (tombstones.size < 1_000) break;
-    }
-  }
 }
 
 function agentSummary(row: AgentRegistryRow): AgentSummary {

@@ -3,16 +3,20 @@ import { randomUUID } from "node:crypto";
 import {
   managedAccountFetch,
   parseManagedAgentReceipt,
-  requireManagedApiKey,
 } from "./managed-account-auth.mjs";
+import { resolveManagedSmokeCredentials } from "./local-smoke-account.mjs";
 
 const baseUrl = new URL(process.env.NANOCODEX_WORKER_URL ?? "http://127.0.0.1:8787");
-const apiKey = requireManagedApiKey();
+const credentials = await resolveManagedSmokeCredentials(baseUrl, "managed durability load");
+const { apiKey } = credentials;
 const mode = process.env.NANOCODEX_LOAD_MODE ?? "control";
 const agents = integer("NANOCODEX_LOAD_AGENTS", 1_000, 1, 100_000);
 const concurrency = integer("NANOCODEX_LOAD_CONCURRENCY", 128, 1, 1_000);
 const timeoutMs = integer("NANOCODEX_LOAD_TIMEOUT_MS", 30_000, 1_000, 600_000);
 const preserve = process.env.NANOCODEX_LOAD_PRESERVE === "true";
+if (preserve && credentials.temporary) {
+  throw new Error("NANOCODEX_LOAD_PRESERVE requires explicit persistent smoke credentials");
+}
 const runId = randomUUID();
 if (!new Set(["control", "turn"]).has(mode)) {
   throw new Error("NANOCODEX_LOAD_MODE must be control or turn");
@@ -110,7 +114,7 @@ try {
           terminalEndToEnd[index] = Date.now() - acceptedAt[index];
           return;
         }
-        if (["blocked", "cancelled", "failed"].includes(turn.state)) {
+        if (["cancelled", "failed"].includes(turn.state)) {
           throw new Error(`turn entered ${turn.state}`);
         }
         await waitWithFullJitter(pollDelayMs, deadline);
@@ -191,6 +195,13 @@ try {
         : error;
       return { error: errorMessage(error) };
     });
+  }
+  try {
+    await credentials.cleanup();
+  } catch (error) {
+    failure = failure
+      ? new AggregateError([failure, error], "load and credential cleanup failed")
+      : error;
   }
 }
 

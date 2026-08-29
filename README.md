@@ -140,7 +140,7 @@ your application
   ├─ cheap Nanocodex command handle ── prompt / steer / cancel / fork
   ├─ optional typed events ─────────── UI / persistence / telemetry
   ├─ caller-defined tools ──────────── your data and capabilities
-  ├─ optional durability layer ─────── journal / replay / recovery / stores
+  ├─ optional durability layer ─────── total state / recovery / stores
   └─ private driver
        ├─ ordered turns and typed committed history
        ├─ persistent OpenAI Responses WebSocket + typed retries
@@ -181,11 +181,15 @@ breaking stay composable without introducing a second retry owner.
 
 ### Durable execution is optional and Rust-owned
 
-`nanocodex-durability` adds an append-only journal, typed reduction and
+`nanocodex-durability` adds a replace-in-place total execution state and
 recovery policy, operation deduplication, effect replay, and session
 checkpoints. It includes memory, SQLite, and Postgres stores, plus a
 host-provided store contract whose only requirement is atomic load and
-compare-and-append. Rust owns the journal format and every recovery decision.
+fenced compare-and-replace. Rust owns the state format and every recovery decision.
+Model calls, warmup, compaction, and tools share one effect admission result:
+execute, replay an exact output, or persist an explicit unknown outcome without
+repeating an at-most-once effect. Live attempts are fenced in-memory
+capabilities, not a second durable state machine.
 
 The layer implements the agent's neutral execution-policy seam; the core agent
 does not depend on it. Lower-level consumers can use `DurableSession` directly
@@ -615,7 +619,7 @@ tracing, and benchmark gates; stable crates never depend on them.
 | --- | --- | --- |
 | [`nanocodex`](crates/nanocodex/README.md) | Stable, published | Thin Alloy-style facade and canonical imports; no runtime implementation. |
 | [`nanocodex-agent`](crates/nanocodex-agent/README.md) | Stable, published | Owned driver, turns/results/events, history policy, snapshots, compaction, branches, and cancellation. |
-| [`nanocodex-durability`](crates/nanocodex-durability/README.md) | Stable, source/Git-only, optional | Append-only execution journal, deduplication, replay and recovery policy, checkpoints, and memory/SQLite/Postgres/host stores. |
+| [`nanocodex-durability`](crates/nanocodex-durability/README.md) | Stable, source/Git-only, optional | Total execution state, deduplication, recovery policy, staged outcomes, checkpoints, and memory/SQLite/Postgres/host stores. |
 | [`nanocodex-oai-api`](crates/nanocodex-oai-api/README.md) | Stable, published | OpenAI auth, typed Responses and Realtime boundaries, persistent transports, managed context, retry, pricing, and Tower client. |
 | [`nanocodex-tools`](crates/nanocodex-tools/README.md) | Stable, published | Tool contract, standard tools, shell/process lifecycle, Code Mode, deferred search, MCP, and remote dispatch. |
 | [`nanocodex-subagents`](crates/nanocodex-subagents/README.md) | Source/Git-only optional workspace extension | Task-tree lifecycle and the seven canonical child-agent tools above the core. |

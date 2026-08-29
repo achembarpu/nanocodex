@@ -4,12 +4,11 @@ import test from "node:test";
 import { sqliteDurabilitySchema } from "nanocodex/durability";
 import { createCloudflareDurabilityStore } from "nanocodex/durability/cloudflare";
 
-test("Cloudflare durability owns schema setup and atomic SQLite adaptation", () => {
+test("Cloudflare durability stores one state and chunks only oversized payloads", () => {
   const owners = new Map();
-  const revisions = new Map();
-  const batches = [];
+  const states = new Map();
+  const heads = new Map();
   const chunks = [];
-  const chunkSelects = [];
   const schema = [];
   let transactions = 0;
   const storage = {
@@ -18,65 +17,44 @@ test("Cloudflare durability owns schema setup and atomic SQLite adaptation", () 
         if (args.some((value) => typeof value === "string" && Buffer.byteLength(value) > 2_000_000)) {
           throw new Error("string or blob too big: SQLITE_TOOBIG");
         }
+        const [stateId, revision, payload] = args;
         let rows;
-        const [journalId, revision, payload] = args;
         if (sql.startsWith("CREATE TABLE")) {
           schema.push(sql);
           rows = [];
-        } else if (sql.startsWith("SELECT owner_id, fence FROM nanocodex_journal_owners")) {
-          const stored = owners.get(journalId);
-          rows = stored === undefined ? [] : [stored];
-        } else if (sql.startsWith("INSERT INTO nanocodex_journal_owners")) {
-          const [, ownerId, fence] = args;
-          owners.set(journalId, { owner_id: ownerId, fence });
+        } else if (sql.startsWith("PRAGMA table_info")) {
+          rows = pragmaRows(sql);
+        } else if (sql.startsWith("SELECT owner_id, fence FROM nanocodex_durable_owners")) {
+          const stored = owners.get(stateId);
+          rows = stored ? [stored] : [];
+        } else if (sql.startsWith("INSERT INTO nanocodex_durable_owners")) {
+          owners.set(stateId, { owner_id: args[1], fence: args[2] });
           rows = [];
-        } else if (sql.startsWith("SELECT revision FROM nanocodex_journals")) {
-          const stored = revisions.get(journalId);
-          rows = stored === undefined ? [] : [{ revision: stored }];
-        } else if (sql.startsWith("SELECT revision, payload FROM nanocodex_journal_batches")) {
-          rows = batches
-            .filter((batch) => batch.journalId === journalId)
-            .map(({ revision: batchRevision, payload: batchPayload }) => ({
-              revision: batchRevision,
-              payload: batchPayload,
-            }));
-          if (sql.includes("length(revision) > length(?)")) {
-            rows = rows.filter((batch) => BigInt(batch.revision) > BigInt(args[1]));
-          }
-          rows.sort((left, right) => Number(BigInt(left.revision) - BigInt(right.revision)));
-          if (sql.includes("LIMIT 9")) rows = rows.slice(0, 9);
-        } else if (sql.startsWith("SELECT revision, chunk_index, payload FROM nanocodex_journal_batch_chunks")) {
-          const selectedRevisions = new Set(args.slice(1));
-          chunkSelects.push([...selectedRevisions]);
-          rows = chunks
-            .filter((chunk) =>
-              chunk.journalId === journalId && selectedRevisions.has(chunk.revision)
-            )
-            .map(({ revision: chunkRevision, chunkIndex, payload: chunkPayload }) => ({
-              revision: chunkRevision,
-              chunk_index: chunkIndex,
-              payload: chunkPayload,
-            }));
-        } else if (sql.startsWith("INSERT INTO nanocodex_journals")) {
-          revisions.set(journalId, revision);
+        } else if (sql.startsWith("SELECT revision, payload FROM nanocodex_durable_states")) {
+          const stored = states.get(stateId);
+          rows = stored ? [stored] : [];
+        } else if (sql.startsWith("INSERT INTO nanocodex_durable_states")) {
+          states.set(stateId, { revision, payload });
           rows = [];
-        } else if (sql.startsWith("INSERT INTO nanocodex_journal_batches")) {
-          batches.push({ journalId, revision, payload });
+        } else if (sql.startsWith("DELETE FROM nanocodex_durable_chunk_heads")) {
+          heads.delete(stateId);
           rows = [];
-        } else if (sql.startsWith("INSERT INTO nanocodex_journal_batch_chunks")) {
-          const [, , chunkIndex, chunkPayload] = args;
-          chunks.push({ journalId, revision, chunkIndex, payload: chunkPayload });
+        } else if (sql.startsWith("INSERT INTO nanocodex_durable_chunk_heads")) {
+          heads.set(stateId, { revision, chunk_count: payload });
           rows = [];
-        } else if (sql.startsWith("DELETE FROM nanocodex_journal_batch_chunks")) {
+        } else if (sql.startsWith("SELECT revision, chunk_count FROM nanocodex_durable_chunk_heads")) {
+          const stored = heads.get(stateId);
+          rows = stored ? [stored] : [];
+        } else if (sql.startsWith("DELETE FROM nanocodex_durable_state_chunks")) {
           for (let index = chunks.length - 1; index >= 0; index -= 1) {
-            if (chunks[index].journalId === journalId) chunks.splice(index, 1);
+            if (chunks[index].stateId === stateId) chunks.splice(index, 1);
           }
           rows = [];
-        } else if (sql.startsWith("DELETE FROM nanocodex_journal_batches")) {
-          for (let index = batches.length - 1; index >= 0; index -= 1) {
-            if (batches[index].journalId === journalId) batches.splice(index, 1);
-          }
+        } else if (sql.startsWith("INSERT INTO nanocodex_durable_state_chunks")) {
+          chunks.push({ stateId, revision, chunk_index: args[2], payload: args[3] });
           rows = [];
+        } else if (sql.startsWith("SELECT revision, chunk_index, payload FROM nanocodex_durable_state_chunks")) {
+          rows = chunks.filter((chunk) => chunk.stateId === stateId);
         } else {
           throw new Error(`unexpected SQL: ${sql}`);
         }
@@ -91,109 +69,81 @@ test("Cloudflare durability owns schema setup and atomic SQLite adaptation", () 
 
   const store = createCloudflareDurabilityStore(storage);
   assert.deepEqual(schema.slice(0, sqliteDurabilitySchema.length), sqliteDurabilitySchema);
-  assert.equal(schema.length, sqliteDurabilitySchema.length + 1);
-  assert.deepEqual(store.load("agent-1"), { revision: "0", batches: [] });
-  const firstOwner = store.acquire("agent-1", { ownerId: "worker-1" });
-  assert.deepEqual(firstOwner, {
+  assert.equal(schema.length, sqliteDurabilitySchema.length + 2);
+  assert.deepEqual(store.load("agent-1"), { revision: "0", payload: null });
+  const owner = store.acquire("agent-1", { ownerId: "worker-1" });
+  assert.deepEqual(owner, {
     ownerId: "worker-1",
     fence: "1",
     revision: "0",
-    batches: [],
+    payload: null,
   });
-  assert.deepEqual(store.append("agent-1", {
-    ownerId: firstOwner.ownerId,
-    fence: firstOwner.fence,
+  assert.deepEqual(store.replace("agent-1", {
+    ownerId: owner.ownerId,
+    fence: owner.fence,
     expectedRevision: "0",
-    payload: "opaque-rust-batch",
-  }), { status: "appended", revision: "1" });
+    payload: "opaque-rust-state",
+  }), { status: "replaced", revision: "1" });
   assert.deepEqual(store.load("agent-1"), {
     revision: "1",
-    batches: [{ revision: "1", payload: "opaque-rust-batch" }],
+    payload: "opaque-rust-state",
   });
-  assert.deepEqual(store.compact("agent-1", {
-    ownerId: firstOwner.ownerId,
-    fence: firstOwner.fence,
-    expectedRevision: "1",
-    payload: "compacted-rust-state",
-  }), { status: "compacted", revision: "1" });
-  assert.deepEqual(store.load("agent-1"), {
-    revision: "1",
-    batches: [{ revision: "1", payload: "compacted-rust-state" }],
-  });
-  revisions.delete("agent-1");
-  batches.splice(0, batches.length);
-  const secondOwner = store.acquire("agent-1", { ownerId: "worker-2" });
-  assert.deepEqual(secondOwner, {
-    ownerId: "worker-2",
-    fence: "2",
-    revision: "0",
-    batches: [],
-  });
-  assert.deepEqual(store.append("agent-1", {
-    ownerId: firstOwner.ownerId,
-    fence: firstOwner.fence,
-    expectedRevision: "9",
-    payload: "stale-owner",
-  }), { status: "fenced" });
-  assert.equal(transactions, 8);
 
   const largePayload = `${"x".repeat(255_999)}😀${"y".repeat(1_800_000)}`;
   const largeOwner = store.acquire("agent-large", { ownerId: "worker-large" });
-  assert.deepEqual(store.append("agent-large", {
+  assert.deepEqual(store.replace("agent-large", {
     ownerId: largeOwner.ownerId,
     fence: largeOwner.fence,
     expectedRevision: "0",
     payload: largePayload,
-  }), { status: "appended", revision: "1" });
-  assert.equal(batches.find((batch) => batch.journalId === "agent-large")?.payload, "");
-  assert.equal(chunks.filter((chunk) => chunk.journalId === "agent-large").length > 1, true);
-  assert.equal(
-    chunks.every((chunk) => chunk.payload.length <= 256_000),
-    true,
-  );
-  assert.equal(
-    chunks.every((chunk) => Buffer.byteLength(chunk.payload) <= 1_000_000),
-    true,
-  );
-  assert.equal(store.load("agent-large").batches[0]?.payload, largePayload);
-  const pagedOwner = store.acquirePage("agent-large", { ownerId: "worker-large-page" });
-  assert.equal(pagedOwner.batches[0]?.payload, largePayload);
-  const compactedPayload = `${"z".repeat(2_100_000)}😀`;
-  assert.deepEqual(store.compact("agent-large", {
-    ownerId: pagedOwner.ownerId,
-    fence: pagedOwner.fence,
-    expectedRevision: "1",
-    payload: compactedPayload,
-  }), { status: "compacted", revision: "1" });
-  assert.equal(store.load("agent-large").batches[0]?.payload, compactedPayload);
+  }), { status: "replaced", revision: "1" });
+  assert.equal(states.get("agent-large").payload, "");
+  assert.ok(chunks.filter((chunk) => chunk.stateId === "agent-large").length > 1);
+  assert.ok(chunks.every((chunk) => chunk.payload.length <= 256_000));
+  assert.equal(store.load("agent-large").payload, largePayload);
 
-  const pagedPayload = "p".repeat(1_050_000);
-  const pagesOwner = store.acquire("agent-pages", { ownerId: "worker-pages" });
-  let pageRevision = "0";
-  for (let index = 0; index < 10; index += 1) {
-    const appended = store.append("agent-pages", {
-      ownerId: pagesOwner.ownerId,
-      fence: pagesOwner.fence,
-      expectedRevision: pageRevision,
-      payload: pagedPayload,
-    });
-    assert.equal(appended.status, "appended");
-    pageRevision = appended.revision;
-  }
-  chunkSelects.splice(0, chunkSelects.length);
-  const firstPage = store.acquirePage("agent-pages", { ownerId: "worker-pages-reopen" });
-  assert.equal(firstPage.batches.length, 8);
-  assert.equal(firstPage.hasMore, true);
-  assert.deepEqual(chunkSelects, [["1", "2", "3", "4", "5", "6", "7", "8", "9"]]);
-  const secondPage = store.acquirePage("agent-pages", {
-    ownerId: firstPage.ownerId,
-    afterRevision: firstPage.batches.at(-1).revision,
-  });
-  assert.equal(secondPage.batches.length, 2);
-  assert.equal(secondPage.hasMore, false);
-  assert.deepEqual(chunkSelects.at(-1), ["9", "10"]);
+  const firstChunk = chunks.find((chunk) => chunk.stateId === "agent-large");
+  firstChunk.revision = "2";
+  assert.throws(() => store.load("agent-large"), /invalid Cloudflare durability chunks/);
+  firstChunk.revision = "1";
+  firstChunk.chunk_index = 99;
+  assert.throws(() => store.load("agent-large"), /invalid Cloudflare durability chunks/);
+  firstChunk.chunk_index = 0;
+  states.get("agent-large").payload = "unexpected-inline-state";
+  assert.throws(() => store.load("agent-large"), /invalid Cloudflare durability chunk head/);
+  states.get("agent-large").payload = "";
+  chunks.pop();
+  assert.throws(() => store.load("agent-large"), /missing Cloudflare durability chunks/);
+  assert.ok(transactions >= 6);
   assert.throws(
     () => createCloudflareDurabilityStore({}),
     /Durable Object storage with SQLite/,
   );
+  assert.throws(
+    () => createCloudflareDurabilityStore({
+      sql: { exec: () => ({ toArray: () => [] }) },
+      transactionSync: (callback) => callback(),
+    }),
+    /incompatible Cloudflare durability schema/,
+  );
 });
+
+function pragmaRows(sql) {
+  if (sql.includes("nanocodex_durable_owners")) {
+    return columns([["state_id", "TEXT", 0, 1], ["owner_id", "TEXT", 1, 0], ["fence", "TEXT", 1, 0]]);
+  }
+  if (sql.includes("nanocodex_durable_states")) {
+    return columns([["state_id", "TEXT", 0, 1], ["revision", "TEXT", 1, 0], ["payload", "TEXT", 1, 0]]);
+  }
+  if (sql.includes("nanocodex_durable_chunk_heads")) {
+    return columns([["state_id", "TEXT", 0, 1], ["revision", "TEXT", 1, 0], ["chunk_count", "INTEGER", 1, 0]]);
+  }
+  return columns([
+    ["state_id", "TEXT", 1, 1], ["revision", "TEXT", 1, 2],
+    ["chunk_index", "INTEGER", 1, 3], ["payload", "TEXT", 1, 0],
+  ]);
+}
+
+function columns(shapes) {
+  return shapes.map(([name, type, notnull, pk], cid) => ({ cid, name, type, notnull, pk }));
+}

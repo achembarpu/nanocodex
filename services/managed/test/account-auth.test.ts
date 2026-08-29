@@ -131,7 +131,7 @@ describe("local WebAuthn credential portability", () => {
 
   it("carries one signed credential into an isolated local auth store", async () => {
     const source = portableEnv();
-    const sessionToken = "s".repeat(43);
+    const sessionToken = "a".repeat(64);
     source.set("webauthn", `session:${sessionToken}`, {
       credentialId: CREDENTIAL_ID,
       publicKey: PUBLIC_KEY,
@@ -189,7 +189,7 @@ describe("local WebAuthn credential portability", () => {
 
   it("targets the selected older account after logout while the portable hint is newer", async () => {
     const target = portableEnv();
-    const latestSessionToken = "n".repeat(43);
+    const latestSessionToken = "b".repeat(64);
     target.set("webauthn", `credential:${CREDENTIAL_ID}`, {
       publicKey: PUBLIC_KEY,
       userId: encodeUserId(USER_ID),
@@ -255,7 +255,7 @@ describe("local WebAuthn credential portability", () => {
 
   it("refuses an unknown selected credential instead of falling back to the portable hint", async () => {
     const source = portableEnv();
-    const sessionToken = "x".repeat(43);
+    const sessionToken = "b".repeat(64);
     source.set("webauthn", `session:${sessionToken}`, {
       credentialId: SECOND_CREDENTIAL_ID,
       publicKey: SECOND_PUBLIC_KEY,
@@ -284,7 +284,7 @@ describe("local WebAuthn credential portability", () => {
 
   it("leaves an untargeted login discoverable even when a portable hint exists", async () => {
     const source = portableEnv();
-    const sessionToken = "d".repeat(43);
+    const sessionToken = "d".repeat(64);
     source.set("webauthn", `session:${sessionToken}`, {
       credentialId: SECOND_CREDENTIAL_ID,
       publicKey: SECOND_PUBLIC_KEY,
@@ -314,7 +314,7 @@ describe("local WebAuthn credential portability", () => {
 
   it("does not import tampered, mismatched, unsigned, or differently signed records", async () => {
     const source = portableEnv();
-    const sessionToken = "t".repeat(43);
+    const sessionToken = "c".repeat(64);
     source.set("webauthn", `session:${sessionToken}`, {
       credentialId: CREDENTIAL_ID,
       publicKey: PUBLIC_KEY,
@@ -348,7 +348,7 @@ describe("local WebAuthn credential portability", () => {
 
   it("issues the same portable record on the browser-safe localhost fallback", async () => {
     const source = portableEnv();
-    const sessionToken = "w".repeat(43);
+    const sessionToken = "e".repeat(64);
     source.set("webauthn", `session:${sessionToken}`, {
       credentialId: CREDENTIAL_ID,
       publicKey: PUBLIC_KEY,
@@ -399,7 +399,7 @@ describe("local WebAuthn credential portability", () => {
 
   it("never issues or imports the portable record on production or generic loopback origins", async () => {
     const source = portableEnv();
-    const portableSessionToken = "v".repeat(43);
+    const portableSessionToken = "c".repeat(64);
     source.set("webauthn", `session:${portableSessionToken}`, {
       credentialId: CREDENTIAL_ID,
       publicKey: PUBLIC_KEY,
@@ -421,7 +421,7 @@ describe("local WebAuthn credential portability", () => {
       "http://nested.branch.nanocodex.localhost:20735",
     ]) {
       const local = portableEnv();
-      const sessionToken = "u".repeat(43);
+      const sessionToken = "f".repeat(64);
       local.set("webauthn", `session:${sessionToken}`, {
         credentialId: CREDENTIAL_ID,
         publicKey: PUBLIC_KEY,

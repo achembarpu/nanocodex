@@ -507,7 +507,6 @@ function managedEnvelopeGroups(envelopes: readonly ManagedEvent[]): Map<string, 
 function managedOuterTerminal(envelope: ManagedEvent): boolean {
   return envelope.data.type === "turn_completed"
     || envelope.data.type === "turn_cancelled"
-    || envelope.data.type === "turn_blocked"
     || envelope.data.type === "turn_failed"
     || envelope.data.type === "stream_failed";
 }
@@ -647,11 +646,7 @@ function managedEnvelopeEvents(
       turn_id: turnId,
     })];
   }
-  if (
-    envelope.data.type === "turn_blocked"
-    || envelope.data.type === "turn_failed"
-  ) {
-    const disposition = envelope.data.type.slice("turn_".length);
+  if (envelope.data.type === "turn_failed") {
     return [
       historyEvent(sessionId, firstSequence, "run.error", {
         message: envelope.data.error,
@@ -659,7 +654,7 @@ function managedEnvelopeEvents(
       }),
       historyEvent(sessionId, firstSequence + 1, "run.failed", {
         status: "failed",
-        disposition,
+        disposition: "failed",
         turn_id: turnId,
       }),
     ];

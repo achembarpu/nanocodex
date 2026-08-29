@@ -54,7 +54,8 @@ pub enum ExecutionAdmission {
 pub enum ExecutionRetry {
     /// An interrupted effect may be executed again.
     Idempotent,
-    /// An interrupted effect has an ambiguous outcome and must not be repeated.
+    /// An interrupted effect has an unknown external outcome and must not be
+    /// repeated.
     Never,
 }
 
@@ -64,6 +65,9 @@ pub enum ExecutionStepAdmission {
     Execute,
     /// Reuse the exact JSON output retained by a prior attempt.
     Replay(String),
+    /// Do not repeat an interrupted at-most-once effect whose outcome is unknown.
+    /// The caller must commit an explicit unknown result before continuing.
+    Unknown,
 }
 
 /// Serializable result retained at a completed agent boundary.
@@ -105,15 +109,11 @@ pub trait ExecutionPolicy: Send + Sync {
         })
     }
 
-    /// Fences a model-only external effect immediately before it begins. The
-    /// default fails closed so omission cannot authorize an effect.
-    fn authorize_model_effect<'a>(
-        &'a self,
-        _kind: &'static str,
-    ) -> ExecutionFuture<'a, Result<()>> {
+    /// Fences a standalone checkpoint effect immediately before it begins.
+    fn fence_checkpoint_effect<'a>(&'a self) -> ExecutionFuture<'a, Result<()>> {
         Box::pin(async {
             Err(NanocodexError::ExecutionPolicyCapabilityUnsupported {
-                capability: "authorize_model_effect",
+                capability: "fence_checkpoint_effect",
             })
         })
     }
@@ -223,15 +223,11 @@ pub trait ExecutionPolicy: Send + Sync {
         })
     }
 
-    /// Fences a model-only external effect immediately before it begins. The
-    /// default fails closed.
-    fn authorize_model_effect<'a>(
-        &'a self,
-        _kind: &'static str,
-    ) -> ExecutionFuture<'a, Result<()>> {
+    /// Fences a standalone checkpoint effect immediately before it begins.
+    fn fence_checkpoint_effect<'a>(&'a self) -> ExecutionFuture<'a, Result<()>> {
         Box::pin(async {
             Err(NanocodexError::ExecutionPolicyCapabilityUnsupported {
-                capability: "authorize_model_effect",
+                capability: "fence_checkpoint_effect",
             })
         })
     }
@@ -488,7 +484,7 @@ impl Execution {
 
     pub(crate) async fn authorize_compaction(&self) -> Result<()> {
         if let Some(policy) = &self.policy {
-            policy.authorize_model_effect("compaction").await?;
+            policy.fence_checkpoint_effect().await?;
         }
         Ok(())
     }
@@ -548,17 +544,6 @@ impl Execution {
             .await
     }
 
-    pub(crate) async fn release_turn(&self, turn: ExecutionTurn) {
-        let ExecutionTurn {
-            policy,
-            operation_id,
-            ..
-        } = turn;
-        if let (Some(policy), Some(operation_id)) = (policy, operation_id) {
-            policy.release(operation_id).await;
-        }
-    }
-
     #[cfg(not(target_family = "wasm"))]
     pub(crate) async fn flush(&self) -> Result<()> {
         self.platform.flush().await
@@ -597,18 +582,10 @@ pub(crate) struct ExecutionSteps {
 pub(crate) enum ExecutionStep<O> {
     Execute,
     Replay(O),
+    Unknown,
 }
 
 impl ExecutionSteps {
-    /// Durably authorizes an operation-owned model effect immediately before
-    /// entering the transport.
-    ///
-    /// Authorization fences owners that were already stale. Once it returns,
-    /// takeover can still fence the result but cannot retract an in-flight call.
-    pub(crate) async fn authorize_model_effect(&self, kind: &'static str) -> Result<()> {
-        self.policy.authorize_model_effect(kind).await
-    }
-
     pub(crate) async fn begin<I, O>(
         &self,
         step_id: impl Into<String>,
@@ -633,6 +610,7 @@ impl ExecutionSteps {
         {
             ExecutionStepAdmission::Execute => Ok(ExecutionStep::Execute),
             ExecutionStepAdmission::Replay(output) => Ok(ExecutionStep::Replay(decode(&output)?)),
+            ExecutionStepAdmission::Unknown => Ok(ExecutionStep::Unknown),
         }
     }
 
@@ -778,10 +756,18 @@ async fn cancel_with_reclaim(
         .await
         .map_err(reopen_after_cancel_retry)?;
     match admission {
-        ExecutionAdmission::Execute => policy
-            .cancel(operation_id, snapshot)
-            .await
-            .map_err(reopen_after_cancel_retry),
+        ExecutionAdmission::Execute => {
+            if snapshot.is_some() {
+                policy
+                    .begin_attempt(operation_id.clone())
+                    .await
+                    .map_err(reopen_after_cancel_retry)?;
+            }
+            policy
+                .cancel(operation_id, snapshot)
+                .await
+                .map_err(reopen_after_cancel_retry)
+        }
         ExecutionAdmission::Cancelled => Ok(()),
         ExecutionAdmission::Completed { .. } | ExecutionAdmission::Failed { .. } => {
             Err(NanocodexError::InvalidExecutionPolicy(format!(

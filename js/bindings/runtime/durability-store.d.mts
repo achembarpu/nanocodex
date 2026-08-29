@@ -1,10 +1,8 @@
 export type {
-  DurabilityAcquiredJournal,
+  DurabilityAcquiredState,
   DurabilityAcquireRequest,
-  DurabilityAppendRequest,
-  DurabilityAppendResult,
-  DurabilityCompactRequest,
-  DurabilityCompactResult,
+  DurabilityReplaceRequest,
+  DurabilityReplaceResult,
   DurabilityFence,
   DurabilityRevision,
   DurabilitySqliteQuery,
@@ -12,8 +10,7 @@ export type {
   DurabilitySqliteTransaction,
   DurabilitySqliteValue,
   DurabilityStore,
-  DurabilityStoredBatch,
-  DurabilityStoredJournal,
+  DurabilityStoredState,
   MemoryDurabilityStore,
   SqliteDurabilityStoreOptions,
 } from "../types.mjs";
@@ -26,8 +23,8 @@ export declare function durabilityRevision(
 ): import("../types.mjs").DurabilityRevision;
 
 export declare function createMemoryDurabilityStore(
-  journalId: string,
-  initial?: import("../types.mjs").DurabilityStoredJournal,
+  stateId: string,
+  initial?: import("../types.mjs").DurabilityStoredState,
 ): import("../types.mjs").MemoryDurabilityStore;
 
 export declare function createSqliteDurabilityStore(

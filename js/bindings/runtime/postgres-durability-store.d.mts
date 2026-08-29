@@ -42,20 +42,19 @@ export type PostgresDurabilityPool = Readonly<{
 /**
  * Signals that PostgreSQL may have applied COMMIT before the connection failed.
  *
- * Callers must treat this as an unknown write outcome and reload the journal;
- * it is never converted to the definite `not_committed` append result.
+ * Callers must treat this as an unknown write outcome and reload the state;
+ * it is never converted to the definite `not_committed` replace result.
  */
 export declare class UnknownPostgresCommitOutcomeError extends Error {
   override readonly name: "UnknownPostgresCommitOutcomeError";
-  constructor(journalId: string, cause: unknown);
+  constructor(stateId: string, cause: unknown);
 }
 
 /**
  * Creates a concrete PostgreSQL-backed Nanocodex durability store.
  *
  * The schema is initialized lazily under a PostgreSQL transaction advisory
- * lock. Loads preserve numeric revision order. Appends atomically compare and
- * advance the journal head before inserting the opaque batch in one
+ * lock. Replacements atomically compare and advance the complete opaque state in one
  * transaction. Failures return `not_committed` only when no transaction began
  * or ROLLBACK was confirmed; a failed COMMIT throws
  * {@link UnknownPostgresCommitOutcomeError} instead.

@@ -1,11 +1,27 @@
 use super::*;
 
+#[derive(Deserialize, Serialize)]
 pub(super) struct WarmupExecution {
     pub(super) response_id: String,
     pub(super) attempt: u32,
     pub(super) connection_generation: u32,
     pub(super) usage: Option<Usage>,
     pub(super) server_reasoning_included: bool,
+}
+
+#[derive(Serialize)]
+struct RecordedWarmupCall<'a> {
+    model: &'a str,
+    model_id_prefix: Option<&'a str>,
+    reasoning_mode: &'a str,
+    effort: &'a str,
+    fast_mode: bool,
+    store_responses: bool,
+    transport: &'a str,
+    websocket_url: &'a str,
+    api_base_url: &'a str,
+    prompt_cache_key: &'a str,
+    request_prefix: &'a [ResponseItem],
 }
 
 pub(super) struct WarmupOutcome {
@@ -218,8 +234,41 @@ where
         factory: &ResponsesAttemptFactory,
         span: &tracing::Span,
     ) -> Result<WarmupExecution> {
+        let mut recorded_request_prefix = factory.profile().prefix().to_vec();
+        for item in &mut recorded_request_prefix {
+            item.strip_id();
+        }
+        let recorded = RecordedWarmupCall {
+            model: self.model.as_str(),
+            model_id_prefix: self.config.model_id_prefix.as_deref(),
+            reasoning_mode: self.config.reasoning_mode.as_str(),
+            effort: self.thinking.as_str(),
+            fast_mode: self.fast_mode,
+            store_responses: self.config.store_responses,
+            transport: self.config.responses_transport.as_str(),
+            websocket_url: &self.config.websocket_url,
+            api_base_url: &self.config.api_base_url,
+            prompt_cache_key: factory.profile().prompt_cache_key(),
+            request_prefix: &recorded_request_prefix,
+        };
         if let Some(steps) = &self.execution_steps {
-            steps.authorize_model_effect("warmup").await?;
+            match steps
+                .begin::<_, WarmupExecution>(
+                    "warmup",
+                    "warmup",
+                    &recorded,
+                    crate::agent::execution::ExecutionRetry::Idempotent,
+                )
+                .await?
+            {
+                crate::agent::ExecutionStep::Replay(output) => return Ok(output),
+                crate::agent::ExecutionStep::Execute => {}
+                crate::agent::ExecutionStep::Unknown => {
+                    return Err(NanocodexError::InvalidAttemptState {
+                        detail: "idempotent warmup was recovered as unknown",
+                    });
+                }
+            }
         }
         let success = self
             .client
@@ -237,13 +286,17 @@ where
                 detail: "warmup returned a non-warmup response",
             });
         };
-        Ok(WarmupExecution {
+        let output = WarmupExecution {
             response_id: response.id,
             attempt,
             connection_generation,
             usage: response.usage,
             server_reasoning_included,
-        })
+        };
+        if let Some(steps) = &self.execution_steps {
+            steps.complete("warmup", &output).await?;
+        }
+        Ok(output)
     }
 
     pub(super) fn warmup_failed<T>(
@@ -346,6 +399,11 @@ where
             {
                 crate::agent::ExecutionStep::Execute => None,
                 crate::agent::ExecutionStep::Replay(output) => Some(output),
+                crate::agent::ExecutionStep::Unknown => {
+                    return Err(NanocodexError::InvalidAttemptState {
+                        detail: "idempotent compaction was recovered as unknown",
+                    });
+                }
             }
         } else {
             None

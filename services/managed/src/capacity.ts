@@ -12,8 +12,7 @@ export type ManagedCapacitySnapshot = Readonly<{
   archived_realtime: ManagedRealtimeArchiveCapacity;
   archived_turns: ManagedTurnArchiveCapacity;
   database_size_bytes: number;
-  journal: CountAndBytes & Readonly<{
-    max_batch_bytes: number;
+  durable_state: CountAndBytes & Readonly<{
     revision: string;
   }>;
   known_payload_bytes: number;
@@ -21,8 +20,8 @@ export type ManagedCapacitySnapshot = Readonly<{
   raw_events: CountAndBytes;
   realtime_operations: CountAndBytes;
   turns: Readonly<{
-    blocked_rows: number;
     input_bytes: number;
+    retry_rows: number;
     terminal_bytes: number;
     terminal_rows: number;
     total_rows: number;
@@ -36,14 +35,13 @@ type AggregateRow = {
   rows: number;
 };
 
-type JournalRow = AggregateRow & {
-  max_batch_bytes: number;
+type DurableStateRow = AggregateRow & {
   revision: string;
 };
 
 type TurnRow = {
-  blocked_rows: number;
   input_bytes: number;
+  retry_rows: number;
   terminal_bytes: number;
   terminal_rows: number;
   total_rows: number;
@@ -66,7 +64,7 @@ export function managedCapacitySnapshot(
   archivedTurns: ManagedTurnArchiveCapacity,
   archivedRealtime: ManagedRealtimeArchiveCapacity,
 ): ManagedCapacitySnapshot {
-  const journal = journalCapacity(storage, cloudflareJournalId(storage, sessionId));
+  const durableState = durableStateCapacity(storage, cloudflareStateId(storage, sessionId));
   const managedEvents = managedEventCapacity(storage);
   const rawEvents = eventCapacity(
     storage,
@@ -79,7 +77,7 @@ export function managedCapacitySnapshot(
     "response_json",
   );
   const turns = turnCapacity(storage);
-  const knownPayloadBytes = journal.bytes
+  const knownPayloadBytes = durableState.bytes
     + managedEvents.bytes
     + rawEvents.bytes
     + realtimeOperations.bytes
@@ -92,7 +90,7 @@ export function managedCapacitySnapshot(
     archived_realtime: archivedRealtime,
     archived_turns: archivedTurns,
     database_size_bytes: databaseSizeBytes,
-    journal,
+    durable_state: durableState,
     known_payload_bytes: knownPayloadBytes,
     managed_events: managedEvents,
     raw_events: rawEvents,
@@ -102,7 +100,7 @@ export function managedCapacitySnapshot(
   };
 }
 
-function cloudflareJournalId(storage: DurableObjectStorage, fallbackSessionId: string): string {
+function cloudflareStateId(storage: DurableObjectStorage, fallbackSessionId: string): string {
   if (!tableExists(storage, "nanocodex_cloudflare_agent")) {
     return `cloudflare:${fallbackSessionId}`;
   }
@@ -112,45 +110,35 @@ function cloudflareJournalId(storage: DurableObjectStorage, fallbackSessionId: s
   return `cloudflare:${runtimeSessionId ?? fallbackSessionId}`;
 }
 
-function journalCapacity(
+function durableStateCapacity(
   storage: DurableObjectStorage,
-  journalId: string,
-): ManagedCapacitySnapshot["journal"] {
-  if (!tableExists(storage, "nanocodex_journal_batches")) {
-    return { ...EMPTY_AGGREGATE, max_batch_bytes: 0, revision: "0" };
+  stateId: string,
+): ManagedCapacitySnapshot["durable_state"] {
+  if (!tableExists(storage, "nanocodex_durable_states")) {
+    return { ...EMPTY_AGGREGATE, revision: "0" };
   }
-  if (tableExists(storage, "nanocodex_journal_batch_chunks")) {
-    return storage.sql.exec<JournalRow>(
-      `WITH batch_bytes AS (
-         SELECT b.revision,
-                LENGTH(CAST(b.payload AS BLOB))
-                  + COALESCE(SUM(LENGTH(CAST(c.payload AS BLOB))), 0) AS bytes
-         FROM nanocodex_journal_batches b
-         LEFT JOIN nanocodex_journal_batch_chunks c
-           ON c.journal_id = b.journal_id AND c.revision = b.revision
-         WHERE b.journal_id = ?
-         GROUP BY b.revision, b.payload
-       )
-       SELECT COUNT(*) AS rows,
-              COALESCE(SUM(bytes), 0) AS bytes,
-              COALESCE(MAX(bytes), 0) AS max_batch_bytes,
-              COALESCE((SELECT revision FROM nanocodex_journals WHERE journal_id = ?), '0')
-                AS revision
-       FROM batch_bytes`,
-      journalId,
-      journalId,
-    ).toArray()[0] ?? { ...EMPTY_AGGREGATE, max_batch_bytes: 0, revision: "0" };
+  if (tableExists(storage, "nanocodex_durable_state_chunks")) {
+    return storage.sql.exec<DurableStateRow>(
+      `SELECT COUNT(*) AS rows,
+              COALESCE(SUM(LENGTH(CAST(s.payload AS BLOB))), 0)
+                + COALESCE((SELECT SUM(LENGTH(CAST(c.payload AS BLOB)))
+                            FROM nanocodex_durable_state_chunks c
+                            WHERE c.state_id = ?), 0) AS bytes,
+              COALESCE(MAX(s.revision), '0') AS revision
+       FROM nanocodex_durable_states s
+       WHERE s.state_id = ?`,
+      stateId,
+      stateId,
+    ).toArray()[0] ?? { ...EMPTY_AGGREGATE, revision: "0" };
   }
-  return storage.sql.exec<JournalRow>(
+  return storage.sql.exec<DurableStateRow>(
     `SELECT COUNT(*) AS rows,
             COALESCE(SUM(LENGTH(CAST(payload AS BLOB))), 0) AS bytes,
-            COALESCE(MAX(LENGTH(CAST(payload AS BLOB))), 0) AS max_batch_bytes,
-            COALESCE((SELECT revision FROM nanocodex_journals WHERE journal_id = ?), '0') AS revision
-     FROM nanocodex_journal_batches
-     WHERE journal_id = ?`,
-    journalId,
-    journalId,
-  ).toArray()[0] ?? { ...EMPTY_AGGREGATE, max_batch_bytes: 0, revision: "0" };
+            COALESCE(MAX(revision), '0') AS revision
+     FROM nanocodex_durable_states
+     WHERE state_id = ?`,
+    stateId,
+  ).toArray()[0] ?? { ...EMPTY_AGGREGATE, revision: "0" };
 }
 
 function eventCapacity(
@@ -183,8 +171,8 @@ function managedEventCapacity(storage: DurableObjectStorage): CountAndBytes {
 function turnCapacity(storage: DurableObjectStorage): ManagedCapacitySnapshot["turns"] {
   if (!tableExists(storage, "managed_turns")) {
     return {
-      blocked_rows: 0,
       input_bytes: 0,
+      retry_rows: 0,
       terminal_bytes: 0,
       terminal_rows: 0,
       total_rows: 0,
@@ -199,13 +187,14 @@ function turnCapacity(storage: DurableObjectStorage): ManagedCapacitySnapshot["t
             COALESCE(SUM(LENGTH(CAST(terminal_json AS BLOB))), 0) AS terminal_bytes,
             SUM(CASE WHEN state IN ('completed', 'cancelled', 'failed') THEN 1 ELSE 0 END)
               AS terminal_rows,
-            SUM(CASE WHEN state = 'blocked' THEN 1 ELSE 0 END) AS blocked_rows,
-            SUM(CASE WHEN state NOT IN ('completed', 'cancelled', 'failed', 'blocked') THEN 1 ELSE 0 END)
+            SUM(CASE WHEN state IN ('accepted', 'cancelling') AND retry_at IS NOT NULL THEN 1 ELSE 0 END)
+              AS retry_rows,
+            SUM(CASE WHEN state NOT IN ('completed', 'cancelled', 'failed') THEN 1 ELSE 0 END)
               AS unfinished_rows
      FROM managed_turns`,
   ).toArray()[0] ?? {
-    blocked_rows: 0,
     input_bytes: 0,
+    retry_rows: 0,
     terminal_bytes: 0,
     terminal_rows: 0,
     total_rows: 0,
