@@ -58,11 +58,12 @@ jobs:
               })
           wrangler.write_text(json.dumps(data, indent=2) + '\n')
           PY
-      - name: Check Managed production bundle
+      - name: Validate Managed compute configuration
         run: |
           npm ci --prefix services/managed --ignore-scripts
           npm --prefix services/managed run typecheck
-          npm --prefix services/managed run build
+          cd services/managed
+          npx wrangler types /tmp/nanocodex-managed-env.d.ts --include-runtime=false
       - name: Commit and remove one-shot workflow
         run: |
           git config user.name "github-actions[bot]"
