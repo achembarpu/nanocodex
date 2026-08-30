@@ -32,3 +32,4 @@ jobs:
           node-version: 24
       - run: npm ci --prefix services/managed/ix-broker --ignore-scripts
       - run: npm test --prefix services/managed/ix-broker
+      - run: docker build --platform linux/amd64 -t nanocodex-ix-broker services/managed/ix-broker
