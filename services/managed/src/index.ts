@@ -68,6 +68,7 @@ import {
 } from "./multiplayer-quota";
 export { MultiplayerQuota } from "./multiplayer-quota";
 export { WorkspaceServiceProxy };
+export { Sandbox } from "@cloudflare/sandbox";
 
 import {
   type ActiveTurn,
