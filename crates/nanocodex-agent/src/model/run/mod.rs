@@ -411,16 +411,11 @@ impl<S> ModelRun<S> {
 }
 
 pub(crate) fn prepare_checkpoint(
-    mut checkpoint: ModelCheckpoint,
+    checkpoint: ModelCheckpoint,
     config: &ModelConfig,
     tools: &Tools,
     context_source: ContextSource,
 ) -> PreparedCheckpoint {
-    // Unstored response IDs are scoped to the live transport connection. A fork
-    // owns a fresh client, so it must replay client-owned history instead.
-    if !config.store_responses {
-        checkpoint.conversation.reset_for_full_request();
-    }
     let runtime = tool_runtime(checkpoint.workspace(), config, tools);
     let selected_agents_md = context_source
         .project_instructions(checkpoint.workspace())
@@ -440,6 +435,11 @@ pub(crate) fn prepare_resumed_checkpoint(
     session_id: &str,
     context_source: ContextSource,
 ) -> Result<PreparedCheckpoint> {
+    // Unstored response IDs are scoped to the live transport connection. A fork
+    // owns a fresh client, so it must replay client-owned history instead.
+    if !config.store_responses {
+        checkpoint.conversation.reset_for_full_request();
+    }
     checkpoint.global_instructions = context_source
         .global_instructions()
         .or(checkpoint.global_instructions);
