@@ -11,10 +11,7 @@ describe("managed Computer escalation", () => {
       stderr: "",
       exitCode: 0,
     }));
-    const sandbox = vi.fn(async () => ({
-      exec: sandboxExec,
-      writeFile: vi.fn(async () => undefined),
-    }));
+    const sandbox = vi.fn(async () => ({ exec: sandboxExec }));
     const baseProvider = createSandboxComputerProvider({
       sandbox,
       workspace: computer.workspace,
@@ -57,10 +54,11 @@ describe("managed Computer escalation", () => {
     runtime.dispose();
   });
 
-  it("materializes the durable workspace before native execution and reuses one sandbox", async () => {
+  it("reprojects exact durable workspace state before every retained native execution", async () => {
     const files = new Map([
       ["/workspace/Cargo.toml", new TextEncoder().encode("[package]\nname='smoke'\nversion='0.1.0'\n")],
       ["/workspace/src/lib.rs", new TextEncoder().encode("pub fn answer() -> u8 { 42 }\n")],
+      ["/workspace/blob.bin", Uint8Array.from([0, 255, 128, 1])],
     ]);
     const workspace = {
       root: "/workspace",
@@ -68,19 +66,19 @@ describe("managed Computer escalation", () => {
         { kind: "file" as const, path: "/workspace/Cargo.toml", size: files.get("/workspace/Cargo.toml")!.byteLength },
         { kind: "directory" as const, path: "/workspace/src" },
         { kind: "file" as const, path: "/workspace/src/lib.rs", size: files.get("/workspace/src/lib.rs")!.byteLength },
+        { kind: "file" as const, path: "/workspace/blob.bin", size: files.get("/workspace/blob.bin")!.byteLength },
       ]),
       readFile: vi.fn(async (path: string) => files.get(path)!),
       writeFile: vi.fn(),
       mkdir: vi.fn(),
       remove: vi.fn(),
     };
-    const writeFile = vi.fn(async () => undefined);
     const exec = vi.fn(async (command: string) => ({
       stdout: command.startsWith("'cargo'") ? "ok\n" : "",
       stderr: "",
       exitCode: 0,
     }));
-    const create = vi.fn(async () => ({ exec, writeFile }));
+    const create = vi.fn(async () => ({ exec }));
     const provider = createSandboxComputerProvider({ sandbox: create, workspace });
 
     await provider.exec({
@@ -95,15 +93,10 @@ describe("managed Computer escalation", () => {
     });
 
     expect(create).toHaveBeenCalledTimes(1);
-    expect(writeFile).toHaveBeenCalledWith(
-      "/workspace/Cargo.toml",
-      expect.stringContaining("name='smoke'"),
-      { encoding: "utf-8" },
-    );
-    expect(writeFile).toHaveBeenCalledWith(
-      "/workspace/src/lib.rs",
-      "pub fn answer() -> u8 { 42 }\n",
-      { encoding: "utf-8" },
+    expect(exec.mock.calls.filter(([command]) => command.includes("find '/workspace'")).length).toBe(2);
+    expect(exec).toHaveBeenCalledWith(
+      "printf %s 'AP+AAQ==' | base64 -d >> '/workspace/blob.bin'",
+      { cwd: "/", timeout: 120_000 },
     );
     expect(exec).toHaveBeenCalledWith("'cargo' 'test' '-q'", {
       cwd: "/workspace",
