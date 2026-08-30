@@ -453,6 +453,77 @@ describe("per-user credential broker", () => {
     });
   });
 
+  it("keeps SSH keys encrypted and binds brokered execution to their exact target", async () => {
+    const subject = "S".repeat(43);
+    const user = "user-ssh-egress";
+    const privateKey = [
+      "-----BEGIN OPENSSH PRIVATE KEY-----",
+      "ssh-private-material-that-must-never-leave-egress".repeat(2),
+      "-----END OPENSSH PRIVATE KEY-----",
+    ].join("\n");
+    await control(`/subjects/${subject}`, "PUT", { user_id: user });
+    const stored = await control(`/users/${user}/credentials/ssh/production`, "PUT", {
+      private_key: privateKey,
+      hostname: "ssh.example.com",
+      port: 2222,
+      username: "deploy",
+      host_key_sha256: `SHA256:${"A".repeat(43)}`,
+    });
+    expect(stored.status).toBe(204);
+
+    const status = await SELF.fetch(`https://broker.test/users/${user}/credentials`);
+    expect(await status.json()).toMatchObject({
+      ssh: [{
+        reference: "production",
+        hostname: "ssh.example.com",
+        port: 2222,
+        username: "deploy",
+      }],
+    });
+    const stub = workerEnv.USER_CREDENTIALS.getByName(user);
+    await runInDurableObject(stub, async (_instance: UserCredentialBroker, state) => {
+      const encoded = JSON.stringify(await state.storage.get("credential-state"));
+      expect(encoded).toContain("ciphertext");
+      expect(encoded).not.toContain("ssh-private-material");
+    });
+
+    const redirected = await SELF.fetch("https://ssh.internal/v1/execute", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-nanocodex-subject": subject,
+      },
+      body: JSON.stringify({
+        identity_ref: "production",
+        hostname: "other.example.com",
+        port: 2222,
+        username: "deploy",
+        command: ["true"],
+      }),
+    });
+    expect(redirected.status).toBe(403);
+    expect(await redirected.json()).toEqual({ error: "ssh_identity_target_mismatch" });
+
+    expect((await control(`/users/${user}/credentials/ssh/production`, "DELETE", {})).status)
+      .toBe(204);
+    const unavailable = await SELF.fetch("https://ssh.internal/v1/execute", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-nanocodex-subject": subject,
+      },
+      body: JSON.stringify({
+        identity_ref: "production",
+        hostname: "ssh.example.com",
+        port: 2222,
+        username: "deploy",
+        command: ["true"],
+      }),
+    });
+    expect(unavailable.status).toBe(409);
+    expect(await unavailable.json()).toEqual({ error: "ssh_identity_unavailable" });
+  });
+
   it("isolates two users that use the same fixed model URL", async () => {
     await control(`/subjects/${subjectB}`, "PUT", { user_id: "user-openai-b" });
     await control("/users/user-openai-b/credentials/openai", "PUT", {
