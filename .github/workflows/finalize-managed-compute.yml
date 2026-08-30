@@ -58,10 +58,15 @@ jobs:
               })
           wrangler.write_text(json.dumps(data, indent=2) + '\n')
           PY
-      - name: Check Managed build
+      - name: Check Managed compute paths
         run: |
           npm ci --prefix services/managed --ignore-scripts
           npm --prefix services/managed run typecheck
+          npx --prefix services/managed vitest run \
+            services/managed/test/computer-provider-config.test.ts \
+            services/managed/test/computer-provider-ix.test.ts \
+            services/managed/test/computer-provider.test.ts \
+            services/managed/test/computer-escalation.test.ts
           npm --prefix services/managed run build
       - name: Commit and remove one-shot workflow
         run: |
