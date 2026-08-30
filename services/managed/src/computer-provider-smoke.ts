@@ -66,11 +66,16 @@ function rustFixture(): Workspace {
       return contents;
     },
     async writeFile(path, contents) {
-      files.set(path, typeof contents === "string" ? encode(contents) : new Uint8Array(contents));
+      files.set(path, typeof contents === "string" ? encode(contents) : copyBytes(contents));
     },
     async mkdir() {},
     async remove(path) { files.delete(path); },
   });
+}
+
+function copyBytes(value: ArrayBuffer | ArrayBufferView<ArrayBufferLike>): Uint8Array {
+  if (value instanceof ArrayBuffer) return new Uint8Array(value).slice();
+  return new Uint8Array(value.buffer, value.byteOffset, value.byteLength).slice();
 }
 
 function encode(value: string): Uint8Array {
