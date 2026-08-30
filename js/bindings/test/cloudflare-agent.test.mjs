@@ -8,6 +8,8 @@ import {
   create,
   createEphemeral,
   destroy,
+  exportDurabilityState,
+  importDurabilityState,
 } from "../cloudflare/Agent.mjs";
 import * as HostAgent from "../host/Agent.mjs";
 import { createCloudflareDurabilityStore } from "../runtime/cloudflare-durability-store.mjs";
@@ -26,6 +28,7 @@ class MemoryStorage {
     this.owners = new Map();
     this.meta = { total_bytes: 0, stream_error: null };
     this.sessionId = undefined;
+    this.stateId = undefined;
     this.sql = { exec: (sql, ...args) => this.#exec(sql, args) };
   }
 
@@ -62,6 +65,16 @@ class MemoryStorage {
       rows = this.sessionId === undefined ? [] : [{ session_id: this.sessionId }];
     } else if (statement.startsWith("INSERT OR IGNORE INTO nanocodex_cloudflare_agent")) {
       this.sessionId ??= args[0];
+    } else if (statement.startsWith("INSERT INTO nanocodex_cloudflare_agent")) {
+      if (this.sessionId !== undefined) throw new Error("duplicate Cloudflare Agent identity");
+      this.sessionId = args[0];
+    } else if (statement.startsWith("SELECT state_id FROM nanocodex_cloudflare_durability")) {
+      rows = this.stateId === undefined ? [] : [{ state_id: this.stateId }];
+    } else if (statement.startsWith("INSERT OR IGNORE INTO nanocodex_cloudflare_durability")) {
+      this.stateId ??= args[0];
+    } else if (statement.startsWith("INSERT INTO nanocodex_cloudflare_durability")) {
+      if (this.stateId !== undefined) throw new Error("duplicate Cloudflare durability identity");
+      this.stateId = args[0];
     } else if (statement.startsWith("SELECT owner_id, fence FROM nanocodex_durable_owners")) {
       const owner = this.owners.get(args[0]);
       rows = owner === undefined ? [] : [{ owner_id: owner.ownerId, fence: owner.fence }];
@@ -109,6 +122,8 @@ class MemoryStorage {
     } else if (statement.startsWith("DELETE FROM nanocodex_durable_states")) {
       this.states = this.states.filter((batch) => batch.stateId !== args[0]);
       this.stateRevisions.delete(args[0]);
+    } else if (statement.startsWith("DELETE FROM nanocodex_durable_owners")) {
+      this.owners.delete(args[0]);
     } else if (statement === "DELETE FROM nanocodex_cloudflare_events") {
       this.events = [];
     } else if (statement.startsWith("UPDATE nanocodex_cloudflare_event_meta SET total_bytes = 0")) {
@@ -177,7 +192,7 @@ test("Cloudflare Agent owns credentials, transport, and durability options", asy
   await assert.rejects(create(module), /requires a Durable Object instance/);
   await assert.rejects(
     create(module, durableOwner(new MemoryStorage()), { apiKey: "managed-secret" }),
-    /does not accept apiKey; only eventPersistence, instructions, terminalReceiptRetention, and tools are configurable/,
+    /does not accept apiKey; only durabilityId, eventPersistence, instructions, terminalReceiptRetention, and tools are configurable/,
   );
   await assert.rejects(
     create(module, durableOwner(new MemoryStorage()), { CODEX_OAUTH_BOOTSTRAP: "managed-secret" }),
@@ -288,12 +303,97 @@ test("Cloudflare Agent isolates states per Durable Object and can recreate after
     create(module, owner(secondStorage, SECOND_OBJECT_ID)),
   ]);
   assert.notEqual(first.sessionId, second.sessionId);
+  assert.equal(firstStorage.stateId, first.sessionId);
+  assert.equal(secondStorage.stateId, second.sessionId);
   assert.deepEqual(new Set(subjects), new Set([FIRST_OBJECT_ID, SECOND_OBJECT_ID]));
   await Promise.all([first.session.shutdown(), second.session.shutdown()]);
 
   const recreated = await create(module, owner(firstStorage, FIRST_OBJECT_ID));
   assert.equal(recreated.sessionId, first.sessionId);
   await recreated.session.shutdown();
+
+  const explicitStorage = new MemoryStorage();
+  const explicitOwner = owner(explicitStorage, "c".repeat(64));
+  const explicit = await create(module, explicitOwner, { durabilityId: "managed-agent-id" });
+  assert.equal(explicitStorage.stateId, "managed-agent-id");
+  await explicit.session.shutdown();
+  await assert.rejects(
+    create(module, explicitOwner, { durabilityId: "rewritten-agent-id" }),
+    /does not match the retained state identity/,
+  );
+});
+
+test("Cloudflare Agent exports and imports one stable state across a fresh runtime identity", async () => {
+  const module = await readFile(new URL("../pkg-web/nanocodex_bg.wasm", import.meta.url));
+  const sourceStorage = new MemoryStorage();
+  const sourceOwner = durableOwner(sourceStorage);
+  const source = await create(module, sourceOwner);
+  await source.session.shutdown();
+  const sourceSessionId = source.sessionId;
+  const stateId = sourceStorage.stateId;
+  const store = createCloudflareDurabilityStore(sourceStorage);
+  const ownership = store.acquire(stateId, { ownerId: "seed" });
+  const payload = JSON.stringify({
+    nanocodex_durable_state: {
+      format: 1,
+      operations: {},
+      latest_checkpoint: null,
+      checkpoint_effect_pending: false,
+    },
+  });
+  assert.deepEqual(store.replace(stateId, {
+    ownerId: ownership.ownerId,
+    fence: ownership.fence,
+    expectedRevision: ownership.revision,
+    payload,
+  }), { status: "replaced", revision: "1" });
+
+  const archive = await exportDurabilityState(sourceOwner);
+  assert.deepEqual(archive, {
+    format: "nanocodex-durability-state-v1",
+    stateId,
+    revision: "1",
+    payload,
+  });
+
+  const destinationStorage = new MemoryStorage();
+  const destinationOwner = durableOwner(destinationStorage, egressBinding(), SECOND_OBJECT_ID);
+  await importDurabilityState(destinationOwner, JSON.parse(JSON.stringify(archive)));
+  await assert.doesNotReject(
+    importDurabilityState(destinationOwner, JSON.parse(JSON.stringify(archive))),
+  );
+  await assert.rejects(
+    importDurabilityState(destinationOwner, { ...archive, revision: 1.5 }),
+    /revision numbers must be nonnegative safe integers/,
+  );
+  await assert.rejects(
+    importDurabilityState(destinationOwner, { ...archive, unexpected: true }),
+    /invalid shape/,
+  );
+  const destination = await create(module, destinationOwner);
+  assert.notEqual(destination.sessionId, sourceSessionId);
+  assert.equal(destinationStorage.stateId, stateId);
+  assert.deepEqual(createCloudflareDurabilityStore(destinationStorage).load(stateId), {
+    revision: "1",
+    payload,
+  });
+  await destination.session.shutdown();
+});
+
+test("Cloudflare Agent portability refuses active and non-pristine owners", async () => {
+  const module = await readFile(new URL("../pkg-web/nanocodex_bg.wasm", import.meta.url));
+  const storage = new MemoryStorage();
+  const owner = durableOwner(storage);
+  const agent = await create(module, owner);
+  await assert.rejects(exportDurabilityState(owner), /shutdown must complete/);
+  await assert.rejects(importDurabilityState(owner, {}), /shutdown must complete/);
+  await agent.session.shutdown();
+  await assert.rejects(importDurabilityState(owner, {
+    format: "nanocodex-durability-state-v1",
+    stateId: "another-state",
+    revision: "0",
+    payload: null,
+  }), /pristine Durable Object/);
 });
 
 test("Cloudflare Agent disposal releases lifecycle authority without bypassing joined shutdown", async () => {
@@ -517,7 +617,7 @@ test("Cloudflare Agent destroy owns idempotent adapter cleanup", async () => {
   destroy(owner);
   const agent = await create(module, owner);
   await agent.session.shutdown();
-  const stateId = `cloudflare:${agent.sessionId}`;
+  const stateId = storage.stateId;
   const staleOwner = { ...storage.owners.get(stateId) };
   assert.equal(staleOwner.fence, "2");
   storage.chunks.push({ stateId, revision: "1", chunkIndex: 0, payload: "retained" });

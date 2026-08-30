@@ -272,7 +272,7 @@ describe("Vercel PostgreSQL durability store", () => {
     }
   });
 
-  it("moves one live agent Cloudflare → Vercel Postgres → Cloudflare without replaying turns", async () => {
+  it("round-trips one live Agent through the Cloudflare and PostgreSQL store contracts", async () => {
     const module = await readFile(
       new URL("../../../js/bindings/pkg-web/nanocodex_bg.wasm", import.meta.url),
     );
@@ -281,14 +281,16 @@ describe("Vercel PostgreSQL durability store", () => {
     const source = createCloudflareDurabilityStore(cloudflareDurabilityStorage());
     const postgres = createPostgresDurabilityStore(pool.asPostgresPool());
     const returned = createCloudflareDurabilityStore(cloudflareDurabilityStorage());
-    const sessionId = "018f1f9a-7b3c-7a70-8000-000000000070";
+    const cloudflareSessionId = "018f1f9a-7b3c-7a70-8000-000000000070";
+    const vercelSessionId = "018f1f9a-7b3c-7a70-8000-000000000071";
+    const returnedSessionId = "018f1f9a-7b3c-7a70-8000-000000000072";
     const stateId = "portable-managed-agent";
     let agent: NodeAgent | undefined;
 
     try {
       agent = await Agent.create({
         module,
-        sessionId,
+        sessionId: cloudflareSessionId,
         thinking: "none",
         transport: Transport.openAi({ apiKey: "test-key", websocketUrl: server.url }),
         durability: source,
@@ -320,7 +322,7 @@ describe("Vercel PostgreSQL durability store", () => {
 
       agent = await Agent.create({
         module,
-        sessionId,
+        sessionId: vercelSessionId,
         thinking: "none",
         transport: Transport.openAi({ apiKey: "test-key", websocketUrl: server.url }),
         durability: postgres,
@@ -366,7 +368,7 @@ describe("Vercel PostgreSQL durability store", () => {
 
       agent = await Agent.create({
         module,
-        sessionId,
+        sessionId: returnedSessionId,
         thinking: "none",
         transport: Transport.openAi({ apiKey: "test-key", websocketUrl: server.url }),
         durability: returned,

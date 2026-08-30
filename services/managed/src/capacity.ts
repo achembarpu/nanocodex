@@ -101,6 +101,12 @@ export function managedCapacitySnapshot(
 }
 
 function cloudflareStateId(storage: DurableObjectStorage, fallbackSessionId: string): string {
+  if (tableExists(storage, "nanocodex_cloudflare_durability")) {
+    const stateId = storage.sql.exec<{ state_id: string }>(
+      "SELECT state_id FROM nanocodex_cloudflare_durability WHERE singleton = 1",
+    ).toArray()[0]?.state_id;
+    if (stateId) return stateId;
+  }
   if (!tableExists(storage, "nanocodex_cloudflare_agent")) {
     return `cloudflare:${fallbackSessionId}`;
   }

@@ -863,19 +863,16 @@ from `nanocodex/durability/postgres`; connection ownership and secret policy
 remain in the application.
 
 The built-in stores can move one stopped agent across providers without
-decoding or rebasing its Rust state:
+decoding or rebasing its Rust state. Cloudflare owners should use the adapter's
+lifecycle-safe export instead of reconstructing its private state ID:
 
 ```js
-import {
-  exportDurabilityState,
-  importDurabilityState,
-} from "nanocodex/durability";
-import { createCloudflareDurabilityStore } from "nanocodex/durability/cloudflare";
+import { Agent as CloudflareAgent } from "nanocodex/cloudflare";
+import { importDurabilityState } from "nanocodex/durability";
 import { createPostgresDurabilityStore } from "nanocodex/durability/postgres";
 
 await cloudflareAgent.session.shutdown();
-const source = createCloudflareDurabilityStore(durableObjectStorage);
-const archive = await exportDurabilityState(source, agentId);
+const archive = await CloudflareAgent.exportDurabilityState(durableObjectOwner);
 
 // Send JSON.stringify(archive) through an authenticated, encrypted operator path.
 const serializedArchive = JSON.stringify(archive);
@@ -900,6 +897,13 @@ same agent Cloudflare → PostgreSQL → Cloudflare, replays committed turn IDs
 without model calls, rebuilds the first new provider request from committed
 history without a previous-response handle, and then continues with new turns
 on each destination.
+
+The managed Cloudflare service exposes the same offline cutover at `POST
+/v1/agents/<agent-id>/durability`; the call permanently closes source admission.
+Create a destination with `POST /v1/agents` and `{ "durability": <archive> }`.
+The Vercel example accepts that same body at `POST /api/sessions` and exports a
+stopped PostgreSQL state through `POST /api/durability/export` with
+`{ "state_id": <durability-id> }`.
 
 Node embedders whose bundler relocates package assets may compile and pass the
 web-target artifact explicitly. The runtime still uses the Node host for

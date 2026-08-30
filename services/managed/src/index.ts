@@ -177,6 +177,7 @@ const SESSION_DELETION_GENERATION_KEY = "nanocodex:session-deletion-generation";
 const INITIAL_ACCOUNT_CONTEXT_KEY = "nanocodex:initial-account-context";
 const CREDENTIAL_BINDING_KEY = "nanocodex:credential-binding";
 const CLEANUP_RETRY_ATTEMPT_KEY = "nanocodex:cleanup-retry-attempt";
+const DURABILITY_EXPORTED_KEY = "nanocodex:durability-exported";
 const CREDENTIAL_BINDING_PREPARE_TIMEOUT_MS = 60_000;
 const DEFAULT_OWNERSHIP_IO_TIMEOUT_MS = 10_000;
 const DEFAULT_MULTIPLAYER_IO_TIMEOUT_MS = 10_000;
@@ -668,6 +669,21 @@ export default {
       if (requestKey !== null && !IDEMPOTENCY_KEY.test(requestKey)) {
         return json({ error: "invalid_idempotency_key" }, { status: 400 });
       }
+      let durabilityArchive: unknown;
+      try {
+        const encoded = await request.text();
+        if (encoded.trim()) {
+          const body = JSON.parse(encoded) as { durability?: unknown };
+          if (!body || typeof body !== "object" || Array.isArray(body)
+            || Object.keys(body).some((key) => key !== "durability")
+            || body.durability === undefined) {
+            return json({ error: "invalid_durability_import" }, { status: 400 });
+          }
+          durabilityArchive = body.durability;
+        }
+      } catch {
+        return json({ error: "invalid_durability_import" }, { status: 400 });
+      }
       const agentId = requestKey === null
         ? uuidV7()
         : await idempotentAgentId(principal.userId, requestKey);
@@ -743,6 +759,24 @@ export default {
           ? json({ error: "credential_broker_unavailable" }, { status: 503 })
           : json({ error: "agent initialization failed" }, { status: 503 });
       }
+      if (durabilityArchive !== undefined) {
+        let imported: Response;
+        try {
+          imported = await fetchCreateStage(stub, "https://session.internal/durability/import", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(durabilityArchive),
+          }, ownershipTimeoutMs, "agent durability import");
+        } catch {
+          if (requestKey === null) await requestSessionCleanup(stub, ownershipTimeoutMs);
+          return json({ error: "durability_import_failed" }, { status: 503 });
+        }
+        await imported.body?.cancel();
+        if (!imported.ok) {
+          if (requestKey === null) await requestSessionCleanup(stub, ownershipTimeoutMs);
+          return json({ error: "invalid_durability_import" }, { status: imported.status });
+        }
+      }
       let committed: Response | undefined;
       try {
         committed = await fetchCreateStage(
@@ -770,6 +804,12 @@ export default {
       return json({
         agent_id: agentId,
         session_id: agentId,
+        durability_id: typeof durabilityArchive === "object"
+          && durabilityArchive !== null
+          && "stateId" in durabilityArchive
+          && typeof durabilityArchive.stateId === "string"
+          ? durabilityArchive.stateId
+          : agentId,
         events_url: new URL(`${routeBase}/${agentId}/events`, url).href,
         websocket_url: websocketUrl.href,
       }, {
@@ -830,6 +870,20 @@ export default {
       return stub.fetch(`https://session.internal/${resource}?${query}`, {
         headers: sessionHeaders,
         signal: request.signal,
+      });
+    }
+    if (resource === "durability") {
+      if (request.method !== "POST") {
+        return json({ error: "method_not_allowed" }, { status: 405 });
+      }
+      if (!principal.capabilities.includes("agents:write")) {
+        return json({ error: "forbidden" }, { status: 403 });
+      }
+      const originFailure = requireSameOriginMutation(request, url, principal);
+      if (originFailure) return originFailure;
+      return stub.fetch("https://session.internal/durability/export", {
+        method: "POST",
+        headers: sessionHeaders,
       });
     }
     if (resource === "turns") {
@@ -1029,6 +1083,7 @@ export class DurableAgentSession extends DurableComputerSession {
   #streamError?: string;
   #deleting = false;
   #deleted = false;
+  #durabilityExported = false;
   #credentialBinding?: CredentialBindingOwnership;
   #deletionMarkerTask?: Promise<void>;
   #deletionTask?: Promise<void>;
@@ -1185,14 +1240,16 @@ export class DurableAgentSession extends DurableComputerSession {
     this.#deleted = this.#initializationOwnership()?.state === "deleted";
     this.#streamError = this.#session()?.stream_error ?? undefined;
     this.ctx.blockConcurrencyWhile(async () => {
-      const [deleting, credentialBinding, deletionGeneration] = await Promise.all([
+      const [deleting, credentialBinding, deletionGeneration, durabilityExported] = await Promise.all([
         this.ctx.storage.get<boolean>(SESSION_DELETING_KEY),
         this.ctx.storage.get<CredentialBindingOwnership>(CREDENTIAL_BINDING_KEY),
         this.ctx.storage.get<number>(SESSION_DELETION_GENERATION_KEY),
+        this.ctx.storage.get<boolean>(DURABILITY_EXPORTED_KEY),
       ]);
       this.#deleting = deleting === true;
       this.#credentialBinding = credentialBinding;
       this.#deletionGeneration = deletionGeneration ?? 0;
+      this.#durabilityExported = durabilityExported === true;
       // Durable state and SSE replay are immediately usable after eviction.
       // Re-admission or deletion may load external resources, so neither sits
       // on the object's request-readiness boundary.
@@ -1308,6 +1365,57 @@ export class DurableAgentSession extends DurableComputerSession {
       }
       await this.#scheduleNextAlarm();
       return new Response(null, { status: 204 });
+    }
+    if (request.method === "POST" && url.pathname === "/durability/import") {
+      if (this.#deleting || this.#deleted || this.#durabilityExported) {
+        return json({ error: "durability_import_conflict" }, { status: 409 });
+      }
+      const session = this.#session();
+      if (!session || session.completed_turns !== 0 || this.#agent || this.#agentPromise
+        || this.#recoverableTurnCount() !== 0) {
+        return json({ error: "durability_import_conflict" }, { status: 409 });
+      }
+      let archive: unknown;
+      try { archive = await request.json(); }
+      catch { return json({ error: "invalid_durability_import" }, { status: 400 }); }
+      try {
+        const imported = await CloudflareAgent.importDurabilityState(
+          this,
+          archive as Parameters<typeof CloudflareAgent.importDurabilityState>[1],
+        );
+        return json(imported, { headers: { "cache-control": "no-store" } });
+      } catch (error) {
+        const message = errorMessage(error);
+        const conflict = message.includes("pristine Durable Object");
+        return json({ error: conflict ? "durability_import_conflict" : "invalid_durability_import", message }, {
+          status: conflict ? 409 : 400,
+          headers: { "cache-control": "no-store" },
+        });
+      }
+    }
+    if (request.method === "POST" && url.pathname === "/durability/export") {
+      if (this.#deleting || this.#deleted || !this.#sessionId()) {
+        return json({ error: "not_found" }, { status: 404 });
+      }
+      if (this.#turns.size > 0 || this.#pendingTurnIds.size > 0
+        || this.#admissionTasks.size > 0 || this.#recoverableTurnCount() > 0) {
+        return json({ error: "agent_busy" }, { status: 409 });
+      }
+      this.#durabilityExported = true;
+      await this.ctx.storage.put(DURABILITY_EXPORTED_KEY, true);
+      try {
+        await this.#shutdownAgent(true);
+        for (const socket of this.ctx.getWebSockets()) {
+          closeSocket(socket, 1000, "durability state exported");
+        }
+        const archive = await CloudflareAgent.exportDurabilityState(this);
+        return json(archive, { headers: { "cache-control": "no-store" } });
+      } catch (error) {
+        return json({ error: "durability_export_failed", message: errorMessage(error) }, {
+          status: 503,
+          headers: { "cache-control": "no-store", "retry-after": "1" },
+        });
+      }
     }
     const forwardedOrigin = url.searchParams.get("public_origin");
     if (!this.#deleting
@@ -1590,6 +1698,9 @@ export class DurableAgentSession extends DurableComputerSession {
       });
     }
     if (request.method === "POST" && url.pathname === "/turns") {
+      if (this.#durabilityExported) {
+        return json({ error: "durability_exported" }, { status: 409 });
+      }
       return this.#submitHttpTurn(request, turnAuthorization);
     }
     if (request.method === "POST" && url.pathname === "/turns/archive") {
@@ -1791,6 +1902,9 @@ export class DurableAgentSession extends DurableComputerSession {
 
   #upgrade(authorization: TurnAuthorization): Response {
     if (this.#deleting) return new Response("Agent is being deleted", { status: 409 });
+    if (this.#durabilityExported) {
+      return new Response("Agent durability state was exported", { status: 409 });
+    }
     const session = this.#sessionStatus();
     if (!session) return new Response("Unknown session", { status: 404 });
     if (authorization.connectGrant
@@ -2090,6 +2204,14 @@ export class DurableAgentSession extends DurableComputerSession {
   async #dispatch(socket: WebSocket, command: ClientCommand): Promise<void> {
     if (this.#deleting) {
       this.#send(socket, { type: "error", code: "agent_deleting", message: "the agent is being deleted" });
+      return;
+    }
+    if (this.#durabilityExported) {
+      this.#send(socket, {
+        type: "error",
+        code: "durability_exported",
+        message: "the agent durability state was exported",
+      });
       return;
     }
     if (command.type === "ping") {
@@ -3383,6 +3505,7 @@ export class DurableAgentSession extends DurableComputerSession {
       }
       await transaction.delete(CREDENTIAL_BINDING_KEY);
       await transaction.delete(CLEANUP_RETRY_ATTEMPT_KEY);
+      await transaction.delete(DURABILITY_EXPORTED_KEY);
       await transaction.delete(INITIAL_ACCOUNT_CONTEXT_KEY);
       await transaction.delete(SESSION_DELETING_KEY);
       await transaction.deleteAlarm();
@@ -3525,6 +3648,7 @@ export class DurableAgentSession extends DurableComputerSession {
   }
 
   async #ensureAgent(): Promise<CloudflareAgent.Agent> {
+    if (this.#durabilityExported) throw new Error("durability state was exported");
     if (this.#deleting) throw retryableError("agent is being deleted");
     if (this.#agentShutdownPromise) {
       try {
@@ -3952,7 +4076,14 @@ export class DurableAgentSession extends DurableComputerSession {
       preparedTools = multiplayer
         ? undefined
         : await createDefaultManagedTools(cloudTools);
+      let durabilityId = session.session_id;
+      try {
+        durabilityId = this.ctx.storage.sql.exec<{ state_id: string }>(
+          "SELECT state_id FROM nanocodex_cloudflare_durability WHERE singleton = 1",
+        ).toArray()[0]?.state_id ?? durabilityId;
+      } catch { /* The adapter creates its identity table on first construction. */ }
       const agentOptions: NonNullable<Parameters<typeof CloudflareAgent.create>[1]> = {
+        durabilityId,
         eventPersistence: "caller",
         terminalReceiptRetention: MANAGED_TERMINAL_RECEIPT_RETENTION,
         instructions: multiplayer

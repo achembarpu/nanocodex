@@ -9,7 +9,12 @@ import {
   managedAccountFetch,
   parseManagedAgentReceipt,
 } from "./managed-account-auth.mjs";
-import { runBoundedProcess, spawnProcessGroup } from "./child-process.mjs";
+import {
+  boundedProcessOutput,
+  redactSecrets,
+  runBoundedProcess,
+  spawnProcessGroup,
+} from "./child-process.mjs";
 import { createLocalSmokeAccount } from "./local-smoke-account.mjs";
 import { waitForReadiness } from "./dev-brokered.mjs";
 
@@ -153,7 +158,7 @@ try {
     results,
   })}\n`);
 } catch (error) {
-  failure = error;
+  failure = withStackDiagnostics(error, stack);
 } finally {
   if (restartAgent && restartCredentials && stack) {
     await deleteAgent(restartCredentials.apiKey, restartAgent.agent_id).catch(() => {});
@@ -179,8 +184,9 @@ async function startStack() {
     }),
     stdio: ["ignore", "pipe", "pipe"],
   });
-  drain(handle.child);
+  handle.diagnostics = boundedProcessOutput(handle.child);
   handles.add(handle);
+  stack = handle;
   await waitForReadiness({
     description: "managed local E2E stack",
     processes: [handle.child],
@@ -301,4 +307,12 @@ function assert(condition, message) {
 function drain(child) {
   child.stdout?.resume();
   child.stderr?.resume();
+}
+
+function withStackDiagnostics(error, handle) {
+  const diagnostics = handle?.diagnostics?.value().trim();
+  if (!diagnostics) return error;
+  const message = error instanceof Error ? error.message : String(error);
+  const redacted = redactSecrets(diagnostics, [accessToken]);
+  return new Error(`${message}\n\nManaged Wrangler diagnostics:\n${redacted}`, { cause: error });
 }

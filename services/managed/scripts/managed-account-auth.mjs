@@ -49,9 +49,10 @@ export function managedAccountSessionWebSocketOptions(cookie, origin, initial = 
 }
 
 export function parseManagedAgentReceipt(value) {
-  const fields = ["agent_id", "session_id", "events_url", "websocket_url"];
+  const fields = ["agent_id", "durability_id", "session_id", "events_url", "websocket_url"];
   if (!isRecord(value)
     || typeof value.agent_id !== "string"
+    || typeof value.durability_id !== "string"
     || typeof value.session_id !== "string"
     || typeof value.events_url !== "string"
     || typeof value.websocket_url !== "string") {
@@ -62,6 +63,7 @@ export function parseManagedAgentReceipt(value) {
   }
   return {
     agent_id: value.agent_id,
+    durability_id: value.durability_id,
     session_id: value.session_id,
     events_url: value.events_url,
     websocket_url: value.websocket_url,

@@ -69,6 +69,14 @@ This is a cutover protocol, not live replication or a distributed transaction:
 Importing the same archive into multiple destinations creates competing clones;
 only one destination may become live.
 
+The Cloudflare adapter exposes this protocol directly as
+`CloudflareAgent.exportDurabilityState(owner)` and
+`CloudflareAgent.importDurabilityState(owner, archive)`. Export requires an
+inactive Agent. Import requires a pristine Durable Object and is exactly
+idempotent for a byte-identical archive, so a lost success response can be
+retried. A fresh runtime session ID is created at the destination while the
+archive's stable state ID remains unchanged.
+
 Archives can contain conversation and tool state and are not encrypted by this
 API. Applications own transport encryption, access control, retention, and
 deletion. An ambiguous destination commit must be reconciled by loading the

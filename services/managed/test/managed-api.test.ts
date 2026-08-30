@@ -5466,6 +5466,87 @@ describe("managed agents REST and resumable SSE", () => {
     expect(BigInt(followingStarted!.cursor)).toBeLessThan(BigInt(followingCompleted!.cursor));
   });
 
+  it("exports and imports a live managed Agent through real Durable Object SQLite", async () => {
+    const source = await createAgent();
+    const turnId = "turn-portable-cloudflare";
+    const input = "retain this portable Cloudflare turn";
+    await submit(source, turnId, input);
+    const sourceTerminal = await waitForTurnState(source, turnId, "completed", 10_000);
+    const sourceCapacity = await testEnv.NANOCODEX_SESSIONS
+      .getByName(source.agent_id)
+      .fetch("https://session.internal/capacity");
+    expect((await sourceCapacity.json<{ durable_state: { rows: number } }>()).durable_state.rows)
+      .toBe(1);
+
+    const exported = await SELF.fetch(
+      source.events_url.replace(/\/events$/, "/durability"),
+      { method: "POST" },
+    );
+    expect(exported.status).toBe(200);
+    const archive = await exported.json<{
+      format: string;
+      stateId: string;
+      revision: string;
+      payload: string;
+    }>();
+    expect(archive).toMatchObject({
+      format: "nanocodex-durability-state-v1",
+      revision: expect.stringMatching(/^[1-9][0-9]*$/),
+      payload: expect.any(String),
+    });
+    expect((await SELF.fetch(source.events_url.replace(/\/events$/, "/turns"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: "after-export", input: "must not resume source" }),
+    })).status).toBe(409);
+
+    const importKey = `portable-${crypto.randomUUID()}`;
+    const createImported = () => SELF.fetch("https://example.test/v1/agents", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "idempotency-key": importKey,
+      },
+      body: JSON.stringify({ durability: archive }),
+    });
+    const importedResponse = await createImported();
+    expect(importedResponse.status).toBe(201);
+    const imported = await importedResponse.json<AgentReceipt>();
+    createdAgents.add(imported.agent_id);
+    expect(imported.agent_id).not.toBe(source.agent_id);
+    expect(imported.durability_id).toBe(archive.stateId);
+
+    const replayedCreate = await createImported();
+    expect(replayedCreate.status).toBe(201);
+    await expect(replayedCreate.json()).resolves.toMatchObject({
+      agent_id: imported.agent_id,
+      durability_id: archive.stateId,
+    });
+
+    await submit(imported, turnId, input);
+    const importedTerminal = await waitForTurnState(imported, turnId, "completed", 10_000);
+    expect(importedTerminal.terminal).toEqual(sourceTerminal.terminal);
+    const identities = await Promise.all([
+      runInDurableObject(
+        testEnv.NANOCODEX_SESSIONS.getByName(source.agent_id),
+        (_instance, state) => state.storage.sql.exec<{ session_id: string }>(
+          "SELECT session_id FROM nanocodex_cloudflare_agent WHERE singleton = 1",
+        ).one().session_id,
+      ),
+      runInDurableObject(
+        testEnv.NANOCODEX_SESSIONS.getByName(imported.agent_id),
+        (_instance, state) => state.storage.sql.exec<{ session_id: string; state_id: string }>(
+          `SELECT a.session_id, d.state_id
+           FROM nanocodex_cloudflare_agent a
+           CROSS JOIN nanocodex_cloudflare_durability d
+           WHERE a.singleton = 1 AND d.singleton = 1`,
+        ).one(),
+      ),
+    ]);
+    expect(identities[1]).toMatchObject({ state_id: archive.stateId });
+    expect(identities[1].session_id).not.toBe(identities[0]);
+  }, 30_000);
+
   it("persists cursors across eviction and tails strictly after the acknowledged cursor", async () => {
     const agent = await createAgent();
     const id = new URL(agent.events_url).pathname.split("/").at(-2)!;
@@ -5601,6 +5682,7 @@ describe("managed agents REST and resumable SSE", () => {
 
 type AgentReceipt = {
   agent_id: string;
+  durability_id: string;
   events_url: string;
   websocket_url: string;
 };
@@ -5612,6 +5694,7 @@ type ManagedTurnView = {
   input: unknown;
   retry_at: number | null;
   state: string;
+  terminal?: unknown;
   terminal_cursor: string | null;
   turn_id: string;
   updated_at: number;

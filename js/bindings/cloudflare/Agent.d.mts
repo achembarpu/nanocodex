@@ -8,6 +8,7 @@ import type {
 } from "../types.mjs";
 import type { CloudflareDurableObjectStorage } from "../runtime/cloudflare-durability-store.mjs";
 import type { Tool as SubagentTool } from "../runtime/subagents.mjs";
+import type { DurabilityPortableStateArchive, DurabilityStoredState } from "../types.mjs";
 
 export type DurableObjectContext = Readonly<{
   storage: CloudflareDurableObjectStorage;
@@ -49,6 +50,17 @@ export type Agent<extended extends object = {}> =
 /** Removes the package-owned durable history for one Cloudflare Agent. */
 export function destroy(owner: DurableObjectOwner): void;
 
+/** Fences and exports this inactive Cloudflare Agent's provider-neutral state. */
+export function exportDurabilityState(
+  owner: DurableObjectOwner,
+): Promise<DurabilityPortableStateArchive>;
+
+/** Imports provider-neutral state into a pristine Cloudflare Agent owner. */
+export function importDurabilityState(
+  owner: DurableObjectOwner,
+  archive: DurabilityPortableStateArchive,
+): Promise<DurabilityStoredState>;
+
 /** Prunes old terminal receipts before constructing the full Agent runtime. */
 export function pruneDurableReceipts(
   owner: DurableObjectOwner,
@@ -66,6 +78,8 @@ export function create(owner: create.Owner, options?: create.Options): Promise<c
 export declare namespace create {
   type Owner = DurableObjectOwner;
   type Options = Readonly<{
+    /** Stable portable state identity. It cannot change after first construction or import. */
+    durabilityId?: string | undefined;
     /**
      * `durable` retains the adapter's resumable event socket. `caller` leaves
      * event retention to the embedding Durable Object and disables connect().

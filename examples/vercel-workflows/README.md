@@ -240,17 +240,20 @@ experimental. Connections are expected to close when a Function reaches its
 maximum duration; automatic cursor-based reconnection is part of the demo's
 normal lifecycle.
 
-The focused durability tests run the production PostgreSQL SQL against PGlite,
-a deterministic WASM PostgreSQL build. They cover schema-lock acquisition,
+The focused deterministic durability tests run the PostgreSQL adapter against
+PGlite. A separate CI test runs the same adapter through a real `pg.Pool`
+connected to PostgreSQL 17. Together they cover schema-lock acquisition,
 expected-revision conflicts, numeric load order, the exact `u64` maximum,
 confirmed rollback, commit ambiguity, and recreation from the retained state
-without requiring external credentials. The portability test additionally runs
-a real Nanocodex WASM agent through Cloudflare SQLite → Vercel PostgreSQL →
-Cloudflare SQLite. It verifies exact revision transfer, duplicate terminal
-replay without a model call, full-history provider requests without stale
-previous-response handles, and continued execution after both cutovers. Live
-multi-session contention remains a deployment smoke against the selected
-Marketplace provider.
+without requiring external credentials. The portability tests additionally run
+a real Nanocodex WASM agent through the Cloudflare SQLite and PostgreSQL store
+contracts, and run the managed Cloudflare HTTP API inside the Workers runtime
+with actual Durable Object SQLite. They verify exact revision transfer, fresh
+runtime identities, duplicate terminal replay without a model call,
+full-history provider requests without stale previous-response handles, and
+continued execution after cutover. Only the OpenAI Responses endpoint is
+simulated. Live PostgreSQL CAS, fencing, import conflict, and continuation are
+mandatory in CI; Marketplace deployment remains an environment-specific smoke.
 
 References:
 
