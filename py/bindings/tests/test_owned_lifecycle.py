@@ -209,22 +209,25 @@ class OwnedLifecycleTests(unittest.TestCase):
                 child.shutdown()
 
             records = server.wait_for_requests(7)
-            replay_requests = [
-                record.body
-                for record in records
-                if any(
-                    prompt in user_texts(record.body)
-                    for prompt in (
-                        "historical branch",
-                        "latest branch",
-                        "resumed branch",
-                    )
+            branch_requests = {
+                prompt: next(
+                    record.body
+                    for record in records
+                    if prompt in user_texts(record.body)
                 )
-            ]
-            self.assertEqual(len(replay_requests), 3)
-            for request in replay_requests:
-                self.assertNotIn("previous_response_id", request)
-                self.assertIn("root checkpoint", user_texts(request))
+                for prompt in (
+                    "historical branch",
+                    "latest branch",
+                    "resumed branch",
+                )
+            }
+            for prompt in ("historical branch", "latest branch"):
+                request = branch_requests[prompt]
+                self.assertEqual(request["previous_response_id"], "resp-final-2")
+                self.assertEqual(user_texts(request), [prompt])
+            resumed_request = branch_requests["resumed branch"]
+            self.assertNotIn("previous_response_id", resumed_request)
+            self.assertIn("root checkpoint", user_texts(resumed_request))
 
     def test_steer_cancel_and_compact_cross_the_boundary(self) -> None:
         initial_started = threading.Event()

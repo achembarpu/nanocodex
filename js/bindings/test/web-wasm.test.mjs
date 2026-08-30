@@ -674,6 +674,17 @@ test("web-target WASM executes the complete browser harness tool contract", asyn
     standard,
     threadId: "browser-harness-e2e",
     shell: {
+      descriptor: {
+        shell: "nanocodex-just-bash",
+        commands: ["bash"],
+        customCommands: [],
+        cwd: "/workspace",
+        limits: {},
+        network: { enabled: false, mode: "none" },
+        pty: false,
+        sessions: false,
+        sandboxEscalation: false,
+      },
       artifactTool: artifact({
         workspace,
         onArtifact: (document) => effects.artifacts.push(document),
