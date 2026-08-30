@@ -483,6 +483,11 @@ impl DurableState {
                             "at-most-once step `{step_id}` in operation `{operation_id}` restarted"
                         )));
                     }
+                    if step.attempts == u32::MAX {
+                        return Err(Error::InvalidState(format!(
+                            "step `{step_id}` in operation `{operation_id}` exceeded the attempt counter range"
+                        )));
+                    }
                 }
             }
             Transition::StepOutcomeReady {
@@ -615,7 +620,11 @@ impl DurableState {
                             "settled step `{step_id}` in operation `{operation_id}` restarted"
                         )));
                     }
-                    step.attempts = step.attempts.saturating_add(1);
+                    step.attempts = step.attempts.checked_add(1).ok_or_else(|| {
+                        Error::InvalidState(format!(
+                            "step `{step_id}` in operation `{operation_id}` exceeded the attempt counter range"
+                        ))
+                    })?;
                 } else {
                     operation.steps.insert(
                         step_id.clone(),

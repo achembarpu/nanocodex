@@ -64,8 +64,6 @@ export function createIndexedDbDurabilityStore(options = {}) {
       requireId(stateId, "durability state ID");
       const ownerId = requireId(request?.ownerId, "durability owner ID");
       const fence = durabilityRevision(request?.fence);
-      const expectedRevision = durabilityRevision(request?.expectedRevision);
-      const payload = requirePayload(request?.payload);
       const db = await open();
       const transaction = db.transaction([OWNERS, STATES], "readwrite");
       const completed = transactionCompletion(transaction);
@@ -76,6 +74,7 @@ export function createIndexedDbDurabilityStore(options = {}) {
           await completed;
           return { status: "fenced" };
         }
+        const expectedRevision = durabilityRevision(request?.expectedRevision);
         const states = transaction.objectStore(STATES);
         const state = storedState(await requestResult(states.get(stateId)), stateId);
         if (state.revision !== expectedRevision) {
@@ -86,6 +85,7 @@ export function createIndexedDbDurabilityStore(options = {}) {
           await completed;
           return { status: "not_committed", message: "IndexedDB durability revision overflow" };
         }
+        const payload = requirePayload(request?.payload);
         const revision = durabilityRevision(BigInt(expectedRevision) + 1n);
         await requestResult(states.put({ stateId, revision, payload }));
         await completed;
@@ -114,7 +114,8 @@ function openDatabase(indexedDb, databaseName, invalidate) {
       const opened = request.result;
       if (settled) return opened.close();
       const stores = Array.from(opened.objectStoreNames).sort();
-      if (stores.length !== 2 || stores[0] !== OWNERS || stores[1] !== STATES) {
+      if (stores.length !== 2 || stores[0] !== OWNERS || stores[1] !== STATES
+        || !validStoreSchema(opened, OWNERS) || !validStoreSchema(opened, STATES)) {
         opened.close();
         return settle(reject, new Error("incompatible IndexedDB durability schema; delete the database"));
       }
@@ -129,6 +130,15 @@ function openDatabase(indexedDb, databaseName, invalidate) {
       callback(value);
     }
   });
+}
+
+function validStoreSchema(database, name) {
+  try {
+    const store = database.transaction([name], "readonly").objectStore(name);
+    return store.keyPath === "stateId" && store.autoIncrement === false;
+  } catch {
+    return false;
+  }
 }
 
 function storedState(value, stateId) {

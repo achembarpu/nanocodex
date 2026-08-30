@@ -360,6 +360,38 @@ async fn rejects_noncanonical_checkpoint_fields() {
 }
 
 #[tokio::test]
+async fn rejects_retry_attempt_counter_overflow_without_advancing_state() {
+    let revision = u64::from(u32::MAX);
+    let payload = format!(
+        r#"{{"nanocodex_durable_state":{{"format":1,"operations":{{"turn":{{"input":"\"prompt\"","status":"pending","steps":{{"model":{{"kind":"model","input":"\"retry\"","retry":"idempotent","status":"effect_pending","attempts":{}}}}},"accepted_order":1}}}},"latest_checkpoint":null,"checkpoint_effect_pending":false}}}}"#,
+        u32::MAX,
+    );
+    let session = DurableSession::open(
+        SeededStore {
+            state: StoredState {
+                revision,
+                payload: Some(payload),
+            },
+        },
+        "attempt-overflow",
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        session.admit("turn", &"prompt").await,
+        Ok(Admission::Pending)
+    ));
+    session.begin_attempt("turn").await.unwrap();
+
+    let error = session
+        .begin_step("turn", "model", "model", &"retry", RetryPolicy::Idempotent)
+        .await
+        .expect_err("attempt overflow must not silently saturate");
+    assert!(matches!(error, Error::InvalidState(_)));
+    assert_eq!(session.state().await.unwrap().revision(), revision);
+}
+
+#[tokio::test]
 async fn rejects_the_deleted_journal_state_envelope() {
     let payload = r#"{"nanocodex_journal_state":{"format":1,"operations":{},"latest_checkpoint":null,"checkpoint_effect_pending":false}}"#;
     let error = match DurableSession::open(seeded_store(&[payload]), "deleted-state-envelope").await

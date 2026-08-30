@@ -25,6 +25,13 @@ export class UnknownPostgresCommitOutcomeError extends Error {
   }
 }
 
+class InvalidPostgresDurabilityRequestError extends Error {
+  constructor(cause) {
+    super("invalid PostgreSQL durability replacement request", { cause });
+    this.name = "InvalidPostgresDurabilityRequestError";
+  }
+}
+
 /** Creates a concrete PostgreSQL-backed Nanocodex durability store. */
 export function createPostgresDurabilityStore(pool) {
   if (!pool || typeof pool.connect !== "function" || typeof pool.query !== "function") {
@@ -54,16 +61,12 @@ export function createPostgresDurabilityStore(pool) {
       requireId(stateId);
       const ownerId = requireOwner(request?.ownerId);
       const fence = durabilityRevision(request?.fence);
-      const expectedRevision = durabilityRevision(request?.expectedRevision);
-      if (typeof request?.payload !== "string") {
-        throw new TypeError("durability payload must be a string");
-      }
       await ready();
       return replaceState(pool, stateId, {
         ownerId,
         fence,
-        expectedRevision,
-        payload: request.payload,
+        expectedRevision: request?.expectedRevision,
+        payload: request?.payload,
       });
     },
   });
@@ -112,8 +115,13 @@ async function initialize(pool) {
         "incompatible Postgres durability primary keys; each state_id must be the sole primary key",
       );
     }
-    await client.query("COMMIT");
-    begun = false;
+    try {
+      await client.query("COMMIT");
+      begun = false;
+    } catch (error) {
+      discard = true;
+      throw error;
+    }
   } catch (error) {
     if (begun) {
       try {
@@ -245,8 +253,9 @@ async function replaceState(pool, stateId, request) {
       begun = false;
       return { status: "fenced" };
     }
+    const expectedRevision = requestRevision(request.expectedRevision);
     const state = await loadStateForUpdate(client, stateId);
-    if (state.revision !== request.expectedRevision) {
+    if (state.revision !== expectedRevision) {
       await client.query("ROLLBACK");
       begun = false;
       return { status: "conflict", actualRevision: state.revision };
@@ -256,13 +265,14 @@ async function replaceState(pool, stateId, request) {
       begun = false;
       return { status: "not_committed", message: "PostgreSQL durability revision overflow" };
     }
+    const payload = requestPayload(request.payload);
     const revision = durabilityRevision(BigInt(state.revision) + 1n);
     await client.query(
       `INSERT INTO nanocodex_durable_states (state_id, revision, payload)
        VALUES ($1, $2::numeric, $3)
        ON CONFLICT (state_id) DO UPDATE
        SET revision = excluded.revision, payload = excluded.payload`,
-      [stateId, revision, request.payload],
+      [stateId, revision, payload],
     );
     try {
       await client.query("COMMIT");
@@ -277,17 +287,35 @@ async function replaceState(pool, stateId, request) {
     if (begun) {
       try {
         await client.query("ROLLBACK");
-        begun = false;
-        return { status: "not_committed", message: message(error) };
       } catch (rollbackError) {
         discard = true;
         throw new AggregateError([error, rollbackError], "PostgreSQL durability replace and rollback both failed");
       }
+      begun = false;
+      if (error instanceof InvalidPostgresDurabilityRequestError) throw error.cause;
+      return { status: "not_committed", message: message(error) };
     }
     throw error;
   } finally {
     client.release(discard);
   }
+}
+
+function requestRevision(value) {
+  try {
+    return durabilityRevision(value);
+  } catch (error) {
+    throw new InvalidPostgresDurabilityRequestError(error);
+  }
+}
+
+function requestPayload(value) {
+  if (typeof value !== "string") {
+    throw new InvalidPostgresDurabilityRequestError(
+      new TypeError("durability payload must be a string"),
+    );
+  }
+  return value;
 }
 
 async function loadStateForUpdate(client, stateId) {

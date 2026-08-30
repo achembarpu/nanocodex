@@ -102,6 +102,20 @@ test("Cloudflare durability stores one state and chunks only oversized payloads"
   assert.ok(chunks.every((chunk) => chunk.payload.length <= 256_000));
   assert.equal(store.load("agent-large").payload, largePayload);
 
+  const replacementOwner = store.acquire("agent-large", { ownerId: "worker-replacement" });
+  assert.deepEqual(store.replace("agent-large", {
+    ownerId: largeOwner.ownerId,
+    fence: largeOwner.fence,
+    expectedRevision: "not-a-revision",
+    payload: new Uint8Array(),
+  }), { status: "fenced" });
+  assert.deepEqual(store.replace("agent-large", {
+    ownerId: replacementOwner.ownerId,
+    fence: replacementOwner.fence,
+    expectedRevision: "0",
+    payload: new Uint8Array(),
+  }), { status: "conflict", actualRevision: "1" });
+
   const firstChunk = chunks.find((chunk) => chunk.stateId === "agent-large");
   firstChunk.revision = "2";
   assert.throws(() => store.load("agent-large"), /invalid Cloudflare durability chunks/);

@@ -132,8 +132,6 @@ export function createSqliteDurabilityStore(options) {
       requireId(stateId, "state");
       const ownerId = requireId(request?.ownerId, "owner");
       const fence = durabilityFence(request?.fence);
-      const expectedRevision = durabilityRevision(request?.expectedRevision);
-      const payload = requirePayload(request?.payload);
       return options.transaction((query) => mapMaybePromise(
         query(
           "SELECT owner_id, fence FROM nanocodex_durable_owners WHERE state_id = ?",
@@ -149,6 +147,7 @@ export function createSqliteDurabilityStore(options) {
           ) {
             return { status: "fenced" };
           }
+          const expectedRevision = durabilityRevision(request?.expectedRevision);
           return mapMaybePromise(loadSqliteState(query, stateId), (state) => {
             if (state.revision !== expectedRevision) {
               return { status: "conflict", actualRevision: state.revision };
@@ -156,6 +155,7 @@ export function createSqliteDurabilityStore(options) {
             if (expectedRevision === MAX_REVISION_TEXT) {
               return { status: "not_committed", message: "SQLite durability revision overflow" };
             }
+            const payload = requirePayload(request?.payload);
             const revision = durabilityRevision(BigInt(expectedRevision) + 1n);
             return mapMaybePromise(
               query(

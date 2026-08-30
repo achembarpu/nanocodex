@@ -54,6 +54,30 @@ test("PostgreSQL fences owners before comparing complete-state revisions", async
     expectedRevision: "999",
     payload: "stale",
   }), { status: "fenced" });
+  assert.deepEqual(await store.replace("state", {
+    ownerId: first.ownerId,
+    fence: first.fence,
+    expectedRevision: "not-a-revision",
+    payload: new Uint8Array(),
+  }), { status: "fenced" });
+  assert.deepEqual(await store.replace("state", {
+    ownerId: second.ownerId,
+    fence: second.fence,
+    expectedRevision: "0",
+    payload: new Uint8Array(),
+  }), { status: "conflict", actualRevision: "1" });
+  await assert.rejects(store.replace("state", {
+    ownerId: second.ownerId,
+    fence: second.fence,
+    expectedRevision: "not-a-revision",
+    payload: "invalid",
+  }), /unsigned 64-bit decimal string/);
+  await assert.rejects(store.replace("state", {
+    ownerId: second.ownerId,
+    fence: second.fence,
+    expectedRevision: "1",
+    payload: new Uint8Array(),
+  }), /payload must be a string/);
 });
 
 test("PostgreSQL distinguishes rolled-back writes from unknown COMMIT outcomes", async () => {
@@ -90,6 +114,17 @@ test("PostgreSQL initialization rejects tables without the exact state primary k
     createPostgresDurabilityStore(pool).load("state"),
     /each state_id must be the sole primary key/,
   );
+});
+
+test("PostgreSQL discards a connection after an ambiguous initialization commit", async () => {
+  const pool = new MockPool();
+  pool.failNextCommit = true;
+  const store = createPostgresDurabilityStore(pool);
+
+  await assert.rejects(store.load("state"), /injected commit failure/);
+  assert.equal(pool.releases.at(-1), true);
+  assert.deepEqual(await store.load("state"), { revision: "0", payload: null });
+  assert.equal(pool.connects, 2);
 });
 
 test("the PostgreSQL commit error retains its exact unknown-outcome identity", () => {

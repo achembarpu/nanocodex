@@ -71,6 +71,22 @@ test("IndexedDB durability serializes atomic compare-and-replace transactions", 
     await store.replace("thread", { ...owner, expectedRevision: "0", payload: "stale" }),
     { status: "fenced" },
   );
+  assert.deepEqual(
+    await store.replace("thread", {
+      ...owner,
+      expectedRevision: "not-a-revision",
+      payload: new Uint8Array(),
+    }),
+    { status: "fenced" },
+  );
+  assert.deepEqual(
+    await store.replace("thread", {
+      ...replacement,
+      expectedRevision: "1",
+      payload: new Uint8Array(),
+    }),
+    { status: "conflict", actualRevision: "0" },
+  );
 });
 
 test("IndexedDB durability atomically increments concurrent owner acquisitions", async () => {
@@ -119,6 +135,17 @@ test("IndexedDB durability creates only owner and state stores", async () => {
   const store = createIndexedDbDurabilityStore({ indexedDB, databaseName: "upgrade" });
   await store.load("thread");
   assert.deepEqual(indexedDB.storeNames("upgrade"), ["owners", "states"]);
+});
+
+test("IndexedDB durability rejects stores with incompatible key semantics", async () => {
+  const indexedDB = createFakeIndexedDb();
+  await createIndexedDbDurabilityStore({ indexedDB, databaseName: "schema" }).load("thread");
+  indexedDB.alterStore("schema", "owners", { keyPath: "ownerId" });
+
+  await assert.rejects(
+    createIndexedDbDurabilityStore({ indexedDB, databaseName: "schema" }).load("thread"),
+    /incompatible IndexedDB durability schema/,
+  );
 });
 
 test("IndexedDB durability has no browser-global import-time dependency", () => {
@@ -203,6 +230,9 @@ function createFakeIndexedDb() {
     storeNames(name) {
       return [...databases.get(name).stores.keys()].sort();
     },
+    alterStore(name, storeName, shape) {
+      Object.assign(databases.get(name).stores.get(storeName), shape);
+    },
     seed(name, stateId, revision, payload) {
       const database = databases.get(name);
       if (!database) throw new Error(`database ${name} has not been opened`);
@@ -231,8 +261,8 @@ class FakeDatabase {
     this.writeTail = Promise.resolve();
   }
 
-  createObjectStore(name, { keyPath }) {
-    const definition = { keyPath, indexes: new Map(), records: new Map() };
+  createObjectStore(name, { keyPath, autoIncrement = false }) {
+    const definition = { keyPath, autoIncrement, indexes: new Map(), records: new Map() };
     this.stores.set(name, definition);
     return {
       createIndex: (indexName, indexKeyPath) => {
@@ -316,6 +346,14 @@ class FakeObjectStore {
     this.name = name;
   }
 
+  get keyPath() {
+    return this.transaction.database.stores.get(this.name).keyPath;
+  }
+
+  get autoIncrement() {
+    return this.transaction.database.stores.get(this.name).autoIncrement;
+  }
+
   get(key) {
     return this.transaction.enqueue(() => clone(this.definition.records.get(serializeKey(key))));
   }
@@ -363,6 +401,7 @@ class FakeObjectStore {
 function cloneStore(store) {
   return {
     keyPath: store.keyPath,
+    autoIncrement: store.autoIncrement,
     indexes: new Map(store.indexes),
     records: new Map([...store.records].map(([key, value]) => [key, clone(value)])),
   };
