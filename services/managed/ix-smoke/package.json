@@ -1,0 +1,14 @@
+{
+  "name": "nanocodex-managed-ix-smoke",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "smoke": "node smoke.mjs"
+  },
+  "dependencies": {
+    "@indexable/sdk": "0.7.2"
+  }
+}
