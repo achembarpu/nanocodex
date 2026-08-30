@@ -1,0 +1,231 @@
+name: Finalize sticky compute promotion
+
+permissions:
+  contents: write
+
+on:
+  push:
+    branches: [feat/managed-sandbox-escalation]
+
+jobs:
+  finalize:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22.15.0
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9
+        with:
+          toolchain: stable
+          targets: wasm32-unknown-unknown
+      - uses: taiki-e/install-action@3522286d40783523f9c7880e33f785905b4c20d0 # v2
+        with:
+          tool: wasm-bindgen-cli@0.2.126
+      - name: Make fallback retry side-effect safe
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          runtime = Path("services/managed/src/computer-runtime.ts")
+          text = runtime.read_text()
+
+          old = 'const COMMAND_SEPARATORS = new Set([";", "&&", "||", "|", "&"]);'
+          new = 'const COMMAND_SEPARATORS = new Set([";", "&&", "||", "|"]);'
+          if old not in text:
+              raise SystemExit("command separator anchor missing")
+          text = text.replace(old, new, 1)
+
+          meta = '''const META_COMMANDS = new Set([
+            ".",
+            "bash",
+            "builtin",
+            "command",
+            "env",
+            "eval",
+            "exec",
+            "sh",
+            "source",
+            "xargs",
+          ]);
+          '''
+          retry_sets = meta + '''const READ_ONLY_RETRY_COMMANDS = new Set([
+            "[",
+            "basename",
+            "cat",
+            "cmp",
+            "cut",
+            "diff",
+            "dirname",
+            "echo",
+            "false",
+            "file",
+            "find",
+            "grep",
+            "head",
+            "ls",
+            "printenv",
+            "printf",
+            "pwd",
+            "readlink",
+            "realpath",
+            "stat",
+            "tail",
+            "test",
+            "tr",
+            "true",
+            "uniq",
+            "wc",
+          ]);
+          const FIND_MUTATING_ACTIONS = new Set([
+            "-delete",
+            "-exec",
+            "-execdir",
+            "-fprint",
+            "-fprint0",
+            "-fprintf",
+            "-ok",
+            "-okdir",
+          ]);
+          '''
+          if meta not in text:
+              raise SystemExit("meta command anchor missing")
+          text = text.replace(meta, retry_sets, 1)
+
+          old_execute = '''    try {
+                const result = await virtualTool.handler(input, context);
+                if (!isVirtualLimitationResult(result)) return result;
+                promoted = true;
+                return executeNativeCommand(parsed, context, provider);
+              } catch (error) {
+                if (!isVirtualLimitationError(error)) throw error;
+                promoted = true;
+                return executeNativeCommand(parsed, context, provider);
+              }
+          '''
+          new_execute = '''    const retrySafe = isVirtualRetrySafeCommand(parsed.cmd);
+              try {
+                const result = await virtualTool.handler(input, context);
+                if (!isVirtualLimitationResult(result)) return result;
+                promoted = true;
+                return retrySafe
+                  ? executeNativeCommand(parsed, context, provider)
+                  : result;
+              } catch (error) {
+                if (!isVirtualLimitationError(error)) throw error;
+                promoted = true;
+                if (!retrySafe) throw error;
+                return executeNativeCommand(parsed, context, provider);
+              }
+          '''
+          if old_execute not in text:
+              raise SystemExit("sticky execute anchor missing")
+          text = text.replace(old_execute, new_execute, 1)
+
+          marker = '''function lexShell(command: string): ShellToken[] | undefined {
+          '''
+          retry_function = '''/**
+           * Post-execution retry is allowed only when the full expression is
+           * read-only. This lets emulator-only failures disappear from the model
+           * without ever replaying a command that may already have mutated state.
+           */
+          export function isVirtualRetrySafeCommand(command: string): boolean {
+            const tokens = lexShell(command);
+            if (!tokens) return false;
+            let expectingCommand = true;
+            let skipRedirectionTarget = false;
+            let currentCommand: string | undefined;
+
+            for (const token of tokens) {
+              if (token.kind === "operator") {
+                if (token.value === ">" || token.value === ">>") return false;
+                if (token.value === "<") {
+                  skipRedirectionTarget = true;
+                  continue;
+                }
+                if (COMMAND_SEPARATORS.has(token.value)) {
+                  expectingCommand = true;
+                  currentCommand = undefined;
+                  continue;
+                }
+                return false;
+              }
+
+              if (skipRedirectionTarget) {
+                skipRedirectionTarget = false;
+                continue;
+              }
+              if (expectingCommand) {
+                if (isAssignment(token.value)) continue;
+                if (!READ_ONLY_RETRY_COMMANDS.has(token.value)) return false;
+                currentCommand = token.value;
+                expectingCommand = false;
+                continue;
+              }
+              if (currentCommand === "find" && FIND_MUTATING_ACTIONS.has(token.value)) return false;
+            }
+            return !skipRedirectionTarget;
+          }
+
+          ''' + marker
+          if marker not in text:
+              raise SystemExit("lexer anchor missing")
+          text = text.replace(marker, retry_function, 1)
+          runtime.write_text(text)
+
+          test = Path("services/managed/test/computer-escalation.test.ts")
+          test_text = test.read_text()
+          test_text = test_text.replace(
+              '''  createManagedComputerRuntime,
+            isVirtualSafeCommand,
+          ''',
+              '''  createManagedComputerRuntime,
+            isVirtualRetrySafeCommand,
+            isVirtualSafeCommand,
+          ''',
+              1,
+          )
+          anchor = '''    expect(isVirtualSafeCommand("./script.sh", safe)).toBe(false);
+            });
+          '''
+          replacement = '''    expect(isVirtualSafeCommand("./script.sh", safe)).toBe(false);
+
+              expect(isVirtualRetrySafeCommand("cat marker | grep cheap")).toBe(true);
+              expect(isVirtualRetrySafeCommand("find . -type f")).toBe(true);
+              expect(isVirtualRetrySafeCommand("cat marker > copy")).toBe(false);
+              expect(isVirtualRetrySafeCommand("printf cheap > marker")).toBe(false);
+              expect(isVirtualRetrySafeCommand("find . -delete")).toBe(false);
+              expect(isVirtualRetrySafeCommand("rm -rf generated")).toBe(false);
+            });
+          '''
+          if anchor not in test_text:
+              raise SystemExit("test anchor missing")
+          test.write_text(test_text.replace(anchor, replacement, 1))
+
+          Path(".github/workflows/finalize-sticky-compute.yml").unlink()
+          PY
+      - name: Build JS bindings
+        run: |
+          npm ci --prefix js/bindings
+          ./scripts/build-js-package.sh
+      - name: Install Managed dependencies
+        run: npm ci --prefix services/managed
+      - name: Typecheck Managed
+        run: npm run typecheck --prefix services/managed
+      - name: Prepare Managed evaluator
+        run: npm run prepare:code-evaluator --prefix services/managed
+      - name: Test compute promotion
+        run: >-
+          npm run test:worker --prefix services/managed --
+          test/computer-escalation.test.ts
+          test/computer-provider.test.ts
+          test/computer-provider-config.test.ts
+          test/computer-provider-ix.test.ts
+      - name: Commit validated changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add services/managed/src/computer-runtime.ts services/managed/test/computer-escalation.test.ts .github/workflows/finalize-sticky-compute.yml
+          git commit -m "fix(managed): make limitation retry side-effect safe"
+          git push
