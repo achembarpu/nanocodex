@@ -52,7 +52,7 @@ export function bindAgent(module, hostAgent = HostAgent) {
     createEphemeral: (owner, options) => createEphemeral(module, owner, options),
     destroy,
     exportDurabilityState,
-    importDurabilityState,
+    importDurabilityState: (owner, archive) => importDurabilityState(owner, archive, module),
     route,
   });
 }
@@ -127,7 +127,7 @@ export async function exportDurabilityState(owner) {
 }
 
 /** Imports provider-neutral state into a pristine Cloudflare Agent owner. */
-export async function importDurabilityState(owner, archive) {
+export async function importDurabilityState(owner, archive, module) {
   const context = reserveInactiveLifecycle(owner, "importing durability state");
   try {
     const storage = context.storage;
@@ -136,10 +136,25 @@ export async function importDurabilityState(owner, archive) {
     const validationStateId = typeof archive?.stateId === "string" && archive.stateId
       ? archive.stateId
       : "nanocodex-invalid-import";
-    const validated = await importPortableState(
-      createMemoryDurabilityStore(validationStateId),
-      archive,
-    );
+    const validationStore = createMemoryDurabilityStore(validationStateId);
+    const validated = await importPortableState(validationStore, archive);
+    if (module !== undefined) {
+      const routeHost = {};
+      const route = (await loadDurabilityRuntime()).own(
+        routeHost,
+        validationStore,
+        validationStateId,
+      );
+      try {
+        installHostBridge();
+        await initializeBrowserEngine({ module });
+        // Opening the Rust durability session validates the complete canonical
+        // state. Pruning happens only in this throwaway memory copy.
+        await pruneWasmDurableReceipts(route.id, validationStateId, 4_096);
+      } finally {
+        route.abandon();
+      }
+    }
     const retainedSessionId = storedSessionId(storage);
     const retainedStateId = storedStateId(storage);
     if (retainedSessionId !== undefined || retainedStateId !== undefined) {

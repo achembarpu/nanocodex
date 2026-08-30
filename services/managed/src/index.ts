@@ -183,9 +183,9 @@ const DEFAULT_OWNERSHIP_IO_TIMEOUT_MS = 10_000;
 const DEFAULT_MULTIPLAYER_IO_TIMEOUT_MS = 10_000;
 const MAX_CLEANUP_RETRY_MS = 60_000;
 const SESSION_OWNER_ASSERTION = "x-nanocodex-owner-id";
-// Exact completed-turn receipts are retained by ManagedTurnArchive, so the
-// runtime state does not need to duplicate them in each compacted checkpoint.
-const MANAGED_TERMINAL_RECEIPT_RETENTION = 0;
+// ManagedTurnArchive owns the long-lived API projection. The portable Rust
+// state keeps a bounded exact-replay window so cutovers do not call the model.
+const MANAGED_TERMINAL_RECEIPT_RETENTION = 512;
 const SESSION_ORGANIZATION_ASSERTION = "x-nanocodex-session-organization-id";
 const SESSION_TEAM_ASSERTION = "x-nanocodex-session-team-id";
 const SESSION_AUTHORIZATION_EPOCH_ASSERTION = "x-nanocodex-authorization-epoch";

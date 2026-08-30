@@ -358,9 +358,10 @@ test("Cloudflare Agent exports and imports one stable state across a fresh runti
 
   const destinationStorage = new MemoryStorage();
   const destinationOwner = durableOwner(destinationStorage, egressBinding(), SECOND_OBJECT_ID);
-  await importDurabilityState(destinationOwner, JSON.parse(JSON.stringify(archive)));
+  const bound = bindAgent(module);
+  await bound.importDurabilityState(destinationOwner, JSON.parse(JSON.stringify(archive)));
   await assert.doesNotReject(
-    importDurabilityState(destinationOwner, JSON.parse(JSON.stringify(archive))),
+    bound.importDurabilityState(destinationOwner, JSON.parse(JSON.stringify(archive))),
   );
   await assert.rejects(
     importDurabilityState(destinationOwner, { ...archive, revision: 1.5 }),
@@ -378,6 +379,25 @@ test("Cloudflare Agent exports and imports one stable state across a fresh runti
     payload,
   });
   await destination.session.shutdown();
+});
+
+test("Cloudflare Agent rejects corrupt canonical state before importing it", async () => {
+  const module = await readFile(new URL("../pkg-web/nanocodex_bg.wasm", import.meta.url));
+  const storage = new MemoryStorage();
+  const owner = durableOwner(storage);
+  await assert.rejects(
+    bindAgent(module).importDurabilityState(owner, {
+      format: "nanocodex-durability-state-v1",
+      stateId: "corrupt-canonical-state",
+      revision: "1",
+      payload: "{}",
+    }),
+    /durability state at revision 1 is invalid/,
+  );
+  assert.equal(storage.sessionId, undefined);
+  assert.equal(storage.stateId, undefined);
+  assert.deepEqual(storage.states, []);
+  assert.equal(storage.owners.size, 0);
 });
 
 test("Cloudflare Agent portability refuses active and non-pristine owners", async () => {

@@ -10,9 +10,18 @@ let heldSubjectBinds = 0;
 let heldSubjectUnbinds = 0;
 let heldSubjectResponses = 0;
 let heldSubjectOrder = [];
+let modelCommands = 0;
 export default {
   async fetch(request) {
     const url = new URL(request.url);
+    if (url.pathname === "/test/model-commands") {
+      if (request.method === "GET") return Response.json({ count: modelCommands });
+      if (request.method === "DELETE") {
+        modelCommands = 0;
+        return new Response(null, { status: 204 });
+      }
+      return Response.json({ error: "method_not_allowed" }, { status: 405 });
+    }
     if (url.pathname === "/test/hold-subject-bind") {
       if (request.method === "POST") {
         let body;
@@ -257,6 +266,7 @@ export default {
       const latest = messages.at(-1);
       const content = Array.isArray(latest?.content) ? latest.content : [];
       const text = content.map((item) => item?.text ?? "").join("").trim();
+      modelCommands += 1;
       const latestUserIndex = input.findLastIndex((item) => (
         item?.type === "message" && item.role === "user"
       ));

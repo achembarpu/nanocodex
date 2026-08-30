@@ -5467,11 +5467,16 @@ describe("managed agents REST and resumable SSE", () => {
   });
 
   it("exports and imports a live managed Agent through real Durable Object SQLite", async () => {
+    expect((await testEnv.NANOCODEX.fetch(
+      "https://broker.internal/test/model-commands",
+      { method: "DELETE" },
+    )).status).toBe(204);
     const source = await createAgent();
     const turnId = "turn-portable-cloudflare";
     const input = "retain this portable Cloudflare turn";
     await submit(source, turnId, input);
     const sourceTerminal = await waitForTurnState(source, turnId, "completed", 10_000);
+    await expect(modelCommandCount()).resolves.toBe(1);
     const sourceCapacity = await testEnv.NANOCODEX_SESSIONS
       .getByName(source.agent_id)
       .fetch("https://session.internal/capacity");
@@ -5494,6 +5499,15 @@ describe("managed agents REST and resumable SSE", () => {
       revision: expect.stringMatching(/^[1-9][0-9]*$/),
       payload: expect.any(String),
     });
+    expect(JSON.parse(archive.payload).nanocodex_durable_state.operations)
+      .toHaveProperty(turnId);
+    await evictDurableObject(testEnv.NANOCODEX_SESSIONS.getByName(source.agent_id));
+    const repeatedExport = await SELF.fetch(
+      source.events_url.replace(/\/events$/, "/durability"),
+      { method: "POST" },
+    );
+    expect(repeatedExport.status).toBe(200);
+    await expect(repeatedExport.json()).resolves.toEqual(archive);
     expect((await SELF.fetch(source.events_url.replace(/\/events$/, "/turns"), {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -5526,6 +5540,10 @@ describe("managed agents REST and resumable SSE", () => {
     await submit(imported, turnId, input);
     const importedTerminal = await waitForTurnState(imported, turnId, "completed", 10_000);
     expect(importedTerminal.terminal).toEqual(sourceTerminal.terminal);
+    await expect(modelCommandCount()).resolves.toBe(1);
+    await submit(imported, "turn-after-cutover", "continue on the imported managed Agent");
+    await waitForTurnState(imported, "turn-after-cutover", "completed", 10_000);
+    await expect(modelCommandCount()).resolves.toBe(2);
     const identities = await Promise.all([
       runInDurableObject(
         testEnv.NANOCODEX_SESSIONS.getByName(source.agent_id),
@@ -5546,6 +5564,25 @@ describe("managed agents REST and resumable SSE", () => {
     expect(identities[1]).toMatchObject({ state_id: archive.stateId });
     expect(identities[1].session_id).not.toBe(identities[0]);
   }, 30_000);
+
+  it("rejects corrupt canonical durability before creating a managed Agent", async () => {
+    const response = await SELF.fetch("https://example.test/v1/agents", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        durability: {
+          format: "nanocodex-durability-state-v1",
+          stateId: `corrupt-${crypto.randomUUID()}`,
+          revision: "1",
+          payload: "{}",
+        },
+      }),
+    });
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({
+      error: "invalid_durability_import",
+    });
+  });
 
   it("persists cursors across eviction and tails strictly after the acknowledged cursor", async () => {
     const agent = await createAgent();
@@ -5748,6 +5785,14 @@ async function managedFetch(input: RequestInfo | URL, init?: RequestInit): Promi
   const headers = new Headers(request.headers);
   headers.set("authorization", `Bearer ${API_KEY}`);
   return RAW_SELF.fetch(new Request(request, { headers }));
+}
+
+async function modelCommandCount(): Promise<number> {
+  const response = await testEnv.NANOCODEX.fetch(
+    "https://broker.internal/test/model-commands",
+  );
+  expect(response.status).toBe(200);
+  return (await response.json<{ count: number }>()).count;
 }
 
 function connectGrantHeaders(
