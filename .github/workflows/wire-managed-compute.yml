@@ -1,0 +1,114 @@
+name: Wire managed compute providers
+
+on:
+  push:
+    branches: [feat/managed-sandbox-escalation]
+    paths: [.github/workflows/wire-managed-compute.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  wire:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: feat/managed-sandbox-escalation
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+      - name: Wire Cloudflare and ix into Managed sessions
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import json
+
+          root = Path('services/managed')
+
+          config = root / 'src/computer-provider-config.ts'
+          config.write_text('''import type { Sandbox } from "@cloudflare/sandbox";\nimport type { Workspace } from "nanocodex/workspace";\n\nimport {\n  createCloudflareSandboxComputerProvider,\n  type ManagedComputerProvider,\n} from "./computer-provider";\nimport { createIxBrokerComputerProvider } from "./computer-provider-ix";\n\nexport type ManagedComputeProviderEnv = Readonly<{\n  NANOCODEX_COMPUTE_SANDBOX?: DurableObjectNamespace<Sandbox>;\n  MANAGED_COMPUTE_PROVIDER?: string;\n  NANOCODEX_IX_BROKER_URL?: string;\n  NANOCODEX_IX_BROKER_TOKEN?: string;\n  NANOCODEX_IX_REGION?: string;\n}>;\n\nexport type ManagedComputerProviderFactory = (workspace: Workspace) => ManagedComputerProvider;\n\n/** Resolve the native execution backend once when a Managed agent runtime is built. */\nexport function createConfiguredManagedComputerProvider(options: Readonly<{\n  env: ManagedComputeProviderEnv;\n  sessionId: string;\n}>): ManagedComputerProviderFactory | undefined {\n  const selected = selectedProvider(options.env);\n  if (selected === "none") return undefined;\n\n  if (selected === "cloudflare") {\n    const namespace = options.env.NANOCODEX_COMPUTE_SANDBOX;\n    if (namespace === undefined) {\n      throw new Error("managed compute provider cloudflare requires NANOCODEX_COMPUTE_SANDBOX");\n    }\n    return (workspace) => createCloudflareSandboxComputerProvider({\n      namespace,\n      sessionId: options.sessionId,\n      workspace,\n    });\n  }\n\n  const brokerUrl = options.env.NANOCODEX_IX_BROKER_URL?.trim();\n  const brokerToken = options.env.NANOCODEX_IX_BROKER_TOKEN?.trim();\n  if (!brokerUrl) throw new Error("managed compute provider ix requires NANOCODEX_IX_BROKER_URL");\n  if (!brokerToken) throw new Error("managed compute provider ix requires NANOCODEX_IX_BROKER_TOKEN");\n  const region = options.env.NANOCODEX_IX_REGION?.trim();\n  return (workspace) => createIxBrokerComputerProvider({\n    brokerUrl,\n    brokerToken,\n    name: `nanocodex-${options.sessionId}`,\n    ...(region ? { region } : {}),\n    workspace,\n  });\n}\n\nfunction selectedProvider(env: ManagedComputeProviderEnv): "none" | "cloudflare" | "ix" {\n  const configured = env.MANAGED_COMPUTE_PROVIDER?.trim().toLowerCase();\n  if (!configured) {\n    return env.NANOCODEX_COMPUTE_SANDBOX === undefined ? "none" : "cloudflare";\n  }\n  if (configured === "none" || configured === "cloudflare" || configured === "ix") {\n    return configured;\n  }\n  throw new Error(`unsupported managed compute provider: ${configured}`);\n}\n''')
+
+          test = root / 'test/computer-provider-config.test.ts'
+          test.write_text('''import { describe, expect, it } from "vitest";\n\nimport { createConfiguredManagedComputerProvider } from "../src/computer-provider-config";\n\ndescribe("managed computer provider configuration", () => {\n  it("stays virtual when no native provider is configured", () => {\n    expect(createConfiguredManagedComputerProvider({ env: {}, sessionId: "session-1" })).toBeUndefined();\n  });\n\n  it("defaults to Cloudflare when the sandbox binding exists", () => {\n    const factory = createConfiguredManagedComputerProvider({\n      env: { NANOCODEX_COMPUTE_SANDBOX: {} as never },\n      sessionId: "session-1",\n    });\n    expect(factory).toBeTypeOf("function");\n  });\n\n  it("allows native compute to be disabled even when Cloudflare is bound", () => {\n    const factory = createConfiguredManagedComputerProvider({\n      env: {\n        MANAGED_COMPUTE_PROVIDER: "none",\n        NANOCODEX_COMPUTE_SANDBOX: {} as never,\n      },\n      sessionId: "session-1",\n    });\n    expect(factory).toBeUndefined();\n  });\n\n  it("requires the Cloudflare binding when explicitly selected", () => {\n    expect(() => createConfiguredManagedComputerProvider({\n      env: { MANAGED_COMPUTE_PROVIDER: "cloudflare" },\n      sessionId: "session-1",\n    })).toThrow(/NANOCODEX_COMPUTE_SANDBOX/);\n  });\n\n  it("requires both ix broker settings", () => {\n    expect(() => createConfiguredManagedComputerProvider({\n      env: { MANAGED_COMPUTE_PROVIDER: "ix" },\n      sessionId: "session-1",\n    })).toThrow(/NANOCODEX_IX_BROKER_URL/);\n    expect(() => createConfiguredManagedComputerProvider({\n      env: { MANAGED_COMPUTE_PROVIDER: "ix", NANOCODEX_IX_BROKER_URL: "https://ix.example" },\n      sessionId: "session-1",\n    })).toThrow(/NANOCODEX_IX_BROKER_TOKEN/);\n  });\n\n  it("accepts ix as the selected Managed backend", () => {\n    const factory = createConfiguredManagedComputerProvider({\n      env: {\n        MANAGED_COMPUTE_PROVIDER: "ix",\n        NANOCODEX_IX_BROKER_URL: "https://ix.example",\n        NANOCODEX_IX_BROKER_TOKEN: "token",\n        NANOCODEX_IX_REGION: "us-west-1",\n      },\n      sessionId: "session-1",\n    });\n    expect(factory).toBeTypeOf("function");\n  });\n\n  it("rejects unknown backends instead of silently falling back", () => {\n    expect(() => createConfiguredManagedComputerProvider({\n      env: { MANAGED_COMPUTE_PROVIDER: "mystery" },\n      sessionId: "session-1",\n    })).toThrow(/unsupported managed compute provider/);\n  });\n});\n''')
+
+          index = root / 'src/index.ts'
+          text = index.read_text()
+          needle = 'import { createManagedComputerRuntime } from "./computer-runtime";\n'
+          replacement = needle + 'import {\n  createConfiguredManagedComputerProvider,\n  type ManagedComputeProviderEnv,\n} from "./computer-provider-config";\n'
+          if replacement not in text:
+              if needle not in text: raise SystemExit('computer runtime import anchor missing')
+              text = text.replace(needle, replacement, 1)
+
+          export_anchor = 'export { WorkspaceServiceProxy };\n'
+          export_replacement = 'export { WorkspaceServiceProxy };\nexport { Sandbox } from "@cloudflare/sandbox";\n'
+          if export_replacement not in text:
+              if export_anchor not in text: raise SystemExit('workspace export anchor missing')
+              text = text.replace(export_anchor, export_replacement, 1)
+
+          env_anchor = 'export interface Env extends AccountAuthEnv {'
+          env_replacement = 'export interface Env extends AccountAuthEnv, ManagedComputeProviderEnv {'
+          if env_replacement not in text:
+              if env_anchor not in text: raise SystemExit('Env anchor missing')
+              text = text.replace(env_anchor, env_replacement, 1)
+
+          runtime_anchor = '''    const computer = await createManagedComputerRuntime({\n      computer: workspace,\n      egress: this.env.NANOCODEX,\n'''
+          runtime_replacement = '''    const computer = await createManagedComputerRuntime({\n      computer: workspace,\n      computerProvider: createConfiguredManagedComputerProvider({\n        env: this.env,\n        sessionId: session.session_id,\n      }),\n      egress: this.env.NANOCODEX,\n'''
+          if runtime_replacement not in text:
+              if runtime_anchor not in text: raise SystemExit('runtime construction anchor missing')
+              text = text.replace(runtime_anchor, runtime_replacement, 1)
+          index.write_text(text)
+
+          wrangler = root / 'wrangler.jsonc'
+          data = json.loads(wrangler.read_text())
+          data['containers'] = [{
+              'class_name': 'Sandbox',
+              'image': './Dockerfile',
+              'instance_type': 'lite',
+          }]
+          bindings = data['durable_objects']['bindings']
+          if not any(binding.get('name') == 'NANOCODEX_COMPUTE_SANDBOX' for binding in bindings):
+              bindings.append({'name': 'NANOCODEX_COMPUTE_SANDBOX', 'class_name': 'Sandbox'})
+          migrations = data['migrations']
+          if not any(migration.get('tag') == 'v5' for migration in migrations):
+              migrations.append({'tag': 'v5', 'new_sqlite_classes': ['Sandbox']})
+          wrangler.write_text(json.dumps(data, indent=2) + '\n')
+
+          broker = root / 'ix-broker/broker.mjs'
+          broker_text = broker.read_text()
+          broker_text = broker_text.replace(
+              '      const machine = machines.connect(id);',
+              '      const machine = await machines.connect(id);',
+          )
+          broker.write_text(broker_text)
+
+          dockerfile = root / 'ix-broker/Dockerfile'
+          dockerfile.write_text('''FROM node:24-bookworm-slim\n\nWORKDIR /app\nCOPY package.json package-lock.json ./\nRUN npm ci --omit=dev\nCOPY broker.mjs server.mjs ./\n\nUSER node\nEXPOSE 8789\nCMD ["node", "server.mjs"]\n''')
+          PY
+      - name: Install Managed dependencies
+        run: |
+          npm ci --prefix services/managed --ignore-scripts
+          npm ci --prefix services/managed/ix-broker --ignore-scripts
+      - name: Check provider wiring
+        run: |
+          set -o pipefail
+          npm --prefix services/managed run typecheck 2>&1 | tee /tmp/managed-typecheck.log
+          npm --prefix services/managed test 2>&1 | tee /tmp/managed-test.log
+          npm --prefix services/managed/ix-broker test 2>&1 | tee /tmp/ix-broker-test.log
+      - name: Upload check logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: managed-compute-wire-logs
+          path: |
+            /tmp/managed-typecheck.log
+            /tmp/managed-test.log
+            /tmp/ix-broker-test.log
+      - name: Commit provider wiring and remove this one-shot workflow
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/wire-managed-compute.yml
+          git add services/managed/src/index.ts services/managed/src/computer-provider-config.ts services/managed/test/computer-provider-config.test.ts services/managed/wrangler.jsonc services/managed/ix-broker/broker.mjs services/managed/ix-broker/Dockerfile
+          git commit -m "feat(managed): select Cloudflare or ix compute"
+          git push
