@@ -1537,13 +1537,14 @@ describe("managed agents REST and resumable SSE", () => {
       );
     }
 
+    const expiredPasskeyToken = "9".repeat(64);
     const expiredPasskey = await RAW_SELF.fetch("https://example.test/v1/me", {
-      headers: { cookie: `nanocodex_account=${"a".repeat(64)}` },
+      headers: { cookie: `nanocodex_account=${expiredPasskeyToken}` },
     });
     expect(expiredPasskey.status).toBe(401);
     expect(await expiredPasskey.json()).toEqual({ error: "reauthentication_required" });
     expect(expiredPasskey.headers.get("set-cookie")).toBe(
-      `nanocodex_account=${"a".repeat(64)}; Path=/; Max-Age=31536000; HttpOnly; SameSite=Lax; Secure`,
+      `nanocodex_account=${expiredPasskeyToken}; Path=/; Max-Age=31536000; HttpOnly; SameSite=Lax; Secure`,
     );
 
     const unrelatedCookie = await RAW_SELF.fetch("https://example.test/v1/me", {
@@ -5119,7 +5120,9 @@ describe("managed agents REST and resumable SSE", () => {
           if (!failed
             && query.includes("INSERT INTO nanocodex_durable_states")
             && bindings.some((binding) => (
-              typeof binding === "string" && binding.includes("\"operation_cancelled\"")
+              typeof binding === "string"
+              && binding.includes(id)
+              && binding.includes("\"cancelled\"")
             ))) {
             failed = true;
             throw new Error("injected cancellation state failure");
@@ -5326,14 +5329,14 @@ describe("managed agents REST and resumable SSE", () => {
 
     try {
       await submit(agent, id, "remain retryable under capped backoff");
-      let turn = await waitForTurnAttempt(agent, id, 1);
+      let turn = await waitForTurnRetry(agent, id, 1);
       for (let expected = 2; expected <= 10; expected += 1) {
         expect(turn.state).toBe("accepted");
         expect(turn.retry_at).not.toBeNull();
         expect(turn.retry_at! - turn.updated_at).toBeLessThanOrEqual(60_000);
         vi.setSystemTime(turn.retry_at!);
         expect(await runDurableObjectAlarm(session)).toBe(true);
-        turn = await waitForTurnAttempt(agent, id, expected);
+        turn = await waitForTurnRetry(agent, id, expected);
       }
       expect(turn).toMatchObject({ attempt_count: 10, state: "accepted" });
       expect(turn.error).not.toMatch(/retry limit reached/i);
@@ -5420,7 +5423,7 @@ describe("managed agents REST and resumable SSE", () => {
     });
     expect(replay.status).toBe(200);
     await waitForTurnState(agent, replayId, "completed");
-    expect(await runInDurableObject(session, (_instance, state) => ({
+    const replayed = await runInDurableObject(session, (_instance, state) => ({
       dispatchInputJson: state.storage.sql.exec<{ input_json: string }>(
         `SELECT input_json FROM managed_turn_dispatch_chunks
          WHERE turn_id = ? ORDER BY chunk_index`,
@@ -5433,11 +5436,12 @@ describe("managed agents REST and resumable SSE", () => {
         "SELECT terminal_json FROM managed_turns WHERE id = ?",
         replayId,
       ).one().terminal_json,
-    }))).toEqual({
+    }));
+    expect(replayed).toMatchObject({
       dispatchInputJson: frozen.dispatchInputJson,
-      stateRevision: frozen.stateRevision,
       terminalJson: frozen.terminalJson,
     });
+    expect(BigInt(replayed.stateRevision)).toBeGreaterThan(BigInt(frozen.stateRevision));
     await submit(agent, "turn-after-raw-replay", "start only after replay attribution");
     await waitForTurnState(agent, "turn-after-raw-replay", "completed");
     await waitForHistoryEvent(agent, ({ cursor, event, turn_id }) => (

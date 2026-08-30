@@ -1148,6 +1148,14 @@ export class DurableAgentSession extends DurableComputerSession {
         citations_json TEXT NOT NULL
       );
     `);
+    // A pending realtime mutation belonged to the previous in-memory owner.
+    // Its external outcome is unknown, so cold construction must not replay it.
+    this.ctx.storage.sql.exec(
+      `UPDATE managed_realtime_operations
+       SET blocked = 1, updated_at = ?
+       WHERE state = 'pending' AND blocked = 0`,
+      Date.now(),
+    );
     this.#hostedTools = new HostedToolsBroker(this.ctx, {
       providerAllowed: (provider) => this.#activeTurnHostedProviderAllowed(provider),
     });
