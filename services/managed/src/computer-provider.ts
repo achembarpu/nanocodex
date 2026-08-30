@@ -231,13 +231,21 @@ export function createMachineComputerProvider(options: Readonly<{
   let closed = false;
   const machine = () => {
     if (closed) throw new Error("computer provider is disposed");
-    return machinePromise ??= options.createMachine();
+    return machinePromise ??= (async () => {
+      const client = await options.createMachine();
+      try {
+        await materializeWorkspace(options.workspace, client);
+        return client;
+      } catch (error) {
+        try { await client.close?.(); } catch {}
+        throw error;
+      }
+    })();
   };
   return Object.freeze({
     async exec(request) {
       requireCapabilities(request.requirements, ["native-process"]);
       const client = await machine();
-      await materializeWorkspace(options.workspace, client);
       return client.exec(request.command, {
         cwd: sandboxPath(request.cwd),
         timeout: request.timeoutMs ?? DEFAULT_TIMEOUT_MS,
