@@ -1,0 +1,32 @@
+name: Refresh ix provider locks
+
+on:
+  push:
+    branches: [feat/managed-sandbox-escalation]
+
+permissions:
+  contents: write
+
+jobs:
+  locks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: feat/managed-sandbox-escalation
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+      - name: Refresh package locks
+        run: |
+          npm install --prefix services/managed --package-lock-only --ignore-scripts
+          npm install --prefix services/managed/ix-broker --package-lock-only --ignore-scripts
+      - name: Commit locks and remove this one-shot workflow
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/refresh-ix-locks.yml
+          git add services/managed/package-lock.json services/managed/ix-broker/package-lock.json
+          git diff --cached --quiet && exit 0
+          git commit -m "chore(managed): lock ix provider"
+          git push
