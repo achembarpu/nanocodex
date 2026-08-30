@@ -16,8 +16,6 @@ jobs:
         with:
           node-version: 24
       - run: npm install --prefix services/managed/ix-smoke --ignore-scripts
-      - name: Show browser entry
+      - name: Show machine surface
         run: |
-          cat services/managed/ix-smoke/node_modules/@indexable/sdk/src/browser.ts
-          echo '--- node entry ---'
-          cat services/managed/ix-smoke/node_modules/@indexable/sdk/src/node.ts
+          grep -n -E 'class Machine|interface Machine|machines\(|connect\(|get id|readonly id| id:' services/managed/ix-smoke/node_modules/@indexable/sdk/generated/index.d.ts | head -120
