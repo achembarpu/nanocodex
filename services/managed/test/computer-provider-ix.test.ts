@@ -1,67 +1,84 @@
-import type { Client } from "@indexable/sdk";
 import { describe, expect, it, vi } from "vitest";
 
-import { createIxSdkComputerProvider } from "../src/computer-provider-ix";
+import { createIxBrokerComputerProvider } from "../src/computer-provider-ix";
 
-describe("managed ix SDK provider", () => {
-  it("creates lazily through Client.machines and explicitly deletes and closes", async () => {
-    const workspace = fixtureWorkspace();
-    const remove = vi.fn(async () => undefined);
-    const close = vi.fn(async () => undefined);
-    const writeFile = vi.fn(async () => undefined);
-    const exec = vi.fn(async (argv: string[]) => ({
-      stdout: argv[2]?.includes("cargo") ? "ix sdk cargo ok\n" : "",
-      stderr: "",
-      exitCode: 0,
-    }));
-    const create = vi.fn(async () => ({
-      close,
-      delete: remove,
-      exec,
-      writeFile,
-    }));
-    const client = {
-      machines: () => ({ create }),
-    } as unknown as Client;
-    const provider = createIxSdkComputerProvider({
-      client,
-      name: "nanocodex-thread-sdk",
-      region: "us-west-1",
-      workspace,
+describe("managed ix broker provider", () => {
+  it("allocates lazily, projects the workspace, executes, and deletes by machine id", async () => {
+    const requests: Array<{ body?: unknown; method: string; url: string }> = [];
+    const request = vi.fn(async (input: string | URL | Request, init: RequestInit = {}) => {
+      const url = String(input);
+      const method = init.method ?? "GET";
+      const body = typeof init.body === "string" ? JSON.parse(init.body) : undefined;
+      requests.push({ method, url, body });
+
+      if (method === "POST" && url.endsWith("/v1/machines")) {
+        return Response.json({ id: "ix-machine-1" }, { status: 201 });
+      }
+      if (method === "PUT" && url.endsWith("/files")) {
+        return Response.json({});
+      }
+      if (method === "POST" && url.endsWith("/exec")) {
+        const argv = (body as { argv?: string[] } | undefined)?.argv ?? [];
+        const command = argv.join(" ");
+        return Response.json({
+          stdout: command.includes("cargo") ? "ix cargo ok\n" : "",
+          stderr: "",
+          exitCode: 0,
+        });
+      }
+      if (method === "DELETE" && url.endsWith("/ix-machine-1")) {
+        return Response.json({});
+      }
+      return new Response("unexpected ix broker request", { status: 500 });
     });
 
-    expect(create).not.toHaveBeenCalled();
+    const provider = createIxBrokerComputerProvider({
+      brokerToken: "broker-secret",
+      brokerUrl: "https://ix-broker.example.test/",
+      fetch: request as unknown as typeof fetch,
+      name: "nanocodex-thread-1",
+      region: "us-west-1",
+      workspace: fixtureWorkspace(),
+    });
+
+    expect(request).not.toHaveBeenCalled();
     expect(await provider.exec({
       command: "'cargo' 'test'",
       cwd: "/workspace",
       requirements: { capabilities: ["native-process"] },
     })).toEqual({
-      stdout: "ix sdk cargo ok\n",
+      stdout: "ix cargo ok\n",
       stderr: "",
       exitCode: 0,
     });
 
-    expect(create).toHaveBeenCalledTimes(1);
-    expect(create).toHaveBeenCalledWith({
-      name: "nanocodex-thread-sdk",
-      region: "us-west-1",
+    expect(requests[0]).toEqual({
+      method: "POST",
+      url: "https://ix-broker.example.test/v1/machines",
+      body: { name: "nanocodex-thread-1", region: "us-west-1" },
     });
-    expect(writeFile).toHaveBeenCalledWith(
-      "/workspace/Cargo.toml",
-      expect.any(Uint8Array),
-    );
+    expect(requests).toContainEqual(expect.objectContaining({
+      method: "PUT",
+      url: "https://ix-broker.example.test/v1/machines/ix-machine-1/files",
+    }));
+    expect(requests.some(({ body, method, url }) =>
+      method === "POST"
+      && url.endsWith("/ix-machine-1/exec")
+      && JSON.stringify(body).includes("cargo"))).toBe(true);
 
     await provider.dispose?.();
-    expect(remove).toHaveBeenCalledTimes(1);
-    expect(close).toHaveBeenCalledTimes(1);
-    expect(remove.mock.invocationCallOrder[0]).toBeLessThan(close.mock.invocationCallOrder[0]!);
+    expect(requests.at(-1)).toEqual({
+      method: "DELETE",
+      url: "https://ix-broker.example.test/v1/machines/ix-machine-1",
+      body: undefined,
+    });
   });
 });
 
 function fixtureWorkspace() {
   const cargo = new TextEncoder().encode([
     "[package]",
-    "name = \"nanocodex-ix-sdk-smoke\"",
+    "name = \"nanocodex-ix-broker-smoke\"",
     "version = \"0.1.0\"",
     "edition = \"2024\"",
     "",
