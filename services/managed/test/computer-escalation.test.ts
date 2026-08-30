@@ -74,7 +74,7 @@ describe("managed Computer escalation", () => {
     runtime.dispose();
   });
 
-  it("preflights the complete shell expression before allowing virtual execution", () => {
+  it("preflight checks the complete shell expression before allowing virtual execution", () => {
     const safe = new Set(["cat", "echo", "find", "grep", "printf"]);
 
     expect(isVirtualSafeCommand("printf cheap > marker && cat marker", safe)).toBe(true);
