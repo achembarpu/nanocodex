@@ -5,14 +5,18 @@ on:
     paths:
       - ".github/workflows/ix-provider.yml"
       - "services/managed/ix-broker/**"
+      - "services/managed/src/computer-provider-config.ts"
       - "services/managed/src/computer-provider-ix.ts"
+      - "services/managed/test/computer-provider-config.test.ts"
       - "services/managed/test/computer-provider-ix.test.ts"
   push:
     branches: [master]
     paths:
       - ".github/workflows/ix-provider.yml"
       - "services/managed/ix-broker/**"
+      - "services/managed/src/computer-provider-config.ts"
       - "services/managed/src/computer-provider-ix.ts"
+      - "services/managed/test/computer-provider-config.test.ts"
       - "services/managed/test/computer-provider-ix.test.ts"
 
 permissions:
@@ -26,5 +30,5 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24
-      - run: npm install --prefix services/managed/ix-broker --ignore-scripts
+      - run: npm ci --prefix services/managed/ix-broker --ignore-scripts
       - run: npm test --prefix services/managed/ix-broker
