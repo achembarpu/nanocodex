@@ -5118,7 +5118,8 @@ describe("managed agents REST and resumable SSE", () => {
         let failed = false;
         sql.exec = function injectedJournalFailure(query, ...bindings) {
           if (!failed
-            && query.includes("INSERT INTO nanocodex_durable_states")
+            && (query.includes("INSERT INTO nanocodex_durable_states")
+              || query.includes("INSERT INTO nanocodex_durable_state_chunks"))
             && bindings.some((binding) => (
               typeof binding === "string"
               && binding.includes("\"cancelled\"")
@@ -5333,7 +5334,13 @@ describe("managed agents REST and resumable SSE", () => {
         expect(turn.state).toBe("accepted");
         expect(turn.retry_at).not.toBeNull();
         expect(turn.retry_at! - turn.updated_at).toBeLessThanOrEqual(60_000);
-        vi.setSystemTime(turn.retry_at!);
+        await waitForScheduledAlarm(session);
+        const alarm = await runInDurableObject(
+          session,
+          (_instance, state) => state.storage.getAlarm(),
+        );
+        expect(alarm).not.toBeNull();
+        vi.setSystemTime(Math.max(turn.retry_at!, alarm!));
         expect(await runDurableObjectAlarm(session)).toBe(true);
         turn = await waitForTurnRetry(agent, id, expected);
       }
