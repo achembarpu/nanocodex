@@ -8,8 +8,7 @@
   },
   "scripts": {
     "build": "wrangler deploy --dry-run --outdir dist",
-    "build:smoke:ix": "wrangler deploy --dry-run --config wrangler.ix-computer-provider-smoke.jsonc --outdir dist-ix-smoke",
-    "check": "npm run typecheck && npm test && npm run build && npm run build:smoke:ix",
+    "check": "npm run typecheck && npm test && npm run build",
     "dev": "node scripts/dev-brokered.mjs",
     "dev:api-key": "node scripts/dev-brokered.mjs --auth-mode=api_key",
     "dev:subscription": "node scripts/dev-brokered.mjs --auth-mode=chatgpt",
@@ -42,7 +41,6 @@
   "dependencies": {
     "@cloudflare/computer": "0.2.1",
     "@cloudflare/sandbox": "0.12.4",
-    "@indexable/sdk": "0.7.2",
     "@jitl/quickjs-wasmfile-release-asyncify": "0.32.0",
     "accounts": "0.16.2",
     "isomorphic-git": "^1.41.5",
