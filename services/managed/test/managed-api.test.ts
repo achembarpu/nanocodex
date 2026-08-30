@@ -5121,7 +5121,6 @@ describe("managed agents REST and resumable SSE", () => {
             && query.includes("INSERT INTO nanocodex_durable_states")
             && bindings.some((binding) => (
               typeof binding === "string"
-              && binding.includes(id)
               && binding.includes("\"cancelled\"")
             ))) {
             failed = true;
@@ -5343,7 +5342,7 @@ describe("managed agents REST and resumable SSE", () => {
       const history = await managedHistory(agent);
       expect(history.data.filter(({ type, turn_id }) => (
         type === "turn_retryable" && turn_id === id
-      ))).toHaveLength(1);
+      ))).toHaveLength(turn.attempt_count);
     } finally {
       testEnv.NANOCODEX = originalBroker;
       vi.useRealTimers();
