@@ -1,0 +1,45 @@
+name: Wire managed compute provider
+
+on:
+  push:
+    branches: [feat/managed-sandbox-escalation]
+
+permissions:
+  contents: write
+
+jobs:
+  wire:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: feat/managed-sandbox-escalation
+      - name: Wire configured provider into session construction
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path("services/managed/src/index.ts")
+          s = p.read_text()
+          old = 'import { createManagedComputerRuntime } from "./computer-runtime";\n'
+          new = old + 'import {\n  configuredComputerProvider,\n  type ManagedComputeProviderEnv,\n} from "./computer-provider-config";\n'
+          assert old in s and 'configuredComputerProvider' not in s
+          s = s.replace(old, new, 1)
+          old = 'export interface Env extends AccountAuthEnv {'
+          new = 'export interface Env extends AccountAuthEnv, ManagedComputeProviderEnv {'
+          assert old in s
+          s = s.replace(old, new, 1)
+          old = '    const computer = await createManagedComputerRuntime({\n      computer: workspace,\n      egress: this.env.NANOCODEX,\n'
+          new = '    const computer = await createManagedComputerRuntime({\n      computer: workspace,\n      computerProvider: configuredComputerProvider(this.env, this.ctx.id.toString()),\n      egress: this.env.NANOCODEX,\n'
+          assert old in s
+          s = s.replace(old, new, 1)
+          p.write_text(s)
+          PY
+      - name: Commit and remove one-shot workflow
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/wire-managed-compute.yml
+          git add services/managed/src/index.ts
+          git diff --cached --quiet && exit 0
+          git commit -m "feat(managed): select configured compute provider"
+          git push
