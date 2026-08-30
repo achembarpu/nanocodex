@@ -15,14 +15,14 @@ describe("managed Computer escalation", () => {
       exec: sandboxExec,
       writeFile: vi.fn(async () => undefined),
     }));
-    const provider = createSandboxComputerProvider({
+    const baseProvider = createSandboxComputerProvider({
       sandbox,
       workspace: computer.workspace,
     });
-    const exec = vi.spyOn(provider, "exec");
+    const providerExec = vi.fn(baseProvider.exec);
     const runtime = await createManagedComputerRuntime({
       computer: computer.client,
-      computerProvider: provider,
+      computerProvider: { exec: providerExec },
       egress: { fetch: vi.fn() } as unknown as Fetcher,
     });
     const context = {
@@ -36,7 +36,7 @@ describe("managed Computer escalation", () => {
       cmd: "printf cheap > marker && cat marker",
     }, context)).toMatchObject({ exit_code: 0, output: "cheap" });
     expect(sandbox).not.toHaveBeenCalled();
-    expect(exec).not.toHaveBeenCalled();
+    expect(providerExec).not.toHaveBeenCalled();
 
     await runtime.filesystem.writeFile("Cargo.toml", "[package]\nname='smoke'\nversion='0.1.0'\n");
     await runtime.filesystem.mkdir("src");
@@ -47,7 +47,7 @@ describe("managed Computer escalation", () => {
       output: "running 1 test\ntest result: ok\n",
     });
     expect(sandbox).toHaveBeenCalledTimes(1);
-    expect(exec).toHaveBeenCalledWith(expect.objectContaining({
+    expect(providerExec).toHaveBeenCalledWith(expect.objectContaining({
       command: "'cargo' 'test'",
       cwd: "/workspace",
       requirements: { capabilities: ["native-process"] },
@@ -165,8 +165,15 @@ function memoryComputer() {
     root: "/workspace",
     async list(path = ".", options: { recursive?: boolean } = {}) {
       const prefix = path === "." ? "/workspace/" : `${path}/`;
-      return [...directories].filter((p) => p !== "/workspace").map((p) => ({ kind: "directory" as const, path: p }))
-        .concat([...files].map(([p, b]) => ({ kind: "file" as const, path: p, size: b.byteLength })))
+      const directoryEntries = [...directories]
+        .filter((p) => p !== "/workspace")
+        .map((p) => ({ kind: "directory" as const, path: p }));
+      const fileEntries = [...files].map(([p, b]) => ({
+        kind: "file" as const,
+        path: p,
+        size: b.byteLength,
+      }));
+      return [...directoryEntries, ...fileEntries]
         .filter((entry) => options.recursive || !entry.path.slice(prefix.length).includes("/"));
     },
     async readFile(path: string) { return files.get(path.startsWith("/") ? path : `/workspace/${path}`)!; },
