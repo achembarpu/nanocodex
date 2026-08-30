@@ -6,7 +6,9 @@ import {
   createMemoryDurabilityStore,
   durabilityRevision,
   exportDurabilityState,
+  exportDurabilityStatePage,
   importDurabilityState,
+  importDurabilityStatePages,
 } from "nanocodex/durability";
 import {
   acquire,
@@ -154,6 +156,60 @@ test("portable export fences the source and exact import refuses overwrite", asy
   await assert.rejects(
     importDurabilityState(destination, archive),
     DurabilityImportConflictError,
+  );
+});
+
+test("cursor export resumes an exact from-exclusive to-inclusive total-state replacement", async () => {
+  const payload = "first-page:🧪:middle:second-page:tail";
+  const source = createMemoryDurabilityStore("range", { revision: "9", payload });
+  const first = await exportDurabilityStatePage(source, "range", { from: "4", limit: 12 });
+  assert.equal(first.from, "4");
+  assert.equal(first.to, "9");
+  assert.equal(first.cursor, "v1:0");
+  assert.notEqual(first.nextCursor, null);
+
+  const repeated = await exportDurabilityStatePage(source, "range", {
+    from: "4",
+    to: first.to,
+    cursor: first.cursor,
+    limit: 12,
+  });
+  assert.deepEqual(repeated, first, "retrying a cursor returns the identical page");
+
+  const pages = [first];
+  while (pages.at(-1).nextCursor !== null) {
+    pages.push(await exportDurabilityStatePage(source, "range", {
+      from: "4",
+      to: first.to,
+      cursor: pages.at(-1).nextCursor,
+      limit: 12,
+    }));
+  }
+  assert.equal(pages.map((page) => page.payload).join(""), payload);
+
+  const destination = createMemoryDurabilityStore("range", {
+    revision: "4",
+    payload: "older-total-state",
+  });
+  assert.deepEqual(await importDurabilityStatePages(destination, pages), {
+    revision: "9",
+    payload,
+  });
+  assert.deepEqual(destination.snapshot(), { revision: "9", payload });
+
+  const divergent = createMemoryDurabilityStore("range", {
+    revision: "5",
+    payload: "diverged",
+  });
+  await assert.rejects(
+    importDurabilityStatePages(divergent, pages),
+    (error) => error instanceof DurabilityImportConflictError
+      && error.expectedRevision === "4"
+      && error.actualRevision === "5",
+  );
+  await assert.rejects(
+    importDurabilityStatePages(createMemoryDurabilityStore("range"), pages.slice(1)),
+    /missing, duplicated, or out of order/,
   );
 });
 

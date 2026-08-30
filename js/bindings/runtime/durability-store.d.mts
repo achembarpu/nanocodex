@@ -4,6 +4,9 @@ export type {
   DurabilityReplaceRequest,
   DurabilityReplaceResult,
   DurabilityFence,
+  DurabilityExportCursor,
+  DurabilityExportPageRequest,
+  DurabilityPortableStatePage,
   DurabilityPortableStateArchive,
   DurabilityPortableStore,
   DurabilityRevision,
@@ -21,7 +24,13 @@ export declare const sqliteDurabilitySchema: readonly string[];
 
 export declare class DurabilityImportConflictError extends Error {
   override readonly name: "DurabilityImportConflictError";
-  constructor(stateId: string);
+  readonly expectedRevision: import("../types.mjs").DurabilityRevision | undefined;
+  readonly actualRevision: import("../types.mjs").DurabilityRevision | undefined;
+  constructor(
+    stateId: string,
+    expectedRevision?: import("../types.mjs").DurabilityRevision,
+    actualRevision?: import("../types.mjs").DurabilityRevision,
+  );
 }
 
 export declare function durabilityRevision(
@@ -42,6 +51,22 @@ export declare function exportDurabilityState(
 export declare function importDurabilityState(
   store: import("../types.mjs").DurabilityPortableStore,
   archive: import("../types.mjs").DurabilityPortableStateArchive,
+): Promise<import("../types.mjs").DurabilityStoredState>;
+
+/**
+ * Fences the source once and returns a deterministic page of its exact `to` revision.
+ * `from` is exclusive, `to` is inclusive, and `cursor` resumes the same payload export.
+ */
+export declare function exportDurabilityStatePage(
+  store: import("../types.mjs").DurabilityStore,
+  stateId: string,
+  request: import("../types.mjs").DurabilityExportPageRequest,
+): Promise<import("../types.mjs").DurabilityPortableStatePage>;
+
+/** Imports a complete contiguous page set iff the destination is still at `from`. */
+export declare function importDurabilityStatePages(
+  store: import("../types.mjs").DurabilityPortableStore,
+  pages: Iterable<import("../types.mjs").DurabilityPortableStatePage>,
 ): Promise<import("../types.mjs").DurabilityStoredState>;
 
 export declare function createMemoryDurabilityStore(

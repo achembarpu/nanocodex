@@ -54,9 +54,11 @@ transaction-scoped PostgreSQL advisory lock serializes schema creation across
 cold instances. Revisions are
 `NUMERIC(20,0)` values read and written as unsigned decimal strings, preserving
 Rust's complete `u64` range. Compare-and-replace conditionally advances the
-revision and replaces the opaque state in one transaction. A rejected `COMMIT` is an
-unknown outcome: the adapter throws, Rust poisons and stops that live state
-owner, and a new step reloads the database before doing more work.
+revision and replaces the opaque state in one transaction. If a `COMMIT`
+response is lost, the adapter discards that connection and retries the exact
+idempotent request on a fresh connection. It returns the committed revision,
+a normal conflict/fence result, or a retry-safe availability error—never an
+ambiguous write outcome.
 
 The browser keeps its agent transcript in application code: an `@wterm/react`
 terminal fed by a small ANSI renderer over the replayable, client-safe Workflow

@@ -40,13 +40,11 @@ export type PostgresDurabilityPool = Readonly<{
 }>;
 
 /**
- * Signals that PostgreSQL may have applied COMMIT before the connection failed.
- *
- * Callers must treat this as an unknown write outcome and reload the state;
- * it is never converted to the definite `not_committed` replace result.
+ * PostgreSQL remained unavailable while the adapter retried an idempotent
+ * operation to verify a lost COMMIT response. Retrying the same request is safe.
  */
-export declare class UnknownPostgresCommitOutcomeError extends Error {
-  override readonly name: "UnknownPostgresCommitOutcomeError";
+export declare class PostgresDurabilityUnavailableError extends Error {
+  override readonly name: "PostgresDurabilityUnavailableError";
   constructor(stateId: string, cause: unknown);
 }
 
@@ -55,9 +53,8 @@ export declare class UnknownPostgresCommitOutcomeError extends Error {
  *
  * The schema is initialized lazily under a PostgreSQL transaction advisory
  * lock. Replacements atomically compare and advance the complete opaque state in one
- * transaction. Failures return `not_committed` only when no transaction began
- * or ROLLBACK was confirmed; a failed COMMIT throws
- * {@link UnknownPostgresCommitOutcomeError} instead.
+ * transaction. Lost COMMIT responses are reconciled internally by retrying the
+ * same idempotent operation; callers never receive an ambiguous write result.
  *
  * The supplied pool is structural and caller-owned. Constructing the store
  * does not connect, query, or import a PostgreSQL driver.

@@ -13,6 +13,7 @@ import {
   createMemoryDurabilityStore,
   durabilityRevision,
   exportDurabilityState as exportPortableState,
+  exportDurabilityStatePage as exportPortableStatePage,
   importDurabilityState as importPortableState,
 } from "../runtime/durability-store.mjs";
 import { cloudflareEgress } from "./egress.mjs";
@@ -110,7 +111,7 @@ export function destroy(owner) {
 }
 
 /** Fences and exports this inactive Cloudflare Agent's provider-neutral state. */
-export async function exportDurabilityState(owner) {
+export async function exportDurabilityState(owner, request) {
   const context = reserveInactiveLifecycle(owner, "exporting durability state");
   try {
     const storage = context.storage;
@@ -120,7 +121,9 @@ export async function exportDurabilityState(owner) {
     if (stateId === undefined) {
       throw new Error("Cloudflare Agent has no durability state to export");
     }
-    return await exportPortableState(durability, stateId);
+    return request === undefined
+      ? await exportPortableState(durability, stateId)
+      : await exportPortableStatePage(durability, stateId, request);
   } finally {
     lifecycleFor(context).creating = false;
   }

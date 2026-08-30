@@ -868,31 +868,45 @@ lifecycle-safe export instead of reconstructing its private state ID:
 
 ```js
 import { Agent as CloudflareAgent } from "nanocodex/cloudflare";
-import { importDurabilityState } from "nanocodex/durability";
+import { importDurabilityStatePages } from "nanocodex/durability";
 import { createPostgresDurabilityStore } from "nanocodex/durability/postgres";
 
 await cloudflareAgent.session.shutdown();
-const archive = await CloudflareAgent.exportDurabilityState(durableObjectOwner);
+const pages = [];
+let cursor;
+let to;
+do {
+  const page = await CloudflareAgent.exportDurabilityState(durableObjectOwner, {
+    from: "0", // exclusive destination revision
+    to,        // omit once, then repeat the selected inclusive source revision
+    cursor,
+  });
+  pages.push(page);
+  to = page.to;
+  cursor = page.nextCursor ?? undefined;
+} while (cursor !== undefined);
 
-// Send JSON.stringify(archive) through an authenticated, encrypted operator path.
-const serializedArchive = JSON.stringify(archive);
+// Send the pages through an authenticated, encrypted operator path.
 const destination = createPostgresDurabilityStore(vercelPostgresPool);
-await importDurabilityState(destination, JSON.parse(serializedArchive));
+await importDurabilityStatePages(destination, JSON.parse(JSON.stringify(pages)));
 
 const vercelAgent = await Agent.create({
   module: wasmModule,
   transport,
   durability: destination,
-  durabilityId: archive.stateId,
+  durabilityId: pages[0].stateId,
 });
 ```
 
-Export fences the old source owner, import refuses a destination that already
-has state, and the exact state ID and revision are retained. Do not use this as
-live replication: stop source admission before export, never resume the source
-after cutover begins, and reconcile the destination after an ambiguous import
-commit. The archive can contain conversation and tool state, so handle it as a
-secret. The Vercel example includes a WASM integration test that executes the
+`from` is exclusive and `to` is inclusive. Each cursor retry returns the same
+page; import atomically succeeds only if the destination is still at `from`.
+Because `to` is one complete Rust state, no intermediate revision log is
+needed. Export fences the old source owner, and PostgreSQL reconciles lost
+COMMIT responses internally by retrying the identical idempotent request, so
+the API never reports an ambiguous write outcome. Stop source admission before
+the first page and never resume it after cutover begins. Pages can contain
+conversation and tool state, so handle them as secrets. The Vercel example
+includes a WASM integration test that executes the
 same agent Cloudflare → PostgreSQL → Cloudflare, replays committed turn IDs
 without model calls, rebuilds the first new provider request from committed
 history without a previous-response handle, and then continues with new turns
@@ -903,7 +917,8 @@ The managed Cloudflare service exposes the same offline cutover at `POST
 Create a destination with `POST /v1/agents` and `{ "durability": <archive> }`.
 The Vercel example accepts that same body at `POST /api/sessions` and exports a
 stopped PostgreSQL state through `POST /api/durability/export` with
-`{ "state_id": <durability-id> }`.
+`{ "state_id": <durability-id>, "from": <revision>, "to": <optional-revision>,
+"cursor": <optional-cursor> }`.
 
 Node embedders whose bundler relocates package assets may compile and pass the
 web-target artifact explicitly. The runtime still uses the Node host for

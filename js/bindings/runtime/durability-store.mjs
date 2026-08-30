@@ -1,8 +1,11 @@
 const MAX_REVISION = 18_446_744_073_709_551_615n;
 const MAX_REVISION_TEXT = String(MAX_REVISION);
 const PORTABLE_FORMAT = "nanocodex-durability-state-v1";
+const PORTABLE_PAGE_FORMAT = "nanocodex-durability-state-page-v1";
 const PORTABLE_EXPORT_OWNER = "nanocodex-portable-export";
 const PORTABLE_IMPORT_OWNER = "nanocodex-portable-import";
+const DEFAULT_EXPORT_PAGE_SIZE = 256 * 1024;
+const MAX_EXPORT_PAGE_SIZE = 1024 * 1024;
 
 export const sqliteDurabilitySchema = Object.freeze([
   `CREATE TABLE IF NOT EXISTS nanocodex_durable_owners (
@@ -22,10 +25,120 @@ export function durabilityRevision(value) {
 }
 
 export class DurabilityImportConflictError extends Error {
-  constructor(stateId) {
-    super(`durability state ${JSON.stringify(stateId)} already exists at the import destination`);
+  constructor(stateId, expectedRevision, actualRevision) {
+    super(expectedRevision === undefined
+      ? `durability state ${JSON.stringify(stateId)} already exists at the import destination`
+      : `durability import expected destination revision ${expectedRevision} for state ${JSON.stringify(stateId)}, but found ${actualRevision}`);
     this.name = "DurabilityImportConflictError";
+    this.expectedRevision = expectedRevision;
+    this.actualRevision = actualRevision;
   }
+}
+
+/** Exports one deterministic page of the exact total state at `to`. */
+export async function exportDurabilityStatePage(store, stateId, request) {
+  requireId(stateId, "state");
+  if (!store || typeof store.acquire !== "function") {
+    throw new TypeError("durability export requires a state store");
+  }
+  const from = durabilityRevision(request?.from);
+  const requestedTo = request?.to === undefined ? undefined : durabilityRevision(request.to);
+  const offset = decodeExportCursor(request?.cursor);
+  const limit = exportPageSize(request?.limit);
+  const acquired = await store.acquire(stateId, { ownerId: PORTABLE_EXPORT_OWNER });
+  exactObject(acquired, ["ownerId", "fence", "revision", "payload"], "durability export acquisition");
+  if (acquired.ownerId !== PORTABLE_EXPORT_OWNER) {
+    throw new TypeError("durability export acquisition returned a different owner ID");
+  }
+  durabilityFence(acquired.fence);
+  const state = copyState({ revision: acquired.revision, payload: acquired.payload });
+  const to = state.revision;
+  if (requestedTo !== undefined && requestedTo !== to) {
+    throw new DurabilityImportConflictError(stateId, requestedTo, to);
+  }
+  if (BigInt(from) >= BigInt(to)) {
+    throw new RangeError("durability export from revision must be less than to revision");
+  }
+  const payload = state.payload ?? "";
+  if (offset > payload.length) throw new TypeError("durability export cursor is out of range");
+  let end = Math.min(offset + limit, payload.length);
+  if (end < payload.length && end > offset && isHighSurrogate(payload.charCodeAt(end - 1))) end -= 1;
+  const nextCursor = end < payload.length ? encodeExportCursor(end) : null;
+  return Object.freeze({
+    format: PORTABLE_PAGE_FORMAT,
+    stateId,
+    from,
+    to,
+    cursor: encodeExportCursor(offset),
+    nextCursor,
+    payloadLength: payload.length,
+    payload: payload.slice(offset, end),
+  });
+}
+
+/** Imports contiguous cursor pages with a CAS guard on the destination's `from` revision. */
+export async function importDurabilityStatePages(store, pages) {
+  if (!store || typeof store.importState !== "function") {
+    throw new TypeError("durability import requires a portable state store");
+  }
+  if (!pages || typeof pages[Symbol.iterator] !== "function") {
+    throw new TypeError("durability import pages must be iterable");
+  }
+  let first;
+  let cursor = encodeExportCursor(0);
+  let payload = "";
+  let complete = false;
+  for (const page of pages) {
+    exactObject(
+      page,
+      ["format", "stateId", "from", "to", "cursor", "nextCursor", "payloadLength", "payload"],
+      "durability export page",
+    );
+    if (page.format !== PORTABLE_PAGE_FORMAT || typeof page.payload !== "string") {
+      throw new TypeError("unsupported durability export page");
+    }
+    if (!Number.isSafeInteger(page.payloadLength) || page.payloadLength < 0) {
+      throw new TypeError("durability export page payload length is invalid");
+    }
+    const identity = {
+      stateId: requireId(page.stateId, "exported state"),
+      from: durabilityRevision(page.from),
+      to: durabilityRevision(page.to),
+      payloadLength: page.payloadLength,
+    };
+    first ??= identity;
+    if (identity.stateId !== first.stateId || identity.from !== first.from
+      || identity.to !== first.to || identity.payloadLength !== first.payloadLength) {
+      throw new TypeError("durability export pages describe different revision ranges");
+    }
+    const offset = decodeExportCursor(page.cursor);
+    if (complete || page.cursor !== cursor || offset !== payload.length) {
+      throw new TypeError("durability export pages are missing, duplicated, or out of order");
+    }
+    payload += page.payload;
+    if (payload.length > first.payloadLength) {
+      throw new TypeError("durability export pages exceed their declared payload length");
+    }
+    if (page.nextCursor === null) {
+      if (payload.length !== first.payloadLength) {
+        throw new TypeError("durability export pages are incomplete");
+      }
+      complete = true;
+    }
+    else {
+      if (page.nextCursor !== encodeExportCursor(payload.length)) {
+        throw new TypeError("durability export page cursor does not match its payload");
+      }
+      cursor = page.nextCursor;
+    }
+  }
+  if (!first || !complete) throw new TypeError("durability export pages are incomplete");
+  if (BigInt(first.from) >= BigInt(first.to)) {
+    throw new RangeError("durability import from revision must be less than to revision");
+  }
+  const state = copyState({ revision: first.to, payload: first.to === "0" ? null : payload });
+  const imported = await store.importState(first.stateId, state, { expectedRevision: first.from });
+  return copyState(imported);
 }
 
 /** Fences a source store and exports one coherent provider-neutral state archive. */
@@ -105,6 +218,7 @@ export function createMemoryDurabilityStore(stateId, initial) {
     acquire(selected, request) {
       select(selected);
       const ownerId = requireId(request?.ownerId, "owner");
+      if (owner?.ownerId === ownerId) return acquiredState(owner, state);
       const previousFence = owner?.fence ?? "0";
       if (previousFence === MAX_REVISION_TEXT) {
         throw new RangeError("in-memory durability fence overflow");
@@ -122,6 +236,11 @@ export function createMemoryDurabilityStore(stateId, initial) {
       if (ownerId !== owner?.ownerId || fence !== owner.fence) return { status: "fenced" };
       const expectedRevision = durabilityRevision(request?.expectedRevision);
       if (expectedRevision !== state.revision) {
+        if (state.revision === nextRevision(expectedRevision)
+          && typeof request?.payload === "string"
+          && state.payload === request.payload) {
+          return { status: "replaced", revision: state.revision };
+        }
         return { status: "conflict", actualRevision: state.revision };
       }
       if (expectedRevision === MAX_REVISION_TEXT) {
@@ -132,15 +251,18 @@ export function createMemoryDurabilityStore(stateId, initial) {
       state = Object.freeze({ revision, payload });
       return { status: "replaced", revision };
     },
-    importState(selected, imported) {
+    importState(selected, imported, options) {
       select(selected);
       const next = copyState(imported);
-      if (owner !== undefined || state.revision !== "0") {
-        throw new DurabilityImportConflictError(selected);
+      const expectedRevision = options?.expectedRevision === undefined
+        ? undefined
+        : durabilityRevision(options.expectedRevision);
+      if (expectedRevision === undefined ? owner !== undefined || state.revision !== "0" : state.revision !== expectedRevision) {
+        throw new DurabilityImportConflictError(selected, expectedRevision, state.revision);
       }
       owner = Object.freeze({
         ownerId: PORTABLE_IMPORT_OWNER,
-        fence: "1",
+        fence: durabilityFence(BigInt(owner?.fence ?? "0") + 1n),
       });
       state = next;
       return state;
@@ -171,6 +293,12 @@ export function createSqliteDurabilityStore(options) {
         (owners) => {
           exactRows(owners, 1, "SQLite durability owner");
           if (owners.length === 1) exactObject(owners[0], ["owner_id", "fence"], "SQLite durability owner");
+          if (owners[0]?.owner_id === ownerId) {
+            return mapMaybePromise(
+              loadSqliteState(query, stateId),
+              (state) => acquiredState({ ownerId, fence: durabilityFence(owners[0].fence) }, state),
+            );
+          }
           const previousFence = durabilityFence(owners[0]?.fence ?? "0");
           if (previousFence === MAX_REVISION_TEXT) {
             throw new RangeError("SQLite durability fence overflow");
@@ -213,6 +341,11 @@ export function createSqliteDurabilityStore(options) {
           const expectedRevision = durabilityRevision(request?.expectedRevision);
           return mapMaybePromise(loadSqliteState(query, stateId), (state) => {
             if (state.revision !== expectedRevision) {
+              if (state.revision === nextRevision(expectedRevision)
+                && typeof request?.payload === "string"
+                && state.payload === request.payload) {
+                return { status: "replaced", revision: state.revision };
+              }
               return { status: "conflict", actualRevision: state.revision };
             }
             if (expectedRevision === MAX_REVISION_TEXT) {
@@ -233,9 +366,12 @@ export function createSqliteDurabilityStore(options) {
         },
       ));
     },
-    importState(stateId, imported) {
+    importState(stateId, imported, importOptions) {
       requireId(stateId, "state");
       const state = copyState(imported);
+      const expectedRevision = importOptions?.expectedRevision === undefined
+        ? undefined
+        : durabilityRevision(importOptions.expectedRevision);
       return options.transaction((query) => mapMaybePromise(
         query(
           "SELECT owner_id, fence FROM nanocodex_durable_owners WHERE state_id = ?",
@@ -246,7 +382,6 @@ export function createSqliteDurabilityStore(options) {
           if (owners.length === 1) {
             exactObject(owners[0], ["owner_id", "fence"], "SQLite durability owner");
           }
-          if (owners.length !== 0) throw new DurabilityImportConflictError(stateId);
           return mapMaybePromise(
             query(
               "SELECT revision, payload FROM nanocodex_durable_states WHERE state_id = ?",
@@ -254,17 +389,31 @@ export function createSqliteDurabilityStore(options) {
             ),
             (states) => {
               exactRows(states, 1, "SQLite durability state");
-              if (states.length !== 0) throw new DurabilityImportConflictError(stateId);
+              const current = states.length === 0
+                ? Object.freeze({ revision: "0", payload: null })
+                : copyState({ revision: states[0].revision, payload: states[0].payload });
+              if (expectedRevision === undefined
+                ? owners.length !== 0 || states.length !== 0
+                : current.revision !== expectedRevision) {
+                throw new DurabilityImportConflictError(stateId, expectedRevision, current.revision);
+              }
+              const previousFence = durabilityFence(owners[0]?.fence ?? "0");
+              if (previousFence === MAX_REVISION_TEXT) throw new RangeError("SQLite durability fence overflow");
+              const fence = durabilityFence(BigInt(previousFence) + 1n);
               return mapMaybePromise(
                 query(
-                  "INSERT INTO nanocodex_durable_owners (state_id, owner_id, fence) VALUES (?, ?, ?)",
-                  [stateId, PORTABLE_IMPORT_OWNER, "1"],
+                  `INSERT INTO nanocodex_durable_owners (state_id, owner_id, fence) VALUES (?, ?, ?)
+                   ON CONFLICT (state_id) DO UPDATE
+                   SET owner_id = excluded.owner_id, fence = excluded.fence`,
+                  [stateId, PORTABLE_IMPORT_OWNER, fence],
                 ),
                 () => state.revision === "0"
                   ? state
                   : mapMaybePromise(
                     query(
-                      "INSERT INTO nanocodex_durable_states (state_id, revision, payload) VALUES (?, ?, ?)",
+                      `INSERT INTO nanocodex_durable_states (state_id, revision, payload) VALUES (?, ?, ?)
+                       ON CONFLICT (state_id) DO UPDATE
+                       SET revision = excluded.revision, payload = excluded.payload`,
                       [stateId, state.revision, state.payload],
                     ),
                     () => state,
@@ -276,6 +425,36 @@ export function createSqliteDurabilityStore(options) {
       ));
     },
   });
+}
+
+function nextRevision(revision) {
+  return revision === MAX_REVISION_TEXT ? undefined : durabilityRevision(BigInt(revision) + 1n);
+}
+
+function exportPageSize(value) {
+  if (value === undefined) return DEFAULT_EXPORT_PAGE_SIZE;
+  if (!Number.isSafeInteger(value) || value < 1 || value > MAX_EXPORT_PAGE_SIZE) {
+    throw new TypeError(`durability export page limit must be an integer from 1 to ${MAX_EXPORT_PAGE_SIZE}`);
+  }
+  return value;
+}
+
+function encodeExportCursor(offset) {
+  return `v1:${offset}`;
+}
+
+function decodeExportCursor(value) {
+  if (value === undefined) return 0;
+  if (typeof value !== "string" || !/^v1:(0|[1-9][0-9]*)$/.test(value)) {
+    throw new TypeError("durability export cursor is invalid");
+  }
+  const offset = Number(value.slice(3));
+  if (!Number.isSafeInteger(offset)) throw new TypeError("durability export cursor is invalid");
+  return offset;
+}
+
+function isHighSurrogate(value) {
+  return value >= 0xd800 && value <= 0xdbff;
 }
 
 function loadSqliteState(query, stateId) {

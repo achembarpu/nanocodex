@@ -355,6 +355,20 @@ test("Cloudflare Agent exports and imports one stable state across a fresh runti
     revision: "1",
     payload,
   });
+  const pages = [];
+  let cursor;
+  do {
+    const page = await exportDurabilityState(sourceOwner, {
+      from: "0",
+      to: "1",
+      cursor,
+      limit: 19,
+    });
+    pages.push(page);
+    cursor = page.nextCursor ?? undefined;
+  } while (cursor !== undefined);
+  assert.equal(pages.map((page) => page.payload).join(""), payload);
+  assert(pages.length > 1, "the Cloudflare lifecycle API must expose resumable pages");
 
   const destinationStorage = new MemoryStorage();
   const destinationOwner = durableOwner(destinationStorage, egressBinding(), SECOND_OBJECT_ID);

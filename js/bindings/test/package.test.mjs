@@ -80,14 +80,16 @@ test("the packed package ships and resolves every public entry point", async () 
         DurabilityImportConflictError,
         durabilityRevision,
         exportDurabilityState,
+        exportDurabilityStatePage,
         importDurabilityState,
+        importDurabilityStatePages,
         sqliteDurabilitySchema,
       } from "nanocodex/durability";
       import * as durabilityExports from "nanocodex/durability";
       import { createCloudflareDurabilityStore } from "nanocodex/durability/cloudflare";
       import {
         createPostgresDurabilityStore,
-        UnknownPostgresCommitOutcomeError,
+        PostgresDurabilityUnavailableError,
       } from "nanocodex/durability/postgres";
       import { Agent as HostAgent, Transport as HostTransport } from "nanocodex/host";
       import * as hostExports from "nanocodex/host";
@@ -110,7 +112,9 @@ test("the packed package ships and resolves every public entry point", async () 
         "DurabilityImportConflictError",
         "durabilityRevision",
         "exportDurabilityState",
+        "exportDurabilityStatePage",
         "importDurabilityState",
+        "importDurabilityStatePages",
         "sqliteDurabilitySchema",
       ];
       assert.deepEqual(
@@ -142,6 +146,15 @@ test("the packed package ships and resolves every public entry point", async () 
       const packageArchive = await exportDurabilityState(packageSource, "portable-package-state");
       const packageDestination = createMemoryDurabilityStore("portable-package-state");
       assert.deepEqual(await importDurabilityState(packageDestination, packageArchive), {
+        revision: "1",
+        payload: "portable-package-payload",
+      });
+      const packagePage = await exportDurabilityStatePage(packageSource, "portable-package-state", {
+        from: durabilityRevision("0"),
+        limit: 1024,
+      });
+      const pageDestination = createMemoryDurabilityStore("portable-package-state");
+      assert.deepEqual(await importDurabilityStatePages(pageDestination, [packagePage]), {
         revision: "1",
         payload: "portable-package-payload",
       });
@@ -182,8 +195,8 @@ test("the packed package ships and resolves every public entry point", async () 
       assert.equal(Object.isFrozen(postgresStore), true);
       assert.equal(postgresCalls, 0);
       const commitCause = new Error("connection closed");
-      const commitError = new UnknownPostgresCommitOutcomeError("package-journal", commitCause);
-      assert.equal(commitError.name, "UnknownPostgresCommitOutcomeError");
+      const commitError = new PostgresDurabilityUnavailableError("package-journal", commitCause);
+      assert.equal(commitError.name, "PostgresDurabilityUnavailableError");
       assert.equal(commitError.cause, commitCause);
       assert.equal(typeof NodeWorkspace.open, "function");
       assert.equal(typeof BrowserWorkspace.open, "function");

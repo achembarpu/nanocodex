@@ -1,10 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import {
-  UnknownPostgresCommitOutcomeError,
-  createPostgresDurabilityStore,
-} from "../runtime/postgres-durability-store.mjs";
+import { createPostgresDurabilityStore } from "../runtime/postgres-durability-store.mjs";
 import { DurabilityImportConflictError } from "../runtime/durability-store.mjs";
 
 test("the PostgreSQL durability leaf is cold and validates its pool", async () => {
@@ -81,7 +78,7 @@ test("PostgreSQL fences owners before comparing complete-state revisions", async
   }), /payload must be a string/);
 });
 
-test("PostgreSQL distinguishes rolled-back writes from unknown COMMIT outcomes", async () => {
+test("PostgreSQL distinguishes rolled-back writes and reconciles lost COMMIT responses", async () => {
   const pool = new MockPool();
   const store = createPostgresDurabilityStore(pool);
   const owner = await store.acquire("state", { ownerId: "owner" });
@@ -95,13 +92,14 @@ test("PostgreSQL distinguishes rolled-back writes from unknown COMMIT outcomes",
 
   pool.failNextCommit = true;
   const releasesBefore = pool.releases.length;
-  await assert.rejects(
-    store.replace("state", { ...owner, expectedRevision: "0", payload: "maybe" }),
-    (error) => error instanceof UnknownPostgresCommitOutcomeError
-      && error.cause?.message === "injected commit failure",
+  assert.deepEqual(
+    await store.replace("state", { ...owner, expectedRevision: "0", payload: "committed-once" }),
+    { status: "replaced", revision: "1" },
   );
-  assert.equal(pool.releases.length, releasesBefore + 1);
-  assert.equal(pool.releases.at(-1), true, "an ambiguous connection must be discarded once");
+  assert.deepEqual(await store.load("state"), { revision: "1", payload: "committed-once" });
+  assert.equal(pool.releases.length, releasesBefore + 2);
+  assert.equal(pool.releases.at(-2), true, "the connection with the lost response must be discarded");
+  assert.equal(pool.releases.at(-1), false, "verification uses a fresh healthy connection");
 });
 
 test("PostgreSQL imports one exact portable revision and fences an empty destination", async () => {
@@ -162,14 +160,6 @@ test("PostgreSQL discards a connection after an ambiguous initialization commit"
   assert.equal(pool.connects, 2);
 });
 
-test("the PostgreSQL commit error retains its exact unknown-outcome identity", () => {
-  const cause = new Error("lost connection");
-  const error = new UnknownPostgresCommitOutcomeError("state", cause);
-  assert.equal(error.name, "UnknownPostgresCommitOutcomeError");
-  assert.equal(error.cause, cause);
-  assert.match(error.message, /state "state"/);
-});
-
 class MockPool {
   constructor() {
     this.connects = 0;
@@ -223,7 +213,10 @@ class MockClient {
       }
       const fence = values.length === 3
         ? String(values[2])
-        : String(BigInt(previous?.fence ?? "0") + 1n);
+        : sql.includes("WHEN nanocodex_durable_owners.owner_id = excluded.owner_id")
+            && previous?.owner_id === ownerId
+          ? previous.fence
+          : String(BigInt(previous?.fence ?? "0") + 1n);
       this.pool.owners.set(stateId, { owner_id: ownerId, fence });
       return { rows: [{ fence }] };
     }

@@ -1,4 +1,4 @@
-import { exportDurabilityState } from "nanocodex/durability";
+import { durabilityRevision, exportDurabilityStatePage } from "nanocodex/durability";
 
 import { hasBearerToken } from "@/lib/bearer-auth";
 import { postgresDurabilityStore } from "@/workflows/postgres-durability";
@@ -14,17 +14,32 @@ export async function POST(request: Request): Promise<Response> {
     );
   }
   try {
-    const body = await request.json() as { state_id?: unknown };
+    const body = await request.json() as {
+      state_id?: unknown;
+      from?: unknown;
+      to?: unknown;
+      cursor?: unknown;
+      limit?: unknown;
+    };
     if (!body || typeof body !== "object" || Array.isArray(body)
-      || Object.keys(body).some((key) => key !== "state_id")
-      || typeof body.state_id !== "string" || !body.state_id.trim()) {
+      || Object.keys(body).some((key) => !["state_id", "from", "to", "cursor", "limit"].includes(key))
+      || typeof body.state_id !== "string" || !body.state_id.trim()
+      || (typeof body.from !== "string" && typeof body.from !== "number")
+      || (body.to !== undefined && typeof body.to !== "string" && typeof body.to !== "number")
+      || (body.cursor !== undefined && typeof body.cursor !== "string")
+      || (body.limit !== undefined && typeof body.limit !== "number")) {
       return Response.json(
-        { error: { code: "invalid_request", message: "state_id is required" } },
+        { error: { code: "invalid_request", message: "state_id and from are required" } },
         { status: 400, headers: { "cache-control": "no-store" } },
       );
     }
     return Response.json(
-      await exportDurabilityState(postgresDurabilityStore(), body.state_id),
+      await exportDurabilityStatePage(postgresDurabilityStore(), body.state_id, {
+        from: durabilityRevision(body.from),
+        to: body.to === undefined ? undefined : durabilityRevision(body.to),
+        cursor: body.cursor,
+        limit: body.limit,
+      }),
       { headers: { "cache-control": "no-store" } },
     );
   } catch (error) {

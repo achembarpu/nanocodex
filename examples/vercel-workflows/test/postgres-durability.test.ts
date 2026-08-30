@@ -7,9 +7,9 @@ import { WebSocketServer, type RawData, type WebSocket } from "ws";
 import {
   DurabilityImportConflictError,
   durabilityRevision,
-  exportDurabilityState,
-  importDurabilityState,
-  type DurabilityPortableStateArchive,
+  exportDurabilityStatePage,
+  importDurabilityStatePages,
+  type DurabilityPortableStatePage,
 } from "nanocodex/durability";
 import { createCloudflareDurabilityStore } from "nanocodex/durability/cloudflare";
 import {
@@ -18,7 +18,6 @@ import {
   type PostgresDurabilityPool,
   type PostgresDurabilityQueryResult,
   type PostgresDurabilityRow,
-  UnknownPostgresCommitOutcomeError,
 } from "nanocodex/durability/postgres";
 import { Agent, Transport } from "nanocodex/node";
 import { cloudflareDurabilityStorage } from "./cloudflare-durability-storage";
@@ -218,7 +217,7 @@ describe("Vercel PostgreSQL durability store", () => {
     }
   });
 
-  it("throws on an unknown COMMIT outcome and reloads the retained commit", async () => {
+  it("reconciles a lost COMMIT response to one definitive successful write", async () => {
     const pool = new PGlitePool({ failCommitAfter: 3 });
     try {
       const first = createPostgresDurabilityStore(pool.asPostgresPool());
@@ -228,7 +227,7 @@ describe("Vercel PostgreSQL durability store", () => {
         fence: owner.fence,
         expectedRevision: durabilityRevision("0"),
         payload: "committed-before-disconnect",
-      })).rejects.toBeInstanceOf(UnknownPostgresCommitOutcomeError);
+      })).resolves.toEqual({ status: "replaced", revision: durabilityRevision("1") });
 
       const recreated = createPostgresDurabilityStore(pool.asPostgresPool());
       await expect(recreated.acquire("unknown", { ownerId: "recreated-owner" })).resolves.toEqual({
@@ -323,10 +322,11 @@ describe("Vercel PostgreSQL durability store", () => {
       await shutdownAgent(agent);
       agent = undefined;
 
-      const cloudflareArchive = jsonRoundTrip(await exportDurabilityState(source, stateId));
-      await expect(importDurabilityState(postgres, cloudflareArchive)).resolves.toEqual({
-        revision: cloudflareArchive.revision,
-        payload: cloudflareArchive.payload,
+      const cloudflarePages = await exportPages(source, stateId, durabilityRevision("0"));
+      const cloudflareTo = cloudflarePages[0]!.to;
+      await expect(importDurabilityStatePages(postgres, jsonRoundTrip(cloudflarePages))).resolves.toEqual({
+        revision: cloudflareTo,
+        payload: cloudflarePages.map((page) => page.payload).join(""),
       });
 
       agent = await Agent.create({
@@ -369,10 +369,13 @@ describe("Vercel PostgreSQL durability store", () => {
       await shutdownAgent(agent);
       agent = undefined;
 
-      const postgresArchive = jsonRoundTrip(await exportDurabilityState(postgres, stateId));
-      expect(BigInt(postgresArchive.revision)).toBeGreaterThan(BigInt(cloudflareArchive.revision));
-      expect(postgresArchive.payload).toContain("opaque-portable-summary");
-      await importDurabilityState(returned, postgresArchive);
+      const postgresPages = await exportPages(postgres, stateId, cloudflareTo);
+      const postgresTo = postgresPages[0]!.to;
+      expect(BigInt(postgresTo)).toBeGreaterThan(BigInt(cloudflareTo));
+      expect(postgresPages.map((page) => page.payload).join(""))
+        .toContain("opaque-portable-summary");
+      await importDurabilityStatePages(returned, jsonRoundTrip(cloudflarePages));
+      await importDurabilityStatePages(returned, jsonRoundTrip(postgresPages));
 
       agent = await Agent.create({
         module,
@@ -417,7 +420,7 @@ describe("Vercel PostgreSQL durability store", () => {
       expect(server.connections).toBe(3);
       await returnScenario;
       expect(BigInt((await returned.load(stateId)).revision)).toBeGreaterThan(
-        BigInt(postgresArchive.revision),
+        BigInt(postgresTo),
       );
     } finally {
       try {
@@ -433,8 +436,30 @@ describe("Vercel PostgreSQL durability store", () => {
   }, 30_000);
 });
 
-function jsonRoundTrip(archive: DurabilityPortableStateArchive): DurabilityPortableStateArchive {
-  return JSON.parse(JSON.stringify(archive)) as DurabilityPortableStateArchive;
+async function exportPages(
+  store: Parameters<typeof exportDurabilityStatePage>[0],
+  stateId: string,
+  from: ReturnType<typeof durabilityRevision>,
+): Promise<DurabilityPortableStatePage[]> {
+  const pages: DurabilityPortableStatePage[] = [];
+  let cursor: string | undefined;
+  let to: ReturnType<typeof durabilityRevision> | undefined;
+  do {
+    const page = await exportDurabilityStatePage(store, stateId, {
+      from,
+      to,
+      cursor,
+      limit: 97,
+    });
+    pages.push(page);
+    to = page.to;
+    cursor = page.nextCursor ?? undefined;
+  } while (cursor !== undefined);
+  return pages;
+}
+
+function jsonRoundTrip(pages: DurabilityPortableStatePage[]): DurabilityPortableStatePage[] {
+  return JSON.parse(JSON.stringify(pages)) as DurabilityPortableStatePage[];
 }
 
 async function shutdownAgent(agent: NodeAgent): Promise<void> {

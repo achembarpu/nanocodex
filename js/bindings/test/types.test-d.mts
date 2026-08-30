@@ -75,13 +75,16 @@ import {
   DurabilityImportConflictError,
   durabilityRevision,
   exportDurabilityState,
+  exportDurabilityStatePage,
   importDurabilityState,
+  importDurabilityStatePages,
   type DurabilityAcquiredState,
   type DurabilityAcquireRequest,
   type DurabilityReplaceRequest,
   type DurabilityReplaceResult,
   type DurabilityFence,
   type DurabilityPortableStateArchive,
+  type DurabilityPortableStatePage,
   type DurabilityPortableStore,
   type DurabilityRevision,
   type DurabilitySqliteQuery,
@@ -98,7 +101,7 @@ import {
   type PostgresDurabilityClient,
   type PostgresDurabilityPool,
   type PostgresDurabilityQueryResult,
-  UnknownPostgresCommitOutcomeError,
+  PostgresDurabilityUnavailableError,
 } from "../runtime/postgres-durability-store.mjs";
 import {
   createCloudflareDurabilityStore,
@@ -185,6 +188,12 @@ async function check() {
     "typed-memory",
   );
   await importDurabilityState(portableStore, portableArchive);
+  const portablePage: DurabilityPortableStatePage = await exportDurabilityStatePage(
+    portableStore,
+    "typed-memory",
+    { from: durabilityRevision("0"), limit: 1024 },
+  );
+  await importDurabilityStatePages(createMemoryDurabilityStore("typed-memory"), [portablePage]);
   const importConflict: Error = new DurabilityImportConflictError("typed-memory");
   const sqliteValue: DurabilitySqliteValue = revision;
   const sqliteRow: DurabilitySqliteRow = { revision: sqliteValue };
@@ -284,7 +293,7 @@ async function check() {
       "SELECT revision::text AS revision",
     );
   postgresClient.release(true);
-  new UnknownPostgresCommitOutcomeError("typed-leaf", new Error("connection closed"));
+  new PostgresDurabilityUnavailableError("typed-leaf", new Error("connection closed"));
   void postgresStore;
   void postgresResult;
   void cloudflareStore;

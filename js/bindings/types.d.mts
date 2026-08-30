@@ -58,6 +58,30 @@ export type DurabilityPortableStateArchive = DurabilityStoredState & Readonly<{
   stateId: string;
 }>;
 
+export type DurabilityExportCursor = string;
+
+/** One deterministic page of the total-state replacement from `from` (exclusive) to `to` (inclusive). */
+export type DurabilityPortableStatePage = Readonly<{
+  format: "nanocodex-durability-state-page-v1";
+  stateId: string;
+  from: DurabilityRevision;
+  to: DurabilityRevision;
+  cursor: DurabilityExportCursor;
+  nextCursor: DurabilityExportCursor | null;
+  /** Total UTF-16 code units in the opaque state payload. */
+  payloadLength: number;
+  payload: string;
+}>;
+
+export type DurabilityExportPageRequest = Readonly<{
+  from: DurabilityRevision;
+  /** Omit on the first request to select the current source revision; repeat the returned `to`. */
+  to?: DurabilityRevision | undefined;
+  cursor?: DurabilityExportCursor | undefined;
+  /** UTF-16 code units per page. Defaults to 256 KiB and is capped at 1 MiB. */
+  limit?: number | undefined;
+}>;
+
 export type DurabilityAcquireRequest = Readonly<{
   ownerId: string;
 }>;
@@ -98,6 +122,7 @@ export type DurabilityPortableStore = DurabilityStore & Readonly<{
   importState(
     stateId: string,
     state: DurabilityStoredState,
+    options?: Readonly<{ expectedRevision?: DurabilityRevision | undefined }> | undefined,
   ): DurabilityStoredState | Promise<DurabilityStoredState>;
 }>;
 

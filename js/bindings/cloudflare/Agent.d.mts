@@ -8,7 +8,12 @@ import type {
 } from "../types.mjs";
 import type { CloudflareDurableObjectStorage } from "../runtime/cloudflare-durability-store.mjs";
 import type { Tool as SubagentTool } from "../runtime/subagents.mjs";
-import type { DurabilityPortableStateArchive, DurabilityStoredState } from "../types.mjs";
+import type {
+  DurabilityExportPageRequest,
+  DurabilityPortableStateArchive,
+  DurabilityPortableStatePage,
+  DurabilityStoredState,
+} from "../types.mjs";
 
 export type DurableObjectContext = Readonly<{
   storage: CloudflareDurableObjectStorage;
@@ -54,6 +59,12 @@ export function destroy(owner: DurableObjectOwner): void;
 export function exportDurabilityState(
   owner: DurableObjectOwner,
 ): Promise<DurabilityPortableStateArchive>;
+
+/** Fences once and exports one resumable page of an exact revision range. */
+export function exportDurabilityState(
+  owner: DurableObjectOwner,
+  request: DurabilityExportPageRequest,
+): Promise<DurabilityPortableStatePage>;
 
 /** Imports provider-neutral state into a pristine Cloudflare Agent owner. */
 export function importDurabilityState(

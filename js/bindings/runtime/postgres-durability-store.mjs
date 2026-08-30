@@ -5,6 +5,7 @@ import {
 
 const MAX_REVISION = "18446744073709551615";
 const PORTABLE_IMPORT_OWNER = "nanocodex-portable-import";
+const VERIFY_ATTEMPTS = 3;
 const SCHEMA = [
   `CREATE TABLE IF NOT EXISTS nanocodex_durable_owners (
      state_id TEXT PRIMARY KEY,
@@ -20,14 +21,16 @@ const SCHEMA = [
    )`,
 ];
 
-export class UnknownPostgresCommitOutcomeError extends Error {
+export class PostgresDurabilityUnavailableError extends Error {
   constructor(stateId, cause) {
-    super(`PostgreSQL durability COMMIT outcome is unknown for state ${JSON.stringify(stateId)}`, {
+    super(`PostgreSQL durability could not verify state ${JSON.stringify(stateId)}; retrying the identical request is safe`, {
       cause,
     });
-    this.name = "UnknownPostgresCommitOutcomeError";
+    this.name = "PostgresDurabilityUnavailableError";
   }
 }
+
+class CommitVerificationRequired extends Error {}
 
 class InvalidPostgresDurabilityRequestError extends Error {
   constructor(cause) {
@@ -73,11 +76,14 @@ export function createPostgresDurabilityStore(pool) {
         payload: request?.payload,
       });
     },
-    async importState(stateId, imported) {
+    async importState(stateId, imported, options) {
       requireId(stateId);
       const state = importedState(imported);
+      const expectedRevision = options?.expectedRevision === undefined
+        ? undefined
+        : durabilityRevision(options.expectedRevision);
       await ready();
-      return restoreState(pool, stateId, state);
+      return restoreState(pool, stateId, state, expectedRevision);
     },
   });
 }
@@ -197,6 +203,10 @@ async function loadState(queryable, stateId) {
 }
 
 async function acquireState(pool, stateId, ownerId) {
+  return verifyCommit(stateId, () => acquireStateOnce(pool, stateId, ownerId));
+}
+
+async function acquireStateOnce(pool, stateId, ownerId) {
   const client = await pool.connect();
   let begun = false;
   let discard = false;
@@ -207,8 +217,14 @@ async function acquireState(pool, stateId, ownerId) {
       `INSERT INTO nanocodex_durable_owners (state_id, owner_id, fence)
        VALUES ($1, $2, 1)
        ON CONFLICT (state_id) DO UPDATE
-       SET owner_id = excluded.owner_id, fence = nanocodex_durable_owners.fence + 1
-       WHERE nanocodex_durable_owners.fence < 18446744073709551615
+       SET owner_id = excluded.owner_id,
+           fence = CASE
+             WHEN nanocodex_durable_owners.owner_id = excluded.owner_id
+               THEN nanocodex_durable_owners.fence
+             ELSE nanocodex_durable_owners.fence + 1
+           END
+       WHERE nanocodex_durable_owners.owner_id = excluded.owner_id
+          OR nanocodex_durable_owners.fence < 18446744073709551615
        RETURNING fence::text`,
       [stateId, ownerId],
     );
@@ -222,11 +238,11 @@ async function acquireState(pool, stateId, ownerId) {
       begun = false;
     } catch (error) {
       discard = true;
-      throw new UnknownPostgresCommitOutcomeError(stateId, error);
+      throw new CommitVerificationRequired("acquire commit response was lost", { cause: error });
     }
     return Object.freeze({ ownerId, fence, ...state });
   } catch (error) {
-    if (error instanceof UnknownPostgresCommitOutcomeError) throw error;
+    if (error instanceof CommitVerificationRequired) throw error;
     if (begun) {
       try {
         await client.query("ROLLBACK");
@@ -245,6 +261,10 @@ async function acquireState(pool, stateId, ownerId) {
 }
 
 async function replaceState(pool, stateId, request) {
+  return verifyCommit(stateId, () => replaceStateOnce(pool, stateId, request));
+}
+
+async function replaceStateOnce(pool, stateId, request) {
   const client = await pool.connect();
   let begun = false;
   let discard = false;
@@ -268,6 +288,11 @@ async function replaceState(pool, stateId, request) {
     if (state.revision !== expectedRevision) {
       await client.query("ROLLBACK");
       begun = false;
+      if (state.revision === nextRevision(expectedRevision)
+        && typeof request.payload === "string"
+        && state.payload === request.payload) {
+        return { status: "replaced", revision: state.revision };
+      }
       return { status: "conflict", actualRevision: state.revision };
     }
     if (state.revision === MAX_REVISION) {
@@ -289,11 +314,11 @@ async function replaceState(pool, stateId, request) {
       begun = false;
     } catch (error) {
       discard = true;
-      throw new UnknownPostgresCommitOutcomeError(stateId, error);
+      throw new CommitVerificationRequired("replace commit response was lost", { cause: error });
     }
     return { status: "replaced", revision };
   } catch (error) {
-    if (error instanceof UnknownPostgresCommitOutcomeError) throw error;
+    if (error instanceof CommitVerificationRequired) throw error;
     if (begun) {
       try {
         await client.query("ROLLBACK");
@@ -311,41 +336,69 @@ async function replaceState(pool, stateId, request) {
   }
 }
 
-async function restoreState(pool, stateId, state) {
+async function restoreState(pool, stateId, state, expectedRevision) {
+  return verifyCommit(
+    stateId,
+    (attempt) => restoreStateOnce(pool, stateId, state, expectedRevision, attempt > 0),
+  );
+}
+
+async function restoreStateOnce(pool, stateId, state, expectedRevision, reconciling) {
   const client = await pool.connect();
   let begun = false;
   let discard = false;
   try {
     await client.query("BEGIN");
     begun = true;
-    const owner = await client.query(
+    const retainedOwner = await client.query(
+      `SELECT owner_id, fence::text FROM nanocodex_durable_owners
+       WHERE state_id = $1 FOR UPDATE`,
+      [stateId],
+    );
+    const retainedState = await loadStateForUpdate(client, stateId);
+    const owner = retainedOwner.rows[0];
+    if (reconciling
+      && owner?.owner_id === PORTABLE_IMPORT_OWNER
+      && retainedState.revision === state.revision
+      && retainedState.payload === state.payload) {
+      await client.query("ROLLBACK");
+      begun = false;
+      return state;
+    }
+    if (expectedRevision === undefined
+      ? owner !== undefined || retainedState.revision !== "0"
+      : retainedState.revision !== expectedRevision) {
+      throw new DurabilityImportConflictError(stateId, expectedRevision, retainedState.revision);
+    }
+    const claimed = await client.query(
       `INSERT INTO nanocodex_durable_owners (state_id, owner_id, fence)
        VALUES ($1, $2, 1)
-       ON CONFLICT (state_id) DO NOTHING
-       RETURNING state_id`,
+       ON CONFLICT (state_id) DO UPDATE
+       SET owner_id = excluded.owner_id, fence = nanocodex_durable_owners.fence + 1
+       WHERE nanocodex_durable_owners.fence < 18446744073709551615
+       RETURNING fence::text`,
       [stateId, PORTABLE_IMPORT_OWNER],
     );
-    if (owner.rows.length !== 1) throw new DurabilityImportConflictError(stateId);
+    if (claimed.rows.length !== 1) throw new RangeError("PostgreSQL durability fence overflow");
     if (state.revision !== "0") {
-      const retained = await client.query(
+      await client.query(
         `INSERT INTO nanocodex_durable_states (state_id, revision, payload)
          VALUES ($1, $2::numeric, $3)
-         ON CONFLICT (state_id) DO NOTHING
-         RETURNING state_id`,
+         ON CONFLICT (state_id) DO UPDATE
+         SET revision = excluded.revision, payload = excluded.payload`,
         [stateId, state.revision, state.payload],
       );
-      if (retained.rows.length !== 1) throw new DurabilityImportConflictError(stateId);
     }
     try {
       await client.query("COMMIT");
       begun = false;
     } catch (error) {
       discard = true;
-      throw new UnknownPostgresCommitOutcomeError(stateId, error);
+      throw new CommitVerificationRequired("import commit response was lost", { cause: error });
     }
     return state;
   } catch (error) {
-    if (error instanceof UnknownPostgresCommitOutcomeError) throw error;
+    if (error instanceof CommitVerificationRequired) throw error;
     if (begun) {
       try {
         await client.query("ROLLBACK");
@@ -361,6 +414,23 @@ async function restoreState(pool, stateId, state) {
   } finally {
     client.release(discard);
   }
+}
+
+async function verifyCommit(stateId, operation) {
+  let retained;
+  for (let attempt = 0; attempt < VERIFY_ATTEMPTS; attempt += 1) {
+    try {
+      return await operation(attempt);
+    } catch (error) {
+      if (!(error instanceof CommitVerificationRequired)) throw error;
+      retained = error;
+    }
+  }
+  throw new PostgresDurabilityUnavailableError(stateId, retained?.cause ?? retained);
+}
+
+function nextRevision(revision) {
+  return revision === MAX_REVISION ? undefined : durabilityRevision(BigInt(revision) + 1n);
 }
 
 function requestRevision(value) {
