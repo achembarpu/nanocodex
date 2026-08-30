@@ -24,7 +24,7 @@ them.
 
 ## Store contract
 
-A store implements two operations:
+The live store protocol implements two operations:
 
 1. `acquire(state_id, owner_id)` atomically advances the owner fence and
    returns the new token with one coherent state value.
@@ -39,6 +39,40 @@ not log-prefix compaction. Hosts never deserialize state.
 This is a hard cutover. The envelope is `nanocodex_durable_state`; the former
 `nanocodex_journal_state` envelope and individual event batches are rejected.
 There is no adoption, migration, or compatibility reader for old durable data.
+
+## Provider portability
+
+The JavaScript memory, SQLite, Cloudflare Durable Object SQLite, and PostgreSQL
+adapters also implement an offline transfer extension. `exportDurabilityState`
+acquires a fresh owner fence at the source and returns one JSON-safe archive
+containing the stable state ID, exact revision, and opaque total-state payload.
+`importDurabilityState` installs that exact revision into an empty destination
+and creates a fence before any destination agent can acquire it.
+
+The state ID is part of the agent's durable identity and must not be rewritten.
+The storage provider and physical database may change; the logical agent ID
+does not. This lets the same Rust/WASM agent move, for example, from a
+Cloudflare Worker Durable Object to Vercel with PostgreSQL and back again.
+Completed operation IDs still replay their committed terminal results without
+calling the model, while newly accepted operations continue from the imported
+checkpoint. The first new model request after rehydration carries the committed
+history and does not depend on a provider-owned previous-response handle.
+
+This is a cutover protocol, not live replication or a distributed transaction:
+
+1. stop accepting work and shut down the source agent;
+2. export once, which fences any stale source writer;
+3. transfer the archive as sensitive application data;
+4. import into an empty destination under the archive's unchanged state ID;
+5. start the destination agent and never resume the old source.
+
+Importing the same archive into multiple destinations creates competing clones;
+only one destination may become live.
+
+Archives can contain conversation and tool state and are not encrypted by this
+API. Applications own transport encryption, access control, retention, and
+deletion. An ambiguous destination commit must be reconciled by loading the
+destination; blindly resuming the source can create split-brain execution.
 
 Store results have exact meanings:
 

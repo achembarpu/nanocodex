@@ -1,5 +1,6 @@
 const MAX_REVISION = 18_446_744_073_709_551_615n;
 const MAX_REVISION_TEXT = String(MAX_REVISION);
+const PORTABLE_FORMAT = "nanocodex-durability-state-v1";
 
 export const sqliteDurabilitySchema = Object.freeze([
   `CREATE TABLE IF NOT EXISTS nanocodex_durable_owners (
@@ -16,6 +17,53 @@ export const sqliteDurabilitySchema = Object.freeze([
 
 export function durabilityRevision(value) {
   return durabilityUint64(value, "revision");
+}
+
+export class DurabilityImportConflictError extends Error {
+  constructor(stateId) {
+    super(`durability state ${JSON.stringify(stateId)} already exists at the import destination`);
+    this.name = "DurabilityImportConflictError";
+  }
+}
+
+/** Fences a source store and exports one coherent provider-neutral state archive. */
+export async function exportDurabilityState(store, stateId) {
+  requireId(stateId, "state");
+  if (!store || typeof store.acquire !== "function") {
+    throw new TypeError("durability export requires a state store");
+  }
+  const ownerId = portableOwnerId("export");
+  const acquired = await store.acquire(stateId, { ownerId });
+  exactObject(
+    acquired,
+    ["ownerId", "fence", "revision", "payload"],
+    "durability export acquisition",
+  );
+  if (acquired.ownerId !== ownerId) {
+    throw new TypeError("durability export acquisition returned a different owner ID");
+  }
+  durabilityFence(acquired.fence);
+  const state = copyState({ revision: acquired.revision, payload: acquired.payload });
+  return Object.freeze({ format: PORTABLE_FORMAT, stateId, ...state });
+}
+
+/** Restores an exact provider-neutral archive into an empty portable store. */
+export async function importDurabilityState(store, archive) {
+  if (!store || typeof store.importState !== "function") {
+    throw new TypeError("durability import requires a portable state store");
+  }
+  exactObject(
+    archive,
+    ["format", "stateId", "revision", "payload"],
+    "durability export archive",
+  );
+  if (archive.format !== PORTABLE_FORMAT) {
+    throw new TypeError(`unsupported durability export format: ${String(archive.format)}`);
+  }
+  requireId(archive.stateId, "exported state");
+  const state = copyState({ revision: archive.revision, payload: archive.payload });
+  const imported = await store.importState(archive.stateId, state);
+  return copyState(imported);
 }
 
 function durabilityFence(value) {
@@ -81,6 +129,19 @@ export function createMemoryDurabilityStore(stateId, initial) {
       const revision = durabilityRevision(BigInt(expectedRevision) + 1n);
       state = Object.freeze({ revision, payload });
       return { status: "replaced", revision };
+    },
+    importState(selected, imported) {
+      select(selected);
+      const next = copyState(imported);
+      if (owner !== undefined || state.revision !== "0") {
+        throw new DurabilityImportConflictError(selected);
+      }
+      owner = Object.freeze({
+        ownerId: portableOwnerId("import"),
+        fence: "1",
+      });
+      state = next;
+      return state;
     },
     snapshot() {
       return state;
@@ -170,6 +231,49 @@ export function createSqliteDurabilityStore(options) {
         },
       ));
     },
+    importState(stateId, imported) {
+      requireId(stateId, "state");
+      const state = copyState(imported);
+      const ownerId = portableOwnerId("import");
+      return options.transaction((query) => mapMaybePromise(
+        query(
+          "SELECT owner_id, fence FROM nanocodex_durable_owners WHERE state_id = ?",
+          [stateId],
+        ),
+        (owners) => {
+          exactRows(owners, 1, "SQLite durability owner");
+          if (owners.length === 1) {
+            exactObject(owners[0], ["owner_id", "fence"], "SQLite durability owner");
+          }
+          if (owners.length !== 0) throw new DurabilityImportConflictError(stateId);
+          return mapMaybePromise(
+            query(
+              "SELECT revision, payload FROM nanocodex_durable_states WHERE state_id = ?",
+              [stateId],
+            ),
+            (states) => {
+              exactRows(states, 1, "SQLite durability state");
+              if (states.length !== 0) throw new DurabilityImportConflictError(stateId);
+              return mapMaybePromise(
+                query(
+                  "INSERT INTO nanocodex_durable_owners (state_id, owner_id, fence) VALUES (?, ?, ?)",
+                  [stateId, ownerId, "1"],
+                ),
+                () => state.revision === "0"
+                  ? state
+                  : mapMaybePromise(
+                    query(
+                      "INSERT INTO nanocodex_durable_states (state_id, revision, payload) VALUES (?, ?, ?)",
+                      [stateId, state.revision, state.payload],
+                    ),
+                    () => state,
+                  ),
+              );
+            },
+          );
+        },
+      ));
+    },
   });
 }
 
@@ -229,6 +333,14 @@ function requirePayload(value) {
     throw new TypeError("durability payload must be a string");
   }
   return value;
+}
+
+function portableOwnerId(kind) {
+  const randomUUID = globalThis.crypto?.randomUUID;
+  if (typeof randomUUID !== "function") {
+    throw new Error("durability portability requires crypto.randomUUID()");
+  }
+  return `nanocodex-${kind}-${randomUUID.call(globalThis.crypto)}`;
 }
 
 function exactRows(rows, maximum, label) {

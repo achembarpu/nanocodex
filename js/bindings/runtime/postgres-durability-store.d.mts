@@ -1,4 +1,4 @@
-import type { DurabilityStore } from "../types.mjs";
+import type { DurabilityPortableStore } from "../types.mjs";
 
 /** A PostgreSQL result row. Column values remain owned by the pool implementation. */
 export type PostgresDurabilityRow = Readonly<Record<string, unknown>>;
@@ -64,4 +64,4 @@ export declare class UnknownPostgresCommitOutcomeError extends Error {
  */
 export declare function createPostgresDurabilityStore(
   pool: PostgresDurabilityPool,
-): DurabilityStore;
+): DurabilityPortableStore;

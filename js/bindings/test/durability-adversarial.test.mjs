@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createMemoryDurabilityStore, durabilityRevision } from "nanocodex/durability";
+import {
+  DurabilityImportConflictError,
+  createMemoryDurabilityStore,
+  durabilityRevision,
+  exportDurabilityState,
+  importDurabilityState,
+} from "nanocodex/durability";
 import {
   acquire,
   own,
@@ -111,4 +117,80 @@ test("stale owners lose before revision comparison and replacement is total", ()
   assert.equal("append" in store, false);
   assert.equal("compact" in store, false);
   assert.equal("acquirePage" in store, false);
+});
+
+test("portable export fences the source and exact import refuses overwrite", async () => {
+  const source = createMemoryDurabilityStore("source");
+  const sourceOwner = source.acquire("source", { ownerId: "source-owner" });
+  assert.deepEqual(source.replace("source", {
+    ...sourceOwner,
+    expectedRevision: "0",
+    payload: "opaque-total-state",
+  }), { status: "replaced", revision: "1" });
+
+  const archive = await exportDurabilityState(source, "source");
+  assert.deepEqual(archive, {
+    format: "nanocodex-durability-state-v1",
+    stateId: "source",
+    revision: "1",
+    payload: "opaque-total-state",
+  });
+  assert.deepEqual(source.replace("source", {
+    ...sourceOwner,
+    expectedRevision: "1",
+    payload: "split-brain-write",
+  }), { status: "fenced" });
+
+  const serialized = JSON.parse(JSON.stringify(archive));
+  const destination = createMemoryDurabilityStore("source");
+  assert.deepEqual(
+    await importDurabilityState(destination, serialized),
+    { revision: "1", payload: "opaque-total-state" },
+  );
+  assert.deepEqual(destination.load("source"), {
+    revision: "1",
+    payload: "opaque-total-state",
+  });
+  await assert.rejects(
+    importDurabilityState(destination, archive),
+    DurabilityImportConflictError,
+  );
+});
+
+test("portable import rejects malformed or unsupported archives", async () => {
+  const destination = createMemoryDurabilityStore("destination");
+  await assert.rejects(
+    importDurabilityState(destination, {
+      format: "nanocodex-durability-state-v0",
+      stateId: "source",
+      revision: "1",
+      payload: "state",
+    }),
+    /unsupported durability export format/,
+  );
+  await assert.rejects(
+    importDurabilityState(destination, {
+      format: "nanocodex-durability-state-v1",
+      stateId: "source",
+      revision: "0",
+      payload: "impossible",
+    }),
+    /payload must be null exactly at revision zero/,
+  );
+});
+
+test("portable import reserves an empty revision and never fences an initialized target", async () => {
+  const source = createMemoryDurabilityStore("empty-portable");
+  const archive = await exportDurabilityState(source, "empty-portable");
+  const destination = createMemoryDurabilityStore("empty-portable");
+
+  assert.deepEqual(await importDurabilityState(destination, archive), {
+    revision: "0",
+    payload: null,
+  });
+  await assert.rejects(importDurabilityState(destination, archive), DurabilityImportConflictError);
+
+  const initialized = createMemoryDurabilityStore("empty-portable");
+  initialized.acquire("empty-portable", { ownerId: "live-owner" });
+  await assert.rejects(importDurabilityState(initialized, archive), DurabilityImportConflictError);
 });

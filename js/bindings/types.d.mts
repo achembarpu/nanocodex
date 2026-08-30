@@ -52,6 +52,12 @@ export type DurabilityStoredState = Readonly<{
   payload: string | null;
 }>;
 
+/** JSON-safe exact state archive used for an offline provider cutover. */
+export type DurabilityPortableStateArchive = DurabilityStoredState & Readonly<{
+  format: "nanocodex-durability-state-v1";
+  stateId: string;
+}>;
+
 export type DurabilityAcquireRequest = Readonly<{
   ownerId: string;
 }>;
@@ -87,8 +93,16 @@ export type DurabilityStore = Readonly<{
   ): DurabilityReplaceResult | Promise<DurabilityReplaceResult>;
 }>;
 
+/** Store that can atomically restore an exact revision into an empty destination. */
+export type DurabilityPortableStore = DurabilityStore & Readonly<{
+  importState(
+    stateId: string,
+    state: DurabilityStoredState,
+  ): DurabilityStoredState | Promise<DurabilityStoredState>;
+}>;
+
 /** In-process store for hosts that carry its snapshot across durable steps. */
-export type MemoryDurabilityStore = DurabilityStore & Readonly<{
+export type MemoryDurabilityStore = DurabilityPortableStore & Readonly<{
   stateId: string;
   snapshot(): DurabilityStoredState;
 }>;

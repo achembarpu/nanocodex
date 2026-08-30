@@ -179,7 +179,7 @@ export async function runNanocodexTurn(
       try {
         await agent.session.shutdown();
       } catch {
-        // The Rust journal result or typed failure above is authoritative.
+        // The Rust total-state result or typed failure above is authoritative.
       } finally {
         agent.dispose();
       }

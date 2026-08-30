@@ -72,12 +72,17 @@ import { nanocodexTools } from "../tools/vite.mjs";
 import { nanocodex } from "../vite/index.mjs";
 import {
   createMemoryDurabilityStore,
+  DurabilityImportConflictError,
   durabilityRevision,
+  exportDurabilityState,
+  importDurabilityState,
   type DurabilityAcquiredState,
   type DurabilityAcquireRequest,
   type DurabilityReplaceRequest,
   type DurabilityReplaceResult,
   type DurabilityFence,
+  type DurabilityPortableStateArchive,
+  type DurabilityPortableStore,
   type DurabilityRevision,
   type DurabilitySqliteQuery,
   type DurabilitySqliteRow,
@@ -174,12 +179,20 @@ async function check() {
   };
   const revision: DurabilityRevision = storedState.revision;
   const memoryStore: MemoryDurabilityStore = createMemoryDurabilityStore("typed-memory");
+  const portableStore: DurabilityPortableStore = memoryStore;
+  const portableArchive: DurabilityPortableStateArchive = await exportDurabilityState(
+    portableStore,
+    "typed-memory",
+  );
+  await importDurabilityState(portableStore, portableArchive);
+  const importConflict: Error = new DurabilityImportConflictError("typed-memory");
   const sqliteValue: DurabilitySqliteValue = revision;
   const sqliteRow: DurabilitySqliteRow = { revision: sqliteValue };
   const sqliteQuery: DurabilitySqliteQuery = <Row extends DurabilitySqliteRow>() => [] as Row[];
   const sqliteTransaction: DurabilitySqliteTransaction = (callback) => callback(sqliteQuery);
   const sqliteOptions: SqliteDurabilityStoreOptions = { transaction: sqliteTransaction };
   void memoryStore;
+  void importConflict;
   void sqliteOptions;
   const durabilityStore: DurabilityStore = {
     load: () => storedState,

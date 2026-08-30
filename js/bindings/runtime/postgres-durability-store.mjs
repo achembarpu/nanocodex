@@ -1,4 +1,7 @@
-import { durabilityRevision } from "./durability-store.mjs";
+import {
+  DurabilityImportConflictError,
+  durabilityRevision,
+} from "./durability-store.mjs";
 
 const MAX_REVISION = "18446744073709551615";
 const SCHEMA = [
@@ -68,6 +71,12 @@ export function createPostgresDurabilityStore(pool) {
         expectedRevision: request?.expectedRevision,
         payload: request?.payload,
       });
+    },
+    async importState(stateId, imported) {
+      requireId(stateId);
+      const state = importedState(imported);
+      await ready();
+      return restoreState(pool, stateId, state);
     },
   });
 }
@@ -301,6 +310,70 @@ async function replaceState(pool, stateId, request) {
   }
 }
 
+async function restoreState(pool, stateId, state) {
+  const client = await pool.connect();
+  let begun = false;
+  let discard = false;
+  try {
+    await client.query("BEGIN");
+    begun = true;
+    const owner = await client.query(
+      `SELECT owner_id, fence::text FROM nanocodex_durable_owners
+       WHERE state_id = $1 FOR UPDATE`,
+      [stateId],
+    );
+    if (owner.rows.length > 1) {
+      throw new Error("PostgreSQL returned duplicate durability owners during import");
+    }
+    if (owner.rows.length !== 0) throw new DurabilityImportConflictError(stateId);
+    const retained = await client.query(
+      `SELECT revision::text FROM nanocodex_durable_states
+       WHERE state_id = $1 FOR UPDATE`,
+      [stateId],
+    );
+    if (retained.rows.length > 1) {
+      throw new Error("PostgreSQL returned duplicate durability states during import");
+    }
+    if (retained.rows.length !== 0) throw new DurabilityImportConflictError(stateId);
+    await client.query(
+      `INSERT INTO nanocodex_durable_owners (state_id, owner_id, fence)
+       VALUES ($1, $2, $3::numeric)`,
+      [stateId, portableOwnerId(), "1"],
+    );
+    if (state.revision !== "0") {
+      await client.query(
+        `INSERT INTO nanocodex_durable_states (state_id, revision, payload)
+         VALUES ($1, $2::numeric, $3)`,
+        [stateId, state.revision, state.payload],
+      );
+    }
+    try {
+      await client.query("COMMIT");
+      begun = false;
+    } catch (error) {
+      discard = true;
+      throw new UnknownPostgresCommitOutcomeError(stateId, error);
+    }
+    return state;
+  } catch (error) {
+    if (error instanceof UnknownPostgresCommitOutcomeError) throw error;
+    if (begun) {
+      try {
+        await client.query("ROLLBACK");
+      } catch (rollbackError) {
+        discard = true;
+        throw new AggregateError(
+          [error, rollbackError],
+          "PostgreSQL durability import and rollback both failed",
+        );
+      }
+    }
+    throw error;
+  } finally {
+    client.release(discard);
+  }
+}
+
 function requestRevision(value) {
   try {
     return durabilityRevision(value);
@@ -316,6 +389,33 @@ function requestPayload(value) {
     );
   }
   return value;
+}
+
+function importedState(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError("imported durability state must be an object");
+  }
+  const keys = Object.keys(value).sort();
+  if (keys.length !== 2 || keys[0] !== "payload" || keys[1] !== "revision") {
+    throw new TypeError("imported durability state must contain exactly payload and revision");
+  }
+  const revision = durabilityRevision(value.revision);
+  const payload = value.payload;
+  if ((revision === "0") !== (payload === null)) {
+    throw new TypeError("imported durability payload must be null exactly at revision zero");
+  }
+  if (payload !== null && typeof payload !== "string") {
+    throw new TypeError("imported durability payload must be a string");
+  }
+  return Object.freeze({ revision, payload });
+}
+
+function portableOwnerId() {
+  const randomUUID = globalThis.crypto?.randomUUID;
+  if (typeof randomUUID !== "function") {
+    throw new Error("durability portability requires crypto.randomUUID()");
+  }
+  return `nanocodex-import-${randomUUID.call(globalThis.crypto)}`;
 }
 
 async function loadStateForUpdate(client, stateId) {

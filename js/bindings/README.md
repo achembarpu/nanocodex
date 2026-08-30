@@ -862,6 +862,45 @@ Vercel and other PostgreSQL hosts use `createPostgresDurabilityStore(pool)`
 from `nanocodex/durability/postgres`; connection ownership and secret policy
 remain in the application.
 
+The built-in stores can move one stopped agent across providers without
+decoding or rebasing its Rust state:
+
+```js
+import {
+  exportDurabilityState,
+  importDurabilityState,
+} from "nanocodex/durability";
+import { createCloudflareDurabilityStore } from "nanocodex/durability/cloudflare";
+import { createPostgresDurabilityStore } from "nanocodex/durability/postgres";
+
+await cloudflareAgent.session.shutdown();
+const source = createCloudflareDurabilityStore(durableObjectStorage);
+const archive = await exportDurabilityState(source, agentId);
+
+// Send JSON.stringify(archive) through an authenticated, encrypted operator path.
+const serializedArchive = JSON.stringify(archive);
+const destination = createPostgresDurabilityStore(vercelPostgresPool);
+await importDurabilityState(destination, JSON.parse(serializedArchive));
+
+const vercelAgent = await Agent.create({
+  module: wasmModule,
+  transport,
+  durability: destination,
+  durabilityId: archive.stateId,
+});
+```
+
+Export fences the old source owner, import refuses a destination that already
+has state, and the exact state ID and revision are retained. Do not use this as
+live replication: stop source admission before export, never resume the source
+after cutover begins, and reconcile the destination after an ambiguous import
+commit. The archive can contain conversation and tool state, so handle it as a
+secret. The Vercel example includes a WASM integration test that executes the
+same agent Cloudflare → PostgreSQL → Cloudflare, replays committed turn IDs
+without model calls, rebuilds the first new provider request from committed
+history without a previous-response handle, and then continues with new turns
+on each destination.
+
 Node embedders whose bundler relocates package assets may compile and pass the
 web-target artifact explicitly. The runtime still uses the Node host for
 WebSockets and Code Mode:

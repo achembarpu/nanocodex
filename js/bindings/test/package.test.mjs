@@ -77,7 +77,10 @@ test("the packed package ships and resolves every public entry point", async () 
       import * as rootExports from "nanocodex";
       import {
         createMemoryDurabilityStore,
+        DurabilityImportConflictError,
         durabilityRevision,
+        exportDurabilityState,
+        importDurabilityState,
         sqliteDurabilitySchema,
       } from "nanocodex/durability";
       import * as durabilityExports from "nanocodex/durability";
@@ -104,7 +107,10 @@ test("the packed package ships and resolves every public entry point", async () 
       const durabilityValueNames = [
         "createMemoryDurabilityStore",
         "createSqliteDurabilityStore",
+        "DurabilityImportConflictError",
         "durabilityRevision",
+        "exportDurabilityState",
+        "importDurabilityState",
         "sqliteDurabilitySchema",
       ];
       assert.deepEqual(
@@ -125,6 +131,20 @@ test("the packed package ships and resolves every public entry point", async () 
       }
       assert.equal(durabilityRevision(1n), "1");
       assert.equal(createMemoryDurabilityStore("package-state").stateId, "package-state");
+      assert.equal(new DurabilityImportConflictError("package-state").name, "DurabilityImportConflictError");
+      const packageSource = createMemoryDurabilityStore("portable-package-state");
+      const packageOwner = packageSource.acquire("portable-package-state", { ownerId: "package-owner" });
+      assert.deepEqual(packageSource.replace("portable-package-state", {
+        ...packageOwner,
+        expectedRevision: "0",
+        payload: "portable-package-payload",
+      }), { status: "replaced", revision: "1" });
+      const packageArchive = await exportDurabilityState(packageSource, "portable-package-state");
+      const packageDestination = createMemoryDurabilityStore("portable-package-state");
+      assert.deepEqual(await importDurabilityState(packageDestination, packageArchive), {
+        revision: "1",
+        payload: "portable-package-payload",
+      });
       let cloudflareSchemaStatements = 0;
       const cloudflareStore = createCloudflareDurabilityStore({
         sql: {

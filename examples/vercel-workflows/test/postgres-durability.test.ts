@@ -1,7 +1,17 @@
+import { readFile } from "node:fs/promises";
+
 import { PGlite } from "@electric-sql/pglite";
 import { describe, expect, it } from "vitest";
+import { WebSocketServer, type RawData, type WebSocket } from "ws";
 
-import { durabilityRevision } from "nanocodex/durability";
+import {
+  DurabilityImportConflictError,
+  durabilityRevision,
+  exportDurabilityState,
+  importDurabilityState,
+  type DurabilityPortableStateArchive,
+} from "nanocodex/durability";
+import { createCloudflareDurabilityStore } from "nanocodex/durability/cloudflare";
 import {
   createPostgresDurabilityStore,
   type PostgresDurabilityClient,
@@ -10,10 +20,13 @@ import {
   type PostgresDurabilityRow,
   UnknownPostgresCommitOutcomeError,
 } from "nanocodex/durability/postgres";
+import { Agent, Transport } from "nanocodex/node";
+import { cloudflareDurabilityStorage } from "./cloudflare-durability-storage";
 import { postgresDurabilityStore } from "../workflows/postgres-durability";
 
 const MAX_REVISION = durabilityRevision("18446744073709551615");
 const BEFORE_MAX_REVISION = durabilityRevision("18446744073709551614");
+type NodeAgent = Awaited<ReturnType<typeof Agent.create>>;
 
 describe("Vercel PostgreSQL durability store", () => {
   it("does not require DATABASE_URL until the application store is requested", () => {
@@ -144,6 +157,32 @@ describe("Vercel PostgreSQL durability store", () => {
     }
   });
 
+  it("admits exactly one concurrent portable import into an empty PostgreSQL target", async () => {
+    const pool = new PGlitePool();
+    try {
+      const stores = [
+        createPostgresDurabilityStore(pool.asPostgresPool()),
+        createPostgresDurabilityStore(pool.asPostgresPool()),
+      ];
+      const attempts = await Promise.allSettled(stores.map((store) => store.importState(
+        "portable-race",
+        { revision: durabilityRevision("23"), payload: "one-exact-import" },
+      )));
+      expect(attempts.filter(({ status }) => status === "fulfilled")).toHaveLength(1);
+      const rejected = attempts.find(({ status }) => status === "rejected");
+      expect(rejected).toMatchObject({ status: "rejected" });
+      if (rejected?.status === "rejected") {
+        expect(rejected.reason).toBeInstanceOf(DurabilityImportConflictError);
+      }
+      await expect(stores[0]!.load("portable-race")).resolves.toEqual({
+        revision: durabilityRevision("23"),
+        payload: "one-exact-import",
+      });
+    } finally {
+      await pool.close();
+    }
+  });
+
   it("preserves the complete unsigned-u64 decimal range without JS numbers", async () => {
     const pool = new PGlitePool();
     try {
@@ -232,7 +271,244 @@ describe("Vercel PostgreSQL durability store", () => {
       await pool.close();
     }
   });
+
+  it("moves one live agent Cloudflare → Vercel Postgres → Cloudflare without replaying turns", async () => {
+    const module = await readFile(
+      new URL("../../../js/bindings/pkg-web/nanocodex_bg.wasm", import.meta.url),
+    );
+    const server = await startResponsesServer();
+    const pool = new PGlitePool();
+    const source = createCloudflareDurabilityStore(cloudflareDurabilityStorage());
+    const postgres = createPostgresDurabilityStore(pool.asPostgresPool());
+    const returned = createCloudflareDurabilityStore(cloudflareDurabilityStorage());
+    const sessionId = "018f1f9a-7b3c-7a70-8000-000000000070";
+    const stateId = "portable-managed-agent";
+    let agent: NodeAgent | undefined;
+
+    try {
+      agent = await Agent.create({
+        module,
+        sessionId,
+        thinking: "none",
+        transport: Transport.openAi({ apiKey: "test-key", websocketUrl: server.url }),
+        durability: source,
+        durabilityId: stateId,
+      });
+      const sourceScenario = answerNext(
+        server,
+        "cloudflare-response",
+        "COMMITTED ON CLOUDFLARE",
+        { inputs: ["commit this turn on Cloudflare"] },
+      );
+      const cloudflareTurn = agent.turn.prompt({
+        id: "turn-cloudflare",
+        input: "commit this turn on Cloudflare",
+      });
+      const cloudflareResult = await cloudflareTurn.result();
+      expect(cloudflareResult.finalMessage).toBe("COMMITTED ON CLOUDFLARE");
+      cloudflareResult.dispose();
+      cloudflareTurn.dispose();
+      await sourceScenario;
+      await shutdownAgent(agent);
+      agent = undefined;
+
+      const cloudflareArchive = jsonRoundTrip(await exportDurabilityState(source, stateId));
+      await expect(importDurabilityState(postgres, cloudflareArchive)).resolves.toEqual({
+        revision: cloudflareArchive.revision,
+        payload: cloudflareArchive.payload,
+      });
+
+      agent = await Agent.create({
+        module,
+        sessionId,
+        thinking: "none",
+        transport: Transport.openAi({ apiKey: "test-key", websocketUrl: server.url }),
+        durability: postgres,
+        durabilityId: stateId,
+      });
+      const replayedCloudflareTurn = agent.turn.prompt({
+        id: "turn-cloudflare",
+        input: "commit this turn on Cloudflare",
+      });
+      const replayedCloudflare = await replayedCloudflareTurn.result();
+      expect(replayedCloudflare.finalMessage).toBe("COMMITTED ON CLOUDFLARE");
+      expect(server.connections).toBe(1);
+      replayedCloudflare.dispose();
+      replayedCloudflareTurn.dispose();
+
+      const postgresScenario = answerNext(
+        server,
+        "postgres-response",
+        "COMMITTED ON POSTGRES",
+        {
+          inputs: [
+            "commit this turn on Cloudflare",
+            "COMMITTED ON CLOUDFLARE",
+            "continue this same agent on Vercel Postgres",
+          ],
+        },
+      );
+      const postgresTurn = agent.turn.prompt({
+        id: "turn-postgres",
+        input: "continue this same agent on Vercel Postgres",
+      });
+      const postgresResult = await postgresTurn.result();
+      expect(postgresResult.finalMessage).toBe("COMMITTED ON POSTGRES");
+      postgresResult.dispose();
+      postgresTurn.dispose();
+      await postgresScenario;
+      await shutdownAgent(agent);
+      agent = undefined;
+
+      const postgresArchive = jsonRoundTrip(await exportDurabilityState(postgres, stateId));
+      expect(BigInt(postgresArchive.revision)).toBeGreaterThan(BigInt(cloudflareArchive.revision));
+      await importDurabilityState(returned, postgresArchive);
+
+      agent = await Agent.create({
+        module,
+        sessionId,
+        thinking: "none",
+        transport: Transport.openAi({ apiKey: "test-key", websocketUrl: server.url }),
+        durability: returned,
+        durabilityId: stateId,
+      });
+      const replayedPostgresTurn = agent.turn.prompt({
+        id: "turn-postgres",
+        input: "continue this same agent on Vercel Postgres",
+      });
+      const replayedPostgres = await replayedPostgresTurn.result();
+      expect(replayedPostgres.finalMessage).toBe("COMMITTED ON POSTGRES");
+      expect(server.connections).toBe(2);
+      replayedPostgres.dispose();
+      replayedPostgresTurn.dispose();
+
+      const returnScenario = answerNext(
+        server,
+        "returned-response",
+        "RUNNING AGAIN ON CLOUDFLARE",
+        {
+          inputs: [
+            "COMMITTED ON CLOUDFLARE",
+            "continue this same agent on Vercel Postgres",
+            "COMMITTED ON POSTGRES",
+            "prove the imported agent can keep running on Cloudflare",
+          ],
+        },
+      );
+      const returnTurn = agent.turn.prompt({
+        id: "turn-returned",
+        input: "prove the imported agent can keep running on Cloudflare",
+      });
+      const returnResult = await returnTurn.result();
+      expect(returnResult.finalMessage).toBe("RUNNING AGAIN ON CLOUDFLARE");
+      expect(server.connections).toBe(3);
+      returnResult.dispose();
+      returnTurn.dispose();
+      await returnScenario;
+      expect(BigInt((await returned.load(stateId)).revision)).toBeGreaterThan(
+        BigInt(postgresArchive.revision),
+      );
+    } finally {
+      try {
+        if (agent) await shutdownAgent(agent);
+      } finally {
+        try {
+          await server.close();
+        } finally {
+          await pool.close();
+        }
+      }
+    }
+  }, 30_000);
 });
+
+function jsonRoundTrip(archive: DurabilityPortableStateArchive): DurabilityPortableStateArchive {
+  return JSON.parse(JSON.stringify(archive)) as DurabilityPortableStateArchive;
+}
+
+async function shutdownAgent(agent: NodeAgent): Promise<void> {
+  try {
+    await agent.session.shutdown();
+  } finally {
+    agent.dispose();
+  }
+}
+
+async function answerNext(
+  server: ResponsesServer,
+  responseId: string,
+  message: string,
+  expected: Readonly<{ inputs: readonly string[] }>,
+): Promise<void> {
+  const socket = await server.nextConnection();
+  const request = await nextMessage(socket);
+  socket.send(JSON.stringify({
+    type: "response.completed",
+    response: {
+      id: responseId,
+      status: "completed",
+      output: [{
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: message }],
+      }],
+      usage: null,
+    },
+  }));
+  const input = JSON.stringify(request.input);
+  for (const text of expected.inputs) expect(input).toContain(text);
+  expect(request.previous_response_id).toBeUndefined();
+}
+
+type ResponsesServer = Readonly<{
+  connections: number;
+  url: string;
+  nextConnection(): Promise<WebSocket>;
+  close(): Promise<void>;
+}>;
+
+async function startResponsesServer(): Promise<ResponsesServer> {
+  const websocketServer = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+  await new Promise<void>((resolve, reject) => {
+    websocketServer.once("listening", resolve);
+    websocketServer.once("error", reject);
+  });
+  const queued: WebSocket[] = [];
+  const waiters: Array<(socket: WebSocket) => void> = [];
+  let connections = 0;
+  websocketServer.on("connection", (socket) => {
+    connections += 1;
+    const resolve = waiters.shift();
+    if (resolve) resolve(socket);
+    else queued.push(socket);
+  });
+  return Object.freeze({
+    get connections() { return connections; },
+    get url() {
+      const address = websocketServer.address();
+      if (!address || typeof address === "string") throw new Error("Responses server is not listening");
+      return `ws://127.0.0.1:${address.port}`;
+    },
+    nextConnection() {
+      const socket = queued.shift();
+      return socket ? Promise.resolve(socket) : new Promise((resolve) => waiters.push(resolve));
+    },
+    close() {
+      for (const socket of websocketServer.clients) socket.terminate();
+      return new Promise<void>((resolve, reject) => {
+        websocketServer.close((error) => error ? reject(error) : resolve());
+      });
+    },
+  });
+}
+
+function nextMessage(socket: WebSocket): Promise<Record<string, unknown>> {
+  return new Promise((resolve) => {
+    socket.once("message", (data: RawData) => {
+      resolve(JSON.parse(data.toString("utf8")) as Record<string, unknown>);
+    });
+  });
+}
 
 type InjectedFailure = { pattern: RegExp; timing: "before" | "after" };
 

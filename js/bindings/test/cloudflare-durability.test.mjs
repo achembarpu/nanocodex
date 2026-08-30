@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { sqliteDurabilitySchema } from "nanocodex/durability";
+import {
+  DurabilityImportConflictError,
+  sqliteDurabilitySchema,
+} from "nanocodex/durability";
 import { createCloudflareDurabilityStore } from "nanocodex/durability/cloudflare";
 
 test("Cloudflare durability stores one state and chunks only oversized payloads", () => {
@@ -116,6 +119,23 @@ test("Cloudflare durability stores one state and chunks only oversized payloads"
     payload: new Uint8Array(),
   }), { status: "conflict", actualRevision: "1" });
 
+  assert.deepEqual(store.importState("agent-import", {
+    revision: "47",
+    payload: largePayload,
+  }), { revision: "47", payload: largePayload });
+  assert.equal(states.get("agent-import").payload, "");
+  assert.equal(store.load("agent-import").payload, largePayload);
+  assert.deepEqual(store.acquire("agent-import", { ownerId: "imported-agent" }), {
+    ownerId: "imported-agent",
+    fence: "2",
+    revision: "47",
+    payload: largePayload,
+  });
+  assert.throws(
+    () => store.importState("agent-import", { revision: "48", payload: "overwrite" }),
+    DurabilityImportConflictError,
+  );
+
   const firstChunk = chunks.find((chunk) => chunk.stateId === "agent-large");
   firstChunk.revision = "2";
   assert.throws(() => store.load("agent-large"), /invalid Cloudflare durability chunks/);
@@ -126,7 +146,7 @@ test("Cloudflare durability stores one state and chunks only oversized payloads"
   states.get("agent-large").payload = "unexpected-inline-state";
   assert.throws(() => store.load("agent-large"), /invalid Cloudflare durability chunk head/);
   states.get("agent-large").payload = "";
-  chunks.pop();
+  chunks.splice(chunks.findLastIndex((chunk) => chunk.stateId === "agent-large"), 1);
   assert.throws(() => store.load("agent-large"), /missing Cloudflare durability chunks/);
   assert.ok(transactions >= 6);
   assert.throws(

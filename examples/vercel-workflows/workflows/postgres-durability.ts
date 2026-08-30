@@ -1,12 +1,12 @@
 import { attachDatabasePool } from "@vercel/functions";
-import type { DurabilityStore } from "nanocodex/durability";
+import type { DurabilityPortableStore } from "nanocodex/durability";
 import { createPostgresDurabilityStore } from "nanocodex/durability/postgres";
 import { Pool } from "pg";
 
-let applicationStore: DurabilityStore | undefined;
+let applicationStore: DurabilityPortableStore | undefined;
 
 /** The one application-owned store used by every Vercel Workflow step. */
-export function postgresDurabilityStore(): DurabilityStore {
+export function postgresDurabilityStore(): DurabilityPortableStore {
   if (applicationStore) return applicationStore;
   const connectionString = process.env.DATABASE_URL?.trim();
   if (!connectionString) {

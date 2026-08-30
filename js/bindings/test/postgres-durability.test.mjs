@@ -5,6 +5,7 @@ import {
   UnknownPostgresCommitOutcomeError,
   createPostgresDurabilityStore,
 } from "../runtime/postgres-durability-store.mjs";
+import { DurabilityImportConflictError } from "../runtime/durability-store.mjs";
 
 test("the PostgreSQL durability leaf is cold and validates its pool", async () => {
   assert.throws(
@@ -103,6 +104,40 @@ test("PostgreSQL distinguishes rolled-back writes from unknown COMMIT outcomes",
   assert.equal(pool.releases.at(-1), true, "an ambiguous connection must be discarded once");
 });
 
+test("PostgreSQL imports one exact portable revision and fences an empty destination", async () => {
+  const pool = new MockPool();
+  const store = createPostgresDurabilityStore(pool);
+
+  assert.deepEqual(await store.importState("portable", {
+    revision: "47",
+    payload: "opaque-provider-neutral-state",
+  }), {
+    revision: "47",
+    payload: "opaque-provider-neutral-state",
+  });
+  assert.deepEqual(await store.load("portable"), {
+    revision: "47",
+    payload: "opaque-provider-neutral-state",
+  });
+  assert.deepEqual(await store.acquire("portable", { ownerId: "restored-agent" }), {
+    ownerId: "restored-agent",
+    fence: "2",
+    revision: "47",
+    payload: "opaque-provider-neutral-state",
+  });
+  await assert.rejects(
+    store.importState("portable", { revision: "48", payload: "overwrite" }),
+    DurabilityImportConflictError,
+  );
+
+  const acquiredEmpty = await store.acquire("already-owned", { ownerId: "live-empty-owner" });
+  assert.equal(acquiredEmpty.revision, "0");
+  await assert.rejects(
+    store.importState("already-owned", { revision: "47", payload: "must-not-fence-live-owner" }),
+    DurabilityImportConflictError,
+  );
+});
+
 test("PostgreSQL initialization rejects tables without the exact state primary keys", async () => {
   const pool = new MockPool();
   pool.primaryKeys = [{
@@ -181,7 +216,9 @@ class MockClient {
     if (sql.startsWith("INSERT INTO nanocodex_durable_owners")) {
       const [stateId, ownerId] = values;
       const previous = this.pool.owners.get(stateId);
-      const fence = String(BigInt(previous?.fence ?? "0") + 1n);
+      const fence = values.length === 3
+        ? String(values[2])
+        : String(BigInt(previous?.fence ?? "0") + 1n);
       this.pool.owners.set(stateId, { owner_id: ownerId, fence });
       return { rows: [{ fence }] };
     }
@@ -192,6 +229,10 @@ class MockClient {
     if (sql.startsWith("SELECT revision::text, payload FROM nanocodex_durable_states")) {
       const state = this.pool.states.get(values[0]);
       return { rows: state ? [state] : [] };
+    }
+    if (sql.startsWith("SELECT revision::text FROM nanocodex_durable_states")) {
+      const state = this.pool.states.get(values[0]);
+      return { rows: state ? [{ revision: state.revision }] : [] };
     }
     if (sql.startsWith("INSERT INTO nanocodex_durable_states")) {
       if (this.pool.failNextUpsert) {
