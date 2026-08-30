@@ -54,16 +54,23 @@ type VercelSandboxClient = Readonly<{
   writeFiles(files: Array<{ path: string; content: Uint8Array }>): Promise<unknown>;
 }>;
 
-type IxMachineClient = Readonly<{
+/** The small slice of the current `@indexable/sdk` Machine handle we need. */
+export type IxMachineClient = Readonly<{
   delete(): Promise<unknown>;
   exec(argv: string[]): Promise<{
     stdout: string;
     stderr: string;
-    exitCode?: number;
-    exit_code?: number;
-    code?: number;
+    exitCode: number;
   }>;
   writeFile(path: string, contents: Uint8Array): Promise<unknown>;
+}>;
+
+/** Structural type of `new Client().machines()` from `@indexable/sdk`. */
+export type IxMachinesClient = Readonly<{
+  create(options?: Readonly<{
+    name?: string;
+    region?: string;
+  }>): Promise<IxMachineClient>;
 }>;
 
 /**
@@ -128,17 +135,25 @@ export function createVercelSandboxComputerProvider(options: Readonly<{
 }
 
 /**
- * Adapter for `@indexable/sdk`. The caller supplies `ix.machines().create(...)`
- * so credentials, region, and ix templates stay outside the generic runtime.
+ * ix.dev provider matching the current `@indexable/sdk` machine API exactly:
+ * callers pass `new Client().machines()`. The VM is not created until the
+ * first native command, is retained for the runtime, and is deleted on dispose.
+ * Authentication stays with the SDK (`IX_TOKEN`) rather than entering this
+ * generic provider contract.
  */
 export function createIxComputerProvider(options: Readonly<{
-  createMachine: () => Promise<IxMachineClient>;
+  machines: IxMachinesClient;
+  name?: string;
+  region?: string;
   workspace: Workspace;
 }>): ManagedComputerProvider {
   return createMachineComputerProvider({
     workspace: options.workspace,
     createMachine: async () => {
-      const machine = await options.createMachine();
+      const machine = await options.machines.create({
+        ...(options.name === undefined ? {} : { name: options.name }),
+        ...(options.region === undefined ? {} : { region: options.region }),
+      });
       return {
         async exec(command, request) {
           const result = await machine.exec([
@@ -149,7 +164,7 @@ export function createIxComputerProvider(options: Readonly<{
           return {
             stdout: result.stdout,
             stderr: result.stderr,
-            exitCode: numericExitCode(result),
+            exitCode: result.exitCode,
           };
         },
         async writeFile(path, contents) { await machine.writeFile(path, contents); },
@@ -342,12 +357,6 @@ function sandboxPath(raw: string): string {
 
 function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'\\''`)}'`;
-}
-
-function numericExitCode(result: { exitCode?: number; exit_code?: number; code?: number }): number {
-  const value = result.exitCode ?? result.exit_code ?? result.code;
-  if (!Number.isInteger(value)) throw new Error("compute provider returned no numeric exit code");
-  return value!;
 }
 
 async function exeApi(
