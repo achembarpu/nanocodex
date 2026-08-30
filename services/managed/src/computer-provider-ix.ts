@@ -1,4 +1,3 @@
-import { Client, type Machine } from "@indexable/sdk";
 import type { Workspace } from "nanocodex/workspace";
 
 import {
@@ -8,26 +7,38 @@ import {
 } from "./computer-provider";
 
 /**
- * First-class ix.dev backend. Authentication and the default region are owned
- * by the ix SDK (`IX_TOKEN` / `IX_REGION`); Nanocodex only owns the machine
- * lifecycle and workspace projection.
+ * ix.dev provider for the Cloudflare Managed runtime.
+ *
+ * The ix browser SDK speaks native WebTransport, which Workerd does not expose.
+ * Keep that transport detail out of Managed: a tiny Node 24 broker owns the ix
+ * SDK and this Worker talks to it over ordinary authenticated HTTPS. The broker
+ * is stateless; every operation reconnects to the ix VM by machine id.
  */
-export function createIxSdkComputerProvider(options: Readonly<{
-  client?: Client;
+export function createIxBrokerComputerProvider(options: Readonly<{
+  brokerToken: string;
+  brokerUrl: string;
+  fetch?: typeof fetch;
   name?: string;
   region?: string;
   workspace: Workspace;
 }>): ManagedComputerProvider {
-  const client = options.client ?? new Client();
-  const machines = client.machines();
+  if (!options.brokerToken) throw new Error("ix broker token is required");
+  const request = options.fetch ?? fetch;
+  const baseUrl = options.brokerUrl.replace(/\/$/u, "");
+  if (!/^https?:\/\//u.test(baseUrl)) throw new Error("ix broker URL must be HTTP(S)");
 
   return createIxComputerProvider({
     machines: {
       async create(input = {}) {
-        return ixMachine(await machines.create({
-          ...(input.name === undefined ? {} : { name: input.name }),
-          ...(input.region === undefined ? {} : { region: input.region }),
-        }));
+        const created = await brokerJson<{ id: string }>(request, options.brokerToken, `${baseUrl}/v1/machines`, {
+          method: "POST",
+          body: JSON.stringify({
+            ...(input.name === undefined ? {} : { name: input.name }),
+            ...(input.region === undefined ? {} : { region: input.region }),
+          }),
+        });
+        if (!created.id) throw new Error("ix broker returned no machine id");
+        return brokerMachine(request, options.brokerToken, baseUrl, created.id);
       },
     },
     ...(options.name === undefined ? {} : { name: options.name }),
@@ -36,28 +47,56 @@ export function createIxSdkComputerProvider(options: Readonly<{
   });
 }
 
-function ixMachine(machine: Machine): IxMachineClient {
+function brokerMachine(
+  request: typeof fetch,
+  token: string,
+  baseUrl: string,
+  id: string,
+): IxMachineClient {
+  const machineUrl = `${baseUrl}/v1/machines/${encodeURIComponent(id)}`;
   return Object.freeze({
     async delete() {
-      try {
-        await machine.delete();
-      } finally {
-        // `close` releases the local SDK handle after the explicit VM delete.
-        // This mirrors ix's own runner implementation and cannot leave a VM
-        // alive if handle cleanup itself fails.
-        await machine.close();
-      }
+      await brokerJson(request, token, machineUrl, { method: "DELETE" });
     },
     async exec(argv) {
-      const result = await machine.exec(argv);
-      return {
-        stdout: result.stdout,
-        stderr: result.stderr,
-        exitCode: result.exitCode,
-      };
+      return brokerJson(request, token, `${machineUrl}/exec`, {
+        method: "POST",
+        body: JSON.stringify({ argv }),
+      });
     },
     async writeFile(path, contents) {
-      await machine.writeFile(path, contents);
+      await brokerJson(request, token, `${machineUrl}/files`, {
+        method: "PUT",
+        body: JSON.stringify({ path, base64: encodeBase64(contents) }),
+      });
     },
   });
+}
+
+async function brokerJson<T = Record<string, never>>(
+  request: typeof fetch,
+  token: string,
+  url: string,
+  init: RequestInit,
+): Promise<T> {
+  const response = await request(url, {
+    ...init,
+    headers: {
+      authorization: `Bearer ${token}`,
+      "content-type": "application/json",
+      ...init.headers,
+    },
+  });
+  const text = await response.text();
+  if (!response.ok) throw new Error(`ix broker HTTP ${response.status}: ${text}`);
+  if (!text.trim()) return {} as T;
+  return JSON.parse(text) as T;
+}
+
+function encodeBase64(value: Uint8Array): string {
+  let binary = "";
+  for (let offset = 0; offset < value.byteLength; offset += 0x8000) {
+    binary += String.fromCharCode(...value.subarray(offset, offset + 0x8000));
+  }
+  return btoa(binary);
 }
