@@ -51,6 +51,12 @@ export async function createManagedComputerRuntime(options: Readonly<{
     if (disposed) return;
     disposed = true;
     options.computer[Symbol.dispose]();
+    try {
+      const closing = options.computerProvider?.dispose?.();
+      if (closing instanceof Promise) void closing.catch(() => {});
+    } catch {
+      // Workspace disposal remains best-effort and synchronous at this boundary.
+    }
   };
 
   try {
