@@ -5438,7 +5438,7 @@ describe("managed agents REST and resumable SSE", () => {
       dispatchInputJson: frozen.dispatchInputJson,
       terminalJson: frozen.terminalJson,
     });
-    expect(BigInt(replayed.stateRevision)).toBeGreaterThan(BigInt(frozen.stateRevision));
+    expect(replayed.stateRevision).toBe(frozen.stateRevision);
     await submit(agent, "turn-after-raw-replay", "start only after replay attribution");
     await waitForTurnState(agent, "turn-after-raw-replay", "completed");
     await waitForHistoryEvent(agent, ({ cursor, event, turn_id }) => (
