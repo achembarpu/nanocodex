@@ -23,7 +23,7 @@ export function createIxBrokerServer({ machines, token }) {
       if (!match) return json(response, 404, { error: "not_found" });
       const id = decodeURIComponent(match[1]);
       const action = match[2];
-      const machine = machines.connect(id);
+      const machine = await machines.connect(id);
 
       if (request.method === "DELETE" && action === undefined) {
         await machine.delete();
