@@ -423,7 +423,11 @@ describe("durable Multiplayer rooms", () => {
     const originalTimeout = testEnv.MANAGED_MULTIPLAYER_IO_TIMEOUT_MS;
     const createId = randomCreateId();
     let roomId: string | undefined;
-    testEnv.MANAGED_MULTIPLAYER_IO_TIMEOUT_MS = "20";
+    // This timeout covers both the real quota reservation and the deliberately
+    // nonsettling room hop. Leave enough headroom for the production quota DO
+    // on a loaded CI worker so this test reaches the boundary it intends to
+    // exercise.
+    testEnv.MANAGED_MULTIPLAYER_IO_TIMEOUT_MS = "250";
     testEnv.NANOCODEX_ROOMS = {
       getByName(name: string) {
         roomId = name;
@@ -431,15 +435,16 @@ describe("durable Multiplayer rooms", () => {
       },
     } as unknown as Env["NANOCODEX_ROOMS"];
 
+    let failed: Response | undefined;
     try {
-      const failed = await within(createRoomResponse("Ada", createId), "room initialization headers");
-      expect(failed.status).toBe(503);
-      expect(await failed.json()).toEqual({ error: "room_initialization_failed" });
-      expect(await quotaLeaseCount(roomId!)).toBe(1);
+      failed = await within(createRoomResponse("Ada", createId), "room initialization headers");
     } finally {
       testEnv.NANOCODEX_ROOMS = originalRooms;
       testEnv.MANAGED_MULTIPLAYER_IO_TIMEOUT_MS = originalTimeout;
     }
+    expect(failed!.status).toBe(503);
+    expect(await failed!.json()).toEqual({ error: "room_initialization_failed" });
+    expect(await quotaLeaseCount(roomId!)).toBe(1);
 
     const recovered = await createRoomResponse("Ada", createId);
     expect(recovered.status).toBe(201);

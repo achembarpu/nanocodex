@@ -5332,7 +5332,10 @@ describe("managed agents REST and resumable SSE", () => {
         expect(turn.retry_at! - turn.updated_at).toBeLessThanOrEqual(60_000);
         const alarm = await waitForScheduledAlarm(session, turn.retry_at!);
         vi.setSystemTime(alarm);
-        expect(await runDurableObjectAlarm(session)).toBe(true);
+        // Advancing fake time can let Miniflare dispatch the due alarm before
+        // the explicit runner wins the race. Either path is valid; the next
+        // retry attempt is the observable contract we need to prove.
+        await runDurableObjectAlarm(session);
         turn = await waitForTurnRetry(agent, id, expected);
       }
       expect(turn).toMatchObject({ attempt_count: 10, state: "accepted" });
