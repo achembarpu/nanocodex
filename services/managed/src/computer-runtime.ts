@@ -14,6 +14,7 @@ import {
   type ComputerWorkspaceClient,
 } from "./computer-workspace";
 import type { ManagedComputerProvider } from "./computer-provider";
+import { createCloudflareSshCommand } from "./cloudflare-ssh";
 import type { ManagedEgressConnectorId } from "./managed-egress";
 
 const MANAGED_SHELL_MAX_ENTRIES = 20_000;
@@ -48,6 +49,7 @@ export async function createManagedComputerRuntime(options: Readonly<{
   connectorAllowed?: (connector: ManagedEgressConnectorId) => boolean;
   egress: Fetcher;
   subject?: string;
+  sshPassword?: (reference: string) => Promise<string>;
 }>): Promise<ManagedComputerRuntime> {
   let disposed = false;
   let provider: ManagedComputerProvider | undefined;
@@ -82,6 +84,18 @@ export async function createManagedComputerRuntime(options: Readonly<{
       gitCommand,
       createManagedGhCommand(fetch, (args, context) =>
         gitCommand.execute(["clone", ...args], context)),
+      {
+        name: "ssh",
+        load: async () => createCloudflareSshCommand({
+          egress: options.egress,
+          filesystem: () => {
+            if (!mountedFilesystem) throw new Error("managed shell filesystem is not mounted");
+            return mountedFilesystem;
+          },
+          ...(options.sshPassword === undefined ? {} : { resolvePassword: options.sshPassword }),
+          ...(options.subject === undefined ? {} : { subject: options.subject }),
+        }),
+      },
       ...(provider === undefined ? [] : [createNativeCommand("cargo", provider)]),
     ]);
     const shell = await justBash({

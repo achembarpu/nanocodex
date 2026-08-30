@@ -34,7 +34,11 @@ describe("managed Computer runtime", () => {
       exit_code: 1,
       output: expect.stringContaining("tool-filegit: not a git repository"),
     });
-    expect(runtime.commandNames).toEqual(["gh", "git"]);
+    expect(runtime.commandNames).toEqual(["gh", "git", "ssh"]);
+    expect(await runtime.tool.handler({ cmd: "ssh --help" }, context)).toMatchObject({
+      exit_code: 0,
+      output: expect.stringContaining("brokered identities execute inside private egress"),
+    });
     expect(runtime.instructions).toContain(
       "call exec_command immediately and once with the complete command",
     );

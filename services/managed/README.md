@@ -82,6 +82,9 @@ time, files, and entry counts remain bounded. A host-owned secure Fetcher sends
 public HTTP through the gateway. Private managed agents may also use exact
 connector destinations; Multiplayer agents receive no connector subject, so
 GitHub, Gmail, Drive, and X fail closed. Provider credentials never enter the shell.
+The `ssh` command can either open direct Cloudflare TCP with an explicit
+workspace identity or use `IdentityRef`; brokered identities execute entirely
+inside private egress and are bound there to one target and host fingerprint.
 
 Browser-local agents continue to use OPFS. Managed and Multiplayer agents
 cannot use OPFS, while a plain in-memory filesystem would disappear on Durable

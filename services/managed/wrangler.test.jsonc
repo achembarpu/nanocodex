@@ -4,6 +4,9 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-07-29",
   "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  "alias": {
+    "node-rsa": "../../js/bindings/tools/browser/unsupportedNodeRsa.mjs"
+  },
   "services": [
     {
       "binding": "NANOCODEX",

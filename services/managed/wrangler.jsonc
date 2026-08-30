@@ -7,6 +7,9 @@
     "nodejs_compat",
     "global_fetch_strictly_public"
   ],
+  "alias": {
+    "node-rsa": "../../js/bindings/tools/browser/unsupportedNodeRsa.mjs"
+  },
   "workers_dev": false,
   "minify": true,
   "upload_source_maps": true,

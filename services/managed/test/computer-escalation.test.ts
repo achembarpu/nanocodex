@@ -49,7 +49,7 @@ describe("managed Computer escalation", () => {
       cwd: "/workspace",
       requirements: { capabilities: ["native-process"] },
     }));
-    expect(runtime.commandNames).toEqual(["cargo", "gh", "git"]);
+    expect(runtime.commandNames).toEqual(["cargo", "gh", "git", "ssh"]);
 
     runtime.dispose();
   });
