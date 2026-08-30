@@ -5466,17 +5466,48 @@ describe("managed agents REST and resumable SSE", () => {
     expect(BigInt(followingStarted!.cursor)).toBeLessThan(BigInt(followingCompleted!.cursor));
   });
 
-  it("exports and imports a live managed Agent through real Durable Object SQLite", async () => {
+  it("ports a compacted multi-turn Agent with tools and subagents through real Durable Object SQLite", async () => {
     expect((await testEnv.NANOCODEX.fetch(
       "https://broker.internal/test/model-commands",
       { method: "DELETE" },
     )).status).toBe(204);
     const source = await createAgent();
-    const turnId = "turn-portable-cloudflare";
-    const input = "retain this portable Cloudflare turn";
-    await submit(source, turnId, input);
-    const sourceTerminal = await waitForTurnState(source, turnId, "completed", 10_000);
-    await expect(modelCommandCount()).resolves.toBe(1);
+    const sourceTurns = [
+      {
+        id: "turn-portable-compaction-seed",
+        input: "E2E_PORTABILITY_COMPACTION_SEED",
+        finalMessage: "PORTABILITY_COMPACTION_SEEDED",
+      },
+      {
+        id: "turn-portable-computer",
+        input: "E2E_COMPUTER_RUNTIME",
+        finalMessage: "COMPUTER_TOOLS_OK",
+      },
+      {
+        id: "turn-portable-web-image",
+        input: "E2E_MANAGED_WEB",
+        finalMessage: "MANAGED_WEB_OK",
+      },
+      {
+        id: "turn-portable-core-tools",
+        input: "E2E_MANAGED_CORE_TOOLS",
+        finalMessage: "MANAGED_CORE_TOOLS_OK",
+      },
+      {
+        id: "turn-portable-subagents",
+        input: "E2E_MANAGED_SUBAGENTS",
+        finalMessage: "MANAGED_SUBAGENTS_OK",
+      },
+    ] as const;
+    const sourceTerminals = new Map<string, Awaited<ReturnType<typeof waitForTurnState>>>();
+    for (const turn of sourceTurns) {
+      await submit(source, turn.id, turn.input);
+      const terminal = await waitForTurnState(source, turn.id, "completed", 15_000);
+      expect(terminal.terminal).toMatchObject({ final_message: turn.finalMessage });
+      sourceTerminals.set(turn.id, terminal);
+    }
+    const commandsBeforeExport = await modelCommandCount();
+    expect(commandsBeforeExport).toBeGreaterThan(sourceTurns.length);
     const sourceCapacity = await testEnv.NANOCODEX_SESSIONS
       .getByName(source.agent_id)
       .fetch("https://session.internal/capacity");
@@ -5499,9 +5530,29 @@ describe("managed agents REST and resumable SSE", () => {
       revision: expect.stringMatching(/^[1-9][0-9]*$/),
       payload: expect.any(String),
     });
-    expect(JSON.parse(archive.payload).nanocodex_durable_state.operations)
-      .toHaveProperty(turnId);
-    await evictDurableObject(testEnv.NANOCODEX_SESSIONS.getByName(source.agent_id));
+    const portableState = JSON.parse(archive.payload).nanocodex_durable_state;
+    expect(portableState.latest_checkpoint).toBeTruthy();
+    expect(JSON.stringify(portableState.latest_checkpoint)).toContain(
+      "portable-managed-compaction",
+    );
+    for (const turn of sourceTurns) {
+      expect(portableState.operations).toHaveProperty(turn.id);
+    }
+    const sourceSession = testEnv.NANOCODEX_SESSIONS.getByName(source.agent_id);
+    let pendingProjections = Number.POSITIVE_INFINITY;
+    for (let attempt = 0; attempt < 8 && pendingProjections > 0; attempt += 1) {
+      await runInDurableObject(sourceSession, async (_instance, state) => {
+        await state.storage.setAlarm(Date.now());
+      });
+      await runDurableObjectAlarm(sourceSession);
+      pendingProjections = await runInDurableObject(sourceSession, (_instance, state) => (
+        state.storage.sql.exec<{ count: number }>(
+          "SELECT COUNT(*) AS count FROM history_projection_outbox",
+        ).one().count
+      ));
+    }
+    expect(pendingProjections).toBe(0);
+    await evictDurableObject(sourceSession);
     const repeatedExport = await SELF.fetch(
       source.events_url.replace(/\/events$/, "/durability"),
       { method: "POST" },
@@ -5537,13 +5588,33 @@ describe("managed agents REST and resumable SSE", () => {
       durability_id: archive.stateId,
     });
 
-    await submit(imported, turnId, input);
-    const importedTerminal = await waitForTurnState(imported, turnId, "completed", 10_000);
-    expect(importedTerminal.terminal).toEqual(sourceTerminal.terminal);
-    await expect(modelCommandCount()).resolves.toBe(1);
-    await submit(imported, "turn-after-cutover", "continue on the imported managed Agent");
-    await waitForTurnState(imported, "turn-after-cutover", "completed", 10_000);
-    await expect(modelCommandCount()).resolves.toBe(2);
+    for (const turn of sourceTurns) {
+      await submit(imported, turn.id, turn.input);
+      const importedTerminal = await waitForTurnState(imported, turn.id, "completed", 10_000);
+      expect(importedTerminal.terminal).toEqual(sourceTerminals.get(turn.id)!.terminal);
+      await expect(modelCommandCount()).resolves.toBe(commandsBeforeExport);
+    }
+
+    const destinationTurns = [
+      {
+        id: "turn-tool-after-cutover",
+        input: "E2E_COMPUTER_RUNTIME",
+        finalMessage: "COMPUTER_TOOLS_OK",
+      },
+      {
+        id: "turn-subagent-after-cutover",
+        input: "E2E_MANAGED_SUBAGENTS",
+        finalMessage: "MANAGED_SUBAGENTS_OK",
+      },
+    ] as const;
+    for (const turn of destinationTurns) {
+      await submit(imported, turn.id, turn.input);
+      const terminal = await waitForTurnState(imported, turn.id, "completed", 15_000);
+      expect(terminal.terminal).toMatchObject({
+        final_message: expect.stringContaining(turn.finalMessage),
+      });
+    }
+    await expect(modelCommandCount()).resolves.toBeGreaterThan(commandsBeforeExport);
     const identities = await Promise.all([
       runInDurableObject(
         testEnv.NANOCODEX_SESSIONS.getByName(source.agent_id),
@@ -5563,7 +5634,7 @@ describe("managed agents REST and resumable SSE", () => {
     ]);
     expect(identities[1]).toMatchObject({ state_id: archive.stateId });
     expect(identities[1].session_id).not.toBe(identities[0]);
-  }, 30_000);
+  }, 90_000);
 
   it("rejects corrupt canonical durability before creating a managed Agent", async () => {
     const response = await SELF.fetch("https://example.test/v1/agents", {

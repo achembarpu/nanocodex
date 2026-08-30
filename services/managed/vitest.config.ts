@@ -271,57 +271,90 @@ export default {
         item?.type === "message" && item.role === "user"
       ));
       const activeInput = latestUserIndex < 0 ? input : input.slice(latestUserIndex);
-      const toolOutput = input.find((item) => (
+      const toolOutput = activeInput.find((item) => (
         item?.type === "function_call_output" && item.call_id === "managed-web"
       ));
-      const imageOutput = input.find((item) => (
+      const imageOutput = activeInput.find((item) => (
         item?.type === "function_call_output" && item.call_id === "managed-image"
       ));
-      const computerOutput = input.find((item) => (
+      const computerOutput = activeInput.find((item) => (
         item?.type === "function_call_output" && item.call_id === "computer-runtime"
       ));
-      const multiplayerConnectorOutput = input.find((item) => (
+      const runtimeInfoOutput = activeInput.find((item) => (
+        item?.type === "function_call_output" && item.call_id === "managed-runtime-info"
+      ));
+      const updatePlanOutput = activeInput.find((item) => (
+        item?.type === "function_call_output" && item.call_id === "managed-update-plan"
+      ));
+      const multiplayerConnectorOutput = activeInput.find((item) => (
         item?.type === "function_call_output" && item.call_id === "multiplayer-no-connectors"
       ));
-      const hostedToolsOutput = input.find((item) => (
+      const hostedToolsOutput = activeInput.find((item) => (
         item?.type === "custom_tool_call_output" && item.call_id === "managed-hosted-exec"
       ));
       const hostedPriorityOutput = activeInput.slice().reverse().find((item) => (
         item?.type === "custom_tool_call_output"
         && (item.call_id === "hosted-priority-local" || item.call_id === "hosted-priority-cloud")
       ));
-      const phoneOutput = input.find((item) => (
+      const phoneOutput = activeInput.find((item) => (
         item?.type === "function_call_output" && item.call_id === "managed-phone"
       ));
-      const spawnOutput = input.find((item) => (
+      const spawnOutput = activeInput.find((item) => (
         item?.type === "function_call_output" && item.call_id === "managed-spawn"
       ));
-      const waitOutput = input.find((item) => (
+      const waitOutput = activeInput.find((item) => (
         item?.type === "function_call_output" && item.call_id === "managed-wait"
       ));
-      const submitOutput = input.find((item) => (
+      const submitOutput = activeInput.find((item) => (
         item?.type === "function_call_output" && item.call_id === "managed-submit"
       ));
-      const managedMemoryFind = input.find((item) => (
+      const compaction = input.some((item) => item?.type === "compaction_trigger");
+      const managedMemoryFind = activeInput.find((item) => (
         item?.type === "function_call_output" && item.call_id === "managed-memory-find"
       ));
-      const managedMemoryRead = input.find((item) => (
+      const managedMemoryRead = activeInput.find((item) => (
         item?.type === "function_call_output" && item.call_id === "managed-memory-read"
       ));
-      const atomicStoreScan = input.find((item) => (
+      const atomicStoreScan = activeInput.find((item) => (
         item?.type === "function_call_output" && item.call_id === "atomic-store-scan"
       ));
-      const atomicStorePut = input.find((item) => (
+      const atomicStorePut = activeInput.find((item) => (
         item?.type === "function_call_output" && item.call_id === "atomic-store-put"
       ));
-      const atomicRecallScan = input.find((item) => (
+      const atomicRecallScan = activeInput.find((item) => (
         item?.type === "function_call_output" && item.call_id === "atomic-recall-scan"
       ));
-      const atomicRecallRead = input.find((item) => (
+      const atomicRecallRead = activeInput.find((item) => (
         item?.type === "function_call_output" && item.call_id === "atomic-recall-read"
       ));
       pendingResponse = setTimeout(() => {
         pendingResponse = undefined;
+        if (compaction) {
+          server.send(JSON.stringify({
+            type: "response.output_item.done",
+            item: {
+              id: "managed-portability-compaction",
+              type: "compaction",
+              encrypted_content: "portable-managed-compaction",
+            },
+          }));
+          server.send(JSON.stringify({
+            type: "response.completed",
+            response: {
+              id: crypto.randomUUID(),
+              status: "completed",
+              output: [],
+              usage: {
+                input_tokens: 100,
+                input_tokens_details: { cached_tokens: 0 },
+                output_tokens: 20,
+                output_tokens_details: { reasoning_tokens: 0 },
+                total_tokens: 120,
+              },
+            },
+          }));
+          return;
+        }
         if (hostedPriorityOutput) {
           const local = hostedPriorityOutput.call_id === "hosted-priority-local";
           const output = JSON.stringify(hostedPriorityOutput.output);
@@ -486,6 +519,27 @@ export default {
           }));
           return;
         }
+        if (runtimeInfoOutput && updatePlanOutput) {
+          const valid = String(runtimeInfoOutput.output).includes("cloudflare-durable-object")
+            && String(updatePlanOutput.output).includes("updated");
+          server.send(JSON.stringify({
+            type: "response.completed",
+            response: {
+              id: crypto.randomUUID(),
+              status: "completed",
+              output: [{
+                type: "message",
+                role: "assistant",
+                content: [{
+                  type: "output_text",
+                  text: valid ? "MANAGED_CORE_TOOLS_OK" : "MANAGED_CORE_TOOLS_BAD",
+                }],
+              }],
+              usage: null,
+            },
+          }));
+          return;
+        }
         if (atomicRecallRead) {
           const valid = String(atomicRecallRead.output).includes("Production deploys happen on Tuesdays.");
           server.send(JSON.stringify({
@@ -644,6 +698,28 @@ export default {
           }));
           return;
         }
+        if (text.includes("E2E_PORTABILITY_COMPACTION_SEED")) {
+          server.send(JSON.stringify({
+            type: "response.completed",
+            response: {
+              id: crypto.randomUUID(),
+              status: "completed",
+              output: [{
+                type: "message",
+                role: "assistant",
+                content: [{ type: "output_text", text: "PORTABILITY_COMPACTION_SEEDED" }],
+              }],
+              usage: {
+                input_tokens: 244_700,
+                input_tokens_details: { cached_tokens: 0 },
+                output_tokens: 100,
+                output_tokens_details: { reasoning_tokens: 0 },
+                total_tokens: 244_800,
+              },
+            },
+          }));
+          return;
+        }
         if (text.includes("E2E_HOSTED_TOOLS")) {
           server.send(JSON.stringify({
             type: "response.completed",
@@ -692,6 +768,31 @@ export default {
                 name: "exec_command",
                 arguments: JSON.stringify({
                   cmd: "printf 'COMPUTER_RUNTIME_OK\\n' > /workspace/computer.txt && cat /workspace/computer.txt && gh api repos/gakonst/nanocodex | jq -r .full_name",
+                }),
+              }],
+              usage: null,
+            },
+          }));
+          return;
+        }
+        if (text.includes("E2E_MANAGED_CORE_TOOLS")) {
+          server.send(JSON.stringify({
+            type: "response.completed",
+            response: {
+              id: crypto.randomUUID(),
+              status: "completed",
+              output: [{
+                type: "function_call",
+                call_id: "managed-runtime-info",
+                name: "runtimeInfo",
+                arguments: "{}",
+              }, {
+                type: "function_call",
+                call_id: "managed-update-plan",
+                name: "update_plan",
+                arguments: JSON.stringify({
+                  explanation: "exercise agent-local tool state",
+                  plan: [{ step: "verify managed core tools", status: "completed" }],
                 }),
               }],
               usage: null,

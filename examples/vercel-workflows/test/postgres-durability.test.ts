@@ -272,7 +272,7 @@ describe("Vercel PostgreSQL durability store", () => {
     }
   });
 
-  it("round-trips one live Agent through the Cloudflare and PostgreSQL store contracts", async () => {
+  it("round-trips one compacted multi-turn Agent through Cloudflare and PostgreSQL", async () => {
     const module = await readFile(
       new URL("../../../js/bindings/pkg-web/nanocodex_bg.wasm", import.meta.url),
     );
@@ -296,20 +296,29 @@ describe("Vercel PostgreSQL durability store", () => {
         durability: source,
         durabilityId: stateId,
       });
-      const sourceScenario = answerNext(
-        server,
-        "cloudflare-response",
-        "COMMITTED ON CLOUDFLARE",
-        { inputs: ["commit this turn on Cloudflare"] },
-      );
-      const cloudflareTurn = agent.turn.prompt({
-        id: "turn-cloudflare",
-        input: "commit this turn on Cloudflare",
-      });
-      const cloudflareResult = await cloudflareTurn.result();
-      expect(cloudflareResult.finalMessage).toBe("COMMITTED ON CLOUDFLARE");
-      cloudflareResult.dispose();
-      cloudflareTurn.dispose();
+      const sourceScenario = (async () => {
+        const socket = await server.nextConnection();
+        await answerMessage(socket, "cloudflare-response-1", "CLOUDFLARE TURN ONE", {
+          inputs: ["first Cloudflare turn"],
+        });
+        await answerMessage(socket, "cloudflare-response-2", "CLOUDFLARE TURN TWO", {
+          inputs: ["second Cloudflare turn"],
+          previousResponseId: "cloudflare-response-1",
+        });
+        await answerCompaction(socket, "cloudflare-compaction", {
+          previousResponseId: "cloudflare-response-2",
+        });
+        await answerMessage(socket, "cloudflare-response-3", "CLOUDFLARE COMPACTED", {
+          inputs: ["opaque-portable-summary", "source after compaction"],
+        });
+      })();
+      await expect(runTurn(agent, "turn-cloudflare-1", "first Cloudflare turn"))
+        .resolves.toBe("CLOUDFLARE TURN ONE");
+      await expect(runTurn(agent, "turn-cloudflare-2", "second Cloudflare turn"))
+        .resolves.toBe("CLOUDFLARE TURN TWO");
+      await agent.session.compact();
+      await expect(runTurn(agent, "turn-cloudflare-3", "source after compaction"))
+        .resolves.toBe("CLOUDFLARE COMPACTED");
       await sourceScenario;
       await shutdownAgent(agent);
       agent = undefined;
@@ -328,42 +337,41 @@ describe("Vercel PostgreSQL durability store", () => {
         durability: postgres,
         durabilityId: stateId,
       });
-      const replayedCloudflareTurn = agent.turn.prompt({
-        id: "turn-cloudflare",
-        input: "commit this turn on Cloudflare",
-      });
-      const replayedCloudflare = await replayedCloudflareTurn.result();
-      expect(replayedCloudflare.finalMessage).toBe("COMMITTED ON CLOUDFLARE");
+      await expect(runTurn(agent, "turn-cloudflare-1", "first Cloudflare turn"))
+        .resolves.toBe("CLOUDFLARE TURN ONE");
+      await expect(runTurn(agent, "turn-cloudflare-2", "second Cloudflare turn"))
+        .resolves.toBe("CLOUDFLARE TURN TWO");
+      await expect(runTurn(agent, "turn-cloudflare-3", "source after compaction"))
+        .resolves.toBe("CLOUDFLARE COMPACTED");
       expect(server.connections).toBe(1);
-      replayedCloudflare.dispose();
-      replayedCloudflareTurn.dispose();
 
-      const postgresScenario = answerNext(
-        server,
-        "postgres-response",
-        "COMMITTED ON POSTGRES",
-        {
+      const postgresScenario = (async () => {
+        const socket = await server.nextConnection();
+        await answerMessage(socket, "postgres-response-1", "POSTGRES TURN ONE", {
           inputs: [
-            "commit this turn on Cloudflare",
-            "COMMITTED ON CLOUDFLARE",
-            "continue this same agent on Vercel Postgres",
+            "opaque-portable-summary",
+            "source after compaction",
+            "CLOUDFLARE COMPACTED",
+            "first Vercel Postgres turn",
           ],
-        },
-      );
-      const postgresTurn = agent.turn.prompt({
-        id: "turn-postgres",
-        input: "continue this same agent on Vercel Postgres",
-      });
-      const postgresResult = await postgresTurn.result();
-      expect(postgresResult.finalMessage).toBe("COMMITTED ON POSTGRES");
-      postgresResult.dispose();
-      postgresTurn.dispose();
+        });
+        await answerMessage(socket, "postgres-response-2", "POSTGRES TURN TWO", {
+          inputs: ["second Vercel Postgres turn"],
+          previousResponseId: "postgres-response-1",
+        });
+      })();
+      await expect(runTurn(agent, "turn-postgres-1", "first Vercel Postgres turn"))
+        .resolves.toBe("POSTGRES TURN ONE");
+      await expect(runTurn(agent, "turn-postgres-2", "second Vercel Postgres turn"))
+        .resolves.toBe("POSTGRES TURN TWO");
       await postgresScenario;
+      expect(server.connections).toBe(2);
       await shutdownAgent(agent);
       agent = undefined;
 
       const postgresArchive = jsonRoundTrip(await exportDurabilityState(postgres, stateId));
       expect(BigInt(postgresArchive.revision)).toBeGreaterThan(BigInt(cloudflareArchive.revision));
+      expect(postgresArchive.payload).toContain("opaque-portable-summary");
       await importDurabilityState(returned, postgresArchive);
 
       agent = await Agent.create({
@@ -374,38 +382,39 @@ describe("Vercel PostgreSQL durability store", () => {
         durability: returned,
         durabilityId: stateId,
       });
-      const replayedPostgresTurn = agent.turn.prompt({
-        id: "turn-postgres",
-        input: "continue this same agent on Vercel Postgres",
-      });
-      const replayedPostgres = await replayedPostgresTurn.result();
-      expect(replayedPostgres.finalMessage).toBe("COMMITTED ON POSTGRES");
+      const replayedTurns = [
+        ["turn-cloudflare-1", "first Cloudflare turn", "CLOUDFLARE TURN ONE"],
+        ["turn-cloudflare-2", "second Cloudflare turn", "CLOUDFLARE TURN TWO"],
+        ["turn-cloudflare-3", "source after compaction", "CLOUDFLARE COMPACTED"],
+        ["turn-postgres-1", "first Vercel Postgres turn", "POSTGRES TURN ONE"],
+        ["turn-postgres-2", "second Vercel Postgres turn", "POSTGRES TURN TWO"],
+      ] as const;
+      for (const [id, input, expected] of replayedTurns) {
+        await expect(runTurn(agent, id, input)).resolves.toBe(expected);
+      }
       expect(server.connections).toBe(2);
-      replayedPostgres.dispose();
-      replayedPostgresTurn.dispose();
 
-      const returnScenario = answerNext(
-        server,
-        "returned-response",
-        "RUNNING AGAIN ON CLOUDFLARE",
-        {
+      const returnScenario = (async () => {
+        const socket = await server.nextConnection();
+        await answerMessage(socket, "returned-response-1", "RETURNED TURN ONE", {
           inputs: [
-            "COMMITTED ON CLOUDFLARE",
-            "continue this same agent on Vercel Postgres",
-            "COMMITTED ON POSTGRES",
-            "prove the imported agent can keep running on Cloudflare",
+            "opaque-portable-summary",
+            "POSTGRES TURN ONE",
+            "second Vercel Postgres turn",
+            "POSTGRES TURN TWO",
+            "first returned Cloudflare turn",
           ],
-        },
-      );
-      const returnTurn = agent.turn.prompt({
-        id: "turn-returned",
-        input: "prove the imported agent can keep running on Cloudflare",
-      });
-      const returnResult = await returnTurn.result();
-      expect(returnResult.finalMessage).toBe("RUNNING AGAIN ON CLOUDFLARE");
+        });
+        await answerMessage(socket, "returned-response-2", "RETURNED TURN TWO", {
+          inputs: ["second returned Cloudflare turn"],
+          previousResponseId: "returned-response-1",
+        });
+      })();
+      await expect(runTurn(agent, "turn-returned-1", "first returned Cloudflare turn"))
+        .resolves.toBe("RETURNED TURN ONE");
+      await expect(runTurn(agent, "turn-returned-2", "second returned Cloudflare turn"))
+        .resolves.toBe("RETURNED TURN TWO");
       expect(server.connections).toBe(3);
-      returnResult.dispose();
-      returnTurn.dispose();
       await returnScenario;
       expect(BigInt((await returned.load(stateId)).revision)).toBeGreaterThan(
         BigInt(postgresArchive.revision),
@@ -436,13 +445,30 @@ async function shutdownAgent(agent: NodeAgent): Promise<void> {
   }
 }
 
-async function answerNext(
-  server: ResponsesServer,
+async function runTurn(
+  agent: NodeAgent,
+  id: string,
+  input: string,
+): Promise<string | undefined> {
+  const turn = agent.turn.prompt({ id, input });
+  try {
+    const result = await turn.result();
+    try {
+      return result.finalMessage;
+    } finally {
+      result.dispose();
+    }
+  } finally {
+    turn.dispose();
+  }
+}
+
+async function answerMessage(
+  socket: WebSocket,
   responseId: string,
   message: string,
-  expected: Readonly<{ inputs: readonly string[] }>,
+  expected: Readonly<{ inputs: readonly string[]; previousResponseId?: string }>,
 ): Promise<void> {
-  const socket = await server.nextConnection();
   const request = await nextMessage(socket);
   socket.send(JSON.stringify({
     type: "response.completed",
@@ -459,7 +485,34 @@ async function answerNext(
   }));
   const input = JSON.stringify(request.input);
   for (const text of expected.inputs) expect(input).toContain(text);
-  expect(request.previous_response_id).toBeUndefined();
+  expect(request.previous_response_id).toBe(expected.previousResponseId);
+}
+
+async function answerCompaction(
+  socket: WebSocket,
+  responseId: string,
+  expected: Readonly<{ previousResponseId?: string }>,
+): Promise<void> {
+  const request = await nextMessage(socket);
+  expect(request.input).toEqual([{ type: "compaction_trigger" }]);
+  expect(request.previous_response_id).toBe(expected.previousResponseId);
+  socket.send(JSON.stringify({
+    type: "response.output_item.done",
+    item: {
+      id: "portable-compaction-item",
+      type: "compaction",
+      encrypted_content: "opaque-portable-summary",
+    },
+  }));
+  socket.send(JSON.stringify({
+    type: "response.completed",
+    response: {
+      id: responseId,
+      status: "completed",
+      output: [],
+      usage: null,
+    },
+  }));
 }
 
 type ResponsesServer = Readonly<{
