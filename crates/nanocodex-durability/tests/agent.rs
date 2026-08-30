@@ -1413,7 +1413,7 @@ async fn queued_developer_context_waits_for_an_exact_id_retry_to_terminalize() -
     let store = crate::MemoryStore::new()?;
     let failing = FailReplaceOnce {
         inner: store.clone(),
-        expected_revision: 6,
+        expected_revision: 4,
         failed: Arc::new(AtomicBool::new(false)),
     };
     let generations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -1457,7 +1457,7 @@ async fn queued_developer_context_waits_for_an_exact_id_retry_to_terminalize() -
     let first = turn
         .result()
         .await
-        .expect_err("the first model-step completion must be retryable");
+        .expect_err("the first model-step settlement must be retryable");
     assert!(first.to_string().contains("injected replacement failure"));
     assert!(
         !append.is_finished(),
@@ -1473,8 +1473,8 @@ async fn queued_developer_context_waits_for_an_exact_id_retry_to_terminalize() -
     append.await??;
     assert_eq!(
         generations.load(Ordering::SeqCst),
-        1,
-        "a staged model outcome must materialize without repeating the provider effect",
+        2,
+        "a definitely uncommitted idempotent model settlement must retry the provider effect",
     );
     let checkpoint = state
         .latest_checkpoint()
@@ -1555,7 +1555,7 @@ async fn cold_reopen_recovers_idle_routed_prompt_without_a_second_model_call() -
     let store = crate::MemoryStore::new()?;
     let failing_store = FailReplaceOnce {
         inner: store.clone(),
-        expected_revision: 7,
+        expected_revision: 5,
         failed: Arc::new(AtomicBool::new(false)),
     };
     let generations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -2084,7 +2084,7 @@ async fn failed_completed_compaction_persistence_restores_the_committed_live_bou
     let store = MemoryStore::new()?;
     let failing = FailReplaceOnce {
         inner: store.clone(),
-        expected_revision: 8,
+        expected_revision: 6,
         failed: Arc::new(AtomicBool::new(false)),
     };
     let openai = || {
@@ -2432,7 +2432,7 @@ async fn assert_cold_model_replay_forces_full_history(store_responses: bool) -> 
     let store = crate::MemoryStore::new()?;
     let failing_store = FailReplaceOnce {
         inner: store.clone(),
-        expected_revision: 7,
+        expected_revision: 5,
         failed: Arc::new(AtomicBool::new(false)),
     };
     let generations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -2657,7 +2657,7 @@ async fn portable_state_replays_a_completed_model_step_after_terminal_commit_fai
     let store = crate::MemoryStore::new()?;
     let failing_store = FailReplaceOnce {
         inner: store.clone(),
-        expected_revision: 7,
+        expected_revision: 5,
         failed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
     let generations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -2727,7 +2727,7 @@ async fn exact_id_retry_reclaims_a_definitely_uncommitted_terminal_replace() -> 
     let store = crate::MemoryStore::new()?;
     let failing_store = FailReplaceOnce {
         inner: store,
-        expected_revision: 7,
+        expected_revision: 5,
         failed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
     let generations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -2779,7 +2779,7 @@ async fn portable_state_continues_after_an_ambiguous_tool_without_repeating_it()
     let store = crate::MemoryStore::new()?;
     let failing_store = FailReplaceOnce {
         inner: store.clone(),
-        expected_revision: 8,
+        expected_revision: 6,
         failed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
     let generations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -2880,7 +2880,7 @@ async fn changed_tool_profile_blocks_replay_after_spawn_without_creating_a_ghost
     let store = crate::MemoryStore::new()?;
     let failing_store = FailReplaceOnce {
         inner: store.clone(),
-        expected_revision: 9,
+        expected_revision: 7,
         failed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
     let generations = Arc::new(std::sync::atomic::AtomicUsize::new(0));

@@ -216,6 +216,11 @@ class MockClient {
     if (sql.startsWith("INSERT INTO nanocodex_durable_owners")) {
       const [stateId, ownerId] = values;
       const previous = this.pool.owners.get(stateId);
+      if (sql.includes("DO NOTHING")) {
+        if (previous) return { rows: [] };
+        this.pool.owners.set(stateId, { owner_id: ownerId, fence: "1" });
+        return { rows: [{ state_id: stateId }] };
+      }
       const fence = values.length === 3
         ? String(values[2])
         : String(BigInt(previous?.fence ?? "0") + 1n);
@@ -239,8 +244,13 @@ class MockClient {
         this.pool.failNextUpsert = false;
         throw new Error("injected upsert failure");
       }
+      if (sql.includes("DO NOTHING") && this.pool.states.has(values[0])) {
+        return { rows: [] };
+      }
       this.pool.states.set(values[0], { revision: values[1], payload: values[2] });
-      return { rows: [] };
+      return {
+        rows: sql.includes("RETURNING state_id") ? [{ state_id: values[0] }] : [],
+      };
     }
     throw new Error(`unexpected SQL: ${sql}`);
   }

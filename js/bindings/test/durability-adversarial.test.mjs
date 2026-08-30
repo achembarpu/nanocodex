@@ -194,3 +194,23 @@ test("portable import reserves an empty revision and never fences an initialized
   initialized.acquire("empty-portable", { ownerId: "live-owner" });
   await assert.rejects(importDurabilityState(initialized, archive), DurabilityImportConflictError);
 });
+
+test("portable cutover has no random-number-generator dependency", async () => {
+  const cryptoDescriptor = Object.getOwnPropertyDescriptor(globalThis, "crypto");
+  Object.defineProperty(globalThis, "crypto", {
+    configurable: true,
+    value: undefined,
+  });
+  try {
+    const source = createMemoryDurabilityStore("crypto-free");
+    const archive = await exportDurabilityState(source, "crypto-free");
+    const destination = createMemoryDurabilityStore("crypto-free");
+    assert.deepEqual(await importDurabilityState(destination, archive), {
+      revision: "0",
+      payload: null,
+    });
+  } finally {
+    if (cryptoDescriptor) Object.defineProperty(globalThis, "crypto", cryptoDescriptor);
+    else delete globalThis.crypto;
+  }
+});

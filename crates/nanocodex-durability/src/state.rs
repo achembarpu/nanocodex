@@ -85,16 +85,6 @@ pub enum Transition {
         /// Opaque typed output returned during replay.
         output: EncodedPayload,
     },
-    /// A step effect settled and its output is durable but has not yet crossed
-    /// the source-ordered materialization boundary.
-    StepOutcomeReady {
-        /// Accepted operation identity.
-        operation_id: String,
-        /// Stable step identity within the operation.
-        step_id: String,
-        /// Complete canonical effect output.
-        output: EncodedPayload,
-    },
     /// An operation completed and advanced the durable session checkpoint.
     OperationCompleted {
         /// Accepted operation identity.
@@ -177,9 +167,7 @@ impl OperationStatus {
 pub enum StepStatus {
     /// The intent committed and the external effect has an unknown outcome.
     EffectPending,
-    /// The external effect settled and its complete output is staged durably.
-    OutcomeReady(EncodedPayload),
-    /// The staged output crossed the operation's materialization boundary.
+    /// The external effect's exact output settled durably.
     Completed(EncodedPayload),
 }
 
@@ -236,6 +224,19 @@ pub(crate) struct RetainedCheckpoint {
     pub(crate) nanocodex_durable_state: DurableCheckpoint,
 }
 
+#[derive(serde::Serialize)]
+struct DurableCheckpointRef<'a> {
+    format: u8,
+    operations: &'a BTreeMap<String, OperationState>,
+    latest_checkpoint: Option<&'a EncodedPayload>,
+    checkpoint_effect_pending: bool,
+}
+
+#[derive(serde::Serialize)]
+struct RetainedCheckpointRef<'a> {
+    nanocodex_durable_state: DurableCheckpointRef<'a>,
+}
+
 impl DurableState {
     /// Current optimistic store revision.
     #[must_use]
@@ -269,9 +270,16 @@ impl DurableState {
     }
 
     pub(crate) fn first_pending_operation(&self) -> Option<(&str, &OperationState)> {
+        self.first_pending_operation_where(|_| true)
+    }
+
+    pub(crate) fn first_pending_operation_where(
+        &self,
+        mut predicate: impl FnMut(&str) -> bool,
+    ) -> Option<(&str, &OperationState)> {
         self.operations
             .iter()
-            .filter(|(_, operation)| !operation.status.is_terminal())
+            .filter(|(id, operation)| !operation.status.is_terminal() && predicate(id.as_str()))
             .min_by_key(|(_, operation)| operation.accepted_order)
             .map(|(id, operation)| (id.as_str(), operation))
     }
@@ -291,27 +299,22 @@ impl DurableState {
         self.checkpoint_effect_pending
     }
 
-    pub(crate) fn checkpoint_payload(
-        &self,
-        terminal_receipt_limit: Option<usize>,
-    ) -> Result<String> {
-        let mut operations = self.operations.clone();
-        if let Some(limit) = terminal_receipt_limit {
-            Self::retain_terminal_operations(&mut operations, limit);
-        }
-        serde_json::to_string(&RetainedCheckpoint {
-            nanocodex_durable_state: DurableCheckpoint {
+    pub(crate) fn checkpoint_payload(&self) -> Result<String> {
+        serde_json::to_string(&RetainedCheckpointRef {
+            nanocodex_durable_state: DurableCheckpointRef {
                 format: STATE_FORMAT,
-                operations,
-                latest_checkpoint: self.latest_checkpoint().cloned(),
+                operations: &self.operations,
+                latest_checkpoint: self.latest_checkpoint(),
                 checkpoint_effect_pending: self.checkpoint_effect_pending,
             },
         })
         .map_err(Error::InvalidPayload)
     }
 
-    pub(crate) fn retain_terminal_receipts(&mut self, limit: usize) {
+    pub(crate) fn retain_terminal_receipts(&mut self, limit: usize) -> bool {
+        let before = self.operations.len();
         Self::retain_terminal_operations(&mut self.operations, limit);
+        self.operations.len() != before
     }
 
     fn retain_terminal_operations(operations: &mut BTreeMap<String, OperationState>, limit: usize) {
@@ -420,8 +423,8 @@ impl DurableState {
         self.validate(entry)
     }
 
-    pub(crate) fn apply_transition(&mut self, revision: u64, entry: &Transition) -> Result<()> {
-        self.validate_transition(revision, entry)?;
+    pub(crate) fn apply_transition(&mut self, revision: u64, entry: Transition) -> Result<()> {
+        self.validate_transition(revision, &entry)?;
         self.apply(revision, entry)?;
         self.revision = revision;
         Ok(())
@@ -470,10 +473,7 @@ impl DurableState {
                             "step `{step_id}` in operation `{operation_id}` changed definition"
                         )));
                     }
-                    if matches!(
-                        step.status,
-                        StepStatus::OutcomeReady(_) | StepStatus::Completed(_)
-                    ) {
+                    if matches!(step.status, StepStatus::Completed(_)) {
                         return Err(Error::InvalidState(format!(
                             "settled step `{step_id}` in operation `{operation_id}` restarted"
                         )));
@@ -490,10 +490,10 @@ impl DurableState {
                     }
                 }
             }
-            Transition::StepOutcomeReady {
+            Transition::StepCompleted {
                 operation_id,
                 step_id,
-                ..
+                output: _,
             } => {
                 ensure_nonempty(step_id, "step ID")?;
                 self.ensure_prior_operations_terminal(operation_id)?;
@@ -503,35 +503,11 @@ impl DurableState {
                         "step `{step_id}` in operation `{operation_id}` completed before start"
                     ))
                 })?;
-                if !matches!(step.status, StepStatus::EffectPending) {
-                    return Err(Error::InvalidState(format!(
-                        "step `{step_id}` in operation `{operation_id}` produced more than one outcome"
-                    )));
-                }
-            }
-            Transition::StepCompleted {
-                operation_id,
-                step_id,
-                output,
-            } => {
-                ensure_nonempty(step_id, "step ID")?;
-                self.ensure_prior_operations_terminal(operation_id)?;
-                let operation = self.pending_operation(operation_id)?;
-                let step = operation.steps.get(step_id).ok_or_else(|| {
-                    Error::InvalidState(format!(
-                        "step `{step_id}` in operation `{operation_id}` materialized before start"
-                    ))
-                })?;
                 match &step.status {
-                    StepStatus::OutcomeReady(staged) if staged == output => {}
-                    StepStatus::OutcomeReady(_) => {
+                    StepStatus::EffectPending => {}
+                    StepStatus::Completed(_) => {
                         return Err(Error::InvalidState(format!(
-                            "step `{step_id}` in operation `{operation_id}` changed its staged outcome"
-                        )));
-                    }
-                    _ => {
-                        return Err(Error::InvalidState(format!(
-                            "step `{step_id}` in operation `{operation_id}` materialized before its outcome was ready"
+                            "step `{step_id}` in operation `{operation_id}` completed more than once"
                         )));
                     }
                 }
@@ -577,21 +553,16 @@ impl DurableState {
         Ok(())
     }
 
-    fn apply(&mut self, revision: u64, entry: &Transition) -> Result<()> {
+    fn apply(&mut self, revision: u64, entry: Transition) -> Result<()> {
         match entry {
             Transition::OperationAccepted {
                 operation_id,
                 input,
             } => {
-                if self.operations.contains_key(operation_id) {
-                    return Err(Error::InvalidState(format!(
-                        "operation `{operation_id}` was accepted more than once"
-                    )));
-                }
                 self.operations.insert(
-                    operation_id.clone(),
+                    operation_id,
                     OperationState {
-                        input: input.clone(),
+                        input,
                         status: OperationStatus::Pending,
                         steps: BTreeMap::new(),
                         accepted_order: revision,
@@ -605,21 +576,8 @@ impl DurableState {
                 input,
                 retry,
             } => {
-                let operation = self.pending_operation_mut(operation_id)?;
-                if let Some(step) = operation.steps.get_mut(step_id) {
-                    if step.kind != *kind || step.input != *input || step.retry != *retry {
-                        return Err(Error::InvalidState(format!(
-                            "step `{step_id}` in operation `{operation_id}` changed definition"
-                        )));
-                    }
-                    if matches!(
-                        step.status,
-                        StepStatus::OutcomeReady(_) | StepStatus::Completed(_)
-                    ) {
-                        return Err(Error::InvalidState(format!(
-                            "settled step `{step_id}` in operation `{operation_id}` restarted"
-                        )));
-                    }
+                let operation = self.pending_operation_mut(&operation_id)?;
+                if let Some(step) = operation.steps.get_mut(&step_id) {
                     step.attempts = step.attempts.checked_add(1).ok_or_else(|| {
                         Error::InvalidState(format!(
                             "step `{step_id}` in operation `{operation_id}` exceeded the attempt counter range"
@@ -627,103 +585,71 @@ impl DurableState {
                     })?;
                 } else {
                     operation.steps.insert(
-                        step_id.clone(),
+                        step_id,
                         StepState {
-                            kind: kind.clone(),
-                            input: input.clone(),
-                            retry: *retry,
+                            kind,
+                            input,
+                            retry,
                             status: StepStatus::EffectPending,
                             attempts: 1,
                         },
                     );
                 }
             }
-            Transition::StepOutcomeReady {
-                operation_id,
-                step_id,
-                output,
-            } => {
-                let operation = self.pending_operation_mut(operation_id)?;
-                let step = operation.steps.get_mut(step_id).ok_or_else(|| {
-                    Error::InvalidState(format!(
-                        "step `{step_id}` in operation `{operation_id}` completed before start"
-                    ))
-                })?;
-                if !matches!(step.status, StepStatus::EffectPending) {
-                    return Err(Error::InvalidState(format!(
-                        "step `{step_id}` in operation `{operation_id}` produced more than one outcome"
-                    )));
-                }
-                step.status = StepStatus::OutcomeReady(output.clone());
-            }
             Transition::StepCompleted {
                 operation_id,
                 step_id,
                 output,
             } => {
-                let operation = self.pending_operation_mut(operation_id)?;
-                let step = operation.steps.get_mut(step_id).ok_or_else(|| {
+                let operation = self.pending_operation_mut(&operation_id)?;
+                let step = operation.steps.get_mut(&step_id).ok_or_else(|| {
                     Error::InvalidState(format!(
-                        "step `{step_id}` in operation `{operation_id}` materialized before start"
+                        "step `{step_id}` in operation `{operation_id}` completed before start"
                     ))
                 })?;
-                match &step.status {
-                    StepStatus::OutcomeReady(staged) if staged == output => {
-                        step.status = StepStatus::Completed(output.clone());
-                    }
-                    _ => {
-                        return Err(Error::InvalidState(format!(
-                            "step `{step_id}` in operation `{operation_id}` materialized without its exact staged outcome"
-                        )));
-                    }
-                }
+                step.status = StepStatus::Completed(output);
             }
             Transition::OperationCompleted {
                 operation_id,
                 checkpoint,
                 output,
             } => {
-                self.ensure_prior_operations_terminal(operation_id)?;
-                let operation = self.pending_operation_mut(operation_id)?;
+                let operation = self.pending_operation_mut(&operation_id)?;
                 operation.status = OperationStatus::Completed {
                     checkpoint: checkpoint.clone(),
-                    output: output.clone(),
+                    output,
                 };
-                self.latest_checkpoint = Some((revision, checkpoint.clone()));
+                self.latest_checkpoint = Some((revision, checkpoint));
             }
             Transition::OperationFailed {
                 operation_id,
                 checkpoint,
                 error,
             } => {
-                self.ensure_prior_operations_terminal(operation_id)?;
-                let operation = self.pending_operation_mut(operation_id)?;
+                let operation = self.pending_operation_mut(&operation_id)?;
                 operation.status = OperationStatus::Failed {
                     checkpoint: checkpoint.clone(),
-                    error: error.clone(),
+                    error,
                 };
-                self.latest_checkpoint = Some((revision, checkpoint.clone()));
+                self.latest_checkpoint = Some((revision, checkpoint));
             }
             Transition::OperationCancelled {
                 operation_id,
                 checkpoint,
             } => {
-                if checkpoint.is_some() {
-                    self.ensure_prior_operations_terminal(operation_id)?;
-                }
-                let operation = self.pending_operation_mut(operation_id)?;
+                let operation = self.pending_operation_mut(&operation_id)?;
                 operation.status = OperationStatus::Cancelled {
                     checkpoint: checkpoint.clone(),
                 };
                 if let Some(checkpoint) = checkpoint {
-                    self.latest_checkpoint = Some((revision, checkpoint.clone()));
+                    self.latest_checkpoint = Some((revision, checkpoint));
                 }
             }
             Transition::CheckpointEffectStarted => {
                 self.checkpoint_effect_pending = true;
             }
             Transition::CheckpointCommitted { checkpoint } => {
-                self.latest_checkpoint = Some((revision, checkpoint.clone()));
+                self.latest_checkpoint = Some((revision, checkpoint));
                 self.checkpoint_effect_pending = false;
             }
         }
@@ -777,7 +703,6 @@ impl Transition {
             Self::OperationAccepted { operation_id, .. }
             | Self::StepStarted { operation_id, .. }
             | Self::StepCompleted { operation_id, .. }
-            | Self::StepOutcomeReady { operation_id, .. }
             | Self::OperationCompleted { operation_id, .. }
             | Self::OperationFailed { operation_id, .. }
             | Self::OperationCancelled { operation_id, .. } => Some(operation_id),

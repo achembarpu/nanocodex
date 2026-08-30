@@ -703,9 +703,7 @@ impl Driver {
     ) -> Result<(String, StoredAdmission)> {
         if let Some((pending_id, operation)) = self
             .state
-            .pending_operations()
-            .into_iter()
-            .find(|(pending_id, _)| !self.claimed.contains_key(*pending_id))
+            .first_pending_operation_where(|pending_id| !self.claimed.contains_key(pending_id))
         {
             if operation.input != input {
                 return Err(Error::OperationBlocked {
@@ -782,16 +780,6 @@ impl Driver {
                 StepStatus::Completed(output) => {
                     return Ok(StoredBeginStep::Replay(output.clone()));
                 }
-                StepStatus::OutcomeReady(output) => {
-                    let output = output.clone();
-                    self.apply(Transition::StepCompleted {
-                        operation_id,
-                        step_id,
-                        output: output.clone(),
-                    })
-                    .await?;
-                    return Ok(StoredBeginStep::Replay(output));
-                }
                 StepStatus::EffectPending if retry == RetryPolicy::Never => {
                     return Ok(StoredBeginStep::Unknown);
                 }
@@ -833,26 +821,7 @@ impl Driver {
             StepStatus::Completed(_) => Err(Error::InvalidState(format!(
                 "step `{step_id}` in operation `{operation_id}` already completed"
             ))),
-            StepStatus::OutcomeReady(staged) => {
-                if staged != output {
-                    return Err(Error::InvalidState(format!(
-                        "step `{step_id}` in operation `{operation_id}` changed its staged outcome"
-                    )));
-                }
-                self.apply(Transition::StepCompleted {
-                    operation_id,
-                    step_id,
-                    output,
-                })
-                .await
-            }
             StepStatus::EffectPending => {
-                self.apply(Transition::StepOutcomeReady {
-                    operation_id: operation_id.clone(),
-                    step_id: step_id.clone(),
-                    output: output.clone(),
-                })
-                .await?;
                 self.apply(Transition::StepCompleted {
                     operation_id,
                     step_id,
@@ -951,9 +920,9 @@ impl Driver {
             Error::InvalidState("state revision exceeded the u64 range".to_owned())
         })?;
         let mut next = self.state.clone();
-        next.apply_transition(expected_revision, &entry)?;
+        next.apply_transition(expected_revision, entry)?;
         if let Some(limit) = self.terminal_receipt_limit {
-            next.retain_terminal_receipts(limit);
+            let _ = next.retain_terminal_receipts(limit);
         }
         self.persist(next).await
     }
@@ -968,7 +937,7 @@ impl Driver {
                 next.revision()
             )));
         }
-        let payload = next.checkpoint_payload(None)?;
+        let payload = next.checkpoint_payload()?;
         let revision = match self
             .store
             .replace(&self.state_id, &self.owner, self.state.revision(), &payload)
@@ -999,10 +968,8 @@ impl Driver {
         let Some(limit) = self.terminal_receipt_limit else {
             return Ok(());
         };
-        let before = self.state.checkpoint_payload(None)?;
         let mut next = self.state.clone();
-        next.retain_terminal_receipts(limit);
-        if next.checkpoint_payload(None)? == before {
+        if !next.retain_terminal_receipts(limit) {
             return Ok(());
         }
         let revision = self.state.revision().checked_add(1).ok_or_else(|| {

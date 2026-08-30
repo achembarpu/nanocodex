@@ -4,6 +4,7 @@ import {
 } from "./durability-store.mjs";
 
 const MAX_REVISION = "18446744073709551615";
+const PORTABLE_IMPORT_OWNER = "nanocodex-portable-import";
 const SCHEMA = [
   `CREATE TABLE IF NOT EXISTS nanocodex_durable_owners (
      state_id TEXT PRIMARY KEY,
@@ -318,34 +319,22 @@ async function restoreState(pool, stateId, state) {
     await client.query("BEGIN");
     begun = true;
     const owner = await client.query(
-      `SELECT owner_id, fence::text FROM nanocodex_durable_owners
-       WHERE state_id = $1 FOR UPDATE`,
-      [stateId],
-    );
-    if (owner.rows.length > 1) {
-      throw new Error("PostgreSQL returned duplicate durability owners during import");
-    }
-    if (owner.rows.length !== 0) throw new DurabilityImportConflictError(stateId);
-    const retained = await client.query(
-      `SELECT revision::text FROM nanocodex_durable_states
-       WHERE state_id = $1 FOR UPDATE`,
-      [stateId],
-    );
-    if (retained.rows.length > 1) {
-      throw new Error("PostgreSQL returned duplicate durability states during import");
-    }
-    if (retained.rows.length !== 0) throw new DurabilityImportConflictError(stateId);
-    await client.query(
       `INSERT INTO nanocodex_durable_owners (state_id, owner_id, fence)
-       VALUES ($1, $2, $3::numeric)`,
-      [stateId, portableOwnerId(), "1"],
+       VALUES ($1, $2, 1)
+       ON CONFLICT (state_id) DO NOTHING
+       RETURNING state_id`,
+      [stateId, PORTABLE_IMPORT_OWNER],
     );
+    if (owner.rows.length !== 1) throw new DurabilityImportConflictError(stateId);
     if (state.revision !== "0") {
-      await client.query(
+      const retained = await client.query(
         `INSERT INTO nanocodex_durable_states (state_id, revision, payload)
-         VALUES ($1, $2::numeric, $3)`,
+         VALUES ($1, $2::numeric, $3)
+         ON CONFLICT (state_id) DO NOTHING
+         RETURNING state_id`,
         [stateId, state.revision, state.payload],
       );
+      if (retained.rows.length !== 1) throw new DurabilityImportConflictError(stateId);
     }
     try {
       await client.query("COMMIT");
@@ -408,14 +397,6 @@ function importedState(value) {
     throw new TypeError("imported durability payload must be a string");
   }
   return Object.freeze({ revision, payload });
-}
-
-function portableOwnerId() {
-  const randomUUID = globalThis.crypto?.randomUUID;
-  if (typeof randomUUID !== "function") {
-    throw new Error("durability portability requires crypto.randomUUID()");
-  }
-  return `nanocodex-import-${randomUUID.call(globalThis.crypto)}`;
 }
 
 async function loadStateForUpdate(client, stateId) {

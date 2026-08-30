@@ -126,7 +126,7 @@ Beginning a step returns exactly one value:
 | Admission | Durable evidence | Caller action |
 |---|---|---|
 | `Execute` | No prior start, or an unfinished retry-safe start | Dispatch once and commit output |
-| `Replay(output)` | An outcome is staged or materialized | Finish materialization if needed, then reuse the exact output; do not dispatch |
+| `Replay(output)` | A completed output is durable | Reuse the exact output; do not dispatch |
 | `Unknown` | An unfinished at-most-once start exists | Do not dispatch; commit an explicit unknown result |
 
 `Unknown` is data, not an operation-level exception. An interrupted unsafe tool
@@ -136,10 +136,10 @@ step's output, and returns control to the model. The message says the effect
 entry or external settlement.
 
 Retry-safe model and compaction steps may execute again only with the same
-stable identity and normalized input. Successful dispatch uses two settlement
-transitions: `effect_pending -> outcome_ready -> completed`. If the second
-commit is lost, recovery materializes the already-staged result without
-repeating the effect. Completed results always replay.
+stable identity and normalized input. Successful dispatch settles in one
+replacement: `effect_pending -> completed(output)`. That replacement is the
+materialization boundary because the output and all operation state share one
+opaque total-state payload. Completed results always replay.
 
 Standalone compaction is a retry-safe checkpoint transform. It commits
 `CheckpointEffectStarted` through the current owner immediately before provider
@@ -196,9 +196,8 @@ the durable cursor is authoritative.
 | After acceptance, before effect start | Pending operation | New owner claims and executes |
 | After retry-safe effect start | `effect_pending` retry-safe step | Execute again with the same identity and input |
 | After unsafe effect start | Started at-most-once step | `Unknown`; never redispatch |
-| After effect returns, before staged settlement | `effect_pending` | Apply the configured safe/unsafe recovery rule |
-| After outcome staging | `outcome_ready` | Materialize and replay exact output; never redispatch |
-| After materialization | `completed` | Replay exact output |
+| After effect returns, before settlement | `effect_pending` | Apply the configured safe/unsafe recovery rule |
+| After settlement | `completed(output)` | Replay exact output; never redispatch |
 | During terminal replacement with `NotCommitted` | Pending operation | Same valid owner may retry |
 | During terminal replacement with unknown outcome | Unknown store result | Reacquire, reload, then decide |
 | After terminal commit | Terminal operation | Replay terminal; no execution |
@@ -222,10 +221,10 @@ policy.
 
 ## Relationship to Pi `dev`
 
-The execution core deliberately follows Pi's harness boundaries: a total
-replace-in-place restart state, separate acceptance and driving, fenced single
-ownership, intent/effect/settlement, staged tool outcomes, durable cancellation,
-and atomic terminal checkpoint/result publication.
+The execution core deliberately follows Pi's harness boundaries: a complete
+current restart state after every transition, separate acceptance and driving,
+fenced single ownership, intent/effect/settlement, durable cancellation, and
+atomic terminal checkpoint/result publication.
 
 This crate is not a clone of Pi's complete session database. Pi also defines
 immutable conversation entries, mutable bound values/lists, an append-only
@@ -234,3 +233,11 @@ cleanup. Nanocodex keeps conversation data inside its typed agent checkpoint
 and scopes this crate to execution recovery. Claiming those storage subsystems
 were copied would be false; the shared durability invariants are the part
 implemented here.
+
+Pi's `outcome_ready` state is necessary because finalized parallel tool output
+is staged separately before source-ordered entry placement. Nanocodex has no
+second authoritative transcript store: the replay output lives in the same
+total-state replacement as its step status. Therefore its minimal equivalent
+is the single `effect_pending -> completed(output)` settlement above. This
+preserves the crash boundary while removing one full payload serialization and
+one backend transaction from every successful external effect.

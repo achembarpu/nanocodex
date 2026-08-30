@@ -1,6 +1,8 @@
 const MAX_REVISION = 18_446_744_073_709_551_615n;
 const MAX_REVISION_TEXT = String(MAX_REVISION);
 const PORTABLE_FORMAT = "nanocodex-durability-state-v1";
+const PORTABLE_EXPORT_OWNER = "nanocodex-portable-export";
+const PORTABLE_IMPORT_OWNER = "nanocodex-portable-import";
 
 export const sqliteDurabilitySchema = Object.freeze([
   `CREATE TABLE IF NOT EXISTS nanocodex_durable_owners (
@@ -32,7 +34,7 @@ export async function exportDurabilityState(store, stateId) {
   if (!store || typeof store.acquire !== "function") {
     throw new TypeError("durability export requires a state store");
   }
-  const ownerId = portableOwnerId("export");
+  const ownerId = PORTABLE_EXPORT_OWNER;
   const acquired = await store.acquire(stateId, { ownerId });
   exactObject(
     acquired,
@@ -137,7 +139,7 @@ export function createMemoryDurabilityStore(stateId, initial) {
         throw new DurabilityImportConflictError(selected);
       }
       owner = Object.freeze({
-        ownerId: portableOwnerId("import"),
+        ownerId: PORTABLE_IMPORT_OWNER,
         fence: "1",
       });
       state = next;
@@ -234,7 +236,6 @@ export function createSqliteDurabilityStore(options) {
     importState(stateId, imported) {
       requireId(stateId, "state");
       const state = copyState(imported);
-      const ownerId = portableOwnerId("import");
       return options.transaction((query) => mapMaybePromise(
         query(
           "SELECT owner_id, fence FROM nanocodex_durable_owners WHERE state_id = ?",
@@ -257,7 +258,7 @@ export function createSqliteDurabilityStore(options) {
               return mapMaybePromise(
                 query(
                   "INSERT INTO nanocodex_durable_owners (state_id, owner_id, fence) VALUES (?, ?, ?)",
-                  [stateId, ownerId, "1"],
+                  [stateId, PORTABLE_IMPORT_OWNER, "1"],
                 ),
                 () => state.revision === "0"
                   ? state
@@ -333,14 +334,6 @@ function requirePayload(value) {
     throw new TypeError("durability payload must be a string");
   }
   return value;
-}
-
-function portableOwnerId(kind) {
-  const randomUUID = globalThis.crypto?.randomUUID;
-  if (typeof randomUUID !== "function") {
-    throw new Error("durability portability requires crypto.randomUUID()");
-  }
-  return `nanocodex-${kind}-${randomUUID.call(globalThis.crypto)}`;
 }
 
 function exactRows(rows, maximum, label) {

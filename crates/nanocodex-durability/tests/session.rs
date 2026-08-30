@@ -202,7 +202,7 @@ async fn replays_completed_operations_and_steps_after_reopen() {
     };
     assert_eq!(checkpoint, Checkpoint { version: 1 });
     assert_eq!(output.message, "done");
-    assert_eq!(reopened.state().await.unwrap().revision(), 5);
+    assert_eq!(reopened.state().await.unwrap().revision(), 4);
 }
 
 #[tokio::test]

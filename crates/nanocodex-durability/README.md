@@ -127,10 +127,14 @@ Only a definite `NotCommitted` replacement may be retried on the same owner.
 owner acquisition and loading the complete current state before deciding what
 ran.
 
-Each external effect follows an intent/effect/settlement boundary. Step state is
-`effect_pending`, `outcome_ready`, or `completed`. Settlement first stages the
-complete result, then materializes it in a second commit. A crash after staging
-replays the staged result without invoking the effect again. An unfinished
-at-most-once effect becomes `Unknown`; an idempotent effect may be retried with
-the exact stable identity and input. Operation terminals atomically carry their
-checkpoint and replay receipt.
+Each external effect follows an intent/effect/settlement boundary. A start
+commits `effect_pending`; settlement atomically replaces it with `completed`
+and the exact output. A crash before settlement uses the declared recovery
+policy, while a crash after settlement replays the output without invoking the
+effect again. An unfinished at-most-once effect becomes `Unknown`; an
+idempotent effect may be retried with the exact stable identity and input.
+Operation terminals atomically carry their checkpoint and replay receipt.
+
+Unlike a store that stages an output separately from source-ordered transcript
+placement, this store owns one opaque total state. A second materialization
+write would add latency without adding a recovery boundary.
