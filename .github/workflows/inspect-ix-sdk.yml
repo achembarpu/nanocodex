@@ -16,8 +16,8 @@ jobs:
         with:
           node-version: 24
       - run: npm install --prefix services/managed/ix-smoke --ignore-scripts
-      - name: Show package surface
+      - name: Show browser entry
         run: |
-          cat services/managed/ix-smoke/node_modules/@indexable/sdk/package.json
-          echo '--- files ---'
-          find services/managed/ix-smoke/node_modules/@indexable/sdk -maxdepth 2 -type f -printf '%P\n' | sort
+          cat services/managed/ix-smoke/node_modules/@indexable/sdk/src/browser.ts
+          echo '--- node entry ---'
+          cat services/managed/ix-smoke/node_modules/@indexable/sdk/src/node.ts
