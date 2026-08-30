@@ -5116,14 +5116,10 @@ describe("managed agents REST and resumable SSE", () => {
         };
         const originalExec = sql.exec;
         let failed = false;
-        sql.exec = function injectedJournalFailure(query, ...bindings) {
+        sql.exec = function injectedStateFailure(query, ...bindings) {
           if (!failed
             && (query.includes("INSERT INTO nanocodex_durable_states")
-              || query.includes("INSERT INTO nanocodex_durable_state_chunks"))
-            && bindings.some((binding) => (
-              typeof binding === "string"
-              && binding.includes("\"cancelled\"")
-            ))) {
+              || query.includes("INSERT INTO nanocodex_durable_state_chunks"))) {
             failed = true;
             throw new Error("injected cancellation state failure");
           }
@@ -5334,13 +5330,8 @@ describe("managed agents REST and resumable SSE", () => {
         expect(turn.state).toBe("accepted");
         expect(turn.retry_at).not.toBeNull();
         expect(turn.retry_at! - turn.updated_at).toBeLessThanOrEqual(60_000);
-        await waitForScheduledAlarm(session);
-        const alarm = await runInDurableObject(
-          session,
-          (_instance, state) => state.storage.getAlarm(),
-        );
-        expect(alarm).not.toBeNull();
-        vi.setSystemTime(Math.max(turn.retry_at!, alarm!));
+        const alarm = await waitForScheduledAlarm(session, turn.retry_at!);
+        vi.setSystemTime(alarm);
         expect(await runDurableObjectAlarm(session)).toBe(true);
         turn = await waitForTurnRetry(agent, id, expected);
       }
@@ -6051,11 +6042,11 @@ async function waitForHistoryEvent(
 
 async function waitForScheduledAlarm(
   stub: DurableObjectStub<DurableAgentSession>,
-): Promise<void> {
-  const deadline = Date.now() + 2_000;
-  while (Date.now() < deadline) {
+  earliest = Number.NEGATIVE_INFINITY,
+): Promise<number> {
+  for (let poll = 0; poll < 200; poll += 1) {
     const alarm = await runInDurableObject(stub, (_instance, state) => state.storage.getAlarm());
-    if (alarm !== null) return;
+    if (alarm !== null && alarm >= earliest) return alarm;
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   throw new Error("timed out waiting for a scheduled Durable Object alarm");
