@@ -215,7 +215,7 @@ describe("Vercel PostgreSQL durability store", () => {
         fence: owner.fence,
         expectedRevision: durabilityRevision("0"),
         payload: "never-started",
-      })).resolves.toEqual({ status: "not_committed", message: "injected query failure" });
+      })).rejects.toThrow("injected query failure");
 
       pool.failNextAfter(/^INSERT INTO nanocodex_durable_states/);
       await expect(store.replace("failures", {
