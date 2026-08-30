@@ -11,11 +11,21 @@ projected directly into the ix VM through the SDK.
 ## Run
 
 ```bash
-npm install
+npm ci
 IX_TOKEN=... \
 NANOCODEX_IX_BROKER_TOKEN=... \
 PORT=8789 \
 npm start
+```
+
+Or run the same artifact used by CI and deployment:
+
+```bash
+docker build --platform linux/amd64 -t nanocodex-ix-broker .
+docker run --rm -p 8789:8789 \
+  -e IX_TOKEN \
+  -e NANOCODEX_IX_BROKER_TOKEN \
+  nanocodex-ix-broker
 ```
 
 The broker is stateless. Every operation reconnects with
@@ -24,14 +34,13 @@ normal load balancer and may restart without losing the machine.
 
 ## Managed configuration
 
-Construct the provider with:
+Set the Managed Worker to select ix:
 
-```ts
-createIxBrokerComputerProvider({
-  brokerUrl: "https://ix-broker.example.com",
-  brokerToken: env.NANOCODEX_IX_BROKER_TOKEN,
-  workspace,
-})
+```text
+NANOCODEX_COMPUTE_PROVIDER=ix
+NANOCODEX_IX_BROKER_URL=https://ix-broker.example.com
+NANOCODEX_IX_BROKER_TOKEN=...
+NANOCODEX_IX_REGION=us-west-1 # optional
 ```
 
 The first native execution creates an ix machine. Later native executions reuse
@@ -45,4 +54,5 @@ The HTTP surface is deliberately tiny:
 - `PUT /v1/machines/:id/files`
 - `DELETE /v1/machines/:id`
 
-All requests require the configured bearer token.
+All requests require the configured bearer token. `IX_TOKEN` stays on the broker;
+the Managed Worker only receives the broker URL and its bearer token.
