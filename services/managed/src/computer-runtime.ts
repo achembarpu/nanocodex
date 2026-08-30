@@ -23,6 +23,9 @@ type DisposableComputerWorkspace = ComputerWorkspaceClient & Readonly<{
   [Symbol.dispose](): void;
 }>;
 
+type ComputerProviderOption = ManagedComputerProvider
+  | ((workspace: Workspace) => ManagedComputerProvider);
+
 export type ManagedComputerRuntime = Readonly<{
   commandNames: readonly string[];
   descriptor: JustBashDescriptor;
@@ -41,18 +44,19 @@ export type ManagedComputerRuntime = Readonly<{
  */
 export async function createManagedComputerRuntime(options: Readonly<{
   computer: DisposableComputerWorkspace;
-  computerProvider?: ManagedComputerProvider;
+  computerProvider?: ComputerProviderOption;
   connectorAllowed?: (connector: ManagedEgressConnectorId) => boolean;
   egress: Fetcher;
   subject?: string;
 }>): Promise<ManagedComputerRuntime> {
   let disposed = false;
+  let provider: ManagedComputerProvider | undefined;
   const dispose = () => {
     if (disposed) return;
     disposed = true;
     options.computer[Symbol.dispose]();
     try {
-      const closing = options.computerProvider?.dispose?.();
+      const closing = provider?.dispose?.();
       if (closing instanceof Promise) void closing.catch(() => {});
     } catch {
       // Workspace disposal remains best-effort and synchronous at this boundary.
@@ -61,6 +65,9 @@ export async function createManagedComputerRuntime(options: Readonly<{
 
   try {
     const sourceFilesystem = await createComputerFilesystem(options.computer);
+    provider = typeof options.computerProvider === "function"
+      ? options.computerProvider(sourceFilesystem)
+      : options.computerProvider;
     const fetch = createManagedShellFetch(
       options.egress,
       options.subject,
@@ -75,9 +82,7 @@ export async function createManagedComputerRuntime(options: Readonly<{
       gitCommand,
       createManagedGhCommand(fetch, (args, context) =>
         gitCommand.execute(["clone", ...args], context)),
-      ...(options.computerProvider === undefined
-        ? []
-        : [createNativeCommand("cargo", options.computerProvider)]),
+      ...(provider === undefined ? [] : [createNativeCommand("cargo", provider)]),
     ]);
     const shell = await justBash({
       filesystem: sourceFilesystem,
