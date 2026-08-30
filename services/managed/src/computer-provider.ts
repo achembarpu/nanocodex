@@ -4,7 +4,7 @@ import type { Workspace } from "nanocodex/workspace";
 const ROOT = "/workspace";
 const DEFAULT_TIMEOUT_MS = 120_000;
 const MAX_ENTRIES = 20_000;
-const EXE_WRITE_CHUNK_BYTES = 24 * 1024;
+const SHELL_WRITE_CHUNK_BYTES = 24 * 1024;
 
 export type ComputerCapability = "native-process";
 
@@ -42,7 +42,6 @@ type CloudflareSandboxClient = Readonly<{
     stderr: string;
     exitCode: number;
   }>;
-  writeFile(path: string, content: string, options: { encoding: "utf-8" }): Promise<unknown>;
 }>;
 
 type VercelSandboxClient = Readonly<{
@@ -164,6 +163,10 @@ export function createIxComputerProvider(options: Readonly<{
  * exe.dev adapter using its HTTPS form of the SSH API. The token must allow
  * `new`, `ssh`, and `rm`. The VM is created lazily and deleted when the provider
  * is disposed. No Nanocodex process is installed in the VM.
+ *
+ * exe.dev's HTTPS command endpoint has a 30-second request timeout today, so
+ * this first adapter is intended for bounded commands. A future long-running
+ * adapter can swap only this machine transport without changing Just Bash.
  */
 export function createExeComputerProvider(options: Readonly<{
   fetch?: typeof fetch;
@@ -190,23 +193,11 @@ export function createExeComputerProvider(options: Readonly<{
           );
         },
         async writeFile(path, contents) {
-          const parent = path.slice(0, path.lastIndexOf("/")) || ROOT;
-          await exeRemoteExec(
-            request,
-            options.token,
-            options.name,
-            `mkdir -p ${shellQuote(parent)} && : > ${shellQuote(path)}`,
+          await writeFileThroughShell(
+            (command) => exeRemoteExec(request, options.token, options.name, command),
+            path,
+            contents,
           );
-          for (let offset = 0; offset < contents.byteLength; offset += EXE_WRITE_CHUNK_BYTES) {
-            const chunk = contents.subarray(offset, offset + EXE_WRITE_CHUNK_BYTES);
-            const encoded = base64(chunk);
-            await exeRemoteExec(
-              request,
-              options.token,
-              options.name,
-              `printf %s ${shellQuote(encoded)} | base64 -d >> ${shellQuote(path)}`,
-            );
-          }
         },
         async close() {
           await exeApi(request, options.token, `rm ${options.name}`);
@@ -259,18 +250,28 @@ export function createSandboxComputerProvider(options: Readonly<{
 }
 
 function cloudflareMachine(sandbox: CloudflareSandboxClient): ComputerMachine {
+  const exec = async (command: string): Promise<ComputerExecResult> => {
+    const result = await sandbox.exec(command, { cwd: "/", timeout: DEFAULT_TIMEOUT_MS });
+    return { stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode };
+  };
   return {
     async exec(command, options) {
       const result = await sandbox.exec(command, options);
       return { stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode };
     },
     async writeFile(path, contents) {
-      await sandbox.writeFile(path, new TextDecoder().decode(contents), { encoding: "utf-8" });
+      await writeFileThroughShell(exec, path, contents);
     },
   };
 }
 
 async function materializeWorkspace(workspace: Workspace, machine: ComputerMachine): Promise<void> {
+  const reset = await machine.exec(
+    `mkdir -p ${shellQuote(ROOT)} && find ${shellQuote(ROOT)} -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +`,
+    { cwd: "/", timeout: DEFAULT_TIMEOUT_MS },
+  );
+  requireSuccessfulSetup(reset, "workspace reset");
+
   const entries = await workspace.list(".", { recursive: true, maxEntries: MAX_ENTRIES });
   const directories = entries
     .filter((entry) => entry.kind === "directory")
@@ -292,6 +293,25 @@ async function materializeWorkspace(workspace: Workspace, machine: ComputerMachi
     });
     requireSuccessfulSetup(mkdir, `workspace parent materialization for ${entry.path}`);
     await machine.writeFile(path, await workspace.readFile(entry.path));
+  }
+}
+
+async function writeFileThroughShell(
+  exec: (command: string) => Promise<ComputerExecResult>,
+  path: string,
+  contents: Uint8Array,
+): Promise<void> {
+  const parent = path.slice(0, path.lastIndexOf("/")) || ROOT;
+  requireSuccessfulSetup(
+    await exec(`mkdir -p ${shellQuote(parent)} && : > ${shellQuote(path)}`),
+    `workspace file initialization for ${path}`,
+  );
+  for (let offset = 0; offset < contents.byteLength; offset += SHELL_WRITE_CHUNK_BYTES) {
+    const chunk = contents.subarray(offset, offset + SHELL_WRITE_CHUNK_BYTES);
+    requireSuccessfulSetup(
+      await exec(`printf %s ${shellQuote(base64(chunk))} | base64 -d >> ${shellQuote(path)}`),
+      `workspace file materialization for ${path}`,
+    );
   }
 }
 
