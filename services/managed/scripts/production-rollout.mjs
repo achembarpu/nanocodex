@@ -51,6 +51,7 @@ const MANAGED_DURABLE_OBJECT_MIGRATIONS = [
   ]],
   ["v3", [["NANOCODEX_MEMORY", "MemoryScope"]]],
   ["v4", [["NANOCODEX_ORGANIZATIONS", "Organization"]]],
+  ["v5", [["NANOCODEX_COMPUTE_SANDBOX", "Sandbox"]]],
 ];
 const PROVIDER_NAMES = [
   "NANOCODEX_MANAGED_AUTH_MODE",
