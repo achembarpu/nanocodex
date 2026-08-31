@@ -16,15 +16,15 @@ export default defineConfig({
     minimum_chrome_version: "116",
     key: "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEApJKR9mIAspoMO7OCUB5T3gTWkoBpPozdwHob+8bOnkBhNtJQeCE2epOesGbD6o5gDzJS94DszhwDZgqj8k/XJqi+RohrbWFoAWjnzXZOP3JKxoh7u5O2K+SKPz68dCjAZuobRxcr4UYgNBfhkgjW9eGtAc8dXHJSocVXx4N6dIpgyOoiAqIIB97QVvQ9Nw7w3laqq8CEt2724hVEvO/ClCvJcnLKqMQd5JjS3bg+ZnPErSiykrWoEddvg7Wx5SwrXPOKCGv7UujkeP4m+3YVtwe1pqpVPbi/252nC7lWO/vXBCoNDXzWdmp3DDjhxx0WUrl1KU/H6rOiaR6+Ia15twIDAQAB",
     permissions: [
-      "activeTab",
       "scripting",
       "sidePanel",
       "storage"
     ],
     host_permissions: [
-      "https://nanocodex-connect-api.gakonst.workers.dev/*"
+      "https://nanocodex-connect-api.gakonst.workers.dev/*",
+      "http://*/*",
+      "https://*/*"
     ],
-    optional_host_permissions: ["http://*/*", "https://*/*"],
     content_security_policy: {
       extension_pages: "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'; worker-src 'self'; connect-src 'self' https://nanocodex-connect-api.gakonst.workers.dev wss://nanocodex-connect-api.gakonst.workers.dev"
     },

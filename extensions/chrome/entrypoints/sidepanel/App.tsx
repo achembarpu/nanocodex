@@ -23,6 +23,7 @@ import type {
   CleanupInput,
   PageInterrupted,
   PageLease,
+  PageSelectionSnapshot,
   PreviewInfo,
   TabClaim,
 } from "../../lib/extension";
@@ -31,11 +32,16 @@ import type { StoredSiteRecipe } from "../../lib/recipe";
 
 interface ActiveOperation {
   cancelled: boolean;
+  catalogTabRefs?: Set<string>;
   controller: AbortController;
   lease?: PageLease;
   ready?: Promise<PageLease>;
-  selection: Promise<string | undefined>;
+  selection?: Promise<PageSelectionSnapshot>;
+  snapshots?: Promise<PageSelectionSnapshot>[];
+  tabCursors?: Map<string, { catalogId: string; offset: number }>;
+  targetTabRef?: string;
   turn?: AgentTurn;
+  windowId?: Promise<number>;
 }
 
 export function App() {
@@ -223,6 +229,7 @@ export function App() {
       operation.cancelled = true;
       operation.controller.abort(new Error("The side panel closed."));
       delete operation.lease;
+      void releasePageSelections(operation);
       void operation.turn?.cancel().catch(() => {});
     }
     sessionOpeningControllerRef.current?.abort(new Error("The side panel closed."));
@@ -243,14 +250,24 @@ export function App() {
     setSaved(await sendMessage<StoredSiteRecipe[]>({ type: "recipe.list" }));
   }
 
-  async function claimSelectedPage(operation: ActiveOperation): Promise<PageLease> {
-    const selectionId = await operation.selection;
+  async function claimSelectedPage(operation: ActiveOperation, requestedTabRef?: string): Promise<PageLease> {
+    const windowId = await (operation.windowId ??= currentPanelWindowId());
+    const selection = requestedTabRef
+      ? undefined
+      : await (operation.selection ??= selectedPageSelection(windowId));
     if (operation.cancelled || operationRef.current !== operation || closedRef.current) {
       throw new Error("The turn was cancelled before the selected tab was needed.");
     }
-    if (!selectionId) {
-      throw new Error("Click the Nanocodex toolbar icon on the HTTP or HTTPS page you want to change.");
+    const selectionId = requestedTabRef ?? selection?.default_tab_ref;
+    const selectionAvailable = requestedTabRef
+      ? operation.catalogTabRefs?.has(requestedTabRef) === true
+      : Boolean(selectionId && selection?.tabs.some(({ tab_ref }) => tab_ref === selectionId));
+    if (!selectionId || !selectionAvailable) {
+      throw new Error(requestedTabRef
+        ? "That open-tab reference is unavailable. List tabs again and choose one exact match."
+        : "No active HTTP or HTTPS tab is available in this side panel's window.");
     }
+    operation.targetTabRef = selectionId;
     const previous = leaseRef.current;
     const claimed = await sendMessage<PageLease>({
       type: "page.claim",
@@ -279,7 +296,48 @@ export function App() {
     if (!operation || operation.cancelled) {
       throw new Error("The current turn is no longer active.");
     }
-    operation.ready ??= claimSelectedPage(operation);
+    if (input.action === "list_tabs") {
+      setActivity("Checking open tabs");
+      const windowId = await (operation.windowId ??= currentPanelWindowId());
+      const continuation = input.cursor === undefined ? undefined : operation.tabCursors?.get(input.cursor);
+      if (input.cursor !== undefined && !continuation) {
+        throw new Error("That open-tab cursor expired. List tabs again from the beginning.");
+      }
+      if (input.cursor === undefined) {
+        operation.catalogTabRefs = new Set();
+        operation.tabCursors = new Map();
+      }
+      operation.catalogTabRefs ??= new Set();
+      const tabCursors = operation.tabCursors ??= new Map();
+      const pending = listOpenPageTabs(windowId, continuation?.offset ?? 0, continuation?.catalogId);
+      (operation.snapshots ??= []).push(pending);
+      const selection = await pending;
+      if (context.signal.aborted) throw context.signal.reason;
+      if (operation.cancelled || operationRef.current !== operation) {
+        throw new Error("The current turn is cancelling.");
+      }
+      for (const { tab_ref: tabRef } of selection.tabs) operation.catalogTabRefs.add(tabRef);
+      let nextCursor: string | undefined;
+      if (selection.next_offset !== undefined) {
+        if (!selection.snapshot_id) throw new Error("The open-tab catalog did not return an identity.");
+        nextCursor = crypto.randomUUID();
+        tabCursors.set(nextCursor, {
+          catalogId: selection.snapshot_id,
+          offset: selection.next_offset,
+        });
+      }
+      setActivity("Thinking");
+      return {
+        ...(selection.default_tab_ref ? { default_tab_ref: selection.default_tab_ref } : {}),
+        ...(nextCursor ? { next_cursor: nextCursor } : {}),
+        tabs: selection.tabs,
+      };
+    }
+    const requestedTabRef = input.action === "inspect" ? input.tab_ref : undefined;
+    if (operation.ready && requestedTabRef && requestedTabRef !== operation.targetTabRef) {
+      throw new Error("This turn is already attached to another exact tab. Start a new request to switch tabs.");
+    }
+    operation.ready ??= claimSelectedPage(operation, requestedTabRef);
     const current = await operation.ready;
     if (context.signal.aborted) throw context.signal.reason;
     if (operation.cancelled || operationRef.current !== operation) {
@@ -325,7 +383,6 @@ export function App() {
     const operation: ActiveOperation = {
       cancelled: false,
       controller: new AbortController(),
-      selection: selectedPageSelection(),
     };
     operationRef.current = operation;
     setOperationActive(true);
@@ -337,6 +394,7 @@ export function App() {
       operation.cancelled = true;
       operation.controller.abort(cause);
       if (operationRef.current === operation) operationRef.current = undefined;
+      void releasePageSelections(operation);
       setOperationActive(false);
       setActivity(undefined);
       throw cause;
@@ -384,6 +442,7 @@ export function App() {
       if (lease) await revertFailedTurnPreview(lease);
       throw cause;
     } finally {
+      await releasePageSelections(operation).catch(() => {});
       if (operationRef.current === operation) {
         operationRef.current = undefined;
         setOperationActive(false);
@@ -473,12 +532,13 @@ export function App() {
     const current = leaseRef.current;
     if (!preview || !current) return;
     setError("");
-    const granted = await chrome.permissions.request({ origins: [preview.permission] });
-    if (!granted) {
-      setError(`Site access was not granted for ${preview.origin}.`);
-      return;
-    }
     try {
+      const granted = await chrome.permissions.contains({ origins: [preview.permission] })
+        || await chrome.permissions.request({ origins: [preview.permission] });
+      if (!granted) {
+        setError(`Site access was not granted for ${preview.origin}.`);
+        return;
+      }
       const response = await sendMessage<{ name?: string }>({
         type: "recipe.keep",
         lease_id: current.lease_id,
@@ -655,7 +715,7 @@ export function App() {
         </>}
       </section>
 
-      {tab ? <div className="site" title={tab.url}><span aria-hidden="true">●</span>{tab.origin}</div> : null}
+      {tab ? <div className="site" title={tab.url}><span aria-hidden="true">●</span>{tab.title} · {tab.origin}</div> : null}
 
       <div className="conversation-workspace">
         <ConversationHistoryRail
@@ -720,7 +780,7 @@ export function App() {
         ) : null}
         <details>
           <summary>Privacy and tab access</summary>
-          <p>The agent attaches a selected tab only when you ask it to inspect or change the page. It can inspect rendered page text and apply reversible CSS, but cannot read form values, cookies, or browser storage. Your signed grant allows replies, actions, conversation history, and full run traces, but never spending or contracts.</p>
+          <p>The agent can list safe titles and origins for loaded HTTP(S) tabs when you name another tab. Without a target, it uses the active web tab when the page tool runs and never falls back to an older tab. Ordinary chat does not read tabs. Page contents are inspected only when the cleanup tool runs, and every change stays bound to one exact document. It cannot read form values, cookies, or browser storage. Your signed grant allows replies, actions, conversation history, and full run traces, but never spending or contracts.</p>
         </details>
       </div>
     </main>
@@ -733,13 +793,43 @@ async function sendMessage<Result = unknown>(message: unknown): Promise<Result> 
   return response;
 }
 
-async function selectedPageSelection(): Promise<string | undefined> {
+async function selectedPageSelection(windowId: number): Promise<PageSelectionSnapshot> {
   try {
-    const selection = await sendMessage<{ selection_id?: string }>({ type: "page.selection" });
-    return typeof selection.selection_id === "string" ? selection.selection_id : undefined;
+    return await sendMessage<PageSelectionSnapshot>({ type: "page.selection", window_id: windowId });
   } catch {
-    return undefined;
+    return { tabs: [] };
   }
+}
+
+function listOpenPageTabs(
+  windowId: number,
+  offset: number,
+  catalogId?: string,
+): Promise<PageSelectionSnapshot> {
+  return sendMessage<PageSelectionSnapshot>({
+    type: "page.tabs",
+    window_id: windowId,
+    offset,
+    ...(catalogId ? { catalog_id: catalogId } : {}),
+  });
+}
+
+async function currentPanelWindowId(): Promise<number> {
+  const current = await chrome.windows.getCurrent();
+  if (!Number.isInteger(current.id)) throw new Error("The side panel's browser window is unavailable.");
+  return current.id as number;
+}
+
+async function releasePageSelections(operation: ActiveOperation): Promise<void> {
+  const snapshots = await Promise.all([
+    operation.selection?.catch(() => undefined),
+    ...(operation.snapshots ?? []).map((snapshot) => snapshot.catch(() => undefined)),
+  ]);
+  const ids = new Set(snapshots.flatMap((snapshot) => snapshot?.snapshot_id ? [snapshot.snapshot_id] : []));
+  await Promise.all([...ids].map((snapshotId) => sendMessage({
+    type: "page.selection.release",
+    snapshot_id: snapshotId,
+  }).catch(() => {})));
 }
 
 function observeTerminalEvent(event: AgentControllerEvent, setActivity: (activity: string | undefined) => void): void {
@@ -757,6 +847,7 @@ function observeTerminalEvent(event: AgentControllerEvent, setActivity: (activit
 function observeTerminalState(_state: AgentTerminalState): void {}
 
 function cleanupActivity(input: CleanupInput): string {
+  if (input.action === "list_tabs") return "Checking open tabs";
   if (input.action === "inspect") return "Reading this tab";
   if (input.action === "preview") return "Applying preview";
   return "Reverting preview";

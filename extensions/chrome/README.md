@@ -3,15 +3,18 @@
 Nanocodex for Chrome is a Manifest V3 consumer of the account-owned hosted
 agent contract. The React side panel reuses the shared durable-agent terminal
 and conversation rail, opens one exact durable agent per approved conversation,
-and reverse-attaches a selected Chrome tab only when the agent calls its page
+and reverse-attaches one exact open Chrome tab only when the agent calls its page
 tool. The background service worker owns only Chrome tab leases, bounded
 page inspection, reversible previews, and saved site recipes. There is no
 parallel extension backend, native host, or extension-to-process protocol.
 
 ## MVP flow
 
-1. Open an HTTP(S) page and click the Nanocodex toolbar action. The action opens
-   one React side panel and grants temporary `activeTab` access.
+1. Click the Nanocodex toolbar action to open one React side panel. Nanocodex
+   can target any loaded, accessible HTTP(S) tab; without an explicit target it
+   uses the active web tab captured when the page tool runs. If the active tab
+   is an internal, loading, or unavailable page, the tool asks you to choose a
+   supported tab instead of falling back to an older selection.
 2. Connect Nanocodex. The hosted Connect popup reuses the canonical Nanocodex
    passkey account and explicitly asks for final replies, action summaries,
    conversation history, full run traces, and ChatGPT-backed agent access.
@@ -25,27 +28,33 @@ parallel extension backend, native host, or extension-to-process protocol.
    a newly approved durable conversation or reopen any conversation retained by
    this extension. The panel records each user turn, streams thinking and the
    reply, and exposes the shared steer/stop controls.
-5. When a prompt asks to inspect or reshape the page, the hosted agent calls the
-   optional attached `cleanup` tool with `inspect`, `preview`, and
-   `revert_preview` actions. Only then does the extension claim the selected
-   HTTP(S) tab. Ordinary chat never depends on a page lease.
+5. When a prompt names another tab, the hosted agent calls `list_tabs` and sees
+   only bounded titles, origins, query-free URLs, per-window active state,
+   same-window state, and opaque tab references, at most 50 per tool result,
+   with an opaque cursor for more. It
+   selects one unambiguous reference and calls `inspect`; when no
+   tab was named it calls `inspect` without a reference and gets the current
+   active web tab. `preview` and `revert_preview` remain attached to that
+   exact document. Ordinary chat never claims or inspects a page.
 6. Inspection returns at most 500 visible semantic DOM candidates and 60,000
    characters. It omits form values, storage, cookies, other tabs, subframes,
    and URL queries/fragments.
 7. A recipe `{name, css, hide_selectors}` is validated and previewed as one
    removable style element. Model output can never inject JavaScript, HTML,
    event handlers, remote resources, or extension capabilities.
-8. **Revert** removes the preview. **Keep for this site** asks for an optional
-   permission for that HTTP(S) host, stores the recipe in
+8. **Revert** removes the preview. **Keep for this site** verifies that Chrome
+   still allows access to that HTTP(S) host, stores the recipe in
    `chrome.storage.local`, and installs a persistent dynamic content script only
    for origins with approved recipes.
 9. Saved recipes are listed in the side panel. **Forget** removes the recipe
-   from storage and every open matching tab, unregisters future injection, and
-   revokes site access when no other saved origin on that host still needs it.
+   from storage and every open matching tab, and unregisters future injection.
+   Installation-wide HTTP(S) access remains until the extension is disabled or
+   removed, or the user changes its site-access setting in Chrome.
    Both saved and forgotten state survive closing and reopening Chrome.
 
-The selected document is represented by an extension-owned opaque lease. Every
-tool call checks that lease; navigation or tab closure invalidates it and
+The selected document is represented by an extension-owned opaque lease. Open-
+tab references are short-lived, turn-scoped, and never expose Chrome tab IDs.
+Every tool call checks the lease; navigation or tab closure invalidates it and
 cancels the active turn. Page requests continue to use Chrome's existing
 logged-in session, but cookie values are never copied into the agent, Connect,
 or extension storage.
@@ -79,19 +88,23 @@ complete.
 
 ## Permissions and security boundary
 
-- Required Chrome APIs: `activeTab`, `scripting`, `sidePanel`, and `storage`.
+- Required Chrome APIs: `scripting`, `sidePanel`, and `storage`. Broad matching
+  host access already permits the Tabs API to expose matching HTTP(S) tab
+  metadata, so Nanocodex does not also request the redundant `tabs` permission.
 - Required network origin: the pinned Nanocodex Connect API. The passkey flow
   opens the canonical HTTPS Connect host as a top-level popup; it is not embedded
   and receives no extension host permission.
-- Optional: HTTP(S) host access, requested for one host only after **Keep**.
+- Required HTTP(S) host access allows a named open tab to be inspected or
+  changed without making the user revisit that tab for a second toolbar click.
+  The model receives only the bounded tab catalog until it invokes `inspect`.
 - Deliberately absent: `nativeMessaging`, `tabs`, `debugger`, `cookies`,
-  `webRequest`, downloads, clipboard, broad required page access, externally
-  connectable pages, and remote code.
+  `webRequest`, downloads, clipboard, externally connectable pages, and remote
+  code.
 - The Connect dialog owns passkey approval. The extension retains only its
   app-scoped grant session in origin-local storage; content scripts cannot read
   extension-local storage, and one-time tool-host tickets are never retained. No
   OpenAI API key, ChatGPT OAuth token, cookie, or provider credential is stored
   by the extension.
 - Preview and persistence run in Chrome's isolated world. The model sees only
-  the narrow cleanup schema, never tab IDs, lease tokens, browser inventory, or
-  Chrome APIs.
+  the narrow cleanup schema, safe open-tab metadata, and turn-scoped opaque tab
+  references—never Chrome tab IDs, lease tokens, cookies, or Chrome APIs.
