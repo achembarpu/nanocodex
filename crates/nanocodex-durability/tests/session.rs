@@ -1,6 +1,6 @@
 use nanocodex_durability::{
     Admission, BeginStep, DurableSession, Error, MemoryStore, OwnedState, OwnerId, OwnerToken,
-    RetryPolicy, StateStore, StoreError, StoreFuture, StoredState,
+    ReconciledStep, RetryPolicy, StateStore, StepStatus, StoreError, StoreFuture, StoredState,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::{
@@ -46,6 +46,67 @@ struct NotCommittedOnceStore {
 
 struct SeededStore {
     state: StoredState,
+}
+
+#[derive(Clone, Copy)]
+enum StepGateMoment {
+    BeforeStartCommit,
+    AfterCompletionCommit,
+}
+
+struct StepGateStore {
+    inner: MemoryStore,
+    moment: StepGateMoment,
+    entered: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+    used: Arc<AtomicBool>,
+}
+
+impl StateStore for StepGateStore {
+    fn acquire<'a>(
+        &'a mut self,
+        state_id: &'a str,
+        owner_id: OwnerId,
+    ) -> StoreFuture<'a, Result<OwnedState, StoreError>> {
+        self.inner.acquire(state_id, owner_id)
+    }
+
+    fn replace<'a>(
+        &'a mut self,
+        state_id: &'a str,
+        owner: &'a OwnerToken,
+        expected_revision: u64,
+        payload: &'a str,
+    ) -> StoreFuture<'a, Result<u64, StoreError>> {
+        let matches = match self.moment {
+            StepGateMoment::BeforeStartCommit => payload.contains("\"status\":\"effect_pending\""),
+            StepGateMoment::AfterCompletionCommit => payload.contains("\"status\":{\"completed\":"),
+        };
+        if matches && !self.used.swap(true, Ordering::SeqCst) {
+            let entered = Arc::clone(&self.entered);
+            let release = Arc::clone(&self.release);
+            return match self.moment {
+                StepGateMoment::BeforeStartCommit => Box::pin(async move {
+                    entered.notify_one();
+                    release.notified().await;
+                    self.inner
+                        .replace(state_id, owner, expected_revision, payload)
+                        .await
+                }),
+                StepGateMoment::AfterCompletionCommit => Box::pin(async move {
+                    let revision = self
+                        .inner
+                        .replace(state_id, owner, expected_revision, payload)
+                        .await?;
+                    entered.notify_one();
+                    release.notified().await;
+                    Ok(revision)
+                }),
+            };
+        }
+        self.inner
+            .replace(state_id, owner, expected_revision, payload)
+    }
 }
 
 impl StateStore for SeededStore {
@@ -271,6 +332,256 @@ async fn refuses_to_repeat_an_ambiguous_unsafe_step() {
             .await,
         Ok(BeginStep::Unknown)
     ));
+    let ReconciledStep::Completed(output) = reopened
+        .reconcile_cancelled_step("turn-1", "tool-1", &"unknown after reopen")
+        .await
+        .unwrap()
+    else {
+        panic!("a cold pending at-most-once effect must reconcile as unknown")
+    };
+    assert_eq!(output.decode::<String>().unwrap(), "unknown after reopen");
+}
+
+#[tokio::test]
+async fn cancellation_reconciliation_does_not_invent_unknown_before_begin_is_observed() {
+    let inner = MemoryStore::new().unwrap();
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let session = Arc::new(
+        DurableSession::open(
+            StepGateStore {
+                inner,
+                moment: StepGateMoment::BeforeStartCommit,
+                entered: Arc::clone(&entered),
+                release: Arc::clone(&release),
+                used: Arc::new(AtomicBool::new(false)),
+            },
+            "cancel-before-begin-observed",
+        )
+        .await
+        .unwrap(),
+    );
+    session.admit("turn-1", &"run tool").await.unwrap();
+    session.begin_attempt("turn-1").await.unwrap();
+    let revision_before_absent = session.state().await.unwrap().revision();
+    assert!(matches!(
+        session
+            .reconcile_cancelled_step("turn-1", "tool-absent", &"unknown")
+            .await
+            .unwrap(),
+        ReconciledStep::NotStarted
+    ));
+    assert_eq!(
+        session.state().await.unwrap().revision(),
+        revision_before_absent,
+        "an absent step must not create a durable transition"
+    );
+
+    let beginning = tokio::spawn({
+        let session = Arc::clone(&session);
+        async move {
+            session
+                .begin_step(
+                    "turn-1",
+                    "tool-1",
+                    "tool_call",
+                    &"effect",
+                    RetryPolicy::Never,
+                )
+                .await
+        }
+    });
+    entered.notified().await;
+    beginning.abort();
+    assert!(beginning.await.unwrap_err().is_cancelled());
+    release.notify_one();
+
+    assert!(matches!(
+        session
+            .reconcile_cancelled_step("turn-1", "tool-1", &"unknown")
+            .await
+            .unwrap(),
+        ReconciledStep::NotStarted
+    ));
+    assert!(
+        session
+            .state()
+            .await
+            .unwrap()
+            .operation("turn-1")
+            .unwrap()
+            .steps
+            .is_empty(),
+        "an unobserved execution permit must leave no durable step"
+    );
+}
+
+#[tokio::test]
+async fn cancellation_reconciliation_completes_an_authorized_pending_step_once_as_unknown() {
+    let session = DurableSession::open(
+        MemoryStore::new().unwrap(),
+        "cancel-authorized-pending-step",
+    )
+    .await
+    .unwrap();
+    session.admit("turn-1", &"run tool").await.unwrap();
+    session.begin_attempt("turn-1").await.unwrap();
+    assert!(matches!(
+        session
+            .begin_step(
+                "turn-1",
+                "tool-1",
+                "tool_call",
+                &"effect",
+                RetryPolicy::Never,
+            )
+            .await
+            .unwrap(),
+        BeginStep::Execute
+    ));
+
+    let ReconciledStep::Completed(output) = session
+        .reconcile_cancelled_step("turn-1", "tool-1", &"unknown")
+        .await
+        .unwrap()
+    else {
+        panic!("an authorized pending effect must settle as unknown")
+    };
+    assert_eq!(output.decode::<String>().unwrap(), "unknown");
+    let revision_after_completion = session.state().await.unwrap().revision();
+    let ReconciledStep::Completed(replayed) = session
+        .reconcile_cancelled_step("turn-1", "tool-1", &"different unknown")
+        .await
+        .unwrap()
+    else {
+        panic!("a settled effect must replay its first authoritative output")
+    };
+    assert_eq!(replayed.decode::<String>().unwrap(), "unknown");
+    assert_eq!(
+        session.state().await.unwrap().revision(),
+        revision_after_completion,
+        "reconciling a completed step must not append a second completion"
+    );
+    assert!(matches!(
+        session
+            .state()
+            .await
+            .unwrap()
+            .operation("turn-1")
+            .unwrap()
+            .steps["tool-1"]
+            .status,
+        StepStatus::Completed(_)
+    ));
+}
+
+#[tokio::test]
+async fn cancellation_reconciliation_does_not_overtake_a_live_begin_handoff() {
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let session = Arc::new(
+        DurableSession::open(
+            StepGateStore {
+                inner: MemoryStore::new().unwrap(),
+                moment: StepGateMoment::BeforeStartCommit,
+                entered: Arc::clone(&entered),
+                release: Arc::clone(&release),
+                used: Arc::new(AtomicBool::new(false)),
+            },
+            "cancel-live-begin-handoff",
+        )
+        .await
+        .unwrap(),
+    );
+    session.admit("turn-1", &"run tool").await.unwrap();
+    session.begin_attempt("turn-1").await.unwrap();
+    let beginning = tokio::spawn({
+        let session = Arc::clone(&session);
+        async move {
+            session
+                .begin_step(
+                    "turn-1",
+                    "tool-1",
+                    "tool_call",
+                    &"effect",
+                    RetryPolicy::Never,
+                )
+                .await
+        }
+    });
+    entered.notified().await;
+    tokio::spawn({
+        let release = Arc::clone(&release);
+        async move {
+            tokio::task::yield_now().await;
+            release.notify_one();
+        }
+    });
+
+    let error = session
+        .reconcile_cancelled_step("turn-1", "tool-1", &"unknown")
+        .await
+        .expect_err("a live execution permit cannot be reclassified by cancellation");
+    assert!(error.to_string().contains("unresolved execution handoff"));
+    assert!(matches!(
+        beginning.await.unwrap().unwrap(),
+        BeginStep::Execute
+    ));
+}
+
+#[tokio::test]
+async fn cancellation_reconciliation_retains_completion_committed_before_its_reply_is_observed() {
+    let inner = MemoryStore::new().unwrap();
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let session = Arc::new(
+        DurableSession::open(
+            StepGateStore {
+                inner,
+                moment: StepGateMoment::AfterCompletionCommit,
+                entered: Arc::clone(&entered),
+                release: Arc::clone(&release),
+                used: Arc::new(AtomicBool::new(false)),
+            },
+            "cancel-after-completion-commit",
+        )
+        .await
+        .unwrap(),
+    );
+    session.admit("turn-1", &"run tool").await.unwrap();
+    session.begin_attempt("turn-1").await.unwrap();
+    session
+        .begin_step(
+            "turn-1",
+            "tool-1",
+            "tool_call",
+            &"effect",
+            RetryPolicy::Never,
+        )
+        .await
+        .unwrap();
+
+    let completing = tokio::spawn({
+        let session = Arc::clone(&session);
+        async move {
+            session
+                .complete_step("turn-1", "tool-1", &"real output")
+                .await
+        }
+    });
+    entered.notified().await;
+    completing.abort();
+    assert!(completing.await.unwrap_err().is_cancelled());
+    release.notify_one();
+
+    let ReconciledStep::Completed(output) = session
+        .reconcile_cancelled_step("turn-1", "tool-1", &"unknown")
+        .await
+        .unwrap()
+    else {
+        panic!("the durable real output must remain authoritative")
+    };
+    assert_eq!(output.decode::<String>().unwrap(), "real output");
 }
 
 #[tokio::test]

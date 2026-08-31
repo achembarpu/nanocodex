@@ -252,12 +252,14 @@ where
             request_prefix: &recorded_request_prefix,
         };
         if let Some(steps) = &self.execution_steps {
+            // A reopened durable step cannot prove that the provider did not
+            // observe the request. Live in-attempt retries remain client-owned.
             match steps
                 .begin::<_, WarmupExecution>(
                     "warmup",
                     "warmup",
                     &recorded,
-                    crate::agent::execution::ExecutionRetry::Idempotent,
+                    crate::agent::execution::ExecutionRetry::Never,
                 )
                 .await?
             {
@@ -265,7 +267,7 @@ where
                 crate::agent::ExecutionStep::Execute => {}
                 crate::agent::ExecutionStep::Unknown => {
                     return Err(NanocodexError::InvalidAttemptState {
-                        detail: "idempotent warmup was recovered as unknown",
+                        detail: "warmup provider outcome is unknown after durable recovery; refusing to resubmit",
                     });
                 }
             }
@@ -388,21 +390,27 @@ where
             prompt_history: &recorded_prompt_history,
         };
         let recovered = if let Some(steps) = &execution_steps {
+            // A reopened durable step cannot prove that the provider did not
+            // observe the request. Live in-attempt retries remain client-owned.
             match steps
                 .begin::<_, RecordedCompactionResult>(
                     &step_id,
                     "compaction",
                     &step_input,
-                    crate::agent::execution::ExecutionRetry::Idempotent,
+                    crate::agent::execution::ExecutionRetry::Never,
                 )
                 .await?
             {
                 crate::agent::ExecutionStep::Execute => None,
                 crate::agent::ExecutionStep::Replay(output) => Some(output),
                 crate::agent::ExecutionStep::Unknown => {
-                    return Err(NanocodexError::InvalidAttemptState {
-                        detail: "idempotent compaction was recovered as unknown",
-                    });
+                    let error = NanocodexError::InvalidAttemptState {
+                        detail: "compaction provider outcome is unknown after durable recovery; refusing to resubmit",
+                    };
+                    span.record("status", "failed");
+                    span.record("otel.status_code", "ERROR");
+                    span.record("duration_ns", elapsed_ns(started_at));
+                    return self.compaction_failed(after_model_call_index, started_at, error);
                 }
             }
         } else {

@@ -24,8 +24,8 @@ use nanocodex_agent::{
 use serde_json::json;
 
 use nanocodex_durability::{
-    DurableAgentExt, DurableSession, MemoryStore, OwnedState, OwnerId, OwnerToken, StateStore,
-    StoreError, StoreFuture,
+    DurableAgentExt, DurableSession, MemoryStore, OperationStatus, OwnedState, OwnerId, OwnerToken,
+    RetryPolicy, StateStore, StepStatus, StoreError, StoreFuture,
 };
 
 fn temporary_workspace(label: &str) -> Result<PathBuf> {
@@ -185,6 +185,10 @@ struct CountingDurableTool {
     calls: Arc<std::sync::atomic::AtomicUsize>,
 }
 
+struct BlockingDurableTool {
+    started: Arc<tokio::sync::Notify>,
+}
+
 struct EphemeralSpawnTool {
     calls: Arc<std::sync::atomic::AtomicUsize>,
 }
@@ -210,6 +214,30 @@ impl nanocodex_agent::Tool for CountingDurableTool {
     ) -> nanocodex_tools::ToolResult {
         self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(nanocodex_tools::ToolOutput::text("counted"))
+    }
+}
+
+#[nanocodex_tools::contract::async_trait]
+impl nanocodex_agent::Tool for BlockingDurableTool {
+    fn definition(&self) -> nanocodex_tools::ToolDefinition {
+        nanocodex_tools::ToolDefinition::function(
+            "count_once",
+            "Block after crossing the durable at-most-once effect boundary.",
+            json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
+        )
+    }
+
+    async fn execute(
+        &self,
+        _input: nanocodex_tools::ToolInput,
+        _context: nanocodex_tools::ToolContext<'_>,
+    ) -> nanocodex_tools::ToolResult {
+        self.started.notify_one();
+        std::future::pending().await
     }
 }
 
@@ -276,6 +304,12 @@ struct GatedWarmupService {
 
 #[derive(Clone)]
 struct DurableCompactionService;
+
+#[derive(Clone)]
+struct PendingStandaloneCompactionService {
+    compactions: Arc<std::sync::atomic::AtomicUsize>,
+    started: Arc<tokio::sync::Notify>,
+}
 
 #[derive(Clone)]
 struct AutomaticCompactionService {
@@ -660,6 +694,35 @@ impl tower::Service<nanocodex_oai_api::tower::ResponsesAttempt> for DurableCompa
 
     fn call(&mut self, request: nanocodex_oai_api::tower::ResponsesAttempt) -> Self::Future {
         std::future::ready(Ok(successful_attempt(request.kind())))
+    }
+}
+
+impl tower::Service<nanocodex_oai_api::tower::ResponsesAttempt>
+    for PendingStandaloneCompactionService
+{
+    type Response = nanocodex_oai_api::tower::ResponsesServiceResponse;
+    type Error = ResponseError;
+    type Future =
+        Pin<Box<dyn Future<Output = std::result::Result<Self::Response, Self::Error>> + Send>>;
+
+    fn poll_ready(
+        &mut self,
+        _context: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::result::Result<(), Self::Error>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, request: nanocodex_oai_api::tower::ResponsesAttempt) -> Self::Future {
+        use nanocodex_oai_api::tower::ResponsesAttemptKind;
+        let kind = request.kind();
+        match kind {
+            ResponsesAttemptKind::Compaction => {
+                self.compactions.fetch_add(1, Ordering::SeqCst);
+                self.started.notify_one();
+                Box::pin(std::future::pending())
+            }
+            kind => Box::pin(async move { Ok(successful_attempt(kind)) }),
+        }
     }
 }
 
@@ -1344,6 +1407,18 @@ async fn execution_policy_authority_defaults_fail_closed() -> Result<()> {
             capability: "cancel"
         })
     ));
+    assert!(matches!(
+        ExecutionPolicy::reconcile_cancelled_step(
+            policy.as_ref(),
+            "turn".to_owned(),
+            "tool".to_owned(),
+            "{}".to_owned(),
+        )
+        .await,
+        Err(NanocodexError::ExecutionPolicyCapabilityUnsupported {
+            capability: "reconcile_cancelled_step"
+        })
+    ));
     assert_eq!(releases.load(Ordering::SeqCst), 0);
     assert_eq!(generations.load(Ordering::SeqCst), 0);
 
@@ -1409,7 +1484,8 @@ async fn developer_context_during_an_active_turn_acks_only_after_durable_commit(
 }
 
 #[tokio::test]
-async fn queued_developer_context_waits_for_an_exact_id_retry_to_terminalize() -> Result<()> {
+async fn queued_developer_context_waits_for_unknown_provider_recovery_to_terminalize() -> Result<()>
+{
     let store = crate::MemoryStore::new()?;
     let failing = FailReplaceOnce {
         inner: store.clone(),
@@ -1468,13 +1544,18 @@ async fn queued_developer_context_waits_for_an_exact_id_retry_to_terminalize() -
         .prompt(PromptRequest::new("retry before developer context").request_id("retry-turn"))
         .await?
         .result()
-        .await?;
-    assert_eq!(recovered.final_message(), "durably replayed");
+        .await
+        .expect_err("a settled provider effect without a durable result must remain unknown");
+    assert!(
+        recovered
+            .to_string()
+            .contains("provider outcome is unknown after durable recovery; refusing to resubmit")
+    );
     append.await??;
     assert_eq!(
         generations.load(Ordering::SeqCst),
-        2,
-        "a definitely uncommitted idempotent model settlement must retry the provider effect",
+        1,
+        "durable recovery must not repeat a provider effect whose outcome may have been billed",
     );
     let checkpoint = state
         .latest_checkpoint()
@@ -1960,6 +2041,157 @@ async fn independent_session_takeover_fences_standalone_compaction_before_execut
 }
 
 #[tokio::test]
+async fn cold_reopen_refuses_to_resubmit_a_pending_standalone_compaction() -> Result<()> {
+    let store = MemoryStore::new()?;
+    let compactions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let started = Arc::new(tokio::sync::Notify::new());
+    let openai = || {
+        let compactions = Arc::clone(&compactions);
+        let started = Arc::clone(&started);
+        OpenAi::builder("test-key")
+            .service(move || PendingStandaloneCompactionService {
+                compactions: Arc::clone(&compactions),
+                started: Arc::clone(&started),
+            })
+            .build()
+    };
+    let workspace = temporary_workspace("standalone-compaction-cold-reopen")?;
+    let state_id = "standalone-compaction-cold-reopen";
+    let state = DurableSession::open(store.clone(), state_id).await?;
+    let (agent, events) = Nanocodex::builder(openai()?)
+        .workspace(&workspace)
+        .durability(state)
+        .await?
+        .build()?;
+    agent
+        .prompt("seed compaction input")
+        .await?
+        .result()
+        .await?;
+
+    let compacting = tokio::spawn({
+        let agent = agent.clone();
+        async move { agent.compact().await }
+    });
+    started.notified().await;
+    assert_eq!(compactions.load(Ordering::SeqCst), 1);
+    agent.shutdown().await?;
+    assert!(matches!(
+        compacting.await?,
+        Err(NanocodexError::TurnCancelled)
+    ));
+    drop((agent, events));
+
+    let reopened = DurableSession::open(store, state_id).await?;
+    let retained = reopened.state().await?;
+    let compaction = retained
+        .pending_operations()
+        .into_iter()
+        .find(|(_, operation)| {
+            operation
+                .steps
+                .values()
+                .any(|step| step.kind == "compaction")
+        })
+        .ok_or_else(|| eyre!("pending standalone compaction receipt was not retained"))?
+        .1;
+    let provider_step = compaction
+        .steps
+        .values()
+        .find(|step| step.kind == "compaction")
+        .ok_or_else(|| eyre!("pending compaction has no provider step"))?;
+    assert_eq!(provider_step.retry, RetryPolicy::Never);
+    assert!(matches!(provider_step.status, StepStatus::EffectPending));
+    assert_eq!(provider_step.attempts, 1);
+    drop(retained);
+
+    let (resumed, resumed_events) = Nanocodex::builder(openai()?)
+        .workspace(&workspace)
+        .durability(reopened)
+        .await?
+        .build()?;
+    let error = resumed
+        .compact()
+        .await
+        .expect_err("a cold pending provider effect must fail closed");
+    let detail = error.to_string();
+    assert!(
+        detail.contains(
+            "compaction provider outcome is unknown after durable recovery; refusing to resubmit"
+        ),
+        "unexpected cold-recovery error: {detail}"
+    );
+    assert_eq!(
+        compactions.load(Ordering::SeqCst),
+        1,
+        "cold recovery must preserve one provider call"
+    );
+
+    resumed.shutdown().await?;
+    drop((resumed, resumed_events));
+    std::fs::remove_dir_all(workspace)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn live_replacement_refuses_to_resubmit_a_pending_standalone_compaction() -> Result<()> {
+    let store = MemoryStore::new()?;
+    let compactions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let started = Arc::new(tokio::sync::Notify::new());
+    let openai = OpenAi::builder("test-key")
+        .service({
+            let compactions = Arc::clone(&compactions);
+            let started = Arc::clone(&started);
+            move || PendingStandaloneCompactionService {
+                compactions: Arc::clone(&compactions),
+                started: Arc::clone(&started),
+            }
+        })
+        .build()?;
+    let workspace = temporary_workspace("standalone-compaction-live-replacement")?;
+    let state = DurableSession::open(store, "standalone-compaction-live-replacement").await?;
+    let (agent, events) = Nanocodex::builder(openai)
+        .workspace(&workspace)
+        .durability(state)
+        .await?
+        .build()?;
+    agent
+        .prompt("seed compaction input")
+        .await?
+        .result()
+        .await?;
+
+    let first = tokio::spawn({
+        let agent = agent.clone();
+        async move { agent.compact().await }
+    });
+    started.notified().await;
+    assert_eq!(compactions.load(Ordering::SeqCst), 1);
+    let replacement = agent
+        .compact()
+        .await
+        .expect_err("replacement must reconcile the pending provider effect as Unknown");
+    let detail = replacement.to_string();
+    assert!(
+        detail.contains(
+            "compaction provider outcome is unknown after durable recovery; refusing to resubmit"
+        ),
+        "unexpected replacement error: {detail}"
+    );
+    assert!(matches!(first.await?, Err(NanocodexError::TurnCancelled)));
+    assert_eq!(
+        compactions.load(Ordering::SeqCst),
+        1,
+        "same-live replacement must preserve one provider call"
+    );
+
+    agent.shutdown().await?;
+    drop((agent, events));
+    std::fs::remove_dir_all(workspace)?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn takeover_after_warmup_authorization_fences_the_result_not_the_in_flight_call() -> Result<()>
 {
     let store = crate::MemoryStore::new()?;
@@ -2196,6 +2428,125 @@ async fn active_cancel_reclaims_a_definitely_uncommitted_terminal_before_follow_
             .is_some_and(|operation| operation.status.is_terminal()),
         "the exact cancellation retry must commit before the follow-on runs"
     );
+    std::fs::remove_dir_all(workspace)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn active_cancel_settles_a_pending_never_retry_tool_as_unknown() -> Result<()> {
+    let store = MemoryStore::new()?;
+    let generations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let tool_started = Arc::new(tokio::sync::Notify::new());
+    let openai = OpenAi::builder("test-key")
+        .service({
+            let generations = Arc::clone(&generations);
+            move || DurableToolService {
+                generations: Arc::clone(&generations),
+            }
+        })
+        .build()?;
+    let tools = Tools::builder()
+        .without_defaults()
+        .tool(BlockingDurableTool {
+            started: Arc::clone(&tool_started),
+        })
+        .build()?;
+    let workspace = temporary_workspace("active-cancel-pending-never-tool")?;
+    let state_id = "active-cancel-pending-never-tool";
+    let state = DurableSession::open(store.clone(), state_id).await?;
+    let (agent, mut events) = Nanocodex::builder(openai)
+        .workspace(&workspace)
+        .session_id(test_session_id())
+        .tools(tools)
+        .durability(state)
+        .await?
+        .build()?;
+    let turn = agent
+        .prompt(PromptRequest::new("run the blocker").request_id("cancel-never-tool"))
+        .await?;
+    tool_started.notified().await;
+
+    turn.cancel().await?;
+    assert!(matches!(
+        turn.result().await,
+        Err(NanocodexError::TurnCancelled)
+    ));
+    let cancellation_events = std::iter::from_fn(|| events.try_recv_timed()).collect::<Vec<_>>();
+    let tool_results = cancellation_events
+        .iter()
+        .enumerate()
+        .filter(|(_, event)| event.event.kind == AgentEventKind::ToolResult)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        tool_results.len(),
+        1,
+        "cancellation must emit the reconciled durable result exactly once"
+    );
+    let (tool_result_index, tool_result) = tool_results[0];
+    let tool_result = tool_result.event.decode_payload::<serde_json::Value>()?;
+    assert_eq!(tool_result["call_id"], "call-count-once");
+    assert_eq!(tool_result["status"], "failed");
+    assert_eq!(tool_result["structured_result"]["status"], "unknown");
+    let emitted_duration_ns = tool_result["duration_ns"]
+        .as_u64()
+        .expect("the Unknown tool result retains its elapsed duration");
+    assert!(
+        emitted_duration_ns > 0,
+        "active cancellation must not reset elapsed tool work"
+    );
+    let run_error_index = cancellation_events
+        .iter()
+        .position(|event| event.event.kind == AgentEventKind::RunError)
+        .expect("explicit cancellation emits RunError");
+    assert!(
+        tool_result_index < run_error_index,
+        "the authoritative tool result must precede the cancellation error"
+    );
+    agent.shutdown().await?;
+    drop((agent, events));
+
+    let reopened = DurableSession::open(store, state_id).await?;
+    let state = reopened.state().await?;
+    let operation = state
+        .operation("cancel-never-tool")
+        .expect("cancelled operation remains retained");
+    let checkpoint = match &operation.status {
+        OperationStatus::Cancelled {
+            checkpoint: Some(checkpoint),
+        } => checkpoint,
+        status => panic!("expected terminal cancellation checkpoint, found {status:?}"),
+    };
+    assert!(
+        operation
+            .steps
+            .values()
+            .all(|step| matches!(step.status, StepStatus::Completed(_))),
+        "terminal cancellation must not retain an unfinished step"
+    );
+    let tool_step = operation
+        .steps
+        .values()
+        .find(|step| step.kind == "tool_call")
+        .expect("the never-retry tool step remains retained");
+    let StepStatus::Completed(output) = &tool_step.status else {
+        unreachable!("all operation steps were asserted completed")
+    };
+    let unknown: serde_json::Value = output.decode()?;
+    assert_eq!(unknown["structured_result"]["status"], "unknown");
+    assert_eq!(unknown["structured_result"]["recovered"], true);
+    assert_eq!(unknown["structured_result"]["replayed"], false);
+    assert_eq!(unknown["duration_ns"], emitted_duration_ns);
+    let retained_work_duration_ns = unknown["work_duration_ns"]
+        .as_u64()
+        .expect("the Unknown tool result retains its execution duration");
+    assert!(retained_work_duration_ns > 0);
+    assert!(retained_work_duration_ns <= emitted_duration_ns);
+    assert!(unknown.to_string().contains("external outcome is unknown"));
+    assert!(
+        checkpoint.json().contains("external outcome is unknown"),
+        "the cancelled checkpoint must contain the same Unknown tool response"
+    );
+
     std::fs::remove_dir_all(workspace)?;
     Ok(())
 }

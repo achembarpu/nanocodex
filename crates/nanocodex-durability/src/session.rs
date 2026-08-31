@@ -76,6 +76,16 @@ pub enum BeginStep<O = EncodedPayload> {
     Unknown,
 }
 
+/// Authoritative result of reconciling an at-most-once step during explicit
+/// cancellation.
+#[derive(Clone, Debug)]
+pub enum ReconciledStep<O = EncodedPayload> {
+    /// The effect definitely did not start, so no output was invented.
+    NotStarted,
+    /// The exact durable output retained for the step.
+    Completed(O),
+}
+
 enum StoredAdmission {
     Accepted,
     Pending,
@@ -126,6 +136,50 @@ enum StoredBeginStep {
     Execute,
     Replay(EncodedPayload),
     Unknown,
+}
+
+enum StoredReconciledStep {
+    NotStarted,
+    Completed(EncodedPayload),
+}
+
+const STEP_HANDOFF_WAITING: u8 = 0;
+const STEP_HANDOFF_AUTHORIZED: u8 = 1;
+const STEP_HANDOFF_ABANDONED: u8 = 2;
+
+struct StepStartHandoff {
+    state: Arc<AtomicU8>,
+    resolved: bool,
+}
+
+impl StepStartHandoff {
+    fn new() -> Self {
+        Self {
+            state: Arc::new(AtomicU8::new(STEP_HANDOFF_WAITING)),
+            resolved: false,
+        }
+    }
+
+    fn shared(&self) -> Arc<AtomicU8> {
+        Arc::clone(&self.state)
+    }
+
+    fn authorize(&mut self) {
+        self.state.store(STEP_HANDOFF_AUTHORIZED, Ordering::Release);
+        self.resolved = true;
+    }
+
+    fn disarm(&mut self) {
+        self.resolved = true;
+    }
+}
+
+impl Drop for StepStartHandoff {
+    fn drop(&mut self) {
+        if !self.resolved {
+            self.state.store(STEP_HANDOFF_ABANDONED, Ordering::Release);
+        }
+    }
 }
 
 #[derive(Clone, Eq, PartialEq)]
@@ -182,6 +236,7 @@ enum Command {
         kind: String,
         input: EncodedPayload,
         retry: RetryPolicy,
+        handoff: Arc<AtomicU8>,
         result: oneshot::Sender<Result<StoredBeginStep>>,
     },
     CompleteStep {
@@ -190,6 +245,13 @@ enum Command {
         step_id: String,
         output: EncodedPayload,
         result: oneshot::Sender<Result<()>>,
+    },
+    ReconcileCancelledStep {
+        caller: Caller,
+        operation_id: String,
+        step_id: String,
+        unknown_output: EncodedPayload,
+        result: oneshot::Sender<Result<StoredReconciledStep>>,
     },
     Complete {
         caller: Caller,
@@ -241,6 +303,7 @@ struct Driver {
     active_agent_generation: Option<u64>,
     claimed: HashMap<String, Caller>,
     running: HashSet<String>,
+    step_start_handoffs: HashMap<(String, String), Arc<AtomicU8>>,
     poisoned: bool,
     commands: mpsc::Receiver<Command>,
     releases: mpsc::UnboundedReceiver<ReleaseSignal>,
@@ -326,6 +389,7 @@ impl Driver {
                         self.active_agent_generation = None;
                         self.claimed.clear();
                         self.running.clear();
+                        self.step_start_handoffs.clear();
                     }
                 }
                 Command::Admit {
@@ -407,8 +471,10 @@ impl Driver {
                     kind,
                     input,
                     retry,
+                    handoff,
                     result,
                 } => {
+                    let handoff_key = (operation_id.clone(), step_id.clone());
                     let outcome = match self.authorize(&caller) {
                         Ok(()) => {
                             self.begin_step(&caller, operation_id, step_id, kind, input, retry)
@@ -416,7 +482,12 @@ impl Driver {
                         }
                         Err(error) => Err(error),
                     };
+                    let started_never = retry == RetryPolicy::Never
+                        && matches!(&outcome, Ok(StoredBeginStep::Execute));
                     drop(result.send(outcome));
+                    if started_never {
+                        self.step_start_handoffs.insert(handoff_key, handoff);
+                    }
                 }
                 Command::CompleteStep {
                     caller,
@@ -425,10 +496,35 @@ impl Driver {
                     output,
                     result,
                 } => {
+                    let handoff_key = (operation_id.clone(), step_id.clone());
                     let outcome = match self.authorize(&caller) {
                         Ok(()) => {
                             self.complete_step(&caller, operation_id, step_id, output)
                                 .await
+                        }
+                        Err(error) => Err(error),
+                    };
+                    if outcome.is_ok() {
+                        self.step_start_handoffs.remove(&handoff_key);
+                    }
+                    drop(result.send(outcome));
+                }
+                Command::ReconcileCancelledStep {
+                    caller,
+                    operation_id,
+                    step_id,
+                    unknown_output,
+                    result,
+                } => {
+                    let outcome = match self.authorize(&caller) {
+                        Ok(()) => {
+                            self.reconcile_cancelled_step(
+                                &caller,
+                                operation_id,
+                                step_id,
+                                unknown_output,
+                            )
+                            .await
                         }
                         Err(error) => Err(error),
                     };
@@ -562,12 +658,25 @@ impl Driver {
                 }
                 Command::FenceCheckpointEffect { caller, result } => {
                     let outcome = match self.authorize(&caller) {
+                        Ok(()) if self.state.checkpoint_effect_pending() => {
+                            Err(Error::InvalidState(
+                                "standalone checkpoint provider outcome is unknown after durable recovery; refusing to resubmit"
+                                    .to_owned(),
+                            ))
+                        }
                         Ok(()) => match self.state.first_pending_operation() {
+                            Some((pending_id, _))
+                                if pending_id.starts_with("standalone-compaction-") =>
+                            {
+                                Ok(())
+                            }
                             Some((pending_id, _)) => Err(Error::OperationBlocked {
                                 operation_id: "standalone-checkpoint".to_owned(),
                                 pending_id: pending_id.to_owned(),
                             }),
-                            None => self.apply(Transition::CheckpointEffectStarted).await,
+                            None => {
+                                Ok(())
+                            }
                         },
                         Err(error) => Err(error),
                     };
@@ -587,6 +696,7 @@ impl Driver {
                     self.active_agent_generation = None;
                     self.claimed.clear();
                     self.running.clear();
+                    self.step_start_handoffs.clear();
                 }
                 release.state.finish();
             }
@@ -601,6 +711,7 @@ impl Driver {
                     .retain(|_, caller| caller != &Caller::Direct(caller_id.clone()));
                 for operation_id in released {
                     self.running.remove(&operation_id);
+                    self.clear_step_start_handoffs(&operation_id);
                 }
             }
         }
@@ -644,6 +755,7 @@ impl Driver {
         self.state = state;
         self.claimed.clear();
         self.running.clear();
+        self.step_start_handoffs.clear();
         self.next_agent_generation = generation;
         self.active_agent_generation = Some(generation);
         Ok(AgentAcquisition {
@@ -832,6 +944,73 @@ impl Driver {
         }
     }
 
+    async fn reconcile_cancelled_step(
+        &mut self,
+        caller: &Caller,
+        operation_id: String,
+        step_id: String,
+        unknown_output: EncodedPayload,
+    ) -> Result<StoredReconciledStep> {
+        self.require_claimed(caller, &operation_id)?;
+        self.require_running(&operation_id)?;
+        let key = (operation_id.clone(), step_id.clone());
+        let Some((retry, status)) = self
+            .state
+            .operation(&operation_id)
+            .and_then(|operation| operation.steps.get(&step_id))
+            .map(|step| (step.retry, step.status.clone()))
+        else {
+            self.step_start_handoffs.remove(&key);
+            return Ok(StoredReconciledStep::NotStarted);
+        };
+        if retry != RetryPolicy::Never {
+            return Err(Error::InvalidState(format!(
+                "step `{step_id}` in operation `{operation_id}` is not an at-most-once effect"
+            )));
+        }
+        match status {
+            StepStatus::Completed(output) => {
+                self.step_start_handoffs.remove(&key);
+                Ok(StoredReconciledStep::Completed(output))
+            }
+            StepStatus::EffectPending => {
+                let handoff = self
+                    .step_start_handoffs
+                    .get(&key)
+                    .map_or(STEP_HANDOFF_AUTHORIZED, |handoff| {
+                        handoff.load(Ordering::Acquire)
+                    });
+                match handoff {
+                    STEP_HANDOFF_ABANDONED => {
+                        self.apply(Transition::StepAbandoned {
+                            operation_id,
+                            step_id,
+                        })
+                        .await?;
+                        self.step_start_handoffs.remove(&key);
+                        Ok(StoredReconciledStep::NotStarted)
+                    }
+                    STEP_HANDOFF_AUTHORIZED => {
+                        self.apply(Transition::StepCompleted {
+                            operation_id,
+                            step_id,
+                            output: unknown_output.clone(),
+                        })
+                        .await?;
+                        self.step_start_handoffs.remove(&key);
+                        Ok(StoredReconciledStep::Completed(unknown_output))
+                    }
+                    STEP_HANDOFF_WAITING => Err(Error::InvalidState(format!(
+                        "step `{step_id}` in operation `{operation_id}` cancellation raced an unresolved execution handoff"
+                    ))),
+                    state => Err(Error::InvalidState(format!(
+                        "step `{step_id}` in operation `{operation_id}` has invalid execution handoff state {state}"
+                    ))),
+                }
+            }
+        }
+    }
+
     async fn complete(
         &mut self,
         caller: &Caller,
@@ -905,6 +1084,7 @@ impl Driver {
         self.require_claimed(caller, operation_id)?;
         self.claimed.remove(operation_id);
         self.running.remove(operation_id);
+        self.clear_step_start_handoffs(operation_id);
         Ok(())
     }
 
@@ -912,7 +1092,13 @@ impl Driver {
         if self.claimed.get(operation_id) == Some(caller) {
             self.claimed.remove(operation_id);
             self.running.remove(operation_id);
+            self.clear_step_start_handoffs(operation_id);
         }
+    }
+
+    fn clear_step_start_handoffs(&mut self, operation_id: &str) {
+        self.step_start_handoffs
+            .retain(|(candidate, _), _| candidate != operation_id);
     }
 
     async fn apply(&mut self, entry: Transition) -> Result<()> {
@@ -1114,6 +1300,7 @@ impl DurableSession {
             active_agent_generation: None,
             claimed: HashMap::new(),
             running: HashSet::new(),
+            step_start_handoffs: HashMap::new(),
             poisoned: false,
             commands: receiver,
             releases: release_receiver,
@@ -1392,6 +1579,7 @@ impl DurableSession {
         retry: RetryPolicy,
     ) -> Result<StoredBeginStep> {
         let (result, receiver) = oneshot::channel();
+        let mut handoff = StepStartHandoff::new();
         self.send(Command::BeginStep {
             caller: Caller::Direct(self.caller_id.clone()),
             operation_id,
@@ -1399,10 +1587,17 @@ impl DurableSession {
             kind,
             input,
             retry,
+            handoff: handoff.shared(),
             result,
         })
         .await?;
-        receive(receiver).await
+        let outcome = receive(receiver).await?;
+        if matches!(&outcome, StoredBeginStep::Execute) {
+            handoff.authorize();
+        } else {
+            handoff.disarm();
+        }
+        Ok(outcome)
     }
 
     /// Commits a step output for future replay.
@@ -1422,6 +1617,29 @@ impl DurableSession {
         })
         .await?;
         receive(receiver).await
+    }
+
+    /// Reconciles an at-most-once step for explicit cancellation and returns
+    /// the exact output selected by durable state.
+    pub async fn reconcile_cancelled_step<T: Serialize + ?Sized>(
+        &self,
+        operation_id: impl Into<String>,
+        step_id: impl Into<String>,
+        unknown_output: &T,
+    ) -> Result<ReconciledStep> {
+        let (result, receiver) = oneshot::channel();
+        self.send(Command::ReconcileCancelledStep {
+            caller: Caller::Direct(self.caller_id.clone()),
+            operation_id: operation_id.into(),
+            step_id: step_id.into(),
+            unknown_output: EncodedPayload::encode(unknown_output)?,
+            result,
+        })
+        .await?;
+        match receive(receiver).await? {
+            StoredReconciledStep::NotStarted => Ok(ReconciledStep::NotStarted),
+            StoredReconciledStep::Completed(output) => Ok(ReconciledStep::Completed(output)),
+        }
     }
 
     /// Atomically terminalizes an operation with its checkpoint and result.
@@ -1642,6 +1860,7 @@ impl DurableOwner {
         I: Serialize + ?Sized,
     {
         let (result, receiver) = oneshot::channel();
+        let mut handoff = StepStartHandoff::new();
         self.send(Command::BeginStep {
             caller: self.caller()?,
             operation_id,
@@ -1649,10 +1868,17 @@ impl DurableOwner {
             kind,
             input: EncodedPayload::encode(input)?,
             retry,
+            handoff: handoff.shared(),
             result,
         })
         .await?;
-        match receive(receiver).await? {
+        let outcome = receive(receiver).await?;
+        if matches!(&outcome, StoredBeginStep::Execute) {
+            handoff.authorize();
+        } else {
+            handoff.disarm();
+        }
+        match outcome {
             StoredBeginStep::Execute => Ok(BeginStep::Execute),
             StoredBeginStep::Replay(output) => Ok(BeginStep::Replay(output)),
             StoredBeginStep::Unknown => Ok(BeginStep::Unknown),
@@ -1675,6 +1901,27 @@ impl DurableOwner {
         })
         .await?;
         receive(receiver).await
+    }
+
+    pub(crate) async fn reconcile_cancelled_step<T: Serialize + ?Sized>(
+        &self,
+        operation_id: String,
+        step_id: String,
+        unknown_output: &T,
+    ) -> Result<ReconciledStep> {
+        let (result, receiver) = oneshot::channel();
+        self.send(Command::ReconcileCancelledStep {
+            caller: self.caller()?,
+            operation_id,
+            step_id,
+            unknown_output: EncodedPayload::encode(unknown_output)?,
+            result,
+        })
+        .await?;
+        match receive(receiver).await? {
+            StoredReconciledStep::NotStarted => Ok(ReconciledStep::NotStarted),
+            StoredReconciledStep::Completed(output) => Ok(ReconciledStep::Completed(output)),
+        }
     }
 
     pub(crate) async fn complete<C: Serialize + ?Sized, O: Serialize + ?Sized>(
@@ -2033,6 +2280,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rejected_step_completion_cannot_erase_an_unresolved_execution_handoff() {
+        let store = MemoryStore::new().unwrap();
+        let session = DurableSession::open(store, "rejected-step-completion-handoff")
+            .await
+            .unwrap();
+        let foreign = session.clone();
+        session.admit("turn-1", &"prompt").await.unwrap();
+        session.begin_attempt("turn-1").await.unwrap();
+
+        let mut handoff = StepStartHandoff::new();
+        let (result, receiver) = oneshot::channel();
+        session
+            .send(Command::BeginStep {
+                caller: Caller::Direct(session.caller_id.clone()),
+                operation_id: "turn-1".to_owned(),
+                step_id: "tool-1".to_owned(),
+                kind: "tool_call".to_owned(),
+                input: EncodedPayload::encode(&"effect").unwrap(),
+                retry: RetryPolicy::Never,
+                handoff: handoff.shared(),
+                result,
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            receive(receiver).await,
+            Ok(StoredBeginStep::Execute)
+        ));
+
+        assert!(matches!(
+            foreign
+                .complete_step("turn-1", "tool-1", &"stale output")
+                .await,
+            Err(Error::OperationNotClaimed { .. })
+        ));
+        let error = session
+            .reconcile_cancelled_step("turn-1", "tool-1", &"unknown")
+            .await
+            .expect_err("a rejected caller must leave the unresolved handoff fenced");
+        assert!(error.to_string().contains("unresolved execution handoff"));
+        handoff.disarm();
+    }
+
+    #[tokio::test]
     async fn direct_mutation_cannot_bypass_a_live_model_owner() {
         let store = MemoryStore::new().unwrap();
         let session = DurableSession::open(store, "direct-owner-bypass")
@@ -2387,21 +2678,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn standalone_checkpoint_intent_survives_a_cold_reopen() {
+    async fn standalone_checkpoint_fence_is_read_only_across_a_cold_reopen() {
         let store = MemoryStore::new().unwrap();
         let session = DurableSession::open(store.clone(), "checkpoint-intent-reopen")
             .await
             .unwrap();
         let (owner, _) = session.acquire_agent().await.unwrap();
+        let revision = session.state().await.unwrap().revision();
         owner.fence_checkpoint_effect().await.unwrap();
-        assert!(session.state().await.unwrap().checkpoint_effect_pending());
+        assert_eq!(session.state().await.unwrap().revision(), revision);
+        assert!(!session.state().await.unwrap().checkpoint_effect_pending());
         owner.shutdown().await.unwrap();
         drop(session);
 
         let reopened = DurableSession::open(store, "checkpoint-intent-reopen")
             .await
             .unwrap();
-        assert!(reopened.state().await.unwrap().checkpoint_effect_pending());
+        assert!(!reopened.state().await.unwrap().checkpoint_effect_pending());
         let (owner, _) = reopened.acquire_agent().await.unwrap();
         owner.fence_checkpoint_effect().await.unwrap();
         owner.commit_checkpoint(&7_u32).await.unwrap();

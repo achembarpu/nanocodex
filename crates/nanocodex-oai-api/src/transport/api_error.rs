@@ -15,13 +15,14 @@ pub(super) fn retryable_api_error(event: &str) -> Option<(&'static str, Option<D
                 return None;
             }
             match discriminator {
+                Some("server_is_overloaded" | "slow_down") => "api_overload",
                 Some("rate_limit_exceeded") => "api_rate_limit",
                 Some("server_error" | "websocket_connection_limit_reached") => "api_server",
                 _ => "api_failed",
             }
         }
         _ => match discriminator {
-            Some("server_is_overloaded" | "slow_down") => return None,
+            Some("server_is_overloaded" | "slow_down") => "api_overload",
             Some("server_error" | "websocket_connection_limit_reached") => "api_server",
             Some("rate_limit_exceeded") => "api_rate_limit",
             _ => return None,
@@ -52,8 +53,6 @@ fn is_terminal_response_failure(code: &str) -> bool {
             | "misalignment_policy_violation"
             | "invalid_prompt"
             | "bio_policy"
-            | "server_is_overloaded"
-            | "slow_down"
     )
 }
 
@@ -167,22 +166,35 @@ mod tests {
     }
 
     #[test]
-    fn overload_failures_are_terminal() {
+    fn overload_failures_are_retryable_and_retain_server_delay() {
         for code in ["server_is_overloaded", "slow_down"] {
-            let failed = format!(
-                r#"{{
-                    "type": "response.failed",
-                    "response": {{ "error": {{ "code": "{code}" }} }}
-                }}"#
-            );
-            let error = format!(
-                r#"{{
-                    "type": "error",
-                    "error": {{ "code": "{code}" }}
-                }}"#
-            );
-            assert_eq!(retryable_api_error(&failed), None, "failed: {code}");
-            assert_eq!(retryable_api_error(&error), None, "error: {code}");
+            for discriminator in ["code", "type"] {
+                let failed = format!(
+                    r#"{{
+                        "type": "response.failed",
+                        "response": {{
+                            "error": {{ "{discriminator}": "{code}", "retry_after": 1.25 }}
+                        }}
+                    }}"#
+                );
+                let error = format!(
+                    r#"{{
+                        "type": "error",
+                        "error": {{ "{discriminator}": "{code}" }},
+                        "headers": {{ "Retry-After": "2.5" }}
+                    }}"#
+                );
+                assert_eq!(
+                    retryable_api_error(&failed),
+                    Some(("api_overload", Some(Duration::from_millis(1_250)))),
+                    "failed: {discriminator}={code}"
+                );
+                assert_eq!(
+                    retryable_api_error(&error),
+                    Some(("api_overload", Some(Duration::from_millis(2_500)))),
+                    "error: {discriminator}={code}"
+                );
+            }
         }
     }
 

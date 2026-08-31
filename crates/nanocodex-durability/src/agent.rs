@@ -4,13 +4,15 @@ use nanocodex_agent::{
     ExecutionPolicyDisposition, NanocodexBuilder, NanocodexError, Result as AgentResult,
     execution::{
         ExecutionAdmission, ExecutionFuture, ExecutionOutput, ExecutionPolicy, ExecutionRetry,
-        ExecutionStepAdmission,
+        ExecutionStepAdmission, ExecutionStepReconciliation,
     },
     session::SessionSnapshot,
 };
 use serde_json::value::RawValue;
 
-use crate::{Admission, BeginStep, DurableSession, Error, RetryPolicy, session::DurableOwner};
+use crate::{
+    Admission, BeginStep, DurableSession, Error, ReconciledStep, RetryPolicy, session::DurableOwner,
+};
 
 /// Fluent builder extension that attaches portable durability to an agent.
 pub trait DurableAgentExt: Sized {
@@ -191,6 +193,28 @@ impl ExecutionPolicy for DurableExecution {
                 .complete_step(operation_id, step_id, &output)
                 .await
                 .map_err(agent_error)
+        })
+    }
+
+    fn reconcile_cancelled_step<'a>(
+        &'a self,
+        operation_id: String,
+        step_id: String,
+        unknown_output_json: String,
+    ) -> ExecutionFuture<'a, AgentResult<ExecutionStepReconciliation>> {
+        Box::pin(async move {
+            let unknown_output = raw(unknown_output_json)?;
+            match self
+                .owner
+                .reconcile_cancelled_step(operation_id, step_id, &unknown_output)
+                .await
+            {
+                Ok(ReconciledStep::NotStarted) => Ok(ExecutionStepReconciliation::NotStarted),
+                Ok(ReconciledStep::Completed(output)) => Ok(
+                    ExecutionStepReconciliation::Completed(output.json().to_owned()),
+                ),
+                Err(error) => Err(agent_error(error)),
+            }
         })
     }
 

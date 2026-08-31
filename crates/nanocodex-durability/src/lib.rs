@@ -19,7 +19,7 @@ pub use memory::MemoryStore;
     doc(cfg(all(feature = "postgres", not(target_family = "wasm"))))
 )]
 pub use postgres::PostgresStore;
-pub use session::{Admission, AutomaticAdmission, BeginStep, DurableSession};
+pub use session::{Admission, AutomaticAdmission, BeginStep, DurableSession, ReconciledStep};
 #[cfg(all(feature = "sqlite", not(target_family = "wasm")))]
 #[cfg_attr(docsrs, doc(cfg(all(feature = "sqlite", not(target_family = "wasm")))))]
 pub use sqlite::SqliteStore;

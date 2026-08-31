@@ -76,6 +76,14 @@ pub enum Transition {
         /// Recovery policy if completion is missing.
         retry: RetryPolicy,
     },
+    /// A newly started at-most-once step was not observed by its executor, so
+    /// its effect boundary is removed before any external dispatch can occur.
+    StepAbandoned {
+        /// Accepted operation identity.
+        operation_id: String,
+        /// Stable step identity within the operation.
+        step_id: String,
+    },
     /// A replayable step completed.
     StepCompleted {
         /// Accepted operation identity.
@@ -512,6 +520,27 @@ impl DurableState {
                     }
                 }
             }
+            Transition::StepAbandoned {
+                operation_id,
+                step_id,
+            } => {
+                ensure_nonempty(step_id, "step ID")?;
+                self.ensure_prior_operations_terminal(operation_id)?;
+                let operation = self.pending_operation(operation_id)?;
+                let step = operation.steps.get(step_id).ok_or_else(|| {
+                    Error::InvalidState(format!(
+                        "step `{step_id}` in operation `{operation_id}` was abandoned before start"
+                    ))
+                })?;
+                if step.retry != RetryPolicy::Never
+                    || !matches!(step.status, StepStatus::EffectPending)
+                    || step.attempts != 1
+                {
+                    return Err(Error::InvalidState(format!(
+                        "step `{step_id}` in operation `{operation_id}` cannot be abandoned after effect authorization"
+                    )));
+                }
+            }
             Transition::OperationCompleted { operation_id, .. } => {
                 self.ensure_prior_operations_terminal(operation_id)?;
                 let operation = self.pending_operation(operation_id)?;
@@ -609,6 +638,14 @@ impl DurableState {
                 })?;
                 step.status = StepStatus::Completed(output);
             }
+            Transition::StepAbandoned {
+                operation_id,
+                step_id,
+            } => {
+                self.pending_operation_mut(&operation_id)?
+                    .steps
+                    .remove(&step_id);
+            }
             Transition::OperationCompleted {
                 operation_id,
                 checkpoint,
@@ -702,6 +739,7 @@ impl Transition {
         match self {
             Self::OperationAccepted { operation_id, .. }
             | Self::StepStarted { operation_id, .. }
+            | Self::StepAbandoned { operation_id, .. }
             | Self::StepCompleted { operation_id, .. }
             | Self::OperationCompleted { operation_id, .. }
             | Self::OperationFailed { operation_id, .. }
