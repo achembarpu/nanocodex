@@ -912,13 +912,6 @@ context, and typed history.
 `Agent` and `Actions` are module namespaces, not classes. `Agent.create` returns
 an owned client decorated with matching domain actions:
 
-TypeScript consumers use one transport-independent contract: `AgentLifecycle`
-is `Agent<AgentLifecycleActions>`, `AgentTurn` is the independently awaitable
-and controllable turn, and `AgentTurnResult` is the minimum completed result.
-Local `DefaultAgent`, `Turn`, and `TurnResult` refine those types with branching,
-settings, snapshots, and other local capabilities. The older `LifecycleTurn`
-and `LifecycleTurnResult` names remain deprecated aliases.
-
 - `agent.turn.prompt(...)` / `Actions.turn.prompt(agent, ...)`
 - `turn.accepted()` / `Actions.turn.accepted(turn)`
 - `turn.result()` / `Actions.turn.getResult(turn)`

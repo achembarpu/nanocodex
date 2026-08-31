@@ -338,28 +338,31 @@ export type AgentActions = {
   };
 };
 
-/** Stable identity and ownership shared by Agent and Turn handles. */
-export type AgentReference = {
+export type Agent<extended extends object = {}> = {
   readonly agentId: string;
   readonly key: string;
   readonly name: string;
   readonly sessionId: string;
   readonly type: string;
   readonly uid: string;
-  /** Releases this JavaScript/WASM handle without joining unfinished turns. */
-  dispose(): void;
-};
-
-export type Agent<extended extends object = {}> = AgentReference & {
   extend<const extension extends object>(
     decorator: (agent: Agent<extended>) => extension,
   ): Agent<extended & extension>;
+  /** Releases this JavaScript/WASM handle without joining unfinished turns. */
+  dispose(): void;
 } & extended;
 
 export type DefaultAgent = Agent<AgentActions>;
 
-/** Minimal transport-independent lifecycle implemented by every runnable Agent. */
-export type AgentLifecycleActions = {
+/** Transport-independent Agent lifecycle shared by local and managed durable Agents. */
+export type AgentLifecycle = {
+  readonly agentId: string;
+  readonly key: string;
+  readonly name: string;
+  readonly sessionId: string;
+  readonly type: string;
+  readonly uid: string;
+  dispose(): void;
   events: {
     watch(options?: WatchEventsOptions): EventWatcher;
   };
@@ -372,39 +375,48 @@ export type AgentLifecycleActions = {
   };
 };
 
-/** Canonical Agent surface shared by local and managed transports. */
-export type AgentLifecycle = Agent<AgentLifecycleActions>;
+export type LifecycleTurn = Readonly<{
+  readonly agent: Readonly<{
+    agentId: string;
+    key: string;
+    name: string;
+    sessionId: string;
+    type: string;
+    uid: string;
+    dispose(): void;
+  }>;
+  accepted(): Promise<string | undefined>;
+  result(): Promise<LifecycleTurnResult>;
+  steer(options: { input: PromptInput }): Promise<void>;
+  cancel(): Promise<void>;
+  dispose(): void;
+}>;
 
-/** The result surface every transport can provide without capability checks. */
-export type AgentTurnResult = Readonly<{
+export type LifecycleTurnResult = Readonly<{
   finalMessage: string;
   /** Managed Agents may return null when the service did not report usage. */
   usage(): Promise<TurnUsage | null>;
   dispose(): void;
 }>;
 
-/** Canonical independently awaitable and controllable turn lifecycle. */
-export type AgentTurn<
-  agent extends AgentReference = AgentReference,
-  result extends AgentTurnResult = AgentTurnResult,
-> = Readonly<{
+export type Turn<agent extends Agent<object> = Agent<object>> = Readonly<{
   readonly agent: agent;
+  /**
+   * Waits for execution-policy admission and returns its durable request ID.
+   * Rejections are Errors whose `code` is `cancelled`, `blocked`, `conflict`,
+   * `retryable`, `reopen_required`, `invalid_request`, or `failed`.
+   */
   accepted(): Promise<string | undefined>;
-  result(): Promise<result>;
+  /**
+   * Waits for the terminal result. A `reopen_required` rejection means this
+   * Agent is stale and the same durable turn may be resumed only on a new Agent.
+   */
+  result(): Promise<TurnResult>;
   steer(options: { input: PromptInput }): Promise<void>;
   cancel(): Promise<void>;
-  /** Releases this observer without cancelling accepted work. */
+  /** Releases this handle without cancelling its accepted turn. */
   dispose(): void;
 }>;
-
-/** @deprecated Use `AgentTurn`. */
-export type LifecycleTurn = AgentTurn<AgentReference, AgentTurnResult>;
-
-/** @deprecated Use `AgentTurnResult`. */
-export type LifecycleTurnResult = AgentTurnResult;
-
-/** Local completed turn, including the snapshot capability. */
-export type Turn<agent extends AgentReference = Agent<object>> = AgentTurn<agent, TurnResult>;
 
 declare const turnResultBrand: unique symbol;
 /** Opaque completed-turn identity. Materialize large values explicitly and release it when done. */
