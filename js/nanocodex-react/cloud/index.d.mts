@@ -228,11 +228,14 @@ export function useRevokeGrant<
   context
 >;
 
-export type ConnectDialogRequest = Dialog.ConnectionRequest;
+export type MockConnectDialogRequest = Dialog.ConnectionRequest;
+export type MockMachineUsdFundDialogRequest = Dialog.FundingRequest;
+export type MockDialogInstance = Dialog.Instance;
 
-export type MachineUsdFundDialogRequest = Dialog.FundingRequest;
-export type MemoryDialogInstance = Dialog.Instance;
-
-export function NanocodexDialog(props: Readonly<{
-  dialog: MemoryDialogInstance;
+/**
+ * Development-only memory-dialog renderer that fabricates approval responses.
+ * It does not authenticate an account or create real signatures.
+ */
+export function NanocodexMockDialog(props: Readonly<{
+  dialog: MockDialogInstance;
 }>): ReactNode;

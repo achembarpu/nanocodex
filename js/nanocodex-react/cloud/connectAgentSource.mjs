@@ -39,7 +39,12 @@ function connectTurn(connectAgent, turnId, input) {
   return Object.freeze({
     historyEntryId: `managed-user-${turnId}`,
     steer: ({ input: steerInput }) => turn.steer({ input: steerInput }),
-    cancel: () => turn.cancel(),
+    cancel: () => {
+      if (!controller.signal.aborted) {
+        controller.abort(new DOMException("Connect turn cancelled", "AbortError"));
+      }
+      return turn.cancel();
+    },
     async result() {
       let retryDelay = TURN_RETRY_INITIAL_MS;
       while (!controller.signal.aborted) {
@@ -83,6 +88,7 @@ function connectEventWatcher(connectAgent, submitted, historyEnabled) {
   let sequence = 0;
   let hasOlder = false;
   let historyLoaded = false;
+  let historyRequested = false;
   let loadingOlder;
   let loadingInitial;
   let historyPageInFlight;
@@ -128,7 +134,8 @@ function connectEventWatcher(connectAgent, submitted, historyEnabled) {
     });
   };
   const scheduleHistoryRetry = () => {
-    if (controller.signal.aborted || historyLoaded || historyRetryTimer !== undefined) return;
+    if (controller.signal.aborted || !historyRequested
+      || historyLoaded || historyRetryTimer !== undefined) return;
     const delay = historyRetryDelay;
     historyRetryDelay = Math.min(historyRetryDelay * 2, HISTORY_RETRY_MAX_MS);
     historyRetryTimer = setTimeout(() => {
@@ -218,21 +225,23 @@ function connectEventWatcher(connectAgent, submitted, historyEnabled) {
       envelopes.sort((left, right) => compareCursor(left.cursor, right.cursor));
       hasOlder = initial.hasMore;
       historyLoaded = true;
-      latestLiveCursor = initial.latestCursor;
+      if (latestLiveCursor === undefined
+        || compareCursor(initial.latestCursor, latestLiveCursor) > 0) {
+        latestLiveCursor = initial.latestCursor;
+      }
       outageReported = false;
       historyRetryDelay = HISTORY_RETRY_INITIAL_MS;
       if (historyRetryTimer !== undefined) clearTimeout(historyRetryTimer);
       historyRetryTimer = undefined;
       emitHistory();
       startTail(initial.latestCursor);
-      if (hasOlder) void loadRemainingHistory();
-      else compactEnvelopeRetention(envelopes, seen);
+      if (!hasOlder) compactEnvelopeRetention(envelopes, seen);
       return true;
     })().finally(() => { loadingInitial = undefined; });
     return loadingInitial;
   };
   const retryWhenOnline = () => {
-    if (controller.signal.aborted || historyLoaded) return;
+    if (controller.signal.aborted || !historyRequested || historyLoaded) return;
     if (historyRetryTimer !== undefined) clearTimeout(historyRetryTimer);
     historyRetryTimer = undefined;
     void loadInitial();
@@ -254,22 +263,9 @@ function connectEventWatcher(connectAgent, submitted, historyEnabled) {
     }).finally(() => { loadingOlder = undefined; });
     return loadingOlder;
   };
-  const loadRemainingHistory = async () => {
-    try {
-      while (hasOlder && !controller.signal.aborted) {
-        const added = await loadOlderPage();
-        if (!added) break;
-      }
-    } catch (error) {
-      reportHistoryOutage(error);
-    } finally {
-      if (!hasOlder) compactEnvelopeRetention(envelopes, seen);
-    }
-  };
-
   if (historyEnabled) {
     globalThis.addEventListener?.("online", retryWhenOnline);
-    void loadInitial();
+    startTail("latest");
   } else {
     historyLoaded = true;
     startTail("latest");
@@ -283,11 +279,18 @@ function connectEventWatcher(connectAgent, submitted, historyEnabled) {
     onHistory(listener) {
       historyListeners.add(listener);
       if (historyLoaded) listener(historySnapshot);
+      else if (historyEnabled) {
+        historyRequested = true;
+        void loadInitial();
+      }
       return () => historyListeners.delete(listener);
     },
     loadOlder() {
       if (!historyEnabled) return Promise.resolve(false);
-      if (!historyLoaded) return loadInitial();
+      if (!historyLoaded) {
+        historyRequested = true;
+        return loadInitial();
+      }
       return loadOlderPage();
     },
     off() {

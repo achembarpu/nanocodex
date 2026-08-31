@@ -6,7 +6,13 @@ import { createElement } from "react";
 import { act, create } from "react-test-renderer";
 import { Client, Dialog, Transport } from "nanocodex/connect";
 
-import { createConfig, useConnect, useConnectAgent, useLogoutAccount } from "../cloud/index.mjs";
+import {
+  createConfig,
+  useConnect,
+  useConnectAgent,
+  useLogoutAccount,
+  useRevokeGrant,
+} from "../cloud/index.mjs";
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -404,9 +410,71 @@ test("useLogoutAccount publishes disconnected before remote cleanup settles", as
   queryClient.clear();
 });
 
+test("useRevokeGrant remains disconnected when remote grant cleanup fails", async () => {
+  const calls = [];
+  const connection = Object.freeze({
+    accountAddress: "0x8ba1f109551bd432803012645ac136ddd64dba72",
+    accessKey: Object.freeze({ keyId: "0x1111111111111111111111111111111111111111" }),
+    grant: Object.freeze({ id: "0x01" }),
+  });
+  const agent = Object.freeze({
+    session: Object.freeze({ async shutdown() { calls.push("shutdown"); } }),
+  });
+  const config = createConfig({
+    client: {
+      _hasSession() { return false; },
+      dialog: {
+        showWallet() { calls.push("show"); },
+        hideWallet() { calls.push("hide"); },
+      },
+      provider: {
+        async request() { calls.push("wallet-revoke"); },
+      },
+      grant: {
+        async revoke() {
+          calls.push("grant-revoke");
+          throw new Error("grant cleanup unavailable");
+        },
+      },
+    },
+  });
+  config._setConnection("connected", connection, agent);
+  const queryClient = new QueryClient({ defaultOptions: { mutations: { retry: false } } });
+  let revoke;
+
+  function Consumer() {
+    revoke = useRevokeGrant({ config });
+    return null;
+  }
+
+  let root;
+  await act(async () => {
+    root = create(createElement(
+      QueryClientProvider,
+      { client: queryClient },
+      createElement(Consumer),
+    ));
+  });
+  let revokeError;
+  await act(async () => {
+    try {
+      await revoke.mutateAsync({});
+    } catch (error) {
+      revokeError = error;
+    }
+  });
+  assert.match(revokeError?.message ?? "", /grant cleanup unavailable/);
+
+  assert.deepEqual(calls, ["shutdown", "show", "wallet-revoke", "hide", "grant-revoke"]);
+  assert.equal(config.getState().status, "disconnected");
+  await act(async () => root.unmount());
+  queryClient.clear();
+});
+
 function testConnectionWire({ expiry, keyId, capabilities, mcpConnections = [] }) {
   return {
     grant_token: "grant-session-test",
+    session_id: "connect-session-test",
     account_address: "0x8ba1f109551bd432803012645ac136ddd64dba72",
     agent_id: "agent-connect-react",
     grant: {

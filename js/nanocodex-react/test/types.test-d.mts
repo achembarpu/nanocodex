@@ -20,10 +20,12 @@ import {
   type AgentEntry,
 } from "../agent/index.mjs";
 import {
+  NanocodexMockDialog,
   createConnectAgentSource,
   useConnectAgent,
   type ConnectAgentSourceOptions,
   type HostedConnectOptions,
+  type MockDialogInstance,
 } from "../cloud/index.mjs";
 import type { ConnectAgent } from "nanocodex/connect";
 
@@ -155,6 +157,10 @@ const hostedConnectOptions: HostedConnectOptions = {
   permission: "agent.run",
 };
 void hostedConnectOptions;
+
+declare const mockDialog: MockDialogInstance;
+const mockDialogProps: ComponentProps<typeof NanocodexMockDialog> = { dialog: mockDialog };
+void mockDialogProps;
 
 function HostedConnectConsumer() {
   const connect = useConnectAgent({ reconnectOnMount: false });
