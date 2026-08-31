@@ -96,6 +96,7 @@ test("ordinary chat stays independent from the optional selected-page lease", ()
   assert.doesNotMatch(start, /claimSelectedPage/);
   assert.match(start, /selection: selectedPageSelection\(\)/);
   assert.doesNotMatch(start, /setPreview\(undefined\)/);
+  assert.match(panelSource, /disabled=\{operationActive \|\| connecting\}/);
 });
 
 test("lazy claims remain bound to the tab selection captured at prompt admission", () => {

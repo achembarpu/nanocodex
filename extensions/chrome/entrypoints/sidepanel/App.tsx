@@ -47,6 +47,7 @@ export function App() {
   const [agentSource, setAgentSource] = useState<Agent>();
   const [agentError, setAgentError] = useState<string>();
   const [agentOpening, setAgentOpening] = useState(false);
+  const [operationActive, setOperationActive] = useState(false);
   const [restoring, setRestoring] = useState(true);
   const [connecting, setConnecting] = useState(false);
   const [activity, setActivity] = useState<string>();
@@ -327,6 +328,7 @@ export function App() {
       selection: selectedPageSelection(),
     };
     operationRef.current = operation;
+    setOperationActive(true);
     let inner: AgentTurn;
     try {
       inner = source.turn.prompt({ input });
@@ -335,6 +337,7 @@ export function App() {
       operation.cancelled = true;
       operation.controller.abort(cause);
       if (operationRef.current === operation) operationRef.current = undefined;
+      setOperationActive(false);
       setActivity(undefined);
       throw cause;
     }
@@ -383,6 +386,7 @@ export function App() {
     } finally {
       if (operationRef.current === operation) {
         operationRef.current = undefined;
+        setOperationActive(false);
         setActivity(undefined);
       }
     }
@@ -643,7 +647,7 @@ export function App() {
           <div><strong>Nanocodex Connect</strong><code title={connection.accountAddress}>{shortAddress(connection.accountAddress)}</code></div>
           <div className="connection-actions">
             {agentError ? <button type="button" onClick={() => void ensurePageAgent(connection).catch(() => {})}>Retry agent</button> : null}
-            <button type="button" disabled={Boolean(operationRef.current) || connecting} onClick={() => void disconnect()}>Disconnect</button>
+            <button type="button" disabled={operationActive || connecting} onClick={() => void disconnect()}>Disconnect</button>
           </div>
         </> : <>
           <p>Connect your passkey account to chat with your durable page agent.</p>
