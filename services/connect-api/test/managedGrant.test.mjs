@@ -105,12 +105,17 @@ test("tool-host upgrade uses a one-time exact-origin ticket bound to MCP and app
   assert.match(open, /ticket\.agentId !== agentId/);
   assert.match(open, /ticket\.toolFingerprint\.toLowerCase\(\) !== fingerprint\.toLowerCase\(\)/);
   assert.match(open, /managedGrantHeaders\(managedGrantAssertion\(grant\)\)/);
+  assert.match(open, /superviseGrantSocket\([\s\S]*?\), true\);/);
   assert.doesNotMatch(open, /authenticatedGrant|authorization/);
   assert.match(open, /current\.id\.toLowerCase\(\) === grantId\.toLowerCase\(\)[\s\S]*?current\.agentId === agentId[\s\S]*?current\.appId === grant\.appId[\s\S]*?grantToolHostFingerprint\(current\)/);
 
   const fingerprint = section("async function grantToolHostFingerprint(", "async function openGrantRealtimeWebSocket(");
   assert.match(fingerprint, /appToolPolicy: grant\.appToolPolicy \?\? null/);
   assert.match(fingerprint, /mcpConnections: grant\.mcpConnections \?\? \[\]/);
+
+  const supervision = section("function superviseGrantSocket(", "function closeSocket(");
+  assert.match(supervision, /preserveUpstreamPolicyClose = false/);
+  assert.match(supervision, /preserveUpstreamPolicyClose && event\.code === 1008[\s\S]*?close\(1008, event\.reason/);
 });
 
 function section(start, end) {

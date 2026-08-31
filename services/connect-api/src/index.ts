@@ -2680,7 +2680,7 @@ async function openGrantToolHostWebSocket(
     && current.appId === grant.appId
     && current.appOrigin === grant.appOrigin
     && (await grantToolHostFingerprint(current)).toLowerCase() === fingerprint.toLowerCase()
-  ));
+  ), true);
   return new Response(null, { status: 101, webSocket: downstream } as ResponseInit);
 }
 
@@ -2849,6 +2849,7 @@ function superviseGrantSocket(
     current.egressSubject === grant.egressSubject
     && current.capabilities.includes("chatgpt")
   ),
+  preserveUpstreamPolicyClose = false,
 ): void {
   let closed = false;
   let authorizationTimer: ReturnType<typeof setTimeout> | undefined;
@@ -2866,7 +2867,13 @@ function superviseGrantSocket(
   downstream.addEventListener("message", forward(upstream));
   upstream.addEventListener("message", forward(downstream));
   downstream.addEventListener("close", () => close(1000, "Connect client closed"));
-  upstream.addEventListener("close", () => close(1000, "ChatGPT upstream closed"));
+  upstream.addEventListener("close", (event) => {
+    if (preserveUpstreamPolicyClose && event.code === 1008) {
+      close(1008, event.reason || "Managed tool host rejected attachment");
+      return;
+    }
+    close(1000, "ChatGPT upstream closed");
+  });
   downstream.addEventListener("error", () => close(1011, "Connect client socket failed"));
   upstream.addEventListener("error", () => close(1011, "ChatGPT upstream failed"));
 
