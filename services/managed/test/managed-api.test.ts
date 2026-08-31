@@ -2167,7 +2167,11 @@ describe("managed agents REST and resumable SSE", () => {
 
     const created = await RAW_SELF.fetch("https://nanocodex.internal/v1/agents", {
       method: "POST",
-      headers: connectGrantHeaders(["github", "chatgpt"]),
+      headers: connectGrantHeaders(
+        ["github", "chatgpt"],
+        USER_ID,
+        "nanocodex-chrome-cleanup-v1",
+      ),
     });
     expect(created.status).toBe(201);
     const receipt = await created.json<AgentReceipt>();
@@ -2175,7 +2179,11 @@ describe("managed agents REST and resumable SSE", () => {
 
     const state = await RAW_SELF.fetch(
       `https://nanocodex.internal/v1/agents/${receipt.agent_id}`,
-      { headers: connectGrantHeaders(["github", "chatgpt"]) },
+      { headers: connectGrantHeaders(
+        ["github", "chatgpt"],
+        USER_ID,
+        "nanocodex-chrome-cleanup-v1",
+      ) },
     );
     expect(state.status).toBe(200);
 
@@ -2184,7 +2192,11 @@ describe("managed agents REST and resumable SSE", () => {
       {
         method: "POST",
         headers: new Headers({
-          ...Object.fromEntries(connectGrantHeaders(["github", "chatgpt"])),
+          ...Object.fromEntries(connectGrantHeaders(
+            ["github", "chatgpt"],
+            USER_ID,
+            "nanocodex-chrome-cleanup-v1",
+          )),
           "content-type": "application/json",
         }),
         body: JSON.stringify({ id: "connect-projected-turn", input: "project this grant" }),
@@ -2204,6 +2216,7 @@ describe("managed agents REST and resumable SSE", () => {
         grantId: CONNECT_GRANT_ID,
         connectors: ["github", "chatgpt"],
         mcpIds: ["m".repeat(43)],
+        appToolPolicy: "nanocodex-chrome-cleanup-v1",
       },
     });
 
@@ -5833,6 +5846,7 @@ async function managedFetch(input: RequestInfo | URL, init?: RequestInit): Promi
 function connectGrantHeaders(
   connectors: readonly string[],
   userId = USER_ID,
+  appToolPolicy?: string,
 ): Headers {
   return new Headers({
     "x-nanocodex-connect-user": userId,
@@ -5844,6 +5858,9 @@ function connectGrantHeaders(
     ]),
     "x-nanocodex-connect-connectors": JSON.stringify(connectors),
     "x-nanocodex-connect-mcp-ids": JSON.stringify(["m".repeat(43)]),
+    ...(appToolPolicy === undefined
+      ? {}
+      : { "x-nanocodex-connect-app-tool-policy": appToolPolicy }),
   });
 }
 

@@ -45,6 +45,33 @@ describe("hosted tools socket protocol", () => {
     expect(parseHostedToolsHostFrame(JSON.stringify({ type: "drain" }))).toEqual({ type: "drain" });
   });
 
+  it("accepts a bounded oneOf of object inputs and rejects non-object branches", () => {
+    const oneOfTool = {
+      ...tool,
+      definition: {
+        ...tool.definition,
+        parameters: {
+          oneOf: [
+            { type: "object", properties: { action: { const: "inspect" } } },
+            { type: "object", properties: { action: { const: "preview" } } },
+          ],
+        },
+      },
+    };
+    expect(parseHostedToolsHostFrame(JSON.stringify({ type: "catalog", tools: [oneOfTool] })))
+      .toMatchObject({ type: "catalog" });
+    expect(() => parseHostedToolsHostFrame(JSON.stringify({
+      type: "catalog",
+      tools: [{
+        ...oneOfTool,
+        definition: {
+          ...oneOfTool.definition,
+          parameters: { oneOf: [{ type: "object" }, { type: "string" }] },
+        },
+      }],
+    }))).toThrow("object JSON Schema");
+  });
+
   it("parses the exact DO-to-executor frame set", () => {
     expect(parseHostedToolsManagedFrame(JSON.stringify({ type: "ready" }))).toEqual({ type: "ready" });
     expect(parseHostedToolsManagedFrame(JSON.stringify({

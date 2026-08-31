@@ -10,6 +10,10 @@ import {
   type HostedToolsHostFrame,
   type HostedToolsManagedFrame,
 } from "./hosted-tools-protocol";
+import {
+  appToolCatalogEntryAllowed,
+  type ConnectAppToolPolicy,
+} from "./app-tool-policy";
 
 const SOCKET_TAG = "hosted-tools";
 const DEFAULT_MAX_IN_FLIGHT = 64;
@@ -68,6 +72,7 @@ type HostedToolsSocketAttachment = {
   kind: typeof SOCKET_TAG;
   sessionId: string;
   allowedMcpIds?: readonly string[];
+  appToolPolicy?: ConnectAppToolPolicy;
   leaseId?: string;
   generation?: number;
   active?: true;
@@ -175,7 +180,7 @@ export type HostedToolsBrokerOptions = Readonly<{
   maxCallsPerGeneration?: number;
   persistence?: HostedToolsBrokerPersistence;
   onCatalogChanged?: (definitions: readonly HostedToolsProviderDefinition[]) => void;
-  providerAllowed?: (provider: string) => boolean;
+  entryAllowed?: (entry: HostedToolCatalogEntry) => boolean;
 }>;
 
 /** Owns the reverse tool attachment for one agent Durable Object. */
@@ -188,7 +193,7 @@ export class HostedToolsBroker {
   readonly #maxCallsPerGeneration: number;
   readonly #persistence: HostedToolsBrokerPersistence;
   readonly #onCatalogChanged?: (definitions: readonly HostedToolsProviderDefinition[]) => void;
-  readonly #providerAllowed: (provider: string) => boolean;
+  readonly #entryAllowed: (entry: HostedToolCatalogEntry) => boolean;
   #catalogValidator?: HostedToolsCatalogValidator;
   #nextCandidateGeneration: number;
 
@@ -210,7 +215,7 @@ export class HostedToolsBroker {
     }
     this.#persistence = options.persistence ?? new SqlHostedToolsPersistence(context.storage);
     this.#onCatalogChanged = options.onCatalogChanged;
-    this.#providerAllowed = options.providerAllowed ?? (() => true);
+    this.#entryAllowed = options.entryAllowed ?? (() => true);
     const retired = this.#persistence.initialize(this.#now());
     this.#nextCandidateGeneration = this.#persistence.state().generation;
     for (const socket of this.context.getWebSockets(SOCKET_TAG)) {
@@ -230,14 +235,14 @@ export class HostedToolsBroker {
       // only the current attached definitions, which stay deferred and can be
       // overlaid onto exact cloud contracts by that router.
       definitions: () => this.#definitions()
-        .filter((binding) => this.#providerAllowed(binding.provider))
+        .filter((binding) => this.#entryAllowed(binding))
         .map((binding) => Object.freeze({
         ...binding.definition,
         defer_loading: true as const,
       })),
       resolve: (name: string) => {
         const prepared = this.#resolve(name);
-        if (!prepared || !this.#providerAllowed(prepared.entry.provider)) return undefined;
+        if (!prepared || !this.#entryAllowed(prepared.entry)) return undefined;
         return Object.freeze({
           name,
           parallelSafe: prepared.entry.parallel_safe,
@@ -249,10 +254,10 @@ export class HostedToolsBroker {
             input: unknown,
             context: { sessionId: string; callId: string; model?: string; signal?: AbortSignal },
           ) => {
-            if (!this.#providerAllowed(prepared.entry.provider)) {
-              return toolResult("Hosted tool provider is outside the active grant", {
+            if (!this.#entryAllowed(prepared.entry)) {
+              return toolResult("Hosted tool is outside the active grant", {
                 status: "unavailable",
-                message: "Hosted tool provider is outside the active grant",
+                message: "Hosted tool is outside the active grant",
               }, false, null);
             }
             const outcome = await prepared.invoke({
@@ -300,13 +305,18 @@ export class HostedToolsBroker {
 
   provider(): HostedToolsDynamicProvider { return this.#provider; }
 
-  upgrade(sessionId: string, allowedMcpIds?: readonly string[]): Response {
+  upgrade(
+    sessionId: string,
+    allowedMcpIds?: readonly string[],
+    appToolPolicy?: ConnectAppToolPolicy,
+  ): Response {
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair);
     server.serializeAttachment({
       kind: SOCKET_TAG,
       sessionId,
       ...(allowedMcpIds === undefined ? {} : { allowedMcpIds: [...allowedMcpIds] }),
+      ...(appToolPolicy === undefined ? {} : { appToolPolicy }),
     } satisfies HostedToolsSocketAttachment);
     this.context.acceptWebSocket(server, [SOCKET_TAG]);
     return new Response(null, { status: 101, webSocket: client });
@@ -449,12 +459,16 @@ export class HostedToolsBroker {
     try {
       if (initial.allowedMcpIds !== undefined) {
         const allowed = new Set(initial.allowedMcpIds);
-        const forbidden = frame.tools.find(({ provider }) => {
-          const match = /^mcp:([A-Za-z0-9_-]{43})$/.exec(provider);
-          return match === null || !allowed.has(match[1]!);
+        const forbidden = frame.tools.find((entry) => {
+          const match = /^mcp:([A-Za-z0-9_-]{43})$/.exec(entry.provider);
+          return match === null
+            ? !appToolCatalogEntryAllowed(initial.appToolPolicy, entry)
+            : !allowed.has(match[1]!);
         });
         if (forbidden) {
-          throw new Error(`provider ${forbidden.provider} is not authorized by the MCP grant`);
+          throw new Error(
+            `tool ${forbidden.provider}:${forbidden.remote_name} is not authorized by the Connect grant`,
+          );
         }
       }
       const validator = this.#catalogValidator;

@@ -20,6 +20,11 @@ import { managedCodeEvaluator } from "./code-evaluator";
 import { createDefaultManagedTools } from "./default-mcp";
 import { HostedToolsBroker } from "./hosted-tools-broker";
 import {
+  appToolCatalogEntryAllowed,
+  isConnectAppToolPolicy,
+} from "./app-tool-policy";
+import type { HostedToolCatalogEntry } from "./hosted-tools-protocol";
+import {
   managedCapacitySnapshot,
   type ManagedCapacitySnapshot,
 } from "./capacity";
@@ -190,6 +195,7 @@ const SESSION_CAPABILITIES_ASSERTION = "x-nanocodex-capabilities";
 const CONNECT_GRANT_ID_ASSERTION = "x-nanocodex-connect-grant-id";
 const CONNECT_CONNECTORS_ASSERTION = "x-nanocodex-connect-connectors";
 const CONNECT_MCP_IDS_ASSERTION = "x-nanocodex-connect-mcp-ids";
+const CONNECT_APP_TOOL_POLICY_ASSERTION = "x-nanocodex-connect-app-tool-policy";
 const MEMORY_ORGANIZATION_ASSERTION = "x-nanocodex-organization-id";
 const MEMORY_TEAM_ASSERTION = "x-nanocodex-team-id";
 const MEMORY_SUBJECT_ASSERTION = "x-nanocodex-subject-id";
@@ -452,9 +458,11 @@ function forwardedPrincipal(headers: Headers): Readonly<{
     const grantId = headers.get(CONNECT_GRANT_ID_ASSERTION);
     const encodedConnectors = headers.get(CONNECT_CONNECTORS_ASSERTION);
     const encodedMcpIds = headers.get(CONNECT_MCP_IDS_ASSERTION);
+    const appToolPolicy = headers.get(CONNECT_APP_TOOL_POLICY_ASSERTION);
     const connectAssertions = [grantId, encodedConnectors, encodedMcpIds];
     if (connectAssertions.some((value) => value !== null)
       && connectAssertions.some((value) => value === null)) return undefined;
+    if (appToolPolicy !== null && grantId === null) return undefined;
     authorization = parseTurnAuthorization(JSON.stringify({
       capabilities: JSON.parse(encodedCapabilities),
       ...(grantId === null ? {} : {
@@ -462,6 +470,7 @@ function forwardedPrincipal(headers: Headers): Readonly<{
           grantId,
           connectors: JSON.parse(encodedConnectors!),
           mcpIds: JSON.parse(encodedMcpIds!),
+          ...(appToolPolicy === null ? {} : { appToolPolicy }),
         },
       }),
     }));
@@ -491,7 +500,7 @@ function isConnectGrantSlice(value: unknown): value is ConnectGrantSlice {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const grant = value as Partial<ConnectGrantSlice>;
   return Object.keys(value).every((key) => (
-    key === "grantId" || key === "connectors" || key === "mcpIds"
+    key === "grantId" || key === "connectors" || key === "mcpIds" || key === "appToolPolicy"
   ))
     && typeof grant.grantId === "string" && /^0x[0-9a-f]{64}$/.test(grant.grantId)
     && isUniqueStringArray(grant.connectors)
@@ -500,7 +509,8 @@ function isConnectGrantSlice(value: unknown): value is ConnectGrantSlice {
       || connector === "x" || connector === "chatgpt"
     ))
     && isUniqueStringArray(grant.mcpIds) && grant.mcpIds.length <= 16
-    && grant.mcpIds.every((id) => /^[A-Za-z0-9_-]{43}$/.test(id));
+    && grant.mcpIds.every((id) => /^[A-Za-z0-9_-]{43}$/.test(id))
+    && (grant.appToolPolicy === undefined || isConnectAppToolPolicy(grant.appToolPolicy));
 }
 
 function isUniqueStringArray(value: unknown): value is string[] {
@@ -1147,7 +1157,7 @@ export class NanocodexSession extends DurableComputerSession {
       );
     `);
     this.#hostedTools = new HostedToolsBroker(this.ctx, {
-      providerAllowed: (provider) => this.#activeTurnHostedProviderAllowed(provider),
+      entryAllowed: (entry) => this.#activeTurnHostedToolAllowed(entry),
     });
     this.#eventLog = new DurableEventLog<StreamMessage>(this.ctx.storage);
     this.#eventArchive = new ManagedEventArchive<StreamMessage>(
@@ -1601,6 +1611,7 @@ export class NanocodexSession extends DurableComputerSession {
       return this.#hostedTools.upgrade(
         session.session_id,
         turnAuthorization.connectGrant?.mcpIds,
+        turnAuthorization.connectGrant?.appToolPolicy,
       );
     }
     if (request.method === "GET" && url.pathname === "/device-host")
@@ -4300,12 +4311,14 @@ export class NanocodexSession extends DurableComputerSession {
         || authorization.connectGrant.connectors.includes(connector));
   }
 
-  #activeTurnHostedProviderAllowed(provider: string): boolean {
+  #activeTurnHostedToolAllowed(entry: HostedToolCatalogEntry): boolean {
     const authorization = this.#activeTurnAuthorization();
     if (!authorization) return false;
     if (!authorization.connectGrant) return true;
-    const match = /^mcp:([A-Za-z0-9_-]{43})$/.exec(provider);
-    return match !== null && authorization.connectGrant.mcpIds.includes(match[1]!);
+    const match = /^mcp:([A-Za-z0-9_-]{43})$/.exec(entry.provider);
+    return match === null
+      ? appToolCatalogEntryAllowed(authorization.connectGrant.appToolPolicy, entry)
+      : authorization.connectGrant.mcpIds.includes(match[1]!);
   }
 
   #historyCitations(turnId: string): HistoryCitation[] {

@@ -12,5 +12,8 @@ export function managedGrantHeaders(assertion) {
     ]),
     "x-nanocodex-connect-connectors": JSON.stringify(assertion.connectors),
     "x-nanocodex-connect-mcp-ids": JSON.stringify(assertion.mcpIds),
+    ...(assertion.appToolPolicy === undefined
+      ? {}
+      : { "x-nanocodex-connect-app-tool-policy": assertion.appToolPolicy }),
   };
 }
