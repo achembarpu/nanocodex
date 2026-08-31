@@ -73,5 +73,23 @@
       "tag": "v5",
       "new_sqlite_classes": ["McpConnectionDirectory"]
     }
-  ]
+  ],
+  "env": {
+    "development": {
+      "name": "nanocodex-egress",
+      "vars": {
+        "ENVIRONMENT": "development",
+        "ALLOW_LOCAL_CREDENTIAL_CLAIM": "true"
+      },
+      "durable_objects": {
+        "bindings": [
+          { "name": "USER_CREDENTIALS", "class_name": "UserCredentialBroker" },
+          { "name": "AGENT_SUBJECTS", "class_name": "AgentSubjectDirectory" },
+          { "name": "USER_CONNECTORS", "class_name": "UserConnectorBroker" },
+          { "name": "MCP_CONNECTIONS", "class_name": "McpConnectionDirectory" },
+          { "name": "CHATGPT_EGRESS", "class_name": "ChatGptEgress", "script_name": "nanocodex" }
+        ]
+      }
+    }
+  }
 }

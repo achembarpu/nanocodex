@@ -3,13 +3,7 @@
   "name": "nanocodex-durable-agent",
   "main": "src/index.ts",
   "compatibility_date": "2026-07-29",
-  "compatibility_flags": [
-    "nodejs_compat",
-    "global_fetch_strictly_public"
-  ],
-  "alias": {
-    "node-rsa": "../../js/bindings/tools/browser/unsupportedNodeRsa.mjs"
-  },
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
   "workers_dev": false,
   "minify": true,
   "upload_source_maps": true,
@@ -78,35 +72,21 @@
       {
         "name": "NANOCODEX_ORGANIZATIONS",
         "class_name": "Organization"
-      },
-      {
-        "name": "NANOCODEX_COMPUTE_SANDBOX",
-        "class_name": "Sandbox"
       }
     ]
   },
   "migrations": [
     {
       "tag": "v1",
-      "new_sqlite_classes": [
-        "NanocodexSession",
-        "MultiplayerRoom",
-        "MultiplayerQuota"
-      ]
+      "new_sqlite_classes": ["NanocodexSession", "MultiplayerRoom", "MultiplayerQuota"]
     },
     {
       "tag": "v2",
-      "new_sqlite_classes": [
-        "NonceStorage",
-        "UserAccount",
-        "ApiKeyRecord"
-      ]
+      "new_sqlite_classes": ["NonceStorage", "UserAccount", "ApiKeyRecord"]
     },
     {
       "tag": "v3",
-      "new_sqlite_classes": [
-        "MemoryScope"
-      ]
+      "new_sqlite_classes": ["MemoryScope"]
     },
     {
       "tag": "v4",
@@ -116,17 +96,41 @@
       "tag": "v5",
       "new_sqlite_classes": ["DurableAgentSession"],
       "deleted_classes": ["NanocodexSession"]
-    },
-    {
-      "tag": "v6",
-      "new_sqlite_classes": [
-        "Sandbox"
-      ]
     }
   ],
   "vars": {
     "AGENT_IDLE_TIMEOUT_MS": "30000",
     "NANOCODEX_COMPUTE_PROVIDER": "cloudflare"
+  },
+  "env": {
+    "development": {
+      "name": "nanocodex-durable-agent",
+      "services": [
+        { "binding": "NANOCODEX", "service": "nanocodex-egress", "remote": false }
+      ],
+      "r2_buckets": [
+        { "binding": "NANOCODEX_HISTORY", "bucket_name": "nanocodex-managed-history" }
+      ],
+      "ai_search": [],
+      "durable_objects": {
+        "bindings": [
+          { "name": "NANOCODEX_SESSIONS", "class_name": "DurableAgentSession" },
+          { "name": "NANOCODEX_ROOMS", "class_name": "MultiplayerRoom" },
+          { "name": "NANOCODEX_MULTIPLAYER_QUOTA", "class_name": "MultiplayerQuota" },
+          { "name": "NANOCODEX_AUTH", "class_name": "NonceStorage" },
+          { "name": "NANOCODEX_USERS", "class_name": "UserAccount" },
+          { "name": "NANOCODEX_API_KEYS", "class_name": "ApiKeyRecord" },
+          { "name": "NANOCODEX_MEMORY", "class_name": "MemoryScope" },
+          { "name": "NANOCODEX_ORGANIZATIONS", "class_name": "Organization" }
+        ]
+      },
+      "vars": {
+        "AGENT_IDLE_TIMEOUT_MS": "1000",
+        "NANOCODEX_ADMIN_TOKEN": "nanocodex-local-room-signing-key",
+        "NANOCODEX_LOCAL_WEBAUTHN_HMAC_KEY": "nanocodex-local-passkey-portability-v1",
+        "NANOCODEX_LOCAL_OAUTH_RELAY_HMAC_KEY": "nanocodex-local-oauth-relay-hmac-v1-only"
+      }
+    }
   },
   "containers": [
     {

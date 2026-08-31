@@ -9,7 +9,6 @@ import { defineConfig, type Plugin } from "vite";
 import { isLocalDocumentRequest } from "./scripts/local-document-request.mjs";
 import { rewriteConnectDialogDevModuleUrl } from "./vite/connectDialogDevModules.ts";
 import { rewriteDocsDevModuleUrl } from "./vite/docsDevModules.ts";
-import { localManagedAuxiliaryWorkers } from "./vite/localWorkerTopology.ts";
 import {
   documentStatusForPath,
   renderLinkPreviewDocument,
@@ -240,37 +239,11 @@ export default defineConfig({
     react(),
     cloudflare({
       inspectorPort: 0,
-      auxiliaryWorkers: localManagedAuxiliaryWorkers(),
-      persistState: process.env.NANOCODEX_LOCAL_STATE_PATH
-        ? { path: process.env.NANOCODEX_LOCAL_STATE_PATH }
-        : undefined,
-      config: (config) => ({
-        // Local repository publication is optional. Do not make its token a
-        // prerequisite for the direct Vite development path.
-        ...(process.env.CLOUDFLARE_ENV === "development"
-          ? { secrets: undefined }
-          : {}),
-        vars: {
-          ...config.vars,
-          ...(process.env.CLOUDFLARE_ENV === "development"
-            && process.env.GIT_MIRROR_TOKEN
-            ? { GIT_MIRROR_TOKEN: process.env.GIT_MIRROR_TOKEN }
-            : {}),
-          ...(process.env.NANOCODEX_LOCAL_DEPLOYMENT_SHA
-            ? { DEPLOYMENT_SHA: process.env.NANOCODEX_LOCAL_DEPLOYMENT_SHA }
-            : {}),
-        },
-        dev: {
-          ...config.dev,
-          // Every local Worker asks the OS for an ephemeral inspector port.
-          // The website, broker, and managed Worker can then start together
-          // even when another checkout already has an inspector open.
-          inspector_port: 0,
-          // The website, Worker APIs, Durable Objects, D1, and Just Bash do
-          // not need Docker. Container-backed experiments remain explicit.
-          enable_containers: process.env.NANOCODEX_DEV_CONTAINERS === "1",
-        },
-      }),
+      auxiliaryWorkers: [
+        { configPath: "../services/egress/wrangler.broker.jsonc", devOnly: true },
+        { configPath: "../services/managed/wrangler.jsonc", devOnly: true },
+        { configPath: "../services/connect-api/wrangler.jsonc", devOnly: true },
+      ],
     }),
   ],
   resolve: {
