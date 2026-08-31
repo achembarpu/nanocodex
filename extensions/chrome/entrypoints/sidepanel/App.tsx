@@ -80,7 +80,7 @@ export function App() {
     };
     const close = () => {
       closedRef.current = true;
-      void closePanelRuntime();
+      fencePanelRuntime();
     };
     chrome.runtime.onMessage.addListener(listener);
     window.addEventListener("pagehide", close);
@@ -161,6 +161,27 @@ export function App() {
     })();
     closingRef.current = closing;
     return closing;
+  }
+
+  function fencePanelRuntime(): void {
+    const operation = operationRef.current;
+    if (operation) {
+      operation.cancelled = true;
+      operation.controller.abort(new Error("The side panel closed."));
+      delete operation.lease;
+      void operation.turn?.cancel().catch(() => {});
+    }
+    const current = leaseRef.current;
+    leaseRef.current = undefined;
+    if (current) {
+      void chrome.runtime.sendMessage({ type: "lease.release", lease_id: current.lease_id }).catch(() => {});
+    }
+    const session = sessionRef.current;
+    sessionRef.current = undefined;
+    void session?.close().catch(() => {});
+    const hostLock = hostLockRef.current;
+    hostLockRef.current = undefined;
+    void hostLock?.release().catch(() => {});
   }
 
   async function refreshSaved(): Promise<void> {

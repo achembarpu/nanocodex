@@ -46,8 +46,10 @@ or extension storage.
 Only one side panel in the Chrome profile can own the reverse-attached cleanup
 host at a time. The panel keeps that browser-owned lock for its agent session,
 so a second window cannot redirect an in-flight tool call to a different tab.
-Closing or disconnecting the owning panel cancels the active durable turn,
-releases its page lease, closes the attachment, and then releases that lock.
+Disconnect performs an ordered shutdown after an active turn settles. On panel
+unload, the page synchronously fences its tool dispatcher and initiates turn
+cancellation, lease release, attachment closure, and lock release before Chrome
+can destroy the document; Chrome also releases the Web Lock with the document.
 Grants created by the earlier local-agent preview are discarded on reconnect
 and require one fresh approval because they do not identify a durable agent.
 
