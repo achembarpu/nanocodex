@@ -43,9 +43,10 @@ NANOCODEX_IX_BROKER_TOKEN=...
 NANOCODEX_IX_REGION=us-west-1 # optional
 ```
 
-The first native execution creates an ix machine. Later native executions reuse
-that machine through the existing Nanocodex provider lifecycle, and provider
-disposal deletes it.
+Managed starts each runtime in Just Bash. The first command that cannot be
+safely handled virtually promotes the runtime to an ix machine; every later
+`exec_command` in that runtime stays on the same machine. Provider selection and
+promotion are internal and do not change the model-facing tool.
 
 The HTTP surface is deliberately tiny:
 
