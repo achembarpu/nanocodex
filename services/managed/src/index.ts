@@ -163,7 +163,9 @@ import {
 import {
   DurableMemoryError,
   MAX_MEMORY_READ_KEYS,
+  parseMemoryKey,
   parseMemoryOperation,
+  parseMemoryToolOperation,
   type MemoryOperation,
   type MemoryResult,
 } from "./durable-memory";
@@ -4659,12 +4661,13 @@ export class DurableAgentSession extends DurableComputerSession {
       },
       {
         name: "memory",
-        description: "Explicitly scans, reads, stores, replaces, or deletes bounded organization memories. Scan before put. Preserve exact keys returned by scan/read/put. Put and delete are root-agent-only.",
+        description: "Explicitly scans, reads, stores, replaces, or deletes bounded organization memories. Scan returns at most 5 results; omit limit to use 5. Queries and content are limited to 512 and 1024 UTF-8 bytes. Scan before put. Preserve exact keys returned by scan/read/put. Put and delete are root-agent-only.",
         parameters: memoryInputSchema(),
         handler: async (input: unknown) => {
-          const operation = parseMemoryOperation(input);
-          this.#requireActiveTurnCapability("memory:read");
-          if (operation.operation === "put" || operation.operation === "delete") {
+          const operation = parseMemoryToolOperation(input);
+          if (operation.operation === "scan" || operation.operation === "read") {
+            this.#requireActiveTurnCapability("memory:read");
+          } else {
             this.#requireActiveTurnCapability("memory:write");
           }
           return this.#memoryOperation(operation);
@@ -6635,25 +6638,37 @@ async function routeHistoryRequest(
 ): Promise<Response | undefined> {
   const find = url.pathname === "/v1/history/sessions/search";
   const read = url.pathname.match(/^\/v1\/history\/sessions\/([^/]+)\/read$/);
-  const memoryTool = url.pathname === "/v1/memory";
-  if (!find && !read && !memoryTool) return undefined;
-  if (request.method !== "POST") {
+  const memory = url.pathname === "/v1/memory";
+  const memoryDelete = url.pathname.match(/^\/v1\/memory\/([^/]+)$/);
+  if (!find && !read && !memory && !memoryDelete) return undefined;
+  const validMethod = (find || read) ? request.method === "POST"
+    : memory ? request.method === "GET" || request.method === "POST"
+      : request.method === "DELETE";
+  if (!validMethod) {
     return json({ error: "method_not_allowed" }, { status: 405 });
   }
   const principal = await authenticate(request, env, url);
   if (!principal) return json({ error: "unauthorized" }, { status: 401 });
+  if (memory && request.method === "GET" && url.search) {
+    return json({ error: "invalid_request" }, { status: 400 });
+  }
   if ((find || read) && !principal.capabilities.includes("history:read")) {
     return json({ error: "forbidden" }, { status: 403 });
   }
-  if (memoryTool && !principal.capabilities.includes("memory:read")) {
+  if (memory && request.method === "GET" && !principal.capabilities.includes("memory:read")) {
     return json({ error: "forbidden" }, { status: 403 });
   }
-  const originFailure = requireSameOriginMutation(request, url, principal);
+  if (memoryDelete && !principal.capabilities.includes("memory:write")) {
+    return json({ error: "memory_read_only" }, { status: 403 });
+  }
+  const originFailure = request.method === "GET"
+    ? undefined
+    : requireSameOriginMutation(request, url, principal);
   if (originFailure) return originFailure;
 
   try {
-    let internalPath: "/search" | "/read" | "/memory";
-    let input: HistoryFindSessionsInput | HistoryReadSessionInput | MemoryOperation;
+    let internalPath: "/search" | "/read" | "/memories" | "/memory";
+    let input: HistoryFindSessionsInput | HistoryReadSessionInput | MemoryOperation | undefined;
     let mutatingMemory = false;
     if (find) {
       input = parseHistoryFindSessionsInput(await parseHistoryRequestBody(request));
@@ -6669,31 +6684,42 @@ async function routeHistoryRequest(
         session_id: read[1],
       });
       internalPath = "/read";
+    } else if (memory && request.method === "GET") {
+      internalPath = "/memories";
     } else {
-      const operation = parseMemoryOperation(await parseHistoryRequestBody(request));
+      const operation = memoryDelete
+        ? { operation: "delete" as const, key: parseMemoryDeleteKey(url, memoryDelete[1]!) }
+        : parseMemoryOperation(await parseHistoryRequestBody(request));
       input = operation;
       mutatingMemory = operation.operation === "put" || operation.operation === "delete";
+      if (!mutatingMemory && !principal.capabilities.includes("memory:read")) {
+        return json({ error: "forbidden" }, { status: 403 });
+      }
       if (mutatingMemory && !principal.capabilities.includes("memory:write")) {
         return json({ error: "memory_read_only" }, { status: 403 });
       }
       internalPath = "/memory";
     }
 
-    const memory = env.NANOCODEX_MEMORY.getByName(principal.organizationId);
-    const initialized = await initializeMemoryScope(memory, principal.organizationId);
+    const memoryScope = env.NANOCODEX_MEMORY.getByName(principal.organizationId);
+    const initialized = await initializeMemoryScope(memoryScope, principal.organizationId);
     if (!initialized.ok) return initialized;
-    const response = await memory.fetch(`https://memory.internal${internalPath}`, {
-      method: "POST",
+    const response = await memoryScope.fetch(`https://memory.internal${internalPath}`, {
+      method: internalPath === "/memories" ? "GET" : "POST",
       headers: {
-        "content-type": "application/json",
+        ...(input === undefined ? {} : { "content-type": "application/json" }),
         [MEMORY_ORGANIZATION_ASSERTION]: principal.organizationId,
         [MEMORY_TEAM_ASSERTION]: principal.teamId,
         [MEMORY_SUBJECT_ASSERTION]: `${principal.subjectId}:${principal.authorizationEpoch}`,
         ...(mutatingMemory ? { [MEMORY_MUTATION_ASSERTION]: "1" } : {}),
       },
-      body: JSON.stringify(input),
+      ...(input === undefined ? {} : { body: JSON.stringify(input) }),
     });
-    if (!response.ok || memoryTool) return response;
+    if (!response.ok || memory) return response;
+    if (memoryDelete) {
+      await response.body?.cancel();
+      return new Response(null, { status: 204 });
+    }
     if (find) {
       const found = await response.json<HistoryFindSessionsResponse>();
       return json({
@@ -6724,6 +6750,17 @@ async function routeHistoryRequest(
   } catch (error) {
     return historySearchErrorResponse(error);
   }
+}
+
+function parseMemoryDeleteKey(url: URL, encodedId: string) {
+  const version = url.searchParams.get("version");
+  if (!/^[1-9][0-9]*$/.test(encodedId)
+    || version === null
+    || !/^[1-9][0-9]*$/.test(version)
+    || [...url.searchParams.keys()].length !== 1) {
+    throw new DurableMemoryError("invalid_key", "memory delete requires one positive id and version");
+  }
+  return parseMemoryKey({ id: Number(encodedId), version: Number(version) });
 }
 
 function historySearchErrorResponse(error: unknown): Response {

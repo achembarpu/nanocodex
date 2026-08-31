@@ -175,6 +175,21 @@ export function parseMemoryOperation(value: unknown): MemoryOperation {
   }
 }
 
+/**
+ * Parses model-authored memory input while bounding an optional result-count hint.
+ * Public callers still use the strict parser above; only the owned agent tool gets
+ * this recovery for a positive integer that exceeds the advertised maximum.
+ */
+export function parseMemoryToolOperation(value: unknown): MemoryOperation {
+  if (isRecord(value)
+    && value.operation === "scan"
+    && Number.isSafeInteger(value.limit)
+    && Number(value.limit) > MAX_MEMORY_SCAN_RESULTS) {
+    return parseMemoryOperation({ ...value, limit: MAX_MEMORY_SCAN_RESULTS });
+  }
+  return parseMemoryOperation(value);
+}
+
 export function parseMemoryKey(value: unknown): MemoryKey {
   if (!isRecord(value)
     || Object.keys(value).some((field) => field !== "id" && field !== "version")) {

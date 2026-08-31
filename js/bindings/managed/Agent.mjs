@@ -1430,8 +1430,8 @@ function validateMemoryOperation(value) {
   }
   if (value.operation === "read") {
     assertOnlyFields(value, ["operation", "keys"], "managed memory read");
-    if (!Array.isArray(value.keys) || value.keys.length === 0) {
-      throw new TypeError("managed memory read requires at least one key");
+    if (!Array.isArray(value.keys) || value.keys.length === 0 || value.keys.length > 20) {
+      throw new TypeError("managed memory read requires from 1 through 20 keys");
     }
     value.keys.forEach(validateMemoryKey);
     return;

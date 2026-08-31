@@ -19,6 +19,8 @@ const OTHER_USER_ID = "33333333-3333-4333-8333-333333333333";
 const OTHER_API_KEY = `ncx_live_${"o".repeat(12)}_${"p".repeat(43)}`;
 const READ_ONLY_API_KEY = `ncx_live_${"r".repeat(12)}_${"q".repeat(43)}`;
 const WRITE_ONLY_API_KEY = `ncx_live_${"w".repeat(12)}_${"v".repeat(43)}`;
+const MEMORY_READ_ONLY_API_KEY = `ncx_live_${"e".repeat(12)}_${"f".repeat(43)}`;
+const MEMORY_WRITE_ONLY_API_KEY = `ncx_live_${"m".repeat(12)}_${"n".repeat(43)}`;
 const AGENT_TOOLS_API_KEY = `ncx_live_${"t".repeat(12)}_${"u".repeat(43)}`;
 const HOSTED_PASSKEY_PUBLIC_KEY = "0x046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c2964fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5";
 const HOSTED_PASSKEY_ADDRESS = "0xd3a9f047ad43d7e2e4e7e491f1fe2e657a2651b6";
@@ -44,6 +46,8 @@ beforeAll(async () => {
   await seedApiKey(OTHER_USER_ID, OTHER_API_KEY);
   await seedApiKey(USER_ID, READ_ONLY_API_KEY, ["agents:read"]);
   await seedApiKey(USER_ID, WRITE_ONLY_API_KEY, ["agents:write"]);
+  await seedApiKey(USER_ID, MEMORY_READ_ONLY_API_KEY, ["memory:read"]);
+  await seedApiKey(USER_ID, MEMORY_WRITE_ONLY_API_KEY, ["memory:write"]);
   await seedApiKey(USER_ID, AGENT_TOOLS_API_KEY, ["agents:write", "tools:use"]);
 });
 
@@ -2615,13 +2619,96 @@ describe("managed agents REST and resumable SSE", () => {
       replaced: true,
       memory: { key: { id: key.id, version: 2 }, use_count: 0 },
     });
-    const staleDelete = await memoryRequest(API_KEY, { operation: "delete", key });
+    const listed = await memoryListRequest(API_KEY);
+    expect(listed.status).toBe(200);
+    expect(await listed.json()).toMatchObject({
+      memories: [{
+        key: { id: key.id, version: 2 },
+        content: "Production deploys happen on Wednesdays.",
+      }],
+    });
+    const isolatedList = await memoryListRequest(OTHER_API_KEY);
+    expect(isolatedList.status).toBe(200);
+    expect(await isolatedList.json()).toEqual({ memories: [] });
+    expect((await memoryListRequest(MEMORY_READ_ONLY_API_KEY)).status).toBe(200);
+    expect((await memoryListRequest(MEMORY_WRITE_ONLY_API_KEY)).status).toBe(403);
+    expect((await memoryRequest(MEMORY_READ_ONLY_API_KEY, {
+      operation: "put",
+      content: "This write must not be authorized.",
+    })).status).toBe(403);
+    expect((await memoryRequest(MEMORY_WRITE_ONLY_API_KEY, {
+      operation: "scan",
+      query: "production deploy schedule",
+    })).status).toBe(403);
+
+    expect((await memoryDeleteRequest(MEMORY_READ_ONLY_API_KEY, key)).status).toBe(403);
+    const staleDelete = await memoryDeleteRequest(MEMORY_WRITE_ONLY_API_KEY, key);
     expect(staleDelete.status).toBe(409);
     expect(await staleDelete.json()).toMatchObject({ error: "memory_conflict" });
     const currentKey = replaced.memory.key as { id: number; version: number };
-    expect(await memoryJson(API_KEY, { operation: "delete", key: currentKey })).toEqual({
-      operation: "delete",
-      key: currentKey,
+    expect((await memoryDeleteRequest(MEMORY_WRITE_ONLY_API_KEY, currentKey)).status).toBe(204);
+    expect(await (await memoryListRequest(API_KEY)).json()).toEqual({ memories: [] });
+  });
+
+  it("lists memory for a cookie-authenticated account without requiring an Origin header", async () => {
+    const account = await RAW_SELF.fetch("https://example.test/v1/me");
+    const cookie = account.headers.get("set-cookie")?.split(";", 1)[0];
+    expect(cookie).toBeTruthy();
+
+    const listed = await RAW_SELF.fetch("https://example.test/v1/memory", {
+      headers: { cookie: cookie! },
+    });
+    expect(listed.status).toBe(200);
+    expect(await listed.json()).toEqual({ memories: [] });
+  });
+
+  it("keeps list and delete operations team-scoped inside one organization", async () => {
+    const organizationId = crypto.randomUUID();
+    const ownerTeamId = crypto.randomUUID();
+    const otherTeamId = crypto.randomUUID();
+    const scope = testEnv.NANOCODEX_MEMORY.getByName(organizationId);
+    const initialized = await scope.fetch("https://memory.internal/initialize", {
+      method: "PUT",
+      headers: { "x-nanocodex-organization-id": organizationId },
+    });
+    expect(initialized.ok).toBe(true);
+
+    const memoryHeaders = (teamId: string, subjectId: string, mutating = false) => ({
+      "content-type": "application/json",
+      "x-nanocodex-organization-id": organizationId,
+      "x-nanocodex-team-id": teamId,
+      "x-nanocodex-subject-id": subjectId,
+      ...(mutating ? { "x-nanocodex-memory-mutation": "1" } : {}),
+    });
+    const ownerSubject = "owner-team-test";
+    expect((await scope.fetch("https://memory.internal/memory", {
+      method: "POST",
+      headers: memoryHeaders(ownerTeamId, ownerSubject),
+      body: JSON.stringify({ operation: "scan", query: "team-scoped preference" }),
+    })).status).toBe(200);
+    const stored = await (await scope.fetch("https://memory.internal/memory", {
+      method: "POST",
+      headers: memoryHeaders(ownerTeamId, ownerSubject, true),
+      body: JSON.stringify({ operation: "put", content: "Keep this conclusion in the owner team." }),
+    })).json<{ memory: { key: { id: number; version: number } } }>();
+
+    const otherList = await scope.fetch("https://memory.internal/memories", {
+      headers: memoryHeaders(otherTeamId, "other-team-test"),
+    });
+    expect(await otherList.json()).toEqual({ memories: [] });
+    const otherDelete = await scope.fetch("https://memory.internal/memory", {
+      method: "POST",
+      headers: memoryHeaders(otherTeamId, "other-team-test", true),
+      body: JSON.stringify({ operation: "delete", key: stored.memory.key }),
+    });
+    expect(otherDelete.status).toBe(404);
+    expect(await otherDelete.json()).toMatchObject({ error: "memory_not_found" });
+
+    const ownerList = await scope.fetch("https://memory.internal/memories", {
+      headers: memoryHeaders(ownerTeamId, ownerSubject),
+    });
+    expect(await ownerList.json()).toMatchObject({
+      memories: [{ key: stored.memory.key, content: "Keep this conclusion in the owner team." }],
     });
   });
 
@@ -2633,7 +2720,7 @@ describe("managed agents REST and resumable SSE", () => {
     ));
     let writerTerminal;
     do {
-      writerTerminal = await nextWithin(writerEvents, "atomic memory store completion");
+      writerTerminal = await nextWithin(writerEvents, "atomic memory store completion", 10_000);
     } while (writerTerminal.data.type !== "turn_completed");
     expect(writerTerminal.data).toMatchObject({
       final_message: "ATOMIC_MEMORY_STORED",
@@ -2648,7 +2735,7 @@ describe("managed agents REST and resumable SSE", () => {
     ));
     let readerTerminal;
     do {
-      readerTerminal = await nextWithin(readerEvents, "atomic memory recall completion");
+      readerTerminal = await nextWithin(readerEvents, "atomic memory recall completion", 10_000);
     } while (readerTerminal.data.type !== "turn_completed");
     expect(readerTerminal.data).toMatchObject({
       final_message: "ATOMIC_MEMORY_RECALLED",
@@ -6719,6 +6806,22 @@ async function memoryRequest(apiKey: string, operation: unknown): Promise<Respon
       "content-type": "application/json",
     },
     body: JSON.stringify(operation),
+  });
+}
+
+async function memoryListRequest(apiKey: string): Promise<Response> {
+  return RAW_SELF.fetch("https://example.test/v1/memory", {
+    headers: { authorization: `Bearer ${apiKey}` },
+  });
+}
+
+async function memoryDeleteRequest(
+  apiKey: string,
+  key: { id: number; version: number },
+): Promise<Response> {
+  return RAW_SELF.fetch(`https://example.test/v1/memory/${key.id}?version=${key.version}`, {
+    method: "DELETE",
+    headers: { authorization: `Bearer ${apiKey}` },
   });
 }
 

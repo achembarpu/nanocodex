@@ -89,6 +89,13 @@ test("managed memory validates operations and rejects malformed server records",
     /positive safe integers/,
   );
   await assert.rejects(
+    Agent.memory({
+      operation: "read",
+      keys: Array.from({ length: 21 }, (_, index) => ({ id: index + 1, version: 1 })),
+    }, options),
+    /from 1 through 20 keys/,
+  );
+  await assert.rejects(
     Agent.memory({ operation: "read", keys: [{ id: 1, version: 1 }] }, options),
     (error) => error instanceof ManagedError && error.code === "invalid_response",
   );

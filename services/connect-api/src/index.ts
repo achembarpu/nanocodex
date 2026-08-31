@@ -699,13 +699,16 @@ async function handleManagedMemoryRoute(
   const isSearchPath = url.pathname === "/v1/history/sessions/search";
   const readMatch = url.pathname.match(/^\/v1\/history\/sessions\/([^/]+)\/read$/);
   const isMemoryPath = url.pathname === "/v1/memory";
-  if (!isSearchPath && !readMatch && !isMemoryPath) return undefined;
-  if (request.method !== "POST") {
-    throw new ApiFailure(405, "method_not_allowed", "Hosted history and memory requests require POST.");
+  const memoryDeleteMatch = url.pathname.match(/^\/v1\/memory\/([^/]+)$/);
+  if (!isSearchPath && !readMatch && !isMemoryPath && !memoryDeleteMatch) return undefined;
+  const validMethod = (isSearchPath || readMatch) ? request.method === "POST"
+    : isMemoryPath ? request.method === "GET" || request.method === "POST"
+      : request.method === "DELETE";
+  if (!validMethod) {
+    throw new ApiFailure(405, "method_not_allowed", "Unsupported hosted history or memory method.");
   }
-  const isSearch = isSearchPath;
   const isMemory = isMemoryPath;
-  if (url.search) {
+  if (url.search && !memoryDeleteMatch) {
     throw new ApiFailure(400, "invalid_managed_request", "Hosted history and memory requests do not accept query parameters.");
   }
 
@@ -721,8 +724,13 @@ async function handleManagedMemoryRoute(
     throw new ApiFailure(403, "grant_inactive", "The Connect grant is not active.");
   }
   remainingGrantTtl(grant);
-  const body = await boundedJson(request, MAX_MANAGED_MEMORY_REQUEST_BYTES, "hosted history or memory");
-  const requiredCapability = managedMemoryCapability(url.pathname, body.operation);
+  const body = request.method === "POST"
+    ? await boundedJson(request, MAX_MANAGED_MEMORY_REQUEST_BYTES, "hosted history or memory")
+    : undefined;
+  const operation = isMemory && request.method === "GET" ? "list"
+    : memoryDeleteMatch ? "delete"
+      : body?.operation;
+  const requiredCapability = managedMemoryCapability(url.pathname, operation);
   if (!requiredCapability) {
     throw new ApiFailure(400, "invalid_memory_operation", "The hosted history or memory operation is invalid.");
   }
@@ -734,20 +742,22 @@ async function handleManagedMemoryRoute(
         : "memory_read_not_granted";
     throw new ApiFailure(403, code, `This Connect grant does not include ${requiredCapability} access.`);
   }
-  if (isMemory) {
-    const operation = body.operation;
-    if (operation !== "scan" && operation !== "read" && operation !== "put" && operation !== "delete") {
+  if (isMemory && request.method === "POST") {
+    const memoryOperation = body?.operation;
+    if (memoryOperation !== "scan" && memoryOperation !== "read"
+      && memoryOperation !== "put" && memoryOperation !== "delete") {
       throw new ApiFailure(400, "invalid_memory_operation", "The hosted memory operation is invalid.");
     }
   }
 
   const target = new URL(url.pathname, "https://nanocodex.internal");
+  if (memoryDeleteMatch) target.search = url.search;
   const headers = new Headers(managedGrantHeaders(managedGrantAssertion(grant)));
-  headers.set("content-type", "application/json");
+  if (body !== undefined) headers.set("content-type", "application/json");
   const upstream = await env.ACCOUNTS.fetch(new Request(target, {
-    method: "POST",
+    method: request.method,
     headers,
-    body: JSON.stringify(body),
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     redirect: "manual",
     signal: request.signal,
   }));
@@ -758,6 +768,10 @@ async function safeManagedJsonResponse(upstream: Response): Promise<Response> {
   if (upstream.status >= 300 && upstream.status < 400) {
     await upstream.body?.cancel();
     throw new ApiFailure(502, "managed_upstream_redirect", "The hosted service returned an unexpected redirect.");
+  }
+  if (upstream.status === 204) {
+    await upstream.body?.cancel();
+    return new Response(null, { status: 204 });
   }
   if (!(upstream.headers.get("content-type") ?? "").includes("application/json")) {
     await upstream.body?.cancel();
