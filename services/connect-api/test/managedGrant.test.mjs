@@ -7,6 +7,7 @@ import { KeyAuthorization } from "ox/tempo";
 import {
   managedAgentPortabilityGranted,
   managedGrantHeaders,
+  managedGrantUpstreamMethod,
   managedGrantWebSocketHeaders,
 } from "../src/managedGrant.mjs";
 
@@ -92,6 +93,15 @@ test("managed grant WebSocket headers assert the internal service origin", () =>
   assert.equal(headers["x-nanocodex-connect-user"], "account-1");
 });
 
+test("managed grant POST reads become internal GETs without broadening mutations", () => {
+  for (const resource of ["", "/events", "/events/history", "/turns/turn-1"]) {
+    assert.equal(managedGrantUpstreamMethod("POST", resource), "GET", resource);
+  }
+  assert.equal(managedGrantUpstreamMethod("POST", "/turns"), "POST");
+  assert.equal(managedGrantUpstreamMethod("POST", "/turns/turn-1/cancel"), "POST");
+  assert.equal(managedGrantUpstreamMethod("GET", "/events"), "GET");
+});
+
 test("managed portability requires the exact grant plus full history and trace visibility", () => {
   const assertion = {
     brokerUserId: "account-1",
@@ -134,6 +144,9 @@ test("managed proxy denies durability unless the exact export route has full sig
   assert.match(proxy, /managedAgentPortabilityGranted\(grant\.capabilities\)/);
   assert.match(proxy, /agent_portability_not_granted/);
   assert.ok(proxy.indexOf("agent_portability_not_granted") < proxy.indexOf("env.ACCOUNTS.fetch"));
+  assert.match(proxy, /const upstreamMethod = managedGrantUpstreamMethod\(request\.method, suffix\)/);
+  assert.match(proxy, /method: upstreamMethod/);
+  assert.match(proxy, /upstreamMethod === "GET" \|\| upstreamMethod === "HEAD" \? undefined : request\.body/);
 });
 
 test("managed grant headers omit app tools unless the stored grant carries a policy", () => {

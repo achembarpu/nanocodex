@@ -15,3 +15,4 @@ export function managedGrantWebSocketHeaders(
   assertion: ManagedGrantAssertion,
   origin: string,
 ): Record<string, string>;
+export function managedGrantUpstreamMethod(method: string, resource: string): string;

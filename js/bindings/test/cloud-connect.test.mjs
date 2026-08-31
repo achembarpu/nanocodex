@@ -3,7 +3,7 @@ import { test } from "node:test";
 
 import { Actions, Client, Dialog, Errors, Transport } from "../cloud/index.mjs";
 import { Voice } from "../browser/index.mjs";
-import { projectAgentObservations } from "../cloud/actions/agent.mjs";
+import { isManagedReadPath, projectAgentObservations } from "../cloud/actions/agent.mjs";
 import { connectionFromWire } from "../cloud/internal.mjs";
 import { managedBrowserVoiceTransport } from "../managed/internal.mjs";
 import { resolveResponsesTransport } from "../runtime/responses-transport.mjs";
@@ -267,6 +267,64 @@ test("Connect opens its grant-provisioned durable agent without a redundant stat
     client.agent.create({ connection, sessionId: "browser-local" }),
     /do not accept app-local sessionId/,
   );
+});
+
+test("Connect sends managed reads as POST so browsers retain exact app-origin admission", async () => {
+  const requests = [];
+  const agentId = "019fc927-b280-79a7-8445-1b9996ad2fb0";
+  const expiry = Math.floor(Date.now() / 1_000) + 3_600;
+  const client = Client.create({
+    appId: "history-workspace",
+    dialog: Dialog.memory(),
+    provider: { request() { throw new Error("wallet should not be used"); } },
+    transport: Transport.from({
+      key: "history",
+      name: "history",
+      type: "history",
+      setup() {
+        return {
+          baseUrl: "https://connect.example",
+          async fetch(input, init) {
+            const request = new Request(input, init);
+            requests.push(request);
+            return Response.json({ data: [], has_more: false, latest_cursor: "0" });
+          },
+          async request() { throw new Error("control-plane request was unexpected"); },
+        };
+      },
+    }),
+  });
+  client._setSessionToken("grant-session-test");
+  const connection = connectionFromWire(testConnectionWire({
+    agentId,
+    expiry,
+    keyId: "0x1111111111111111111111111111111111111111",
+    capabilities: ["nanocodex.agent", "agent.output.final", "agent.history.read", "chatgpt"],
+  }));
+  const agent = await client.agent.create({ connection });
+  assert.equal((await agent.events.page({ limit: 1 })).latestCursor, "0");
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].method, "POST");
+  assert.equal(
+    new URL(requests[0].url).pathname,
+    `/v1/grants/${connection.grant.id}/agents/${agentId}/events/history`,
+  );
+  assert.equal(requests[0].headers.get("authorization"), "Bearer grant-session-test");
+});
+
+test("Connect POST-tunnels only the complete managed read surface", () => {
+  for (const path of ["", "/events", "/events/history", "/turns/turn-1"]) {
+    assert.equal(isManagedReadPath(path), true, path);
+  }
+  for (const path of [
+    "/turns",
+    "/turns/turn-1/cancel",
+    "/turns/turn-1/steer",
+    "/durability",
+    "/realtime/calls",
+  ]) {
+    assert.equal(isManagedReadPath(path), false, path);
+  }
 });
 
 test("ConnectAgent publishes app tools with only signed hosted MCPs over the ticketed tool host", async () => {

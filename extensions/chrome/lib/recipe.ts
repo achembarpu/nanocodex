@@ -69,7 +69,9 @@ export function recipeStorageKey(origin: string): string {
 export function normalizeOrigin(value: string): string {
   const url = new URL(value);
   if (url.protocol !== "http:" && url.protocol !== "https:") {
-    throw new Error("only HTTP and HTTPS pages support recipes");
+    throw new Error(
+      "This tab cannot be changed. Open an HTTP or HTTPS page, then click the Nanocodex toolbar icon there.",
+    );
   }
   return url.origin;
 }

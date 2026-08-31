@@ -41,6 +41,7 @@ import {
 import {
   managedAgentPortabilityGranted,
   managedGrantHeaders,
+  managedGrantUpstreamMethod,
   managedGrantWebSocketHeaders,
   type ManagedGrantAssertion,
 } from "./managedGrant.mjs";
@@ -1956,10 +1957,11 @@ async function proxyManagedAgent(
     const value = request.headers.get(name);
     if (value) headers.set(name, value);
   }
+  const upstreamMethod = managedGrantUpstreamMethod(request.method, suffix);
   const upstream = await env.ACCOUNTS.fetch(new Request(target, {
-    method: request.method,
+    method: upstreamMethod,
     headers,
-    body: request.method === "GET" || request.method === "HEAD" ? undefined : request.body,
+    body: upstreamMethod === "GET" || upstreamMethod === "HEAD" ? undefined : request.body,
     signal: request.signal,
   }));
   return projectManagedResponse(upstream, grant, suffix);

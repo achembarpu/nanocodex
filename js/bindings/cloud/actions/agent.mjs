@@ -348,13 +348,27 @@ function managedGrantFetch(session, baseUrl, grantId, agentId) {
     if (url.origin !== origin || (url.pathname !== prefix && !url.pathname.startsWith(`${prefix}/`))) {
       throw new TypeError("Connect managed fetch is restricted to its authorized durable agent");
     }
+    const source = input instanceof Request
+      ? (init === undefined ? input : new Request(input, init))
+      : undefined;
+    const method = source?.method ?? init?.method ?? "GET";
+    const read = method === "GET" && isManagedReadPath(url.pathname.slice(prefix.length));
     url.pathname = `/v1/grants/${grantId}/agents/${encodeURIComponent(agentId)}${url.pathname.slice(prefix.length)}`;
-    if (input instanceof Request) {
-      const request = init === undefined ? input : new Request(input, init);
-      return session.fetch(new Request(url, request));
+    if (read) {
+      const request = new Request(url, source ?? init);
+      return session.fetch(new Request(request, { method: "POST" }));
     }
+    if (source) return session.fetch(new Request(url, source));
     return session.fetch(url, init);
   };
+}
+
+/** @internal Exact managed reads tunneled as POST so browsers send Origin. */
+export function isManagedReadPath(pathname) {
+  return pathname === ""
+    || pathname === "/events"
+    || pathname === "/events/history"
+    || /^\/turns\/[^/]+$/.test(pathname);
 }
 
 async function* projectManagedEvents(events, visibility) {

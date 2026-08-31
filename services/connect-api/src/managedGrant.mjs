@@ -37,3 +37,13 @@ export function managedGrantWebSocketHeaders(assertion, origin) {
     upgrade: "websocket",
   };
 }
+
+export function managedGrantUpstreamMethod(method, resource) {
+  if (method !== "POST") return method;
+  return resource === ""
+    || resource === "/events"
+    || resource === "/events/history"
+    || /^\/turns\/[^/]+$/.test(resource)
+    ? "GET"
+    : method;
+}

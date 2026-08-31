@@ -35,5 +35,8 @@ test("scopes storage exactly by origin while requesting Chrome's narrow host pat
   assert.equal(normalizeOrigin("https://example.test/private?q=secret"), "https://example.test");
   assert.equal(recipeStorageKey("https://example.test/a"), "site-recipe:https://example.test");
   assert.equal(permissionPattern("https://example.test/a"), "https://example.test/*");
-  assert.throws(() => normalizeOrigin("chrome://settings"), /HTTP and HTTPS/);
+  assert.throws(
+    () => normalizeOrigin("chrome://settings"),
+    /Open an HTTP or HTTPS page, then click the Nanocodex toolbar icon there/,
+  );
 });
