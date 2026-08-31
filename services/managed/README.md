@@ -470,72 +470,12 @@ room. Raw managed-agent ownership is account-authenticated and does not derive
 credentials from either value. Only the allocator value is copied to the
 website Worker.
 
-### Master production rollout
+### Production deployment
 
-Production runs only for a current `gakonst/nanocodex` master push when
-`CLOUDFLARE_DEPLOY_ENABLED=true`. Configure these repository variables before
-enabling it:
-
-- `CLOUDFLARE_ACCOUNT_ID`;
-- `NANOCODEX_MANAGED_AUTH_MODE`, exactly `api_key` or `chatgpt`.
-
-Configure `CLOUDFLARE_API_TOKEN`, `NANOCODEX_ADMIN_TOKEN`,
-`NANOCODEX_ROOM_ALLOCATOR_TOKEN`, `NANOCODEX_BROKER_PROBE_TOKEN`, and
-`NANOCODEX_GIT_TOKEN` as repository secrets. The broker probe token is a third
-independent random authority used only by the private broker and disposable
-readiness probe; generate 32 random bytes and store their 43-character
-base64url encoding. For `api_key`, also configure only the selected broker input
-`NANOCODEX_MANAGED_OPENAI_API_KEY`. For `chatgpt`, configure
-`NANOCODEX_MANAGED_CODEX_OAUTH_BOOTSTRAP` and
-`NANOCODEX_MANAGED_CODEX_RELAY_URL`; see the adjacent broker README for their
-validated shapes. Missing, weak, equal admin/allocator, malformed, or
-mode-inconsistent prerequisites stop the job before the website deploys.
-
-After all package checks pass, CI downloads the attested browser WASM artifact,
-prepares the managed Worker's private WASM module, and rejects an absent or
-invalid module before mutation. It then rechecks that the revision is current master,
-deploys the private broker with one fixed policy, rechecks master, and deploys
-this private managed Worker so its Durable Object migrations apply. An
-ephemeral authenticated probe first requires the private broker's fixed
-credential-and-WebSocket readiness check to succeed over a Service Binding. It
-then reaches the backend only through another Service Binding, creates a room
-with the allocator token, deletes it with the returned owner cookie, and
-requires the private quota Durable Object's `active_rooms` count to return to
-its exact baseline. The probe Worker and all temporary files are deleted in
-`finally`.
-
-Only after that boundary passes and master is checked again does CI deploy the
-website. Its generated config must bind `EGRESS` directly to the stable private
-`nanocodex-egress-broker-example` Worker, bind `MULTIPLAYER_BACKEND` to
-`nanocodex-durable-agent`, and set the non-secret `NANOCODEX_AUTH_MODE` to the
-same exact `api_key` or `chatgpt` selection used by the preceding broker and
-managed deployments. The managed secrets file contains the distinct administrator and room
-allocator values; the website secrets file contains the identical allocator
-value under `MULTIPLAYER_ALLOCATOR_TOKEN` and never the administrator. Provider
-and relay values exist only in the broker step. The website deployment uses
-`--containers-rollout none`, so this Worker-only rollout does not rebuild or
-replace the existing `ChatGptEgress` container. Every generated config/secrets
-file is mode `0600`, and the existing website revision attestation, master
-freshness check, repository publication, and repository endpoint verification
-remain the final gates.
-
-The boundary check creates one real room, so every production rollout consumes
-one entry from the deployment-wide 32-allocation hourly window. Concurrent
-production room churn can make its exact quota-baseline assertion fail closed;
-retry only after verifying the prior probe room was owner-deleted or its bounded
-lease expired.
-
-The checked-in managed-Worker configuration has `workers_dev = false`: it is a
-private production backend reached only through the website's
-`MULTIPLAYER_BACKEND` Service Binding. The website strips browser
-`Authorization` headers and supplies `MULTIPLAYER_ALLOCATOR_TOKEN` only for exact
-room creation requests. Join forwards only its bounded invite body; state,
-socket, and owner-delete forward only the exact current-room HttpOnly membership
-cookie. Website credential cookies, other-room cookies, and arbitrary browser
-headers never cross the binding. Use the disposable smoke below when
-you need a temporary public test endpoint; it keeps the broker and managed
-Worker private, exposes only a third disposable proxy running the exact website
-room router, and deletes all three afterward.
+Prepare the evaluator and deploy this Worker directly with `npm run deploy`.
+Deploy egress first and the root Worker after this one. Resource provisioning,
+secret rotation, container rollouts, and behavior verification are separate
+operations; follow `../../AGENTS.md`.
 
 The disposable Cloudflare smoke performs that whole deployment with unique
 names, runs three real room clients plus one real managed-agent turn, and then

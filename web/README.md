@@ -405,30 +405,23 @@ scrolling are left to Pierre CodeView and the browser's native input behavior.
 
 ## Production
 
-`master` CI can own production deployment after the `CLOUDFLARE_API_TOKEN`
-repository secret, `CLOUDFLARE_ACCOUNT_ID` repository variable, and
-`CLOUDFLARE_DEPLOY_ENABLED=true` repository variable are configured. The
-existing `NANOCODEX_GIT_TOKEN` publishes the matching repository generation.
-Without that explicit enablement, CI still validates the complete production
-graph but does not mutate the hosted Worker. Local commands build and preview
-it:
+Build and preview the root locally with:
 
 ```bash
 npm run build
 npm run preview
 ```
 
-For a break-glass production deployment, start from a clean commit and preserve
-the same attestation contract before running `publish:repository`:
+Deploy the built root Worker directly with Wrangler. This updates Worker code
+without rebuilding or rolling the existing container image:
 
 ```bash
-npm run deploy
+npm run deploy:built
 ```
 
-The deploy command requires `HEAD` to equal the fetched `origin/master`, binds
-that full commit SHA into the Worker version, rolls only that version to 100%
-without rebuilding unchanged containers, and does not return successfully until
-the live health endpoint attests the same revision.
+Pass the exact commit as `DEPLOYMENT_SHA`. Deploy backend and Connect Workers
+first, then root. Deployment verification and repository publication are
+separate explicit operations; follow the behavior matrix in `../AGENTS.md`.
 
 Do not publish repository data until the hosted `/api/health` reports that
 exact `deployment_sha`. The publisher enforces this ordering independently. An

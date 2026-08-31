@@ -76,7 +76,7 @@ test("managed agents have no provider-credential or direct transport path", asyn
   const brokerConfig = JSON.parse(brokerConfigText);
   const webConfig = JSON.parse(webConfigText);
   assert.equal(config.workers_dev, false);
-  assert.equal(config.name, "nanocodex-managed-development");
+  assert.equal(config.name, "nanocodex-durable-agent");
   assert.equal(brokerConfig.workers_dev, false);
   assert.deepEqual(
     config.services?.filter((service) => service.binding === "NANOCODEX"),

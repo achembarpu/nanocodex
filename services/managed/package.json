@@ -13,11 +13,8 @@
     "dev:api-key": "node scripts/dev-brokered.mjs --auth-mode=api_key",
     "dev:subscription": "node scripts/dev-brokered.mjs --auth-mode=chatgpt",
     "e2e:local": "npm run prepare:code-evaluator && node scripts/local-e2e.mjs",
-    "deploy:production:preflight": "npm run prepare:code-evaluator && node scripts/production-rollout.mjs preflight",
-    "deploy:production:managed": "npm run prepare:code-evaluator && node scripts/production-rollout.mjs deploy-managed",
-    "deploy:production:web": "node scripts/production-rollout.mjs deploy-web",
+    "deploy": "npm run prepare:code-evaluator && wrangler deploy --strict",
     "load:durability": "node scripts/durability-load.mjs",
-    "verify:production:boundary": "node scripts/production-rollout.mjs verify-boundary",
     "fanout": "node scripts/fanout.mjs",
     "mock:openai": "node scripts/mock-openai.mjs",
     "multiclient": "node scripts/multiclient-smoke.mjs",
@@ -55,7 +52,7 @@
     "@cloudflare/workers-types": "^5.20260730.1",
     "typescript": "5.9.3",
     "vitest": "^4.0.18",
-    "wrangler": "^4.115.0",
+    "wrangler": "4.123.0",
     "ws": "^8.18.3"
   }
 }
