@@ -48,6 +48,8 @@ managed. Neither value is accepted from a public browser request.
 | `POST /users/:user/credentials/chatgpt/login/status` | none | pending/authenticated/expired status; polling and token exchange stay server-side |
 | `DELETE /users/:user/credentials/chatgpt` | none | `204` |
 | `POST /users/:user/credentials/chatgpt/local-claim` | none | secret-free status; development only |
+| `PUT /users/:user/credentials/ssh/:reference` | target-bound private-key document | `204` |
+| `DELETE /users/:user/credentials/ssh/:reference` | none | `204` |
 
 The local claim is enabled only when `ENVIRONMENT` is `local`, `development`,
 or `test` and `ALLOW_LOCAL_CREDENTIAL_CLAIM=true`. It consumes
@@ -80,6 +82,35 @@ credential is healthy is an idempotent no-op, so a stale caller cannot replace
 a newer token or revision. A different healthy account returns
 `409 chatgpt_account_conflict`. Every success is an empty `204` with `no-store`;
 request bodies and provider material are never logged or reflected.
+
+## Brokered SSH identities
+
+An authenticated account may store an SSH identity through
+`PUT /v1/credentials/ssh/:reference`. The JSON document contains
+unencrypted PEM `private_key`, canonical lowercase `hostname`, `port`, `username`, and the
+server's `host_key_sha256` fingerprint. The private broker encrypts the whole
+record with the same per-user credential vault used for provider credentials.
+Status returns only the reference and target metadata.
+
+Managed Just Bash then uses the opaque reference:
+
+```sh
+ssh -p 2222 -o IdentityRef=production deploy@ssh.example.com -- uname -a
+```
+
+During command execution the shell sends the private egress Worker only the
+reference, exact target, and remote command. Egress refuses any target that
+differs from the stored record, verifies the stored host fingerprint, performs
+key authentication itself, and returns only bounded stdout, stderr, and exit
+status. Private-key bytes never enter the execution Worker, agent context,
+durable workspace, shell environment, tool output, or audit log. Direct `-i`
+SSH remains a separate host-owned mode; `IdentityRef` never falls back to a
+workspace file or disables host checking.
+
+Account-owned managed turns may use stored SSH identities. Capability-bound
+Connect turns fail closed for `IdentityRef` until the signed Connect resource
+protocol can enumerate the exact approved SSH identity references; account
+entitlement alone never broadens an existing app grant.
 
 ## Model egress
 
@@ -128,7 +159,7 @@ Dormant pre-sharding agents remain recoverable because their AgentDO retains
 the authoritative owner and idempotently binds its direct shard before model
 use; deletion similarly creates the permanent shard tombstone.
 
-All API keys, ChatGPT access/refresh state, device-login state, connector
+All API keys, SSH private keys, ChatGPT access/refresh state, device-login state, connector
 access/refresh tokens, PKCE verifiers, OAuth state, and refresh markers are
 AES-256-GCM encrypted before Durable Object storage. Production
 requires `CREDENTIAL_ENCRYPTION_KEY`; `CREDENTIAL_ENCRYPTION_KEY_PREVIOUS`

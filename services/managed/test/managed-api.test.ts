@@ -1140,11 +1140,14 @@ describe("managed agents REST and resumable SSE", () => {
     expect(anonymousCookie).toMatch(/^nanocodex_account=a_[A-Za-z0-9_-]{43}$/);
 
     const originalBroker = testEnv.NANOCODEX;
-    const brokerRequests: Request[] = [];
+    const brokerRequests: Array<{ body: string | null; url: string }> = [];
     testEnv.NANOCODEX = {
       async fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
         const request = new Request(input, init);
-        brokerRequests.push(request);
+        brokerRequests.push({
+          body: request.body === null ? null : await request.text(),
+          url: request.url,
+        });
         return new Response(null, { status: 204 });
       },
     } as Fetcher;
@@ -1167,6 +1170,21 @@ describe("managed agents REST and resumable SSE", () => {
         body: JSON.stringify({ api_key: "sk-anonymous-must-not-store" }),
       });
       expect(anonymousPut.status).toBe(401);
+      expect(brokerRequests).toHaveLength(0);
+
+      const anonymousSsh = await RAW_SELF.fetch(
+        "https://example.test/v1/credentials/ssh/production",
+        {
+          method: "PUT",
+          headers: {
+            cookie: anonymousCookie!,
+            origin: "https://example.test",
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({ private_key: "anonymous-ssh-secret" }),
+        },
+      );
+      expect(anonymousSsh.status).toBe(401);
       expect(brokerRequests).toHaveLength(0);
 
       const anonymousApiKey = await RAW_SELF.fetch("https://example.test/v1/api-keys", {
@@ -1197,6 +1215,27 @@ describe("managed agents REST and resumable SSE", () => {
       });
       expect(persistentPut.status).toBe(204);
 
+      const sshBody = {
+        private_key: "persistent-ssh-secret",
+        hostname: "ssh.example.com",
+        port: 22,
+        username: "deploy",
+        host_key_sha256: `SHA256:${"A".repeat(43)}`,
+      };
+      const persistentSsh = await RAW_SELF.fetch(
+        "https://example.test/v1/credentials/ssh/production",
+        {
+          method: "PUT",
+          headers: {
+            cookie,
+            origin: "https://example.test",
+            "content-type": "application/json",
+          },
+          body: JSON.stringify(sshBody),
+        },
+      );
+      expect(persistentSsh.status).toBe(204);
+
       const persistentDelete = await RAW_SELF.fetch("https://example.test/v1/credentials/openai", {
         method: "DELETE",
         headers: { cookie, origin: "https://example.test" },
@@ -1208,10 +1247,14 @@ describe("managed agents REST and resumable SSE", () => {
         headers: { cookie, origin: "https://example.test" },
       });
       expect(localClaim.status).toBe(204);
-      expect(brokerRequests).toHaveLength(3);
+      expect(brokerRequests).toHaveLength(4);
       expect(brokerRequests[0]?.body).not.toBeNull();
-      expect(brokerRequests[1]?.body).toBeNull();
+      expect(new URL(brokerRequests[1]!.url).pathname).toBe(
+        `/users/${userId}/credentials/ssh/production`,
+      );
+      expect(JSON.parse(brokerRequests[1]!.body!)).toEqual(sshBody);
       expect(brokerRequests[2]?.body).toBeNull();
+      expect(brokerRequests[3]?.body).toBeNull();
     } finally {
       testEnv.NANOCODEX = originalBroker;
     }

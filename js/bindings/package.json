@@ -107,6 +107,10 @@
       "types": "./tools/bash.d.mts",
       "import": "./tools/bash.mjs"
     },
+    "./tools/ssh": {
+      "types": "./tools/ssh.d.mts",
+      "import": "./tools/ssh.mjs"
+    },
     "./tools/repository-workspace": {
       "types": "./tools/repository-workspace.d.mts",
       "import": "./tools/repository-workspace.mjs"

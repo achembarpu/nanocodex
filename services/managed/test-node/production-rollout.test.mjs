@@ -194,7 +194,7 @@ test("production Wrangler environment excludes every secret and stale provider i
   });
 });
 
-test("managed production config retains the exact private eight-DO topology", async () => {
+test("managed production config retains the exact private nine-DO topology", async () => {
   const base = JSON.parse(await readFile(new URL("../wrangler.jsonc", import.meta.url), "utf8"));
   assert.equal(base.name, "nanocodex-managed-development");
   const config = buildManagedProductionConfig(base, { mainPath: "/fixed/managed.ts" });
@@ -208,17 +208,22 @@ test("managed production config retains the exact private eight-DO topology", as
   assert.deepEqual(config.services, [
     { binding: "NANOCODEX", service: "nanocodex-egress" },
   ]);
-  assert.equal(config.durable_objects.bindings.length, 8);
+  assert.equal(config.durable_objects.bindings.length, 9);
   assert.deepEqual(
     config.durable_objects.bindings.find(({ name }) => name === "NANOCODEX_SESSIONS"),
     { name: "NANOCODEX_SESSIONS", class_name: "DurableAgentSession" },
   );
-  assert.deepEqual(config.migrations.map(({ tag }) => tag), ["v1", "v2", "v3", "v4", "v5"]);
-  assert.deepEqual(config.migrations.at(-1), {
+  assert.deepEqual(config.migrations.map(({ tag }) => tag), ["v1", "v2", "v3", "v4", "v5", "v6"]);
+  assert.deepEqual(config.migrations.at(-2), {
     tag: "v5",
     new_sqlite_classes: ["DurableAgentSession"],
     deleted_classes: ["NanocodexSession"],
   });
+  assert.deepEqual(config.migrations.at(-1), {
+    tag: "v6",
+    new_sqlite_classes: ["Sandbox"],
+  });
+  assert.equal(config.vars.NANOCODEX_COMPUTE_PROVIDER, "cloudflare");
   assert.doesNotMatch(JSON.stringify(config), /NANOCODEX_AUTH_MODE|OPENAI_API_KEY|CODEX_OAUTH_BOOTSTRAP|CODEX_RELAY_URL/);
   assert.deepEqual(managedSecretPayload(adminToken), { NANOCODEX_ADMIN_TOKEN: adminToken });
   assert.deepEqual(webSecretPayload("g".repeat(43)), {
@@ -255,7 +260,7 @@ test("managed deployment reports the object-shaped migration tags after Wrangler
 
   assert.deepEqual(result, {
     component: "private-managed",
-    migrations: ["v1", "v2", "v3", "v4", "v5"],
+    migrations: ["v1", "v2", "v3", "v4", "v5", "v6"],
     revision,
     status: "deployed",
   });

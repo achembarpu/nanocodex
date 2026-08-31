@@ -25,7 +25,8 @@ export async function routeCredentialRequest(
   env: CredentialEnv,
   url: URL,
 ): Promise<Response | undefined> {
-  const methods = ROUTES.get(url.pathname);
+  const sshIdentity = url.pathname.match(/^\/v1\/credentials\/ssh\/([A-Za-z0-9][A-Za-z0-9._-]{0,63})$/)?.[1];
+  const methods = ROUTES.get(url.pathname) ?? (sshIdentity ? new Set(["PUT", "DELETE"]) : undefined);
   if (!methods) return undefined;
   if (!methods.has(request.method)) return json({ error: "method_not_allowed" }, 405);
   if (url.search) return json({ error: "invalid_request" }, 400);
@@ -39,7 +40,7 @@ export async function routeCredentialRequest(
   if (!principal || principal.kind !== "account_session") {
     return json({ error: "unauthorized" }, 401);
   }
-  if (request.method === "PUT" && url.pathname === "/v1/credentials/openai"
+  if (request.method === "PUT" && (url.pathname === "/v1/credentials/openai" || sshIdentity)
     && !request.headers.get("content-type")?.toLowerCase().startsWith("application/json")) {
     return json({ error: "invalid_content_type" }, 415);
   }

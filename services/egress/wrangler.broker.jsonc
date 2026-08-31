@@ -3,7 +3,10 @@
   "name": "nanocodex-egress",
   "main": "src/egress.ts",
   "compatibility_date": "2026-07-29",
-  "compatibility_flags": ["global_fetch_strictly_public"],
+  "compatibility_flags": ["global_fetch_strictly_public", "nodejs_compat"],
+  "alias": {
+    "node-rsa": "../../js/bindings/tools/browser/unsupportedNodeRsa.mjs"
+  },
   "workers_dev": false,
   "minify": true,
   "upload_source_maps": true,

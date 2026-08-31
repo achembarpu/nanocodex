@@ -27,6 +27,9 @@ export type JustBashCustomCommand = Readonly<{
     args: string[],
     context: unknown,
   ): Promise<Readonly<{ stdout: string; stderr: string; exitCode: number }>>;
+}> | Readonly<{
+  name: string;
+  load(): Promise<JustBashCustomCommand>;
 }>;
 
 export type JustBashNetworkOptions = Readonly<{

@@ -18,6 +18,9 @@
     "test:node": "node --test test/*.node.mjs",
     "typecheck": "tsc --noEmit"
   },
+  "dependencies": {
+    "nanocodex": "file:../../js/bindings"
+  },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.22.0",
     "@cloudflare/workers-types": "^5.20260730.1",

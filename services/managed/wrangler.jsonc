@@ -3,7 +3,13 @@
   "name": "nanocodex-managed-development",
   "main": "src/index.ts",
   "compatibility_date": "2026-07-29",
-  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  "compatibility_flags": [
+    "nodejs_compat",
+    "global_fetch_strictly_public"
+  ],
+  "alias": {
+    "node-rsa": "../../js/bindings/tools/browser/unsupportedNodeRsa.mjs"
+  },
   "workers_dev": false,
   "minify": true,
   "upload_source_maps": true,
@@ -72,21 +78,35 @@
       {
         "name": "NANOCODEX_ORGANIZATIONS",
         "class_name": "Organization"
+      },
+      {
+        "name": "NANOCODEX_COMPUTE_SANDBOX",
+        "class_name": "Sandbox"
       }
     ]
   },
   "migrations": [
     {
       "tag": "v1",
-      "new_sqlite_classes": ["NanocodexSession", "MultiplayerRoom", "MultiplayerQuota"]
+      "new_sqlite_classes": [
+        "NanocodexSession",
+        "MultiplayerRoom",
+        "MultiplayerQuota"
+      ]
     },
     {
       "tag": "v2",
-      "new_sqlite_classes": ["NonceStorage", "UserAccount", "ApiKeyRecord"]
+      "new_sqlite_classes": [
+        "NonceStorage",
+        "UserAccount",
+        "ApiKeyRecord"
+      ]
     },
     {
       "tag": "v3",
-      "new_sqlite_classes": ["MemoryScope"]
+      "new_sqlite_classes": [
+        "MemoryScope"
+      ]
     },
     {
       "tag": "v4",
@@ -96,9 +116,23 @@
       "tag": "v5",
       "new_sqlite_classes": ["DurableAgentSession"],
       "deleted_classes": ["NanocodexSession"]
+    },
+    {
+      "tag": "v6",
+      "new_sqlite_classes": [
+        "Sandbox"
+      ]
     }
   ],
   "vars": {
-    "AGENT_IDLE_TIMEOUT_MS": "30000"
-  }
+    "AGENT_IDLE_TIMEOUT_MS": "30000",
+    "NANOCODEX_COMPUTE_PROVIDER": "cloudflare"
+  },
+  "containers": [
+    {
+      "class_name": "Sandbox",
+      "image": "./Dockerfile",
+      "instance_type": "lite"
+    }
+  ]
 }

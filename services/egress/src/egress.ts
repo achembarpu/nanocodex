@@ -14,6 +14,14 @@ import {
   McpConnectionDirectory,
   validMcpConnectionMaterialization,
 } from "./mcp-connection-owner";
+import {
+  BrokeredSshError,
+  executeBrokeredSsh,
+  type BrokeredSshIdentity,
+  validateBrokeredSshRequest,
+  validateSshIdentity,
+  validSshIdentityReference,
+} from "./ssh";
 
 export { AgentSubjectDirectory, UserCredentialBroker } from "./broker";
 export { UserConnectorBroker } from "./connector-broker";
@@ -31,6 +39,7 @@ const MAX_CONTROL_BODY_BYTES = 16 * 1024;
 const MAX_CHATGPT_IMPORT_BODY_BYTES = 64 * 1024;
 const MAX_BROKER_RESPONSE_BYTES = 4 * 1024;
 const MAX_MODEL_BODY_BYTES = 32 * 1024 * 1024;
+const MAX_SSH_BODY_BYTES = 72 * 1024;
 const CODEX_ATTESTATION_UNAVAILABLE = '{"v":1,"s":1}';
 const REDIRECT_STATUS = new Set([301, 302, 303, 307, 308]);
 const CONNECTOR_METHODS = new Set(["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"]);
@@ -175,6 +184,11 @@ export async function handleEgress(
   try { url = new URL(request.url); } catch { return jsonError(400, "invalid_url"); }
   if (url.username || url.password || url.hash) return jsonError(403, "destination_denied");
 
+  if (url.protocol === "https:" && url.hostname === "ssh.internal" && !url.port
+    && url.pathname === "/v1/execute" && !url.search) {
+    return handleSshEgress(request, url, env, started);
+  }
+
   const mcpConnection = mcpConnectionId(url);
   if (mcpConnection) {
     return handleMcpEgress(request, url, mcpConnection, env, started);
@@ -303,6 +317,46 @@ export async function handleEgress(
         ...(userId === undefined ? {} : { user_id: userId }),
         deployment_sha: env.DEPLOYMENT_SHA,
       });
+  }
+}
+
+async function handleSshEgress(
+  request: Request,
+  url: URL,
+  env: EgressEnv,
+  started: number,
+): Promise<Response> {
+  if (request.method !== "POST") return auditedError(403, "method_denied", request, url, "ssh", started);
+  const subject = request.headers.get(SUBJECT_HEADER);
+  if (!subject || !SUBJECT.test(subject)) {
+    return auditedError(403, "agent_subject_required", request, url, "ssh", started);
+  }
+  if (request.headers.get("content-type")?.toLowerCase() !== "application/json"
+    || request.headers.has("authorization") || request.headers.has("cookie")
+    || request.headers.has("proxy-authorization")) {
+    return auditedError(403, "required_header_mismatch", request, url, "ssh", started);
+  }
+  const parsed = validateBrokeredSshRequest(await readJson(request, MAX_SSH_BODY_BYTES));
+  if (!parsed) return auditedError(400, "invalid_ssh_request", request, url, "ssh", started);
+  let userId: string | undefined;
+  try {
+    userId = await resolveSubject(env, subject);
+    const identity = await resolveSshIdentity(env, userId, parsed.identityReference);
+    const result = await executeBrokeredSsh(identity, parsed, request.signal);
+    audit("allow", request, url, "ssh", started, {
+      status: 200,
+      user_id: userId,
+      deployment_sha: env.DEPLOYMENT_SHA,
+    });
+    return json({ stdout: result.stdout, stderr: result.stderr, exit_code: result.exitCode }, 200);
+  } catch (error) {
+    const problem = error instanceof BrokeredSshError
+      ? new EgressFailure(error.status, error.code)
+      : egressFailure(error);
+    return auditedError(problem.status, problem.code, request, url, "ssh", started, {
+      ...(userId === undefined ? {} : { user_id: userId }),
+      deployment_sha: env.DEPLOYMENT_SHA,
+    });
   }
 }
 
@@ -523,6 +577,37 @@ async function handleControl(request: Request, url: URL, env: EgressEnv): Promis
       ...(request.body === null ? {} : {
         headers: { "content-type": request.headers.get("content-type") ?? "" },
         body: request.body,
+      }),
+    });
+  }
+
+  const sshIdentityMatch = url.pathname.match(
+    /^\/users\/([A-Za-z0-9][A-Za-z0-9._:-]{0,127})\/credentials\/ssh\/([A-Za-z0-9][A-Za-z0-9._-]{0,63})$/,
+  );
+  if (sshIdentityMatch) {
+    if (request.method !== "PUT" && request.method !== "DELETE") {
+      return jsonError(405, "method_not_allowed");
+    }
+    const userId = sshIdentityMatch[1]!;
+    const reference = sshIdentityMatch[2]!;
+    if (!validSshIdentityReference(reference)) return jsonError(400, "invalid_ssh_identity_reference");
+    const target = `https://credentials.internal/v1/ssh-identities/${encodeURIComponent(reference)}`;
+    if (request.method === "DELETE") return userBroker(env, userId).fetch(target, { method: "DELETE" });
+    if (request.headers.get("content-type")?.toLowerCase() !== "application/json") {
+      return jsonError(400, "invalid_ssh_identity");
+    }
+    const body = await readJson(request, MAX_SSH_BODY_BYTES);
+    const identity = validateSshIdentity(body);
+    if (!identity) return jsonError(400, "invalid_ssh_identity");
+    return userBroker(env, userId).fetch(target, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        private_key: identity.privateKey,
+        hostname: identity.hostname,
+        port: identity.port,
+        username: identity.username,
+        host_key_sha256: identity.hostKeySha256,
       }),
     });
   }
@@ -865,6 +950,27 @@ async function resolveCredential(
     throw new EgressFailure(503, "invalid_credential_response");
   }
   return value;
+}
+
+async function resolveSshIdentity(
+  env: EgressEnv,
+  userId: string,
+  reference: string,
+): Promise<BrokeredSshIdentity> {
+  const response = await userBroker(env, userId).fetch(
+    `https://credentials.internal/v1/ssh-identities/${encodeURIComponent(reference)}`,
+    { method: "POST" },
+  );
+  if (!response.ok) {
+    await readBoundedText(response, MAX_BROKER_RESPONSE_BYTES);
+    throw new EgressFailure(
+      response.status === 404 ? 409 : 503,
+      response.status === 404 ? "ssh_identity_unavailable" : "ssh_identity_broker_unavailable",
+    );
+  }
+  const identity = validateSshIdentity(await response.json<unknown>());
+  if (!identity) throw new EgressFailure(503, "invalid_ssh_identity_response");
+  return identity;
 }
 
 async function replayableBody(request: Request, operation: ModelOperation): Promise<Uint8Array | null> {
