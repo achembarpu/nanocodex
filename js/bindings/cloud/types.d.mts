@@ -62,8 +62,11 @@ export type AgentTurn = Readonly<{
 }>;
 
 export type ConnectAgent = Readonly<{
+  /** Stable account-owned managed Agent resource identity. */
+  agentId: string;
+  /** @deprecated Use `agentId`. */
   id: string;
-  /** Alias matching the canonical Nanocodex Agent surface. */
+  /** Stable conversation identity retained across follow-on turns. */
   sessionId: string;
   type: "connect";
   provider: string;
@@ -116,6 +119,7 @@ export type MppPermission = Readonly<{
 export type Connection = Readonly<{
   accountAddress: Hex;
   agentId: string;
+  sessionId: string;
   grant: Grant;
   accessKey: AccessKey;
   mpp: MppPermission;

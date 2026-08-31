@@ -77,8 +77,9 @@ async function connectAgent(managed, connection, transport, tools, signal) {
     detachInitialToolAbort(toolState);
   }
   const agent = {
-    id: managed.id,
-    sessionId: managed.id,
+    agentId: connection.agentId,
+    id: connection.agentId,
+    sessionId: connection.sessionId,
     type: "connect",
     provider: PROVIDER_NAME,
     state: () => managed.state(),

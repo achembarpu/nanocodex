@@ -286,6 +286,8 @@ type GrantRecord = Readonly<{
   accountAddress: `0x${string}`;
   brokerUserId: string;
   agentId: string;
+  /** Present on grants issued after managed identity projection was introduced. */
+  sessionId?: string;
   permission: string;
   status: "active" | "revoked";
   expiresAt: number;
@@ -310,7 +312,8 @@ type GrantPrincipal = Readonly<{
   appOrigin: string;
   grantId: `0x${string}`;
 }>;
-type ConnectAgentRecord = Readonly<{ agentId: string }>;
+type ManagedAgentIdentity = Readonly<{ agentId: string; sessionId: string }>;
+type ConnectAgentRecord = Readonly<{ agentId: string; sessionId?: string }>;
 type ConnectIdentityRecord = Readonly<{
   accountAddress: `0x${string}`;
   brokerUserId: string;
@@ -1286,9 +1289,9 @@ async function createConnection(
       "A new durable conversation cannot reuse an existing agent approval.",
     );
   }
-  const [durableAgentId, egressSubject] = await Promise.all([
+  const [durableAgent, egressSubject] = await Promise.all([
     isConnectAgentId(approval.durableAgentId)
-      ? Promise.resolve(approval.durableAgentId)
+      ? resolveManagedAgentIdentity(env, grantAssertion, approval.durableAgentId)
       : connectManagedAgent(env, store, appScope, grantAssertion, conversationId),
     connectEgressSubject(env, store, identity.userId, appScope),
   ]);
@@ -1300,7 +1303,8 @@ async function createConnection(
     appOrigin: app.origin,
     accountAddress,
     brokerUserId: identity.userId,
-    agentId: durableAgentId,
+    agentId: durableAgent.agentId,
+    sessionId: durableAgent.sessionId,
     permission,
     status: "active",
     expiresAt,
@@ -1793,13 +1797,13 @@ async function connectManagedAgent(
   appId: string,
   assertion: ManagedGrantAssertion,
   conversationId?: string,
-): Promise<string> {
+): Promise<ManagedAgentIdentity> {
   if (!store.create) {
     throw new ApiFailure(500, "durable_agent_unavailable", "Atomic durable-agent provisioning is unavailable.");
   }
   const recordKey = `connect-agent:${appId}:${assertion.brokerUserId}${conversationId ? `:${conversationId}` : ""}`;
   const retained = await store.get<unknown>(recordKey);
-  if (isConnectAgentRecord(retained)) return retained.agentId;
+  if (isConnectAgentRecord(retained)) return connectAgentIdentity(retained);
   const lockKey = `${recordKey}:lock`;
   const lockValue = randomSubject();
   let acquired = false;
@@ -1813,14 +1817,14 @@ async function connectManagedAgent(
   }
   try {
     const retainedAfterLock = await store.get<unknown>(recordKey);
-    if (isConnectAgentRecord(retainedAfterLock)) return retainedAfterLock.agentId;
+    if (isConnectAgentRecord(retainedAfterLock)) return connectAgentIdentity(retainedAfterLock);
 
-    const agentId = await createManagedAgent(env, assertion);
+    const identity = await createManagedAgent(env, assertion);
     try {
-      await store.set(recordKey, { agentId } satisfies ConnectAgentRecord);
-      return agentId;
+      await store.set(recordKey, identity satisfies ConnectAgentRecord);
+      return identity;
     } catch (cause) {
-      await deleteManagedAgent(env, assertion, agentId).catch(() => {});
+      await deleteManagedAgent(env, assertion, identity.agentId).catch(() => {});
       throw cause;
     }
   } finally {
@@ -1841,7 +1845,18 @@ function managedGrantAssertion(grant: GrantRecord): ManagedGrantAssertion {
 
 function isConnectAgentRecord(value: unknown): value is ConnectAgentRecord {
   return isRecord(value)
-    && isConnectAgentId(value.agentId);
+    && isConnectAgentId(value.agentId)
+    && (value.sessionId === undefined || isConnectAgentId(value.sessionId));
+}
+
+function connectAgentIdentity(record: ConnectAgentRecord): ManagedAgentIdentity {
+  return {
+    agentId: record.agentId,
+    // Managed currently uses one UUID for both identities. Preserve retained
+    // pre-projection records while ensuring newly provisioned records retain
+    // the authoritative service response.
+    sessionId: record.sessionId ?? record.agentId,
+  };
 }
 
 function isConnectAgentId(value: unknown): value is string {
@@ -1916,16 +1931,39 @@ function isConnectSubjectRecord(
     && EGRESS_SUBJECT.test(value.subject);
 }
 
-async function createManagedAgent(env: Env, assertion: ManagedGrantAssertion): Promise<string> {
+async function createManagedAgent(
+  env: Env,
+  assertion: ManagedGrantAssertion,
+): Promise<ManagedAgentIdentity> {
   const response = await env.ACCOUNTS.fetch(new Request("https://nanocodex.internal/v1/agents", {
     method: "POST",
     headers: managedGrantHeaders(assertion),
   }));
   const body = await response.json().catch(() => undefined) as unknown;
-  if (!response.ok || !isRecord(body) || !isConnectAgentId(body.agent_id)) {
+  if (!response.ok || !isRecord(body)
+    || !isConnectAgentId(body.agent_id)
+    || !isConnectAgentId(body.session_id)) {
     throw new ApiFailure(503, "durable_agent_unavailable", "The durable Nanocodex agent could not be provisioned.");
   }
-  return body.agent_id;
+  return { agentId: body.agent_id, sessionId: body.session_id };
+}
+
+async function resolveManagedAgentIdentity(
+  env: Env,
+  assertion: ManagedGrantAssertion,
+  agentId: string,
+): Promise<ManagedAgentIdentity> {
+  const response = await env.ACCOUNTS.fetch(new Request(
+    `https://nanocodex.internal/v1/agents/${encodeURIComponent(agentId)}`,
+    { headers: managedGrantHeaders(assertion) },
+  ));
+  const body = await response.json().catch(() => undefined) as unknown;
+  if (!response.ok || !isRecord(body)
+    || body.agent_id !== agentId
+    || !isConnectAgentId(body.session_id)) {
+    throw new ApiFailure(503, "durable_agent_unavailable", "The durable Nanocodex agent identity could not be resolved.");
+  }
+  return { agentId, sessionId: body.session_id };
 }
 
 async function deleteManagedAgent(
@@ -3132,6 +3170,7 @@ function isGrantRecord(value: unknown): value is GrantRecord {
     && /^0x[0-9a-fA-F]{40}$/.test(String(value.accountAddress))
     && isBrokerUserId(value.brokerUserId)
     && typeof value.agentId === "string"
+    && (value.sessionId === undefined || isConnectAgentId(value.sessionId))
     && typeof value.permission === "string"
     && (value.status === "active" || value.status === "revoked")
     && Number.isSafeInteger(value.expiresAt)
@@ -4708,6 +4747,7 @@ function connectionWire(grant: GrantRecord, grantToken: string) {
     account_id: grant.brokerUserId,
     account_address: grant.accountAddress,
     agent_id: grant.agentId,
+    session_id: grant.sessionId ?? grant.agentId,
     grant: grantWire(grant),
     mcp_connections: grant.mcpConnections ?? [],
     authorization_mode: grant.accessKey ? "access_key" : "hosted",
