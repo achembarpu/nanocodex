@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { bindBrowser } from "../tools/browser/index.mjs";
+import { createPreparedBrowser } from "../tools/browser/preparedBrowser.mjs";
 import * as datasets from "../tools/dataset.mjs";
 import { namedTool } from "../tools/namedTool.mjs";
 import * as standard from "../tools/standard.mjs";
@@ -33,7 +34,7 @@ test("the default browser harness exposes one exact model-visible tool set", asy
       return Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
     },
   };
-  const runtime = bindBrowser({
+  const runtime = bindBrowser(createPreparedBrowser({
     datasets,
     fetch: async (input) => {
       requests.push(String(input));
@@ -63,7 +64,7 @@ test("the default browser harness exposes one exact model-visible tool set", asy
       projectInstructions: "project instructions",
       workspace,
     },
-  }, {
+  }), {
     dataset: {
       fetch: async () => new Response('{"id":1}\n'),
     },
@@ -177,8 +178,7 @@ test("the browser harness preserves explicit tool URLs", async () => {
 });
 
 test("accountInfo adds app authorization without forwarding unknown control-plane fields", async () => {
-  const runtime = bindBrowser({
-    ...preparedBrowser(),
+  const runtime = bindBrowser(preparedBrowser({
     fetch: async () => Response.json({
       connectors: { chatgpt: { connected: true, label: "Subscription" } },
       identity: { tempoAddress: "0xabc", brokerUserId: "secret" },
@@ -215,7 +215,7 @@ test("accountInfo adds app authorization without forwarding unknown control-plan
         grantToken: "secret",
       }],
     }),
-  }, { accountInfo: { requireAuthorization: true } });
+  }), { accountInfo: { requireAuthorization: true } });
   const accountInfo = runtime.tools.find(({ name }) => name === "accountInfo");
 
   assert.deepEqual(await accountInfo.handler({}, context), {
@@ -249,9 +249,9 @@ test("accountInfo adds app authorization without forwarding unknown control-plan
   });
 });
 
-function preparedBrowser() {
+function preparedBrowser(overrides = {}) {
   const workspace = { async readFile() { return new Uint8Array(); } };
-  return {
+  return createPreparedBrowser({
     datasets,
     fetch: async () => Response.json({ connectors: {} }),
     origin: "https://demo.test",
@@ -268,5 +268,6 @@ function preparedBrowser() {
       projectInstructions: "project instructions",
       workspace,
     },
-  };
+    ...overrides,
+  });
 }

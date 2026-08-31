@@ -4,7 +4,9 @@ import {
   createBrowserRuntimeFetch,
   installBrowserEgressFetch,
 } from "./browserEgress.mjs";
+import { captureBrowserAuthority, sameBrowserAuthority } from "./browserAuthority.mjs";
 import { browserAccountInfoTool, browserRuntimeInfoTool } from "./accountInfo.mjs";
+import { createPreparedBrowser, usePreparedBrowser } from "./preparedBrowser.mjs";
 
 const preparedBrowsers = new Map();
 
@@ -49,16 +51,34 @@ export function prepareBrowser(options) {
     throw new TypeError("browser origin is required outside a browser location");
   }
   if (options.installFetch === false) {
-    return prepareBrowserRuntime(options.threadId, origin, options);
+    const authority = captureBrowserAuthority(options);
+    return prepareBrowserRuntime(options.threadId, origin, {
+      ...options,
+      headers: authority.headers,
+    }).then((runtime) => createPreparedBrowser(runtime));
   }
   const key = `${origin}\n${options.threadId}`;
-  let prepared = preparedBrowsers.get(key);
-  prepared ??= prepareBrowserRuntime(options.threadId, origin, options).catch((error) => {
-    preparedBrowsers.delete(key);
-    throw error;
-  });
-  preparedBrowsers.set(key, prepared);
-  return prepared;
+  const authority = captureBrowserAuthority(options);
+  let entry = preparedBrowsers.get(key);
+  if (entry && !sameBrowserAuthority(entry.authority, authority)) {
+    throw new Error("browser runtime is already prepared by a different credential authority");
+  }
+  if (!entry) {
+    entry = {
+      authority,
+      promise: prepareBrowserRuntime(options.threadId, origin, {
+        ...options,
+        headers: authority.headers,
+      }).catch((error) => {
+        if (preparedBrowsers.get(key) === entry) preparedBrowsers.delete(key);
+        throw error;
+      }),
+    };
+    preparedBrowsers.set(key, entry);
+  }
+  return entry.promise.then((runtime) => createPreparedBrowser(runtime, () => {
+    if (preparedBrowsers.get(key) === entry) preparedBrowsers.delete(key);
+  }));
 }
 
 async function prepareBrowserRuntime(threadId, origin, options) {
@@ -99,21 +119,22 @@ export function bindBrowser(prepared, options = {}) {
   if (options.threadId !== undefined && options.threadId !== prepared.threadId) {
     throw new Error("prepared browser runtime belongs to a different thread");
   }
-  const { datasets, fetch, shell, standard } = prepared;
+  const runtime = usePreparedBrowser(prepared);
+  const { datasets, fetch, shell, standard } = runtime;
   const web = {
-    url: new URL("/api/tools/web-search", prepared.origin),
+    url: new URL("/api/tools/web-search", runtime.origin),
     fetch,
     ...options.web,
   };
   const images = {
-    url: new URL("/api/tools/image-generation", prepared.origin),
+    url: new URL("/api/tools/image-generation", runtime.origin),
     fetch,
     ...options.images,
   };
   const account = {
     endpoint: options.accountInfo?.endpoint,
     fetch,
-    origin: prepared.origin,
+    origin: runtime.origin,
     requireAuthorization: options.accountInfo?.requireAuthorization,
   };
   return Object.freeze({

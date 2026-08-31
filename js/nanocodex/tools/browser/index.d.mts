@@ -3,6 +3,8 @@ import type { NamedTool } from "../../types.mjs";
 import type { JustBashDescriptor } from "../bash.mjs";
 import type { DatasetOptions, JsonToolOptions } from "../index.mjs";
 
+declare const preparedBrowserBrand: unique symbol;
+
 export type BrowserThread = Readonly<{
   id: string;
   workspaceName: string;
@@ -123,12 +125,22 @@ export type BrowserShellFileSystem = {
   utimes(path: string, atime: Date | number, mtime: Date | number): Promise<void>;
 };
 
-export type BrowserOptions = Readonly<{
+export type BrowserPreparationOptions = Readonly<{
   threadId: string;
   origin?: string | undefined;
+  /** Fetch authority captured for the prepared runtime. */
   fetch?: typeof globalThis.fetch | undefined;
+  /** Credential headers captured for the prepared runtime. */
   headers?: HeadersInit | undefined;
+  /**
+   * Installs an isolate-owned fetch route by default. Set false for a
+   * caller-owned runtime that must not share or pin process-global authority.
+   */
   installFetch?: boolean | undefined;
+}>;
+
+export type BrowserBindingOptions = Readonly<{
+  threadId?: string | undefined;
   accountInfo?: Readonly<{
     endpoint?: string | undefined;
     requireAuthorization?: boolean | undefined;
@@ -140,6 +152,10 @@ export type BrowserOptions = Readonly<{
   rememberImage?(sessionId: string, imageUrl: string): void;
 }>;
 
+export type BrowserOptions =
+  | (BrowserPreparationOptions & BrowserBindingOptions & Readonly<{ prepared?: undefined }>)
+  | (BrowserBindingOptions & Readonly<{ prepared: PreparedBrowser }>);
+
 export type BrowserTools = Readonly<{
   filesystem: Workspace;
   instructions: string;
@@ -147,18 +163,27 @@ export type BrowserTools = Readonly<{
   tools: readonly NamedTool[];
 }>;
 
-/** Thread-scoped OPFS, Git, shell, and module state reusable across Agent starts. */
+/**
+ * Owned thread-scoped OPFS, Git, shell, and module state reusable across Agent starts.
+ * Binding releases the cache entry but leaves this handle reusable. Disposal is
+ * idempotent, releases this handle's runtime and unused cache entry, and prevents
+ * later binding. It does not replace an isolate-owned fetch route installed during
+ * preparation; use `installFetch: false` when authority must remain caller-owned.
+ */
 export type PreparedBrowser = Readonly<{
+  readonly [preparedBrowserBrand]: true;
   origin: string;
   threadId: string;
+  dispose(): void;
 }>;
 
 /** Opens a persistent OPFS workspace and composes its WASM-backed tools. */
 export function browser(options: BrowserOptions): Promise<BrowserTools>;
 export function prepareBrowser(
-  options: Pick<BrowserOptions, "threadId" | "origin">,
+  options: BrowserPreparationOptions,
 ): Promise<PreparedBrowser>;
-export function bindBrowser(prepared: PreparedBrowser, options: BrowserOptions): BrowserTools;
+/** Binds tools and releases the preparation's cache retention without disposing the handle. */
+export function bindBrowser(prepared: PreparedBrowser, options?: BrowserBindingOptions): BrowserTools;
 
 export function browserThread(threadId: string, origin: string): BrowserThread;
 export function getBrowserThread(): BrowserThread;
