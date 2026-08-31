@@ -58,9 +58,8 @@ gives every worktree the stable `nanocodex.localhost` WebAuthn RP ID. No
 OrbStack, Docker, local TLS, or `.local` DNS is required. OAuth providers return
 through the stateless relay on `127.0.0.1:47891`, which verifies a short-lived
 signed routing envelope before returning to the initiating worktree and its
-private token exchange. Provider dashboards use the four exact callback URLs
-documented in `docs/LOCALHOST_MIGRATION_PROMPT.md`; never register a worktree
-origin or wildcard callback.
+private token exchange. Provider dashboards use the exact callback URLs in
+`LOCAL_DEVELOPMENT.md`; never register a worktree origin or wildcard callback.
 
 ## End-to-end flow
 

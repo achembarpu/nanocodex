@@ -383,5 +383,5 @@ for the end-to-end tool protocol example. Build the lean guest artifact with
 If the runtime argument is omitted, the rootfs must already contain
 `/usr/local/bin/nanocodex-vm-guest`.
 
-The retained baseline and regression budgets are recorded in
-[`benchmarks/refactor_vm_baseline_2026-07-26.md`](../benchmarks/refactor_vm_baseline_2026-07-26.md).
+Keep VM regression budgets in executable benchmark thresholds, not dated
+baseline narratives.

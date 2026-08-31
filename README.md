@@ -565,26 +565,6 @@ task itself. Explore [`tasks/`](tasks), the
 [comparison-plan contract](evals/harbor-comparisons/README.md). Benchmark tasks
 and verifiers are never modified to make Nanocodex pass.
 
-### Retained evidence
-
-The repository keeps enough detail to distinguish correctness, service time,
-local overhead, and infrastructure failure:
-
-| Retained measurement | Result | What it supports |
-| --- | ---: | --- |
-| [PR #50 release gate](benchmarks/pr50_milestone_2026-07-28.md) | **39/39 latency gates passed** | Request, history, compaction, events, Code Mode, MCP, and TUI boundaries were all measured. |
-| [Paired 10-turn + three-fork workload](benchmarks/pr50_milestone_2026-07-28.md#live-model-latency-boundary) | **70 turns; 97.879% model time; 0.267 ms median local overhead** | The representative owned lifecycle remained model-latency bound. |
-| [41-task retained workload](benchmarks/long_prompt_profile_2026-07-20.md#41-task-retained-workload) | **503 model calls, 892 tool calls, 81,618 API events, 63.1 MB JSONL** | Model generation plus requested tool work accounted for 99.864% of summed wall time; unattributed local remainder was 0.136%. |
-| [Stored historical forks](benchmarks/fork_results.md#live-api-results) | **1.224 s branch median; 99.6% cached input; 97.4% smaller request payload than replay** | Healthy branches reused provider checkpoints and stable cache lineage. The stock-Codex comparison is directional, not apples-to-apples. |
-| [Retained live VM](benchmarks/refactor_vm_baseline_2026-07-26.md#results) | **320.93–352.97 µs command RPC; 162.63–165.22 ms boot + first RPC + shutdown** | Normal retained sessions do not pay image construction or VM boot per tool call. |
-| [Frozen Terminal-Bench 2.1 experiment](docs/HARBOR_RS_LOG.md#2026-07-21--abandon-benchmark-specific-agent-tuning) | **13/20 in 8m15s, 3.01M input tokens** | A model-driven completion audit reached 16/20 but took 16m22s and 6.98M tokens, so the benchmark-specific tuning was discarded rather than promoted into product policy. |
-
-The final row is deliberately historical, not a claim about the current release
-or the full benchmark. It demonstrates the evaluation standard: a higher score
-does not justify a pathological runtime policy. Exact deterministic verifier
-results remain authoritative; setup timeouts, cancelled jobs, and
-infrastructure-only trials are not reported as agent scores.
-
 ## Deployment proofs
 
 Nanocodex does not impose a generic app-server protocol. These applications
@@ -677,8 +657,7 @@ Further reading:
 - [Observability contract](docs/OBSERVABILITY.md)
 - [Subagent design](docs/SUBAGENTS.md)
 - [VM operations](docs/VM.md)
-- [Benchmarks and retained measurements](benchmarks/)
-- [Implementation history](docs/IMPLEMENTATION_HISTORY.md)
+- [Benchmarks and executable regression gates](benchmarks/)
 
 ## License
 
