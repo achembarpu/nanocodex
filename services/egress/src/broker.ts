@@ -5,6 +5,11 @@ import {
   type CredentialVaultEnv,
   type EncryptedEnvelope,
 } from "./credential-vault";
+import {
+  type BrokeredSshIdentity,
+  validateSshIdentity,
+  validSshIdentityReference,
+} from "./ssh";
 
 const STATE_KEY = "credential-state";
 const TOKEN_ENDPOINT_PATH = "/oauth/token";
@@ -65,6 +70,7 @@ type CredentialState = {
   openai?: ApiKeyCredential;
   chatgpt?: ChatGptCredential;
   login?: PendingLogin;
+  ssh?: Record<string, BrokeredSshIdentity>;
 };
 type StoredRow = { envelope: EncryptedEnvelope };
 
@@ -250,6 +256,40 @@ export class UserCredentialBroker extends DurableObject<BrokerEnv> {
       if (request.method === "GET" && url.pathname === "/v1/status") {
         return json(this.#publicStatus(), 200);
       }
+      const sshIdentity = url.pathname.match(/^\/v1\/ssh-identities\/([A-Za-z0-9][A-Za-z0-9._-]{0,63})$/)?.[1];
+      if (sshIdentity && validSshIdentityReference(sshIdentity)) {
+        if (request.method === "PUT") {
+          const identity = validateSshIdentity(await readJson(request, 72 * 1024));
+          if (!identity) return jsonError(400, "invalid_ssh_identity");
+          this.#credentials.ssh = { ...this.#credentials.ssh, [sshIdentity]: identity };
+          await this.#persist();
+          return new Response(null, { status: 204, headers: noStoreHeaders() });
+        }
+        if (request.method === "DELETE") {
+          if (this.#credentials.ssh?.[sshIdentity] !== undefined) {
+            const identities = { ...this.#credentials.ssh };
+            delete identities[sshIdentity];
+            if (Object.keys(identities).length) this.#credentials.ssh = identities;
+            else delete this.#credentials.ssh;
+            await this.#persist();
+          }
+          return new Response(null, { status: 204, headers: noStoreHeaders() });
+        }
+        if (request.method === "POST") {
+          if (await hasRequestPayload(request)) return jsonError(400, "invalid_request");
+          const identity = this.#credentials.ssh?.[sshIdentity];
+          return identity
+            ? json({
+                private_key: identity.privateKey,
+                hostname: identity.hostname,
+                port: identity.port,
+                username: identity.username,
+                host_key_sha256: identity.hostKeySha256,
+              }, 200)
+            : jsonError(404, "ssh_identity_not_configured");
+        }
+        return jsonError(405, "method_not_allowed");
+      }
       if (request.method === "PUT" && url.pathname === "/v1/openai-key") {
         const body = await readJson(request, 16 * 1024);
         const secret = stringField(body, "api_key")?.trim();
@@ -337,6 +377,13 @@ export class UserCredentialBroker extends DurableObject<BrokerEnv> {
           : {}),
         ...(login ? { login: publicLogin(login) } : {}),
       },
+      ssh: Object.entries(this.#credentials.ssh ?? {}).map(([reference, identity]) => ({
+        reference,
+        hostname: identity.hostname,
+        port: identity.port,
+        username: identity.username,
+        host_key_sha256: identity.hostKeySha256,
+      })),
     };
   }
 

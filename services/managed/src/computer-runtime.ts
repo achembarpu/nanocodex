@@ -13,6 +13,8 @@ import {
   createComputerFilesystem,
   type ComputerWorkspaceClient,
 } from "./computer-workspace";
+import type { ManagedComputerProvider } from "./computer-provider";
+import { createCloudflareSshCommand } from "./cloudflare-ssh";
 import type { ManagedEgressConnectorId } from "./managed-egress";
 
 const MANAGED_SHELL_MAX_ENTRIES = 20_000;
@@ -21,6 +23,9 @@ const MANAGED_SHELL_MAX_OUTPUT_TOKENS = 10_000;
 type DisposableComputerWorkspace = ComputerWorkspaceClient & Readonly<{
   [Symbol.dispose](): void;
 }>;
+
+type ComputerProviderOption = ManagedComputerProvider
+  | ((workspace: Workspace) => ManagedComputerProvider);
 
 export type ManagedComputerRuntime = Readonly<{
   commandNames: readonly string[];
@@ -34,24 +39,37 @@ export type ManagedComputerRuntime = Readonly<{
 
 /**
  * Constructs the one managed Computer/Just Bash runtime used by every managed
- * agent profile. The caller controls only the egress authority: all profiles
- * receive the same mounted filesystem, shell limits, and git/gh commands.
+ * agent profile. The durable virtual workspace stays the default. A caller may
+ * supply a Computer provider; native commands are then mounted lazily as Just
+ * Bash custom commands instead of making every turn pay for a container.
  */
 export async function createManagedComputerRuntime(options: Readonly<{
   computer: DisposableComputerWorkspace;
+  computerProvider?: ComputerProviderOption;
   connectorAllowed?: (connector: ManagedEgressConnectorId) => boolean;
   egress: Fetcher;
   subject?: string;
+  sshPassword?: (reference: string) => Promise<string>;
 }>): Promise<ManagedComputerRuntime> {
   let disposed = false;
+  let provider: ManagedComputerProvider | undefined;
   const dispose = () => {
     if (disposed) return;
     disposed = true;
     options.computer[Symbol.dispose]();
+    try {
+      const closing = provider?.dispose?.();
+      if (closing instanceof Promise) void closing.catch(() => {});
+    } catch {
+      // Workspace disposal remains best-effort and synchronous at this boundary.
+    }
   };
 
   try {
     const sourceFilesystem = await createComputerFilesystem(options.computer);
+    provider = typeof options.computerProvider === "function"
+      ? options.computerProvider(sourceFilesystem)
+      : options.computerProvider;
     const fetch = createManagedShellFetch(
       options.egress,
       options.subject,
@@ -66,6 +84,19 @@ export async function createManagedComputerRuntime(options: Readonly<{
       gitCommand,
       createManagedGhCommand(fetch, (args, context) =>
         gitCommand.execute(["clone", ...args], context)),
+      {
+        name: "ssh",
+        load: async () => createCloudflareSshCommand({
+          egress: options.egress,
+          filesystem: () => {
+            if (!mountedFilesystem) throw new Error("managed shell filesystem is not mounted");
+            return mountedFilesystem;
+          },
+          ...(options.sshPassword === undefined ? {} : { resolvePassword: options.sshPassword }),
+          ...(options.subject === undefined ? {} : { subject: options.subject }),
+        }),
+      },
+      ...(provider === undefined ? [] : [createNativeCommand("cargo", provider)]),
     ]);
     const shell = await justBash({
       filesystem: sourceFilesystem,
@@ -92,4 +123,23 @@ export async function createManagedComputerRuntime(options: Readonly<{
     dispose();
     throw error;
   }
+}
+
+function createNativeCommand(name: string, provider: ManagedComputerProvider) {
+  return {
+    name,
+    trusted: true,
+    async execute(args: string[], context: { cwd?: unknown } = {}) {
+      const cwd = typeof context.cwd === "string" ? context.cwd : "/workspace";
+      return provider.exec({
+        command: [name, ...args].map(shellQuote).join(" "),
+        cwd,
+        requirements: { capabilities: ["native-process"] },
+      });
+    },
+  };
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", `'\\''`)}'`;
 }

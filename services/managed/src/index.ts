@@ -38,6 +38,10 @@ import {
 import { fetchResponseWithDeadline, withHardDeadline } from "./deadline";
 import { drainRuntimeForDeletion } from "./deletion-runtime";
 import { createManagedComputerRuntime } from "./computer-runtime";
+import {
+  configuredComputerProvider,
+  type ManagedComputeProviderEnv,
+} from "./computer-provider-config";
 import type { ManagedEgressConnectorId } from "./managed-egress";
 import {
   DurableEventLog,
@@ -84,6 +88,7 @@ import {
 } from "./multiplayer-quota";
 export { MultiplayerQuota } from "./multiplayer-quota";
 export { WorkspaceServiceProxy };
+export { Sandbox } from "@cloudflare/sandbox";
 
 import {
   type ActiveTurn,
@@ -240,7 +245,7 @@ const MEMORY_REVIEW_CHECKPOINT = [
   "</memory_review_checkpoint>",
 ].join("\n");
 
-export interface Env extends AccountAuthEnv {
+export interface Env extends AccountAuthEnv, ManagedComputeProviderEnv {
   NANOCODEX_SESSIONS: DurableObjectNamespace<DurableAgentSession>;
   NANOCODEX_ROOMS: DurableObjectNamespace<MultiplayerRoom>;
   NANOCODEX_MULTIPLAYER_QUOTA: DurableObjectNamespace<MultiplayerQuota>;
@@ -4505,6 +4510,7 @@ export class DurableAgentSession extends DurableComputerSession {
     // fail closed without a subject, while ordinary public HTTP remains usable.
     const computer = await createManagedComputerRuntime({
       computer: workspace,
+      computerProvider: configuredComputerProvider(this.env, this.ctx.id.toString()),
       egress: this.env.NANOCODEX,
       ...(multiplayer ? {} : { subject: this.ctx.id.toString() }),
       connectorAllowed: (connector) => this.#activeTurnConnectorAllowed(connector),

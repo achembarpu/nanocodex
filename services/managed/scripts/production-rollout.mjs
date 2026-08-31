@@ -47,6 +47,7 @@ const MANAGED_DURABLE_OBJECT_BINDINGS = [
   ["NANOCODEX_API_KEYS", "ApiKeyRecord"],
   ["NANOCODEX_MEMORY", "MemoryScope"],
   ["NANOCODEX_ORGANIZATIONS", "Organization"],
+  ["NANOCODEX_COMPUTE_SANDBOX", "Sandbox"],
 ];
 const MANAGED_DURABLE_OBJECT_MIGRATIONS = [
   {
@@ -64,6 +65,7 @@ const MANAGED_DURABLE_OBJECT_MIGRATIONS = [
     new_sqlite_classes: ["DurableAgentSession"],
     deleted_classes: ["NanocodexSession"],
   },
+  { tag: "v6", new_sqlite_classes: ["Sandbox"] },
 ];
 const PROVIDER_NAMES = [
   "NANOCODEX_MANAGED_AUTH_MODE",
