@@ -105,7 +105,10 @@ test("keeps cleanup policy out of the visible transcript", () => {
   assert.match(modelInput, /user does not\s+specify a tab, inspect without tab_ref/);
   assert.match(modelInput, /my X timeline/);
   assert.match(modelInput, /Do not ask the user to switch tabs/);
-  assert.match(panelStyleSource, /\.chat \.agent-dom-transcript \{ min-height: 0; overflow: visible; \}/);
+  assert.match(panelStyleSource, /\.conversation-workspace \{ flex: 1 1 0; min-height: 0; \}/);
+  assert.match(panelStyleSource, /\.chat \{ flex: 1 1 0; min-height: 0; \}/);
+  assert.match(panelStyleSource, /\.chat \.agent-terminal-shell \{ width: 100%; height: 100%; min-height: 0; \}/);
+  assert.match(panelStyleSource, /grid-template-rows: minmax\(0, 1fr\) auto/);
 });
 
 test("ordinary chat stays independent from the optional selected-page lease", () => {

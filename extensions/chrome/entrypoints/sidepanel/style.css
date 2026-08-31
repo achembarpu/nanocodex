@@ -26,7 +26,7 @@ h1, h2, p { margin: 0; }
   width: 100%;
   height: 100dvh;
   padding: 14px;
-  overflow: auto;
+  overflow: hidden;
 }
 
 .app-header,
@@ -108,17 +108,18 @@ h2 { font-size: 14px; }
 }
 .site span { color: #3d9161; font-size: 7px; }
 
-.chat { flex: 0 0 auto; min-height: 260px; }
+.conversation-workspace { flex: 1 1 0; min-height: 0; }
+.conversation-main { min-height: 0; }
+.chat { flex: 1 1 0; min-height: 0; }
 .chat > .agent-terminal-workspace,
-.chat .agent-terminal-shell { width: 100%; height: auto; min-height: 260px; }
+.chat .agent-terminal-shell { width: 100%; height: 100%; min-height: 0; }
 .chat .agent-terminal-workspace { display: contents; }
 .chat .agent-terminal-shell {
   border-radius: 13px;
   box-shadow: 0 4px 20px rgba(55, 47, 38, .06);
 }
-.chat .agent-terminal-shell.is-dom { grid-template-rows: auto auto; }
-.chat .agent-dom-transcript { min-height: 0; overflow: visible; }
-.chat .agent-dom-transcript-inner { min-height: 0; }
+.chat .agent-terminal-shell.is-dom { grid-template-rows: minmax(0, 1fr) auto; }
+.chat .agent-dom-transcript { min-height: 0; overflow: auto; }
 .chat .agent-dom-transcript-inner { padding: 20px 16px 24px; font: 13px/1.55 var(--font-mono); }
 .chat .agent-terminal-user {
   width: fit-content;
