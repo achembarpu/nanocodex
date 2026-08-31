@@ -6,11 +6,13 @@ import {
   MAX_MEMORY_QUERY_BYTES,
   MAX_MEMORY_READ_KEYS,
   MAX_MEMORY_RECORDS,
+  MAX_MEMORY_SCAN_RESULTS,
   MAX_MEMORY_TOTAL_CONTENT_BYTES,
   MEMORY_PROBATION_DURATION_MS,
   memoryPreview,
   normalizeMemoryIdentity,
   parseMemoryOperation,
+  parseMemoryToolOperation,
   rankMemories,
   tokenizeMemory,
   type MemoryRecord,
@@ -115,6 +117,22 @@ describe("durable memory contract", () => {
       operation: "read",
       keys: [{ id: 1, version: 1 }, { id: 1, version: 2 }],
     });
+  });
+
+  it("bounds oversized model-authored scan limits without relaxing the public parser", () => {
+    expect(parseMemoryToolOperation({ operation: "scan", query: "rust", limit: 10 })).toEqual({
+      operation: "scan",
+      query: "rust",
+      limit: MAX_MEMORY_SCAN_RESULTS,
+    });
+    expect(() => parseMemoryOperation({ operation: "scan", query: "rust", limit: 10 })).toThrow(
+      "integer from 1 to 5",
+    );
+    for (const limit of [0, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+      expect(() => parseMemoryToolOperation({ operation: "scan", query: "rust", limit })).toThrow(
+        "integer from 1 to 5",
+      );
+    }
   });
 
   it("exports Tact's account bounds and probation duration", () => {

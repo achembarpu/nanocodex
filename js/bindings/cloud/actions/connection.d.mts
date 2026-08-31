@@ -76,6 +76,8 @@ export declare namespace connect {
     mcpConnections?: readonly McpConnection[] | undefined;
     /** Optional requested MCP connection to foreground in the hosted dialog. */
     focusMcpConnectionId?: string | undefined;
+    /** Select one newly approved durable conversation by an app-generated UUIDv4. */
+    conversationId?: string | undefined;
     signal?: AbortSignal | undefined;
   }>;
   type ReturnType = Promise<Connection>;
@@ -100,6 +102,8 @@ export declare namespace reconnect {
     permission?: string | undefined;
     /** Reject a retained grant with a different exact hosted MCP slice. */
     mcpConnectionIds?: readonly string[] | undefined;
+    /** Reject a retained grant for another durable conversation. */
+    conversationId?: string | undefined;
     signal?: AbortSignal | undefined;
   }>;
   type ReturnType = Promise<Connection | undefined>;

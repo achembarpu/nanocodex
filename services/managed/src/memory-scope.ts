@@ -292,6 +292,9 @@ export class MemoryScope extends DurableObject<MemoryScopeEnv> {
         })));
         return json({ turns, citations } satisfies HistoryReadSessionResponse);
       }
+      if (request.method === "GET" && url.pathname === "/memories") {
+        return json({ memories: this.#listMemories(assertedTeam) });
+      }
       if (request.method === "POST" && url.pathname === "/memory") {
         const operation = parseMemoryOperation(await parseJsonBody<unknown>(request));
         const mutating = operation.operation === "put" || operation.operation === "delete";
@@ -738,6 +741,18 @@ export class MemoryScope extends DurableObject<MemoryScopeEnv> {
       }
       return { operation: "read", memories };
     });
+  }
+
+  #listMemories(teamId: string): MemoryRecord[] {
+    this.#pruneMemories(Date.now());
+    return this.ctx.storage.sql.exec<DurableMemoryRow>(
+      `SELECT * FROM durable_memories
+       WHERE owner_team_id = ?
+       ORDER BY created_at_ms, id
+       LIMIT ?`,
+      teamId,
+      MAX_MEMORY_RECORDS,
+    ).toArray().map(memoryRecord);
   }
 
   #putMemory(content: string, replace: MemoryKey | undefined, teamId: string): MemoryPutResult {

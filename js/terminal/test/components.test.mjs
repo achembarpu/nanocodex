@@ -5,6 +5,7 @@ import TestRenderer, { act } from "react-test-renderer";
 
 import {
   AgentTerminalView,
+  ConversationHistoryRail,
   TerminalComposer,
   TerminalTranscriptSurface,
   interleaveTranscriptEntries,
@@ -24,6 +25,39 @@ globalThis.window = {
   requestAnimationFrame: () => 1,
 };
 globalThis.document = { activeElement: null, body: {} };
+
+test("conversation rail owns selection and creation controls without duplicating ids", async () => {
+  const selected = [];
+  let created = 0;
+  let renderer;
+  const props = {
+    agentStatus: "ready",
+    conversations: [{ id: "one", title: "First", turnCount: 2 }],
+    mobileOpen: false,
+    onClose() {},
+    onCreate() { created += 1; },
+    onOpen() {},
+    onRetry() {},
+    onSelect(id) { selected.push(id); },
+    pending: false,
+    runtime: "managed",
+    selectedId: "one",
+  };
+  await act(async () => {
+    renderer = TestRenderer.create(React.createElement("main", null,
+      React.createElement(ConversationHistoryRail, props),
+      React.createElement(ConversationHistoryRail, props),
+    ));
+  });
+  const labelledIds = renderer.root.findAllByType("aside").map((node) => node.props["aria-labelledby"]);
+  assert.equal(new Set(labelledIds).size, 2);
+  assert.equal(renderer.root.findAllByProps({ "aria-current": "location" }).length, 2);
+  await act(async () => renderer.root.findAllByProps({ "aria-label": "New conversation" })[0].props.onClick());
+  await act(async () => renderer.root.findAllByProps({ "aria-current": "location" })[0].props.onClick());
+  assert.equal(created, 1);
+  assert.deepEqual(selected, ["one"]);
+  await act(async () => renderer.unmount());
+});
 
 test("controller-backed terminal remains caller-owned when no Agent is attached", async () => {
   const states = [];

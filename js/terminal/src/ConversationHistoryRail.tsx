@@ -1,6 +1,6 @@
 import { ChevronRight, Menu, MessageSquare, Plus, X } from "lucide-react";
-import { memo, useEffect, useRef } from "react";
-import type { AgentStatus } from "./agentTerminalTypes";
+import { memo, useEffect, useId, useRef } from "react";
+import type { AgentStatus } from "./types.js";
 
 export type ConversationSummary = Readonly<{
   id: string;
@@ -26,6 +26,7 @@ export const ConversationHistoryRail = memo(function ConversationHistoryRail({
   runtime: "local" | "managed";
   selectedId?: string;
 }) {
+  const titleId = useId();
   const closeRef = useRef<HTMLButtonElement>(null);
   useEffect(() => {
     if (!mobileOpen) return;
@@ -42,13 +43,13 @@ export const ConversationHistoryRail = memo(function ConversationHistoryRail({
     />
     <aside
       className={mobileOpen ? "conversation-sidebar is-mobile-open" : "conversation-sidebar"}
-      aria-labelledby="conversation-history-title"
+      aria-labelledby={titleId}
       role={mobileOpen ? "dialog" : "complementary"}
       aria-modal={mobileOpen || undefined}
     >
       <header className="conversation-sidebar-header">
         <div>
-          <strong id="conversation-history-title">Conversations</strong>
+          <strong id={titleId}>Conversations</strong>
           <span><MessageSquare aria-hidden="true" /> {runtime === "local" ? "this browser" : "managed account"}</span>
         </div>
         <nav className="conversation-sidebar-actions" aria-label="Conversation actions">
@@ -67,6 +68,7 @@ export const ConversationHistoryRail = memo(function ConversationHistoryRail({
           return <button
             className={active ? "conversation-row is-selected" : "conversation-row"}
             type="button" key={conversation.id}
+            disabled={pending}
             aria-current={active ? "location" : undefined}
             onClick={() => onSelect(conversation.id)}
           >

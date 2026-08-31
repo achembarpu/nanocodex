@@ -1,9 +1,10 @@
 # Nanocodex Chrome extension
 
 Nanocodex for Chrome is a Manifest V3 consumer of the account-owned hosted
-agent contract. The React side panel opens the durable agent authorized by
-Nanocodex Connect and reverse-attaches one explicitly selected Chrome tab as a
-host tool. The background service worker owns only Chrome tab leases, bounded
+agent contract. The React side panel reuses the shared durable-agent terminal
+and conversation rail, opens one exact durable agent per approved conversation,
+and reverse-attaches a selected Chrome tab only when the agent calls its page
+tool. The background service worker owns only Chrome tab leases, bounded
 page inspection, reversible previews, and saved site recipes. There is no
 parallel extension backend, native host, or extension-to-process protocol.
 
@@ -12,30 +13,33 @@ parallel extension backend, native host, or extension-to-process protocol.
 1. Open an HTTP(S) page and click the Nanocodex toolbar action. The action opens
    one React side panel and grants temporary `activeTab` access.
 2. Connect Nanocodex. The hosted Connect popup reuses the canonical Nanocodex
-   passkey account and asks only for final replies, conversation history, and
-   ChatGPT-backed agent access. Action summaries and raw traces stay hidden.
+   passkey account and explicitly asks for final replies, action summaries,
+   conversation history, full run traces, and ChatGPT-backed agent access.
    The app-scoped grant is retained in extension-local storage and validated
    when the panel is reopened.
 3. The Connect SDK opens the account-owned durable agent and exchanges the
    grant for a one-time ticket to its private tool-host socket. The extension's
    `cleanup` catalog is attached to that exact agent and grant. No OpenAI or
    ChatGPT credential enters extension storage or browser traffic.
-4. Chat with the cleanup agent. The panel immediately records each user turn,
-   labels its local inspect/preview activity, streams the reply, and exposes a
-   stop control. The hosted agent calls the attached `cleanup` tool with
-   `inspect`, `preview`, and `revert_preview` actions. Follow-on prompts and
-   browser restarts restore the account-owned conversation.
-5. Inspection returns at most 500 visible semantic DOM candidates and 60,000
+4. Chat normally with the durable agent. The shared conversation rail can mint
+   a newly approved durable conversation or reopen any conversation retained by
+   this extension. The panel records each user turn, streams thinking and the
+   reply, and exposes the shared steer/stop controls.
+5. When a prompt asks to inspect or reshape the page, the hosted agent calls the
+   optional attached `cleanup` tool with `inspect`, `preview`, and
+   `revert_preview` actions. Only then does the extension claim the selected
+   HTTP(S) tab. Ordinary chat never depends on a page lease.
+6. Inspection returns at most 500 visible semantic DOM candidates and 60,000
    characters. It omits form values, storage, cookies, other tabs, subframes,
    and URL queries/fragments.
-6. A recipe `{name, css, hide_selectors}` is validated and previewed as one
+7. A recipe `{name, css, hide_selectors}` is validated and previewed as one
    removable style element. Model output can never inject JavaScript, HTML,
    event handlers, remote resources, or extension capabilities.
-7. **Revert** removes the preview. **Keep for this site** asks for an optional
+8. **Revert** removes the preview. **Keep for this site** asks for an optional
    permission for that HTTP(S) host, stores the recipe in
    `chrome.storage.local`, and installs a persistent dynamic content script only
    for origins with approved recipes.
-8. Saved recipes are listed in the side panel. **Forget** removes the recipe
+9. Saved recipes are listed in the side panel. **Forget** removes the recipe
    from storage and every open matching tab, unregisters future injection, and
    revokes site access when no other saved origin on that host still needs it.
    Both saved and forgotten state survive closing and reopening Chrome.

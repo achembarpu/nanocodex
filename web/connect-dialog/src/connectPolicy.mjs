@@ -4,6 +4,8 @@ const appResourcePrefix = "urn:nanocodex:app:";
 const appOriginResourcePrefix = "urn:nanocodex:origin:";
 const connectorFocusResourcePrefix = "urn:nanocodex:connector-focus:";
 const credentialImportResourcePrefix = "urn:nanocodex:credential-import:";
+const agentConversationResourcePrefix = "urn:nanocodex:agent:conversation:";
+const agentConversationId = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const chatGptCredentialImportResource = /^urn:nanocodex:credential-import:chatgpt:codex-auth-v1:sha256:[A-Za-z0-9_-]{43}$/;
 const connectorIds = new Set(["chatgpt", "github", "gmail", "gdrive", "x"]);
 const mcpConnectionId = /^[A-Za-z0-9_-]{43}$/;
@@ -39,8 +41,8 @@ const signedAppVisibility = Object.freeze([
   Object.freeze({
     resource: "urn:nanocodex:agent:trace:read",
     name: "traces",
-    label: "Traces",
-    detail: "Full run trace",
+    label: "Thinking & traces",
+    detail: "Reasoning, thinking, and full tool traffic",
   }),
   Object.freeze({
     resource: "urn:nanocodex:history:read",
@@ -122,6 +124,13 @@ export function signedAppResources(resources, app) {
   if (applicationResources.length !== 1 || applicationResources[0] !== expectedApp
     || originResources.length !== 1 || originResources[0] !== expectedOrigin) {
     throw new Error("The signed application resources do not match this Connect dialog.");
+  }
+  const conversations = resources.filter((resource) =>
+    typeof resource === "string" && resource.startsWith(agentConversationResourcePrefix));
+  if (conversations.length > 1
+    || (conversations.length === 1
+      && !agentConversationId.test(conversations[0].slice(agentConversationResourcePrefix.length)))) {
+    throw new Error("The signed durable conversation request is invalid.");
   }
   return resources;
 }
@@ -247,9 +256,19 @@ export function appVisibilityPermissions(resources) {
   const compact = new Set(resources
     .filter((resource) => typeof resource === "string" && resource.startsWith("urn:nanocodex:agent:visibility:"))
     .flatMap((resource) => resource.slice("urn:nanocodex:agent:visibility:".length).split(",")));
-  return signedAppVisibility
+  const visibility = signedAppVisibility
     .filter(({ resource, name }) => requested.has(resource) || compact.has(name))
     .map(({ name: _name, ...permission }) => permission);
+  const conversations = [...requested].filter((resource) => resource.startsWith(agentConversationResourcePrefix));
+  if (conversations.length === 1
+    && agentConversationId.test(conversations[0].slice(agentConversationResourcePrefix.length))) {
+    visibility.push(Object.freeze({
+      resource: conversations[0],
+      label: "Conversation",
+      detail: "Create and use one new durable conversation",
+    }));
+  }
+  return visibility;
 }
 
 export function accountLoginCapabilities(accounts) {

@@ -115,6 +115,8 @@ const AGENT_VISIBILITY_RESOURCES = {
   "urn:nanocodex:agent:trace:read": "agent.trace.read",
 } as const;
 const AGENT_VISIBILITY_RESOURCE_PREFIX = "urn:nanocodex:agent:visibility:";
+const AGENT_CONVERSATION_RESOURCE_PREFIX = "urn:nanocodex:agent:conversation:";
+const AGENT_CONVERSATION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const HOSTED_HISTORY_RESOURCE = "urn:nanocodex:history:read";
 const HOSTED_MEMORY_READ_RESOURCE = "urn:nanocodex:memory:read";
 const HOSTED_MEMORY_WRITE_RESOURCE = "urn:nanocodex:memory:write";
@@ -288,6 +290,7 @@ type GrantRecord = Readonly<{
   status: "active" | "revoked";
   expiresAt: number;
   capabilities: readonly string[];
+  conversationId?: string;
   appToolPolicy?: typeof CHROME_CLEANUP_APP_TOOL_POLICY;
   mcpConnections?: readonly Readonly<{ id: string; name: string }>[];
   accessKey?: Record<string, unknown>;
@@ -696,13 +699,16 @@ async function handleManagedMemoryRoute(
   const isSearchPath = url.pathname === "/v1/history/sessions/search";
   const readMatch = url.pathname.match(/^\/v1\/history\/sessions\/([^/]+)\/read$/);
   const isMemoryPath = url.pathname === "/v1/memory";
-  if (!isSearchPath && !readMatch && !isMemoryPath) return undefined;
-  if (request.method !== "POST") {
-    throw new ApiFailure(405, "method_not_allowed", "Hosted history and memory requests require POST.");
+  const memoryDeleteMatch = url.pathname.match(/^\/v1\/memory\/([^/]+)$/);
+  if (!isSearchPath && !readMatch && !isMemoryPath && !memoryDeleteMatch) return undefined;
+  const validMethod = (isSearchPath || readMatch) ? request.method === "POST"
+    : isMemoryPath ? request.method === "GET" || request.method === "POST"
+      : request.method === "DELETE";
+  if (!validMethod) {
+    throw new ApiFailure(405, "method_not_allowed", "Unsupported hosted history or memory method.");
   }
-  const isSearch = isSearchPath;
   const isMemory = isMemoryPath;
-  if (url.search) {
+  if (url.search && !memoryDeleteMatch) {
     throw new ApiFailure(400, "invalid_managed_request", "Hosted history and memory requests do not accept query parameters.");
   }
 
@@ -718,8 +724,13 @@ async function handleManagedMemoryRoute(
     throw new ApiFailure(403, "grant_inactive", "The Connect grant is not active.");
   }
   remainingGrantTtl(grant);
-  const body = await boundedJson(request, MAX_MANAGED_MEMORY_REQUEST_BYTES, "hosted history or memory");
-  const requiredCapability = managedMemoryCapability(url.pathname, body.operation);
+  const body = request.method === "POST"
+    ? await boundedJson(request, MAX_MANAGED_MEMORY_REQUEST_BYTES, "hosted history or memory")
+    : undefined;
+  const operation = isMemory && request.method === "GET" ? "list"
+    : memoryDeleteMatch ? "delete"
+      : body?.operation;
+  const requiredCapability = managedMemoryCapability(url.pathname, operation);
   if (!requiredCapability) {
     throw new ApiFailure(400, "invalid_memory_operation", "The hosted history or memory operation is invalid.");
   }
@@ -731,20 +742,22 @@ async function handleManagedMemoryRoute(
         : "memory_read_not_granted";
     throw new ApiFailure(403, code, `This Connect grant does not include ${requiredCapability} access.`);
   }
-  if (isMemory) {
-    const operation = body.operation;
-    if (operation !== "scan" && operation !== "read" && operation !== "put" && operation !== "delete") {
+  if (isMemory && request.method === "POST") {
+    const memoryOperation = body?.operation;
+    if (memoryOperation !== "scan" && memoryOperation !== "read"
+      && memoryOperation !== "put" && memoryOperation !== "delete") {
       throw new ApiFailure(400, "invalid_memory_operation", "The hosted memory operation is invalid.");
     }
   }
 
   const target = new URL(url.pathname, "https://nanocodex.internal");
+  if (memoryDeleteMatch) target.search = url.search;
   const headers = new Headers(managedGrantHeaders(managedGrantAssertion(grant)));
-  headers.set("content-type", "application/json");
+  if (body !== undefined) headers.set("content-type", "application/json");
   const upstream = await env.ACCOUNTS.fetch(new Request(target, {
-    method: "POST",
+    method: request.method,
     headers,
-    body: JSON.stringify(body),
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     redirect: "manual",
     signal: request.signal,
   }));
@@ -755,6 +768,10 @@ async function safeManagedJsonResponse(upstream: Response): Promise<Response> {
   if (upstream.status >= 300 && upstream.status < 400) {
     await upstream.body?.cancel();
     throw new ApiFailure(502, "managed_upstream_redirect", "The hosted service returned an unexpected redirect.");
+  }
+  if (upstream.status === 204) {
+    await upstream.body?.cancel();
+    return new Response(null, { status: 204 });
   }
   if (!(upstream.headers.get("content-type") ?? "").includes("application/json")) {
     await upstream.body?.cancel();
@@ -1254,6 +1271,7 @@ async function createConnection(
     ...connectors,
     ...mcpConnections.map((connection) => `mcp:${connection.id}`),
   ];
+  const conversationId = approvedAgentConversationId(approval.resources);
   const grantAssertion: ManagedGrantAssertion = {
     brokerUserId: identity.userId,
     capabilities: grantCapabilities,
@@ -1261,10 +1279,17 @@ async function createConnection(
     grantId,
     mcpIds: mcpConnections.map(({ id }) => id),
   };
+  if (conversationId && isConnectAgentId(approval.durableAgentId)) {
+    throw new ApiFailure(
+      403,
+      "conversation_mismatch",
+      "A new durable conversation cannot reuse an existing agent approval.",
+    );
+  }
   const [durableAgentId, egressSubject] = await Promise.all([
     isConnectAgentId(approval.durableAgentId)
       ? Promise.resolve(approval.durableAgentId)
-      : connectManagedAgent(env, store, appScope, grantAssertion),
+      : connectManagedAgent(env, store, appScope, grantAssertion, conversationId),
     connectEgressSubject(env, store, identity.userId, appScope),
   ]);
   mark("capabilities");
@@ -1280,6 +1305,7 @@ async function createConnection(
     status: "active",
     expiresAt,
     capabilities: grantCapabilities,
+    ...(conversationId ? { conversationId } : {}),
     ...(appToolPolicy === undefined ? {} : { appToolPolicy }),
     mcpConnections: mcpConnections.map(({ id, name }) => ({ id, name })),
     ...(accessKey ? { accessKey } : {}),
@@ -1766,11 +1792,12 @@ async function connectManagedAgent(
   store: Kv.Kv,
   appId: string,
   assertion: ManagedGrantAssertion,
+  conversationId?: string,
 ): Promise<string> {
   if (!store.create) {
     throw new ApiFailure(500, "durable_agent_unavailable", "Atomic durable-agent provisioning is unavailable.");
   }
-  const recordKey = `connect-agent:${appId}:${assertion.brokerUserId}`;
+  const recordKey = `connect-agent:${appId}:${assertion.brokerUserId}${conversationId ? `:${conversationId}` : ""}`;
   const retained = await store.get<unknown>(recordKey);
   if (isConnectAgentRecord(retained)) return retained.agentId;
   const lockKey = `${recordKey}:lock`;
@@ -4609,6 +4636,19 @@ function approvedAgentCapabilities(resources: readonly string[]): string[] {
   return [...new Set([...legacy, ...combined, ...portability])];
 }
 
+function approvedAgentConversationId(resources: readonly string[]): string | undefined {
+  const values = resources.filter((resource) => resource.startsWith(AGENT_CONVERSATION_RESOURCE_PREFIX));
+  if (values.length === 0) return undefined;
+  if (values.length !== 1) {
+    throw new ApiFailure(403, "conversation_mismatch", "The signed Connect approval must select one durable conversation.");
+  }
+  const value = values[0]!.slice(AGENT_CONVERSATION_RESOURCE_PREFIX.length);
+  if (!AGENT_CONVERSATION_ID.test(value)) {
+    throw new ApiFailure(403, "conversation_mismatch", "The signed durable conversation identifier is invalid.");
+  }
+  return value;
+}
+
 function approvedHostedCapabilities(resources: readonly string[]): string[] {
   const approved = new Set(resources);
   return [
@@ -4695,6 +4735,7 @@ function grantWire(grant: GrantRecord) {
     status: grant.status,
     expires_at: grant.expiresAt,
     capabilities: grant.capabilities,
+    ...(grant.conversationId ? { conversation_id: grant.conversationId } : {}),
     mcp_connections: grant.mcpConnections ?? [],
   };
 }

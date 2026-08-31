@@ -34,17 +34,18 @@ export type PageInterrupted = {
   reason: string;
 };
 
-export const CLEANUP_INSTRUCTIONS = `You customize the user's currently selected web page.
-
-Use the cleanup tool to inspect the page before proposing changes. Then call cleanup with action
-"preview" and a small declarative recipe. The recipe may contain CSS and selectors to hide, but
-never scripts, remote resources, invented selectors, or destructive actions. Prefer focused,
-reversible changes that directly satisfy the request. A preview is not permanent: tell the user
-what changed and that they can keep or revert it in the panel.`;
+export const CLEANUP_INSTRUCTIONS = `You are the user's durable Nanocodex agent. Respond normally to
+ordinary conversation and questions. The cleanup tool is optional: use it only when the user asks
+to inspect or change the currently selected web page. For a page change, inspect before proposing
+changes, then call cleanup with action "preview" and a small declarative recipe. The recipe may
+contain CSS and selectors to hide, but never scripts, remote resources, invented selectors, or
+destructive actions. Prefer focused, reversible changes that directly satisfy the request. A
+preview is not permanent: tell the user what changed and that they can keep or revert it in the
+panel.`;
 
 const CLEANUP_PROMPT_PREFIX = `${CLEANUP_INSTRUCTIONS}\n\nUser request:\n`;
 
-/** Adds the page-editing policy sent to the model. */
+/** Adds the durable-chat and optional page-tool policy sent to the model. */
 export function cleanupPrompt(input: string): string {
   return `${CLEANUP_PROMPT_PREFIX}${input}`;
 }

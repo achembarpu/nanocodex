@@ -303,7 +303,9 @@ export function sanitizeCliWalletResult(value) {
 export function managedMemoryCapability(path, operation) {
   if (path === "/v1/history/sessions/search"
     || /^\/v1\/history\/sessions\/[^/]+\/read$/.test(path)) return "history:read";
+  if (/^\/v1\/memory\/[^/]+$/.test(path) && operation === "delete") return "memory:write";
   if (path !== "/v1/memory") return undefined;
+  if (operation === "list") return "memory:read";
   if (operation === "scan" || operation === "read") return "memory:read";
   if (operation === "put" || operation === "delete") return "memory:write";
   return undefined;

@@ -12,6 +12,9 @@ const CONNECT_DIALOG = "https://nanocodex.gakonst.workers.dev/connect-dialog/";
 const MANAGED_AGENT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const MACHINE_USD = "0x20c0000000000000000000006637932dE5413804" as const;
 const USDC_E = "0x20C000000000000000000000b9537d11c60E8b50" as const;
+const CONVERSATION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
+export const LEGACY_CONVERSATION_ID = "legacy";
 
 export const CHROME_ZERO_SPEND_LIMITS = [
   { token: MACHINE_USD, limit: 0n, period: 0 },
@@ -22,60 +25,66 @@ export const CHROME_CONNECT_REQUEST = {
   capabilities: {
     agent: {
       finalMessages: true,
-      actionSummaries: false,
+      actionSummaries: true,
       conversationHistory: true,
-      rawTraces: false,
+      rawTraces: true,
     },
     cloudAccounts: { chatgpt: true },
   },
   permission: "agent.run",
 } as const;
 
-const client = Client.create({
-  appId: "nanocodex-chrome",
-  auth: {
-    challenge: `${CONNECT_API}/v1/connect/auth/challenge`,
-    verify: `${CONNECT_API}/v1/connect/auth`,
-    logout: `${CONNECT_API}/v1/connect/auth/logout`,
-    resources: ["urn:nanocodex:agent:run"],
-    returnToken: true,
-  },
-  accessKey: {
-    authorize: {
-      expiry: Math.floor(Date.now() / 1_000) + 30 * 86_400,
-      reuse: {
-        minExpiry: Math.floor(Date.now() / 1_000) + 7 * 86_400,
-        minLimits: CHROME_ZERO_SPEND_LIMITS,
-      },
-      limits: CHROME_ZERO_SPEND_LIMITS,
-      scopes: [],
-    },
-  },
-  dialog: Dialog.popup({
-    host: CONNECT_DIALOG,
-    key: "nanocodex-chrome",
-    name: "Nanocodex Connect",
-  }),
-  transport: Transport.http(CONNECT_API, {
-    credentials: "omit",
-    key: "nanocodex-chrome",
-    name: "Nanocodex Connect API",
-  }),
-});
+type ConnectClient = ReturnType<typeof Client.create>;
+export type ExpectedConversation = Readonly<{ agentId: string; accountAddress?: string }>;
+const conversationClients = new Map<string, ConnectClient>();
+const agentClients = new Map<string, ConnectClient>();
 
-export function connectNanocodex(): Promise<Connection> {
-  return client.connection.connect(CHROME_CONNECT_REQUEST);
+export async function connectNanocodex(
+  conversationId = LEGACY_CONVERSATION_ID,
+  expected?: ExpectedConversation,
+): Promise<Connection> {
+  const client = clientForConversation(conversationId);
+  const snapshot = expected ? snapshotConversationStorage(conversationId) : undefined;
+  try {
+    const connection = await client.connection.connect(connectRequest(conversationId));
+    if (!isManagedAgentId(connection.agentId) || (expected && !connectionMatchesIdentity(connection, expected))) {
+      await client.connection.disconnect().catch(() => {});
+      restoreConversationStorage(conversationId, snapshot ?? new Map());
+      conversationClients.delete(conversationId);
+      throw new Error("This conversation belongs to a different Nanocodex account. Start a new conversation instead.");
+    }
+    agentClients.set(connection.agentId, client);
+    return connection;
+  } catch (cause) {
+    if (snapshot) {
+      restoreConversationStorage(conversationId, snapshot);
+      conversationClients.delete(conversationId);
+    }
+    throw cause;
+  }
 }
 
-export async function reconnectNanocodex(): Promise<Connection | undefined> {
-  const connection = await client.connection.reconnect(CHROME_CONNECT_REQUEST);
-  if (!connection || isManagedAgentId(connection.agentId)) return connection;
-  await client.connection.disconnect();
-  return undefined;
+export async function reconnectNanocodex(
+  conversationId = LEGACY_CONVERSATION_ID,
+  expected?: ExpectedConversation,
+): Promise<Connection | undefined> {
+  const client = clientForConversation(conversationId);
+  const connection = await client.connection.reconnect(connectRequest(conversationId));
+  if (!connection) return undefined;
+  if (!isManagedAgentId(connection.agentId) || (expected && !connectionMatchesIdentity(connection, expected))) {
+    await client.connection.disconnect();
+    conversationClients.delete(conversationId);
+    if (expected) {
+      throw new Error("The retained authorization no longer matches this conversation.");
+    }
+    return undefined;
+  }
+  agentClients.set(connection.agentId, client);
+  return connection;
 }
 
-export function disconnectNanocodex(): Promise<void> {
-  return client.connection.disconnect();
+export function disconnectNanocodex(conversationId = LEGACY_CONVERSATION_ID): Promise<void> {
+  return clientForConversation(conversationId).connection.disconnect();
 }
 
 export function createConnectedAgent(
@@ -83,7 +92,116 @@ export function createConnectedAgent(
   tools: readonly NamedTool[],
   signal?: AbortSignal,
 ): Promise<ConnectAgent> {
+  const client = agentClients.get(connection.agentId);
+  if (!client) throw new Error("The durable conversation session is unavailable.");
   return client.agent.create({ connection, tools, signal });
+}
+
+export function createConversationId(): string {
+  return crypto.randomUUID();
+}
+
+export function isConversationId(value: string): boolean {
+  return value === LEGACY_CONVERSATION_ID || CONVERSATION_ID.test(value);
+}
+
+function clientForConversation(conversationId: string): ConnectClient {
+  if (!isConversationId(conversationId)) throw new TypeError("Invalid durable conversation identifier.");
+  const retained = conversationClients.get(conversationId);
+  if (retained) return retained;
+  if (conversationId === LEGACY_CONVERSATION_ID) migrateLegacyConversationSession();
+  const now = Math.floor(Date.now() / 1_000);
+  const client = Client.create({
+    appId: "nanocodex-chrome",
+    auth: {
+      challenge: `${CONNECT_API}/v1/connect/auth/challenge`,
+      verify: `${CONNECT_API}/v1/connect/auth`,
+      logout: `${CONNECT_API}/v1/connect/auth/logout`,
+      resources: ["urn:nanocodex:agent:run"],
+      returnToken: true,
+    },
+    accessKey: {
+      authorize: {
+        expiry: now + 30 * 86_400,
+        reuse: {
+          minExpiry: now + 7 * 86_400,
+          minLimits: CHROME_ZERO_SPEND_LIMITS,
+        },
+        limits: CHROME_ZERO_SPEND_LIMITS,
+        scopes: [],
+      },
+    },
+    dialog: Dialog.popup({
+      host: CONNECT_DIALOG,
+      key: `nanocodex-chrome-${conversationId}`,
+      name: "Nanocodex Connect",
+    }),
+    session: conversationStorage(conversationId),
+    transport: Transport.http(CONNECT_API, {
+      credentials: "omit",
+      key: `nanocodex-chrome-${conversationId}`,
+      name: "Nanocodex Connect API",
+    }),
+  });
+  conversationClients.set(conversationId, client);
+  return client;
+}
+
+function connectRequest(conversationId: string) {
+  return {
+    ...CHROME_CONNECT_REQUEST,
+    ...(conversationId === LEGACY_CONVERSATION_ID ? {} : { conversationId }),
+  } as const;
+}
+
+function conversationStorage(conversationId: string): Pick<Storage, "getItem" | "setItem" | "removeItem"> {
+  const prefix = conversationStoragePrefix(conversationId);
+  return {
+    getItem: (key) => localStorage.getItem(`${prefix}${key}`),
+    setItem: (key, value) => localStorage.setItem(`${prefix}${key}`, value),
+    removeItem: (key) => localStorage.removeItem(`${prefix}${key}`),
+  };
+}
+
+function snapshotConversationStorage(conversationId: string): Map<string, string> {
+  const prefix = conversationStoragePrefix(conversationId);
+  const snapshot = new Map<string, string>();
+  for (let index = 0; index < localStorage.length; index += 1) {
+    const key = localStorage.key(index);
+    if (key?.startsWith(prefix)) snapshot.set(key, localStorage.getItem(key) ?? "");
+  }
+  return snapshot;
+}
+
+function restoreConversationStorage(conversationId: string, snapshot: ReadonlyMap<string, string>): void {
+  const prefix = conversationStoragePrefix(conversationId);
+  const currentKeys: string[] = [];
+  for (let index = 0; index < localStorage.length; index += 1) {
+    const key = localStorage.key(index);
+    if (key?.startsWith(prefix)) currentKeys.push(key);
+  }
+  for (const key of currentKeys) localStorage.removeItem(key);
+  for (const [key, value] of snapshot) localStorage.setItem(key, value);
+}
+
+function conversationStoragePrefix(conversationId: string): string {
+  return `nanocodex:chrome:conversation:${conversationId}:`;
+}
+
+export function migrateLegacyConversationSession(
+  storage: Pick<Storage, "getItem" | "setItem" | "removeItem"> = localStorage,
+): void {
+  const key = "nanocodex:connect:nanocodex-chrome:session";
+  const migratedKey = `${conversationStoragePrefix(LEGACY_CONVERSATION_ID)}${key}`;
+  const retained = storage.getItem(key);
+  if (storage.getItem(migratedKey) === null && retained !== null) storage.setItem(migratedKey, retained);
+  if (retained !== null) storage.removeItem(key);
+}
+
+function connectionMatchesIdentity(connection: Connection, expected: ExpectedConversation): boolean {
+  return connection.agentId === expected.agentId
+    && (expected.accountAddress === undefined
+      || connection.accountAddress.toLowerCase() === expected.accountAddress.toLowerCase());
 }
 
 export function isManagedAgentId(value: string): boolean {

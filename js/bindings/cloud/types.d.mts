@@ -89,6 +89,8 @@ export type Grant = Readonly<{
   permission: string;
   status: "active" | "revoked" | "expired";
   expiresAt: number;
+  /** App-generated signed selector for this exact durable conversation. */
+  conversationId?: string | undefined;
   capabilities: readonly string[];
   visibility: AgentVisibility;
   /** Secret-free cloud account providers bound to this grant. */

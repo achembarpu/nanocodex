@@ -932,7 +932,11 @@ export default {
                 type: "function_call",
                 call_id: "atomic-recall-scan",
                 name: "memory",
-                arguments: JSON.stringify({ operation: "scan", query: "Tuesday production deploy" }),
+                arguments: JSON.stringify({
+                  operation: "scan",
+                  query: "Tuesday production deploy",
+                  limit: 10,
+                }),
               }],
               usage: null,
             },

@@ -720,7 +720,11 @@ test("Connect binds normalized cloud accounts into auth resources and the connec
           },
           async request(request) {
             requests.push(request);
-            return testConnectionWire({ expiry, keyId, capabilities: [
+            return testConnectionWire({
+              conversationId: "0f5f2ab8-2585-4d7c-9403-0de76f55ad18",
+              expiry,
+              keyId,
+              capabilities: [
               "nanocodex.agent",
               "agent.output.final",
               "agent.output.actions",
@@ -729,7 +733,8 @@ test("Connect binds normalized cloud accounts into auth resources and the connec
               "github",
               "gdrive",
               "x",
-            ] });
+              ],
+            });
           },
         };
       },
@@ -737,6 +742,7 @@ test("Connect binds normalized cloud accounts into auth resources and the connec
   });
 
   const connection = await client.connection.connect({
+    conversationId: "0f5f2ab8-2585-4d7c-9403-0de76f55ad18",
     capabilities: {
       auth: {
         challenge: "https://connect.example/v1/connect/auth/challenge",
@@ -779,6 +785,7 @@ test("Connect binds normalized cloud accounts into auth resources and the connec
             "urn:nanocodex:origin:https%3A%2F%2Fconsumer.example",
             "urn:nanocodex:connectors:github,gdrive,x",
             "urn:nanocodex:agent:visibility:reply,actions,history,traces",
+            "urn:nanocodex:agent:conversation:0f5f2ab8-2585-4d7c-9403-0de76f55ad18",
           ],
         },
       },
@@ -796,6 +803,7 @@ test("Connect binds normalized cloud accounts into auth resources and the connec
     conversationHistory: true,
     rawTraces: true,
   });
+  assert.equal(connection.grant.conversationId, "0f5f2ab8-2585-4d7c-9403-0de76f55ad18");
   assert.equal("credentials" in connection.grant, false);
   assert.equal("account" in connection.grant, false);
   assert.equal(connection.mpp.balanceStatus, "ready");
@@ -1641,6 +1649,17 @@ test("recognized visibility capabilities do not receive the legacy output fallba
   });
 });
 
+test("durable conversation projections require an exact lowercase UUIDv4", () => {
+  const expiry = Math.floor(Date.now() / 1_000) + 3_600;
+  const keyId = "0x1111111111111111111111111111111111111111";
+  assert.throws(() => connectionFromWire(testConnectionWire({
+    capabilities: ["nanocodex.agent"],
+    conversationId: "not-a-conversation",
+    expiry,
+    keyId,
+  })), /conversation_id must be a lowercase UUIDv4/);
+});
+
 test("ConnectAgent projections hide terminal output outside the signed resources", async () => {
   assert.deepEqual(projectAgentObservations({
     finalMessages: false,
@@ -1661,7 +1680,14 @@ async function nextDialogRequest(dialog) {
   throw new Error("Nanocodex Connect did not open its dialog");
 }
 
-function testConnectionWire({ expiry, keyId, capabilities, agentId = "agent_connectors", mcpConnections = [] }) {
+function testConnectionWire({
+  expiry,
+  keyId,
+  capabilities,
+  agentId = "agent_connectors",
+  conversationId,
+  mcpConnections = [],
+}) {
   return {
     grant_token: "grant-session-test",
     account_address: "0x8ba1f109551bd432803012645ac136ddd64dba72",
@@ -1672,6 +1698,7 @@ function testConnectionWire({ expiry, keyId, capabilities, agentId = "agent_conn
       status: "active",
       expires_at: expiry,
       capabilities,
+      ...(conversationId === undefined ? {} : { conversation_id: conversationId }),
       mcp_connections: mcpConnections,
     },
     access_key: {
