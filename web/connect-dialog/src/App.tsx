@@ -1323,6 +1323,7 @@ function ConnectionWizard({
     : undefined;
   const deferredChatGptImport = request.connectPolicy.chatGptCredentialImport;
   const requester = presentation === "wizard" ? "Nanocodex CLI" : request.app.name;
+  const hostedAuthorization = request.auth.resources.includes(hostedAuthorizationResource);
   if (!connectorStatuses && !accountAddress) {
     return (
       <AccountChooser
@@ -1409,7 +1410,9 @@ function ConnectionWizard({
 
         {!focused && !focusedMcp ? <AccountConnectionSection
           eyebrow="Access"
-          meta={request.accessKey ? "30-day key" : "Active key"}
+          meta={hostedAuthorization
+            ? "No delegated key"
+            : request.accessKey ? "30-day key" : "Active key"}
           title={`${requester} access`}
           titleId="wizard-access-heading"
         >
