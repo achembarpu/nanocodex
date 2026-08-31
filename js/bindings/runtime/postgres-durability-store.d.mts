@@ -1,4 +1,4 @@
-import type { DurabilityStore } from "../types.mjs";
+import type { DurabilityPortableStore } from "../types.mjs";
 
 /** A PostgreSQL result row. Column values remain owned by the pool implementation. */
 export type PostgresDurabilityRow = Readonly<Record<string, unknown>>;
@@ -40,29 +40,25 @@ export type PostgresDurabilityPool = Readonly<{
 }>;
 
 /**
- * Signals that PostgreSQL may have applied COMMIT before the connection failed.
- *
- * Callers must treat this as an unknown write outcome and reload the journal;
- * it is never converted to the definite `not_committed` append result.
+ * PostgreSQL remained unavailable while the adapter retried an idempotent
+ * operation to verify a lost COMMIT response. Retrying the same request is safe.
  */
-export declare class UnknownPostgresCommitOutcomeError extends Error {
-  override readonly name: "UnknownPostgresCommitOutcomeError";
-  constructor(journalId: string, cause: unknown);
+export declare class PostgresDurabilityUnavailableError extends Error {
+  override readonly name: "PostgresDurabilityUnavailableError";
+  constructor(stateId: string, cause: unknown);
 }
 
 /**
  * Creates a concrete PostgreSQL-backed Nanocodex durability store.
  *
  * The schema is initialized lazily under a PostgreSQL transaction advisory
- * lock. Loads preserve numeric revision order. Appends atomically compare and
- * advance the journal head before inserting the opaque batch in one
- * transaction. Failures return `not_committed` only when no transaction began
- * or ROLLBACK was confirmed; a failed COMMIT throws
- * {@link UnknownPostgresCommitOutcomeError} instead.
+ * lock. Replacements atomically compare and advance the complete opaque state in one
+ * transaction. Lost COMMIT responses are reconciled internally by retrying the
+ * same idempotent operation; callers never receive an ambiguous write result.
  *
  * The supplied pool is structural and caller-owned. Constructing the store
  * does not connect, query, or import a PostgreSQL driver.
  */
 export declare function createPostgresDurabilityStore(
   pool: PostgresDurabilityPool,
-): DurabilityStore;
+): DurabilityPortableStore;

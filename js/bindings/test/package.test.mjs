@@ -77,14 +77,20 @@ test("the packed package ships and resolves every public entry point", async () 
       import * as rootExports from "nanocodex";
       import {
         createMemoryDurabilityStore,
+        DurabilityImportConflictError,
         durabilityRevision,
+        durabilityStateDigest,
+        exportDurabilityState,
+        exportDurabilityStatePage,
+        importDurabilityState,
+        importDurabilityStatePages,
         sqliteDurabilitySchema,
       } from "nanocodex/durability";
       import * as durabilityExports from "nanocodex/durability";
       import { createCloudflareDurabilityStore } from "nanocodex/durability/cloudflare";
       import {
         createPostgresDurabilityStore,
-        UnknownPostgresCommitOutcomeError,
+        PostgresDurabilityUnavailableError,
       } from "nanocodex/durability/postgres";
       import { Agent as HostAgent, Transport as HostTransport } from "nanocodex/host";
       import * as hostExports from "nanocodex/host";
@@ -104,7 +110,13 @@ test("the packed package ships and resolves every public entry point", async () 
       const durabilityValueNames = [
         "createMemoryDurabilityStore",
         "createSqliteDurabilityStore",
+        "DurabilityImportConflictError",
         "durabilityRevision",
+        "durabilityStateDigest",
+        "exportDurabilityState",
+        "exportDurabilityStatePage",
+        "importDurabilityState",
+        "importDurabilityStatePages",
         "sqliteDurabilitySchema",
       ];
       assert.deepEqual(
@@ -124,19 +136,54 @@ test("the packed package ships and resolves every public entry point", async () 
         );
       }
       assert.equal(durabilityRevision(1n), "1");
-      assert.equal(createMemoryDurabilityStore("package-journal").journalId, "package-journal");
+      assert.match(await durabilityStateDigest({ revision: "0", payload: null }), /^sha256:/);
+      assert.equal(createMemoryDurabilityStore("package-state").stateId, "package-state");
+      assert.equal(new DurabilityImportConflictError("package-state").name, "DurabilityImportConflictError");
+      const packageSource = createMemoryDurabilityStore("portable-package-state");
+      const packageOwner = packageSource.acquire("portable-package-state", { ownerId: "package-owner" });
+      assert.deepEqual(packageSource.replace("portable-package-state", {
+        ...packageOwner,
+        expectedRevision: "0",
+        payload: "portable-package-payload",
+      }), { status: "replaced", revision: "1" });
+      const packageArchive = await exportDurabilityState(packageSource, "portable-package-state");
+      const packageDestination = createMemoryDurabilityStore("portable-package-state");
+      assert.deepEqual(await importDurabilityState(packageDestination, packageArchive), {
+        revision: "1",
+        payload: "portable-package-payload",
+      });
+      const packagePage = await exportDurabilityStatePage(packageSource, "portable-package-state", {
+        from: durabilityRevision("0"),
+        limit: 1024,
+      });
+      const pageDestination = createMemoryDurabilityStore("portable-package-state");
+      assert.deepEqual(await importDurabilityStatePages(pageDestination, [packagePage]), {
+        revision: "1",
+        payload: "portable-package-payload",
+      });
       let cloudflareSchemaStatements = 0;
       const cloudflareStore = createCloudflareDurabilityStore({
         sql: {
-          exec() {
-            cloudflareSchemaStatements += 1;
-            return { toArray: () => [] };
+          exec(sql) {
+            if (sql.startsWith("CREATE TABLE")) cloudflareSchemaStatements += 1;
+            let rows = [];
+            if (sql.startsWith("PRAGMA table_info")) {
+              const shapes = sql.includes("nanocodex_durable_owners")
+                ? [["state_id", "TEXT", 0, 1], ["owner_id", "TEXT", 1, 0], ["fence", "TEXT", 1, 0]]
+                : sql.includes("nanocodex_durable_states")
+                  ? [["state_id", "TEXT", 0, 1], ["revision", "TEXT", 1, 0], ["payload", "TEXT", 1, 0]]
+                  : sql.includes("nanocodex_durable_chunk_heads")
+                    ? [["state_id", "TEXT", 0, 1], ["revision", "TEXT", 1, 0], ["chunk_count", "INTEGER", 1, 0]]
+                    : [["state_id", "TEXT", 1, 1], ["revision", "TEXT", 1, 2], ["chunk_index", "INTEGER", 1, 3], ["payload", "TEXT", 1, 0]];
+              rows = shapes.map(([name, type, notnull, pk], cid) => ({ cid, name, type, notnull, pk }));
+            }
+            return { toArray: () => rows };
           },
         },
         transactionSync(callback) { return callback(); },
       });
       assert.equal(Object.isFrozen(cloudflareStore), true);
-      assert.equal(cloudflareSchemaStatements, sqliteDurabilitySchema.length + 1);
+      assert.equal(cloudflareSchemaStatements, sqliteDurabilitySchema.length + 2);
       let postgresCalls = 0;
       const postgresStore = createPostgresDurabilityStore({
         connect() {
@@ -151,8 +198,8 @@ test("the packed package ships and resolves every public entry point", async () 
       assert.equal(Object.isFrozen(postgresStore), true);
       assert.equal(postgresCalls, 0);
       const commitCause = new Error("connection closed");
-      const commitError = new UnknownPostgresCommitOutcomeError("package-journal", commitCause);
-      assert.equal(commitError.name, "UnknownPostgresCommitOutcomeError");
+      const commitError = new PostgresDurabilityUnavailableError("package-journal", commitCause);
+      assert.equal(commitError.name, "PostgresDurabilityUnavailableError");
       assert.equal(commitError.cause, commitCause);
       assert.equal(typeof NodeWorkspace.open, "function");
       assert.equal(typeof BrowserWorkspace.open, "function");

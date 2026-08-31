@@ -47,67 +47,97 @@ export type DurabilityFence = string & {
   readonly [durabilityFenceBrand]: "NanocodexDurabilityFence";
 };
 
-export type DurabilityStoredBatch = Readonly<{
+export type DurabilityStoredState = Readonly<{
   revision: DurabilityRevision;
+  payload: string | null;
+}>;
+
+/** JSON-safe exact state archive used for an offline provider cutover. */
+export type DurabilityPortableStateArchive = DurabilityStoredState & Readonly<{
+  format: "nanocodex-durability-state-v1";
+  stateId: string;
+}>;
+
+export type DurabilityExportCursor = string;
+
+/** One deterministic page of the total-state replacement from `from` (exclusive) to `to` (inclusive). */
+export type DurabilityPortableStatePage = Readonly<{
+  format: "nanocodex-durability-state-page-v1";
+  stateId: string;
+  from: DurabilityRevision;
+  /** SHA-256 over the UTF-8 JSON tuple `[from, fromPayload]`. */
+  fromDigest: string;
+  to: DurabilityRevision;
+  cursor: DurabilityExportCursor;
+  nextCursor: DurabilityExportCursor | null;
+  /** Total UTF-16 code units in the opaque state payload. */
+  payloadLength: number;
   payload: string;
 }>;
 
-export type DurabilityStoredJournal = Readonly<{
-  revision: DurabilityRevision;
-  batches: readonly DurabilityStoredBatch[];
+export type DurabilityExportPageRequest = Readonly<{
+  from: DurabilityRevision;
+  /** Digest of the exact state at `from`; omit only when `from` is revision zero. */
+  fromDigest?: string | undefined;
+  /** Omit on the first request to select the current source revision; repeat the returned `to`. */
+  to?: DurabilityRevision | undefined;
+  cursor?: DurabilityExportCursor | undefined;
+  /** UTF-16 code units per page. Defaults to 256 KiB and is capped at 1 MiB. */
+  limit?: number | undefined;
 }>;
 
 export type DurabilityAcquireRequest = Readonly<{
   ownerId: string;
 }>;
 
-export type DurabilityAcquiredJournal = DurabilityStoredJournal & Readonly<{
+export type DurabilityAcquiredState = DurabilityStoredState & Readonly<{
   ownerId: string;
   fence: DurabilityFence;
 }>;
 
-export type DurabilityAppendRequest = Readonly<{
+export type DurabilityReplaceRequest = Readonly<{
   ownerId: string;
   fence: DurabilityFence;
   expectedRevision: DurabilityRevision;
   payload: string;
 }>;
 
-export type DurabilityAppendResult =
-  | Readonly<{ status: "appended"; revision: DurabilityRevision }>
-  | Readonly<{ status: "fenced" }>
-  | Readonly<{ status: "conflict"; actualRevision: DurabilityRevision }>
-  | Readonly<{ status: "not_committed"; message: string }>;
-
-export type DurabilityCompactRequest = DurabilityAppendRequest;
-
-export type DurabilityCompactResult =
-  | Readonly<{ status: "compacted"; revision: DurabilityRevision }>
+export type DurabilityReplaceResult =
+  | Readonly<{ status: "replaced"; revision: DurabilityRevision }>
   | Readonly<{ status: "fenced" }>
   | Readonly<{ status: "conflict"; actualRevision: DurabilityRevision }>
   | Readonly<{ status: "not_committed"; message: string }>;
 
 /** Host capability consumed by the Rust/WASM durability driver. */
 export type DurabilityStore = Readonly<{
-  load(journalId: string): DurabilityStoredJournal | Promise<DurabilityStoredJournal>;
+  load(stateId: string): DurabilityStoredState | Promise<DurabilityStoredState>;
   acquire(
-    journalId: string,
+    stateId: string,
     request: DurabilityAcquireRequest,
-  ): DurabilityAcquiredJournal | Promise<DurabilityAcquiredJournal>;
-  append(
-    journalId: string,
-    request: DurabilityAppendRequest,
-  ): DurabilityAppendResult | Promise<DurabilityAppendResult>;
-  compact?(
-    journalId: string,
-    request: DurabilityCompactRequest,
-  ): DurabilityCompactResult | Promise<DurabilityCompactResult>;
+  ): DurabilityAcquiredState | Promise<DurabilityAcquiredState>;
+  replace(
+    stateId: string,
+    request: DurabilityReplaceRequest,
+  ): DurabilityReplaceResult | Promise<DurabilityReplaceResult>;
+}>;
+
+/** Store that can atomically restore an exact revision into an empty destination. */
+export type DurabilityPortableStore = DurabilityStore & Readonly<{
+  importState(
+    stateId: string,
+    state: DurabilityStoredState,
+    options?: Readonly<{
+      expectedRevision?: DurabilityRevision | undefined;
+      /** When supplied, compare the complete expected state atomically before importing. */
+      expectedPayload?: string | null | undefined;
+    }> | undefined,
+  ): DurabilityStoredState | Promise<DurabilityStoredState>;
 }>;
 
 /** In-process store for hosts that carry its snapshot across durable steps. */
-export type MemoryDurabilityStore = DurabilityStore & Readonly<{
-  journalId: string;
-  snapshot(): DurabilityStoredJournal;
+export type MemoryDurabilityStore = DurabilityPortableStore & Readonly<{
+  stateId: string;
+  snapshot(): DurabilityStoredState;
 }>;
 
 /**

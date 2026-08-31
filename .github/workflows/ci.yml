@@ -129,6 +129,23 @@ jobs:
     name: Node and browser bindings
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: nanocodex_test
+          POSTGRES_PASSWORD: nanocodex_test
+          POSTGRES_USER: nanocodex_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U nanocodex_test -d nanocodex_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgres://nanocodex_test:nanocodex_test@127.0.0.1:5432/nanocodex_test
+      NANOCODEX_LIVE_POSTGRES: "1"
     permissions:
       contents: read
     steps:

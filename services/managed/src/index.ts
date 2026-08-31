@@ -38,21 +38,29 @@ import {
   MAX_HISTORY_PAGE_SIZE,
   parseCursor,
   type DurableEvent,
+  type DurableEventTail,
 } from "./durable-events";
 import {
   ManagedEventArchive,
+  type ManagedEventArchiveState,
   type ManagedEventSealResult,
 } from "./managed-event-archive";
 import {
   ManagedTurnArchive,
+  type ManagedTurnArchiveIdentity,
   type ManagedTurnReceipt,
   type ManagedTurnSealResult,
 } from "./managed-turn-archive";
 import {
   ManagedRealtimeArchive,
+  type ManagedRealtimeArchiveState,
   type ManagedRealtimeReceipt,
   type ManagedRealtimeSealResult,
 } from "./managed-realtime-archive";
+import {
+  ManagedPortabilityArchive,
+  type ManagedPortableArchiveIdentity,
+} from "./managed-portability-archive";
 import { webAsset } from "./web";
 import {
   MultiplayerRoom,
@@ -95,7 +103,8 @@ import {
 } from "./device-host-protocol";
 import {
   classifyTurnFailure,
-  materializeTurnTerminal,
+  materializeTurnResolution,
+  type TurnResolution,
   type TurnTerminal,
 } from "./turn-completion";
 import {
@@ -157,6 +166,7 @@ export { ApiKeyRecord, NonceStorage, Organization, UserAccount } from "./account
 
 const MAX_CLIENT_MESSAGE_BYTES = 1024 * 1024;
 const MAX_ACTIVE_TURNS = 16;
+const MAX_PRE_ADMISSION_CANCELLATIONS = 64;
 const MAX_CLIENT_CONNECTIONS = 64;
 const MAX_REQUEST_BODY_BYTES = 1024 * 1024;
 const MAX_REALTIME_REQUEST_BYTES = 64 * 1024;
@@ -164,6 +174,7 @@ const MAX_REALTIME_CONTEXT_BYTES = 1024 * 1024;
 const DISPATCH_INPUT_CHUNK_CODE_UNITS = 256_000;
 const MAX_PENDING_REALTIME_OPERATIONS = 32;
 const MAX_RETRY_DELAY_MS = 60_000;
+const MAX_IMPORT_BATCHES_PER_CREATE = 4;
 const UUID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const SESSION_ID = UUID;
@@ -180,14 +191,17 @@ const SESSION_DELETION_GENERATION_KEY = "nanocodex:session-deletion-generation";
 const INITIAL_ACCOUNT_CONTEXT_KEY = "nanocodex:initial-account-context";
 const CREDENTIAL_BINDING_KEY = "nanocodex:credential-binding";
 const CLEANUP_RETRY_ATTEMPT_KEY = "nanocodex:cleanup-retry-attempt";
+const DURABILITY_EXPORTED_KEY = "nanocodex:durability-exported";
+const DURABILITY_IMPORT_STATE_KEY = "nanocodex:durability-import-state";
+const DURABILITY_IMPORT_RECEIPT_KEY = "nanocodex:durability-import-receipt";
 const CREDENTIAL_BINDING_PREPARE_TIMEOUT_MS = 60_000;
 const DEFAULT_OWNERSHIP_IO_TIMEOUT_MS = 10_000;
 const DEFAULT_MULTIPLAYER_IO_TIMEOUT_MS = 10_000;
 const MAX_CLEANUP_RETRY_MS = 60_000;
 const SESSION_OWNER_ASSERTION = "x-nanocodex-owner-id";
-// Exact completed-turn receipts are retained by ManagedTurnArchive, so the
-// runtime journal does not need to duplicate them in each compacted checkpoint.
-const MANAGED_TERMINAL_RECEIPT_RETENTION = 0;
+// ManagedTurnArchive owns the long-lived API projection. The portable Rust
+// state keeps a bounded exact-replay window so cutovers do not call the model.
+const MANAGED_TERMINAL_RECEIPT_RETENTION = 512;
 const SESSION_ORGANIZATION_ASSERTION = "x-nanocodex-session-organization-id";
 const SESSION_TEAM_ASSERTION = "x-nanocodex-session-team-id";
 const SESSION_AUTHORIZATION_EPOCH_ASSERTION = "x-nanocodex-authorization-epoch";
@@ -220,7 +234,7 @@ const MEMORY_REVIEW_CHECKPOINT = [
 ].join("\n");
 
 export interface Env extends AccountAuthEnv {
-  NANOCODEX_SESSIONS: DurableObjectNamespace<NanocodexSession>;
+  NANOCODEX_SESSIONS: DurableObjectNamespace<DurableAgentSession>;
   NANOCODEX_ROOMS: DurableObjectNamespace<MultiplayerRoom>;
   NANOCODEX_MULTIPLAYER_QUOTA: DurableObjectNamespace<MultiplayerQuota>;
   NANOCODEX_MEMORY: DurableObjectNamespace<MemoryScope>;
@@ -300,8 +314,6 @@ type InitialAccountContext = Readonly<{
 type ManagedTurnState =
   | "accepted"
   | "cancelling"
-  | "retryable"
-  | "blocked"
   | "completed"
   | "cancelled"
   | "failed";
@@ -333,7 +345,6 @@ type StreamMessage = Extract<ServerMessage,
   | { type: "turn_completed" }
   | { type: "turn_cancelled" }
   | { type: "turn_retryable" }
-  | { type: "turn_blocked" }
   | { type: "turn_failed" }
   | { type: "event" }
   | { type: "stream_failed" }
@@ -374,8 +385,9 @@ type ManagedRealtimeRouteResult = Readonly<{
   voice_session_id: string;
 }>;
 
-type ManagedTransition =
-  TurnTerminal | Extract<StreamMessage, { type: "turn_cancelling" }>;
+type ManagedTransition = TurnTerminal | Extract<StreamMessage, {
+  type: "turn_cancelling" | "turn_retryable";
+}>;
 
 type TurnAuthorization = Readonly<{
   capabilities: readonly OrganizationCapability[];
@@ -404,12 +416,89 @@ type AgentConstructionOwnership = {
   shutdown?: Promise<void>;
 };
 
+type DurabilityImportOwnership = Readonly<{
+  deletionGeneration: number;
+  promise: Promise<Response>;
+}>;
+
 type CredentialBindingOwnership = Readonly<{
   cleanup_at: number;
   owner_id: string;
   session_id: string;
   state: "preparing" | "active";
   subject: string;
+}>;
+
+type PortableDurabilityArchive = Readonly<{
+  format: "nanocodex-durability-state-v1";
+  payload: string;
+  revision: string;
+  stateId: string;
+}>;
+
+type ManagedDurabilityArchive = Readonly<{
+  durability: PortableDurabilityArchive;
+  format: "nanocodex-managed-durability-state-v1";
+  managed_events: ManagedEventPortability;
+  managed_realtime: ManagedRealtimePortability;
+  managed_session: ManagedSessionPortability;
+  managed_turn_receipts: ManagedTurnArchiveIdentity;
+  source_agent_id: string;
+}>;
+
+type ManagedTurnArchiveAdoption = Readonly<{
+  events: ManagedEventPortability;
+  realtime: ManagedRealtimePortability;
+  session: ManagedSessionPortability;
+  source_storage_id: string;
+  turn_receipts: ManagedTurnArchiveIdentity;
+}>;
+
+type ManagedEventPortability = Readonly<{
+  archive: ManagedPortableArchiveIdentity;
+  state: ManagedEventArchiveState;
+  tail: DurableEventTail<StreamMessage>;
+}>;
+
+type ManagedRealtimePortableOperation = Readonly<{
+  blocked: 0 | 1;
+  created_at: number;
+  kind: ManagedRealtimeKind;
+  operation_id: string;
+  request_hash: string;
+  response_json: string | null;
+  state: "pending" | "completed";
+  updated_at: number;
+  voice_session_id: string;
+}>;
+
+type ManagedRealtimePortability = Readonly<{
+  archive: ManagedPortableArchiveIdentity;
+  state: ManagedRealtimeArchiveState;
+  tail: readonly ManagedRealtimePortableOperation[];
+}>;
+
+type ManagedSessionPortability = Readonly<{
+  accepted_turns: number;
+  completed_turns: number;
+  first_prompt: string;
+  last_active: number;
+  stream_error: string | null;
+  title: string;
+}>;
+
+type ManagedDurabilityImport = Readonly<{
+  durability: unknown;
+  turn_archive_adoption?: ManagedTurnArchiveAdoption;
+}>;
+
+type DurabilityImportReceipt = Readonly<{
+  adoption?: ManagedTurnArchiveAdoption;
+  owner_id: string;
+  request_hash: string;
+  source_agent_id: string | null;
+  stage: "pending" | "authorized" | "complete";
+  state_id: string;
 }>;
 
 type RoomInitializationReceipt = {
@@ -666,6 +755,7 @@ export default {
       return json({ error: "method_not_allowed" }, { status: 405 });
     }
     if (request.method === "POST" && url.pathname === "/v1/agents") {
+      if (url.search !== "") return json({ error: "invalid_request" }, { status: 400 });
       const principal = await authenticate(request, env, url);
       if (!principal) return json({ error: "unauthorized" }, { status: 401 });
       observeManagedPrincipal(env, "managed.agent.create_requested", principal, {
@@ -677,6 +767,50 @@ export default {
       const requestKey = request.headers.get("idempotency-key");
       if (requestKey !== null && !IDEMPOTENCY_KEY.test(requestKey)) {
         return json({ error: "invalid_idempotency_key" }, { status: 400 });
+      }
+      let durabilityArchive: unknown;
+      try {
+        const encoded = await request.text();
+        if (encoded.trim()) {
+          const body = JSON.parse(encoded) as { durability?: unknown };
+          if (!body || typeof body !== "object" || Array.isArray(body)
+            || Object.keys(body).some((key) => key !== "durability")
+            || body.durability === undefined) {
+            return json({ error: "invalid_durability_import" }, { status: 400 });
+          }
+          durabilityArchive = body.durability;
+        }
+      } catch {
+        return json({ error: "invalid_durability_import" }, { status: 400 });
+      }
+      if (durabilityArchive !== undefined
+        && !principal.capabilities.includes("agents:portability")) {
+        return json({ error: "forbidden" }, { status: 403 });
+      }
+      let managedArchive: ManagedDurabilityArchive | undefined;
+      let durabilityRequestHash: string | undefined;
+      let durabilityStateId: string | undefined;
+      if (durabilityArchive !== undefined) {
+        try {
+          if (typeof durabilityArchive === "object" && durabilityArchive !== null
+            && (durabilityArchive as { format?: unknown }).format
+              === "nanocodex-managed-durability-state-v1") {
+            managedArchive = validateManagedDurabilityArchive(durabilityArchive);
+            durabilityStateId = managedArchive.durability.stateId;
+          } else {
+            durabilityStateId = portableDurabilityStateId(durabilityArchive);
+          }
+          durabilityRequestHash = await hashText(canonicalJson(durabilityArchive));
+        } catch (error) {
+          const message = error instanceof ManagedRequestError ? error.message : errorMessage(error);
+          return json({ error: "invalid_durability_import", message }, { status: 400 });
+        }
+      }
+      if (managedArchive !== undefined && requestKey === null) {
+        return json({
+          error: "idempotency_required",
+          message: "managed durability imports require Idempotency-Key",
+        }, { status: 400 });
       }
       const agentId = requestKey === null
         ? uuidV7()
@@ -690,6 +824,11 @@ export default {
           method: "PUT",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
+            durability_import: durabilityRequestHash === undefined ? null : {
+              request_hash: durabilityRequestHash,
+              source_agent_id: managedArchive?.source_agent_id ?? null,
+              state_id: durabilityStateId,
+            },
             owner_id: principal.userId,
             session_id: agentId,
             subject,
@@ -698,12 +837,48 @@ export default {
       } catch {
         return json({ error: "agent cleanup initialization failed" }, { status: 503 });
       }
-      await prepared.body?.cancel();
       if (!prepared.ok) {
+        await prepared.body?.cancel();
         if (prepared.status === 409) {
-          return json({ error: "agent_creation_expired" }, { status: 409 });
+          return json({
+            error: durabilityArchive === undefined
+              ? "agent_creation_expired"
+              : "durability_import_conflict",
+          }, { status: 409 });
         }
         return json({ error: "agent cleanup initialization failed" }, { status: 503 });
+      }
+      const retainedImport = durabilityArchive === undefined
+        ? undefined
+        : await prepared.json<DurabilityImportReceipt>();
+      if (durabilityArchive === undefined) await prepared.body?.cancel();
+      let durabilityImport: ManagedDurabilityImport | undefined;
+      if (durabilityArchive !== undefined && retainedImport?.stage !== "complete") {
+        if (retainedImport?.stage === "authorized") {
+          durabilityImport = {
+            durability: managedArchive?.durability ?? durabilityArchive,
+            ...(retainedImport.adoption === undefined
+              ? {}
+              : { turn_archive_adoption: retainedImport.adoption }),
+          };
+        } else {
+          try {
+            durabilityImport = await resolveManagedDurabilityImport(
+              env,
+              principal,
+              durabilityArchive,
+              ownershipTimeoutMs,
+            );
+          } catch (error) {
+            if (error instanceof ManagedRequestError) {
+              return json({ error: error.code, message: error.message }, { status: error.status });
+            }
+            return json({ error: "durability_import_failed" }, {
+              status: 503,
+              headers: { "retry-after": "1" },
+            });
+          }
+        }
       }
       const memory = env.NANOCODEX_MEMORY.getByName(principal.organizationId);
       const [credentialBinding, initialization, memoryInitialization] = await Promise.allSettled([
@@ -753,6 +928,36 @@ export default {
           ? json({ error: "credential_broker_unavailable" }, { status: 503 })
           : json({ error: "agent initialization failed" }, { status: 503 });
       }
+      if (durabilityImport !== undefined) {
+        let importComplete = false;
+        for (let batch = 0; batch < MAX_IMPORT_BATCHES_PER_CREATE; batch += 1) {
+          let imported: Response;
+          try {
+            imported = await fetchCreateStage(stub, "https://session.internal/durability/import", {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify(durabilityImport),
+            }, ownershipTimeoutMs, "agent durability import");
+          } catch {
+            if (requestKey === null) await requestSessionCleanup(stub, ownershipTimeoutMs);
+            return json({ error: "durability_import_failed" }, { status: 503 });
+          }
+          await imported.body?.cancel();
+          if (imported.status === 202) continue;
+          if (!imported.ok) {
+            if (requestKey === null) await requestSessionCleanup(stub, ownershipTimeoutMs);
+            return json({ error: "invalid_durability_import" }, { status: imported.status });
+          }
+          importComplete = true;
+          break;
+        }
+        if (!importComplete) {
+          return json({ error: "durability_import_pending" }, {
+            status: 503,
+            headers: { "retry-after": "1" },
+          });
+        }
+      }
       let committed: Response | undefined;
       try {
         committed = await fetchCreateStage(
@@ -769,6 +974,21 @@ export default {
         if (requestKey === null) await requestSessionCleanup(stub, ownershipTimeoutMs);
         return json({ error: "agent cleanup commit failed" }, { status: 503 });
       }
+      const importedSession = durabilityImport?.turn_archive_adoption?.session
+        ?? retainedImport?.adoption?.session;
+      if (importedSession && importedSession.accepted_turns > 0) {
+        try {
+          await recordAgentActivity(env, principal.userId, agentId, {
+            title: importedSession.title,
+            turnCount: importedSession.accepted_turns,
+          });
+        } catch {
+          return json({ error: "agent activity update failed" }, {
+            status: 503,
+            headers: { "retry-after": "1" },
+          });
+        }
+      }
       const routeBase = "/v1/agents";
       const websocketUrl = new URL(`${routeBase}/${agentId}/ws`, url);
       websocketUrl.protocol = websocketUrl.protocol === "https:" ? "wss:" : "ws:";
@@ -780,6 +1000,7 @@ export default {
       return json({
         agent_id: agentId,
         session_id: agentId,
+        durability_id: durabilityStateId ?? agentId,
         events_url: new URL(`${routeBase}/${agentId}/events`, url).href,
         websocket_url: websocketUrl.href,
       }, {
@@ -840,6 +1061,21 @@ export default {
       return stub.fetch(`https://session.internal/${resource}?${query}`, {
         headers: sessionHeaders,
         signal: request.signal,
+      });
+    }
+    if (resource === "durability") {
+      if (request.method !== "POST") {
+        return json({ error: "method_not_allowed" }, { status: 405 });
+      }
+      if (url.search !== "") return json({ error: "invalid_request" }, { status: 400 });
+      if (!principal.capabilities.includes("agents:portability")) {
+        return json({ error: "forbidden" }, { status: 403 });
+      }
+      const originFailure = requireSameOriginMutation(request, url, principal);
+      if (originFailure) return originFailure;
+      return stub.fetch("https://session.internal/durability/export", {
+        method: "POST",
+        headers: sessionHeaders,
       });
     }
     if (resource === "turns") {
@@ -1003,7 +1239,7 @@ const DurableComputerSession = withWorkspace(
   }),
 );
 
-export class NanocodexSession extends DurableComputerSession {
+export class DurableAgentSession extends DurableComputerSession {
   #agent?: CloudflareAgent.Agent;
   #agentPromise?: Promise<CloudflareAgent.Agent>;
   #agentConstruction?: AgentConstructionOwnership;
@@ -1017,6 +1253,7 @@ export class NanocodexSession extends DurableComputerSession {
   #turnArchiveTask?: Promise<ManagedTurnSealResult>;
   readonly #realtimeArchive: ManagedRealtimeArchive;
   #realtimeArchiveTask?: Promise<ManagedRealtimeSealResult>;
+  readonly #portabilityArchive: ManagedPortabilityArchive;
   readonly #turns = new Map<string, Turn>();
   readonly #reopenInterruptedTurnIds = new Set<string>();
   readonly #eventTurnQueue: string[] = [];
@@ -1039,6 +1276,9 @@ export class NanocodexSession extends DurableComputerSession {
   #streamError?: string;
   #deleting = false;
   #deleted = false;
+  #durabilityExported = false;
+  #durabilityImportState?: "pending" | "complete";
+  #durabilityImportTask?: DurabilityImportOwnership;
   #credentialBinding?: CredentialBindingOwnership;
   #deletionMarkerTask?: Promise<void>;
   #deletionTask?: Promise<void>;
@@ -1048,8 +1288,6 @@ export class NanocodexSession extends DurableComputerSession {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.ctx.storage.sql.exec(`
-      DROP TABLE IF EXISTS terminal_turns;
-      DROP TABLE IF EXISTS completed_operations;
       CREATE TABLE IF NOT EXISTS session_state (
         singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
         session_id TEXT NOT NULL UNIQUE,
@@ -1080,7 +1318,7 @@ export class NanocodexSession extends DurableComputerSession {
         dispatch_input_chunks INTEGER CHECK (dispatch_input_chunks IS NULL OR dispatch_input_chunks > 0),
         authorization_json TEXT NOT NULL,
         state TEXT NOT NULL CHECK (
-          state IN ('accepted', 'cancelling', 'retryable', 'blocked', 'completed', 'cancelled', 'failed')
+          state IN ('accepted', 'cancelling', 'completed', 'cancelled', 'failed')
         ),
         accepted_cursor INTEGER NOT NULL,
         terminal_json TEXT,
@@ -1095,6 +1333,10 @@ export class NanocodexSession extends DurableComputerSession {
       );
       CREATE UNIQUE INDEX IF NOT EXISTS managed_turns_request_key
         ON managed_turns(request_key) WHERE request_key IS NOT NULL;
+      CREATE TABLE IF NOT EXISTS managed_turn_cancel_intents (
+        turn_id TEXT PRIMARY KEY,
+        created_at INTEGER NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS managed_turn_dispatch_chunks (
         turn_id TEXT NOT NULL,
         chunk_index INTEGER NOT NULL,
@@ -1119,6 +1361,13 @@ export class NanocodexSession extends DurableComputerSession {
         voice_session_id TEXT NOT NULL,
         authorization_json TEXT NOT NULL DEFAULT '{"capabilities":[]}',
         updated_at INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS managed_portability_restoration (
+        singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+        source_storage_id TEXT NOT NULL,
+        events_digest TEXT NOT NULL,
+        realtime_digest TEXT NOT NULL,
+        turn_receipts_digest TEXT NOT NULL
       );
       CREATE TABLE IF NOT EXISTS device_host_state (
         singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
@@ -1156,6 +1405,14 @@ export class NanocodexSession extends DurableComputerSession {
         citations_json TEXT NOT NULL
       );
     `);
+    // A pending realtime mutation belonged to the previous in-memory owner.
+    // Its external outcome is unknown, so cold construction must not replay it.
+    this.ctx.storage.sql.exec(
+      `UPDATE managed_realtime_operations
+       SET blocked = 1, updated_at = ?
+       WHERE state = 'pending' AND blocked = 0`,
+      Date.now(),
+    );
     this.#hostedTools = new HostedToolsBroker(this.ctx, {
       entryAllowed: (entry, connectGrantId) => (
         this.#activeTurnHostedToolAllowed(entry, connectGrantId)
@@ -1184,147 +1441,26 @@ export class NanocodexSession extends DurableComputerSession {
       this.ctx.id.toString(),
       optionalPositiveInteger(this.env.MANAGED_REALTIME_ARCHIVE_RECENT_OPERATIONS),
     );
-    const sessionColumns = new Set(
-      this.ctx.storage.sql
-        .exec<{ name: string }>("PRAGMA table_info(session_state)")
-        .toArray()
-        .map((column) => column.name),
-    );
-    if (!sessionColumns.has("public_origin")) {
-      this.ctx.storage.sql.exec(
-        "ALTER TABLE session_state ADD COLUMN public_origin TEXT NOT NULL DEFAULT ''",
-      );
-    }
-    if (!sessionColumns.has("owner_id")) {
-      this.ctx.storage.sql.exec(
-        "ALTER TABLE session_state ADD COLUMN owner_id TEXT NOT NULL DEFAULT ''",
-      );
-    }
-    if (!sessionColumns.has("organization_id")) {
-      this.ctx.storage.sql.exec(
-        "ALTER TABLE session_state ADD COLUMN organization_id TEXT NOT NULL DEFAULT ''",
-      );
-    }
-    if (!sessionColumns.has("team_id")) {
-      this.ctx.storage.sql.exec(
-        "ALTER TABLE session_state ADD COLUMN team_id TEXT NOT NULL DEFAULT ''",
-      );
-    }
-    if (!sessionColumns.has("authorization_epoch")) {
-      this.ctx.storage.sql.exec(
-        "ALTER TABLE session_state ADD COLUMN authorization_epoch INTEGER NOT NULL DEFAULT 0",
-      );
-    }
-    if (!sessionColumns.has("stream_error")) {
-      this.ctx.storage.sql.exec("ALTER TABLE session_state ADD COLUMN stream_error TEXT");
-    }
-    if (!sessionColumns.has("runtime_profile")) {
-      this.ctx.storage.sql.exec(
-        "ALTER TABLE session_state ADD COLUMN runtime_profile TEXT NOT NULL DEFAULT 'managed'",
-      );
-    }
-    if (!sessionColumns.has("accepted_turns")) {
-      this.ctx.storage.sql.exec(
-        "ALTER TABLE session_state ADD COLUMN accepted_turns INTEGER NOT NULL DEFAULT 0 CHECK (accepted_turns >= 0)",
-      );
-      this.ctx.storage.sql.exec(
-        "UPDATE session_state SET accepted_turns = (SELECT COUNT(*) FROM managed_turns)",
-      );
-    }
-    if (!sessionColumns.has("first_prompt")) {
-      this.ctx.storage.sql.exec(
-        "ALTER TABLE session_state ADD COLUMN first_prompt TEXT NOT NULL DEFAULT ''",
-      );
-      const retainedFirstPrompt = this.ctx.storage.sql.exec<{ input_json: string }>(
-        "SELECT input_json FROM managed_turns ORDER BY created_at, id LIMIT 1",
-      ).toArray()[0]?.input_json;
-      if (retainedFirstPrompt !== undefined) {
-        try {
-          this.ctx.storage.sql.exec(
-            "UPDATE session_state SET first_prompt = ? WHERE singleton = 1",
-            promptInputText(JSON.parse(retainedFirstPrompt) as PromptInput),
-          );
-        } catch { /* Invalid retained input fails through its normal recovery path. */ }
-      }
-    }
-    const managedTurnColumns = new Set(this.ctx.storage.sql.exec<{ name: string }>(
-      "PRAGMA table_info(managed_turns)",
-    ).toArray().map((column) => column.name));
-    if (!managedTurnColumns.has("may_have_inner_operation")) {
-      // Pre-upgrade unfinished rows may already own an inner Rust journal
-      // operation. Conservatively replay them instead of orphaning that work.
-      this.ctx.storage.sql.exec(
-        "ALTER TABLE managed_turns ADD COLUMN may_have_inner_operation INTEGER NOT NULL DEFAULT 1 CHECK (may_have_inner_operation IN (0, 1))",
-      );
-    }
-    if (!managedTurnColumns.has("dispatch_input_chunks")) {
-      this.ctx.storage.sql.exec(
-        "ALTER TABLE managed_turns ADD COLUMN dispatch_input_chunks INTEGER CHECK (dispatch_input_chunks IS NULL OR dispatch_input_chunks > 0)",
-      );
-    }
-    const realtimeOperationColumns = new Set(
-      this.ctx.storage.sql
-        .exec<{ name: string }>("PRAGMA table_info(managed_realtime_operations)")
-        .toArray()
-        .map((column) => column.name),
-    );
-    if (!realtimeOperationColumns.has("blocked")) {
-      this.ctx.storage.sql.exec(
-        "ALTER TABLE managed_realtime_operations ADD COLUMN blocked INTEGER NOT NULL DEFAULT 0 CHECK (blocked IN (0, 1))",
-      );
-    }
-    const realtimeSessionColumns = new Set(
-      this.ctx.storage.sql
-        .exec<{ name: string }>("PRAGMA table_info(managed_realtime_session)")
-        .toArray()
-        .map((column) => column.name),
-    );
-    if (!realtimeSessionColumns.has("authorization_json")) {
-      this.ctx.storage.sql.exec(
-        `ALTER TABLE managed_realtime_session ADD COLUMN authorization_json TEXT NOT NULL
-         DEFAULT '{"capabilities":[]}'`,
-      );
-    }
-    const migrationNow = Date.now();
-    this.ctx.storage.sql.exec(
-      `UPDATE managed_realtime_operations
-       SET blocked = 1, updated_at = ?
-       WHERE state = 'pending' AND blocked = 0`,
-      migrationNow,
-    );
-    // Older realtime routing persisted a synthetic managed ID while Rust
-    // admitted the operation under a different generated UUID. There is no
-    // retained authoritative mapping between them, so replay must fail closed
-    // instead of admitting duplicate work under the synthetic ID.
-    this.ctx.storage.sql.exec(
-      `UPDATE managed_turns
-       SET state = 'blocked', retry_at = NULL,
-           error = 'pre-upgrade realtime turn has an indeterminate durable operation identity',
-           updated_at = ?
-       WHERE request_key LIKE 'realtime:%'
-         AND length(id) = 57
-         AND substr(id, 1, 9) = 'realtime:'
-         AND substr(id, 10) NOT GLOB '*[^0-9a-f]*'
-         AND state IN ('accepted', 'cancelling', 'retryable')`,
-      migrationNow,
+    this.#portabilityArchive = new ManagedPortabilityArchive(
+      this.ctx.storage,
+      this.env.NANOCODEX_HISTORY,
+      this.ctx.id.toString(),
     );
     this.#deleted = this.#initializationOwnership()?.state === "deleted";
-    if (!managedTurnColumns.has("authorization_json")) {
-      this.ctx.storage.sql.exec(
-        `ALTER TABLE managed_turns ADD COLUMN authorization_json TEXT NOT NULL
-         DEFAULT '{"capabilities":[]}'`,
-      );
-    }
     this.#streamError = this.#session()?.stream_error ?? undefined;
     this.ctx.blockConcurrencyWhile(async () => {
-      const [deleting, credentialBinding, deletionGeneration] = await Promise.all([
+      const [deleting, credentialBinding, deletionGeneration, durabilityExported, durabilityImportState] = await Promise.all([
         this.ctx.storage.get<boolean>(SESSION_DELETING_KEY),
         this.ctx.storage.get<CredentialBindingOwnership>(CREDENTIAL_BINDING_KEY),
         this.ctx.storage.get<number>(SESSION_DELETION_GENERATION_KEY),
+        this.ctx.storage.get<boolean>(DURABILITY_EXPORTED_KEY),
+        this.ctx.storage.get<"pending" | "complete">(DURABILITY_IMPORT_STATE_KEY),
       ]);
       this.#deleting = deleting === true;
       this.#credentialBinding = credentialBinding;
       this.#deletionGeneration = deletionGeneration ?? 0;
+      this.#durabilityExported = durabilityExported === true;
+      this.#durabilityImportState = durabilityImportState;
       // Durable state and SSE replay are immediately usable after eviction.
       // Re-admission or deletion may load external resources, so neither sits
       // on the object's request-readiness boundary.
@@ -1354,22 +1490,44 @@ export class NanocodexSession extends DurableComputerSession {
     }
     if (request.method === "PUT" && url.pathname === "/credential-binding") {
       if (this.#deleting || this.#deleted) return new Response(null, { status: 409 });
-      let ownership: Partial<CredentialBindingOwnership>;
-      try { ownership = await request.json<Partial<CredentialBindingOwnership>>(); }
+      let ownership: Partial<CredentialBindingOwnership> & { durability_import?: unknown };
+      try {
+        ownership = await request.json<Partial<CredentialBindingOwnership> & {
+          durability_import?: unknown;
+        }>();
+      }
       catch { return new Response(null, { status: 400 }); }
       if (!isUserId(ownership.owner_id)
         || typeof ownership.session_id !== "string"
         || !SESSION_ID.test(ownership.session_id)
         || typeof ownership.subject !== "string"
-        || ownership.subject !== this.ctx.id.toString()) {
+        || ownership.subject !== this.ctx.id.toString()
+        || !validDurabilityImportPreparation(ownership.durability_import)) {
         return new Response(null, { status: 400 });
       }
+      const requestedImport = ownership.durability_import as {
+        request_hash: string;
+        source_agent_id: string | null;
+        state_id: string;
+      } | null;
+      const retainedImport = await this.ctx.storage.get<DurabilityImportReceipt>(
+        DURABILITY_IMPORT_RECEIPT_KEY,
+      );
       const current = this.#credentialBinding;
       if (current && (current.owner_id !== ownership.owner_id
         || current.session_id !== ownership.session_id
         || current.subject !== ownership.subject)) {
         return new Response(null, { status: 409 });
       }
+      if (current && (retainedImport !== undefined) !== (requestedImport !== null)) {
+        return new Response(null, { status: 409 });
+      }
+      if (retainedImport && requestedImport && (
+        retainedImport.owner_id !== ownership.owner_id
+        || retainedImport.request_hash !== requestedImport.request_hash
+        || retainedImport.source_agent_id !== requestedImport.source_agent_id
+        || retainedImport.state_id !== requestedImport.state_id
+      )) return new Response(null, { status: 409 });
       if (!current) {
         const prepared: CredentialBindingOwnership = {
           cleanup_at: Date.now() + this.#credentialPreparationLeaseMs(),
@@ -1380,9 +1538,20 @@ export class NanocodexSession extends DurableComputerSession {
         };
         await this.ctx.storage.transaction(async (transaction) => {
           await transaction.put(CREDENTIAL_BINDING_KEY, prepared);
+          if (requestedImport) {
+            await transaction.put(DURABILITY_IMPORT_STATE_KEY, "pending");
+            await transaction.put(DURABILITY_IMPORT_RECEIPT_KEY, {
+              owner_id: ownership.owner_id!,
+              request_hash: requestedImport.request_hash,
+              source_agent_id: requestedImport.source_agent_id,
+              stage: "pending",
+              state_id: requestedImport.state_id,
+            } satisfies DurabilityImportReceipt);
+          }
           await transaction.setAlarm(prepared.cleanup_at);
         });
         this.#credentialBinding = prepared;
+        this.#durabilityImportState = requestedImport ? "pending" : undefined;
       } else if (current.state === "preparing") {
         const refreshed = {
           ...current,
@@ -1393,6 +1562,13 @@ export class NanocodexSession extends DurableComputerSession {
           await transaction.setAlarm(refreshed.cleanup_at);
         });
         this.#credentialBinding = refreshed;
+      }
+      if (requestedImport) {
+        const receipt = await this.ctx.storage.get<DurabilityImportReceipt>(
+          DURABILITY_IMPORT_RECEIPT_KEY,
+        );
+        if (!receipt) return new Response(null, { status: 409 });
+        return json(receipt, { headers: { "cache-control": "no-store" } });
       }
       return new Response(null, { status: 204 });
     }
@@ -1415,6 +1591,7 @@ export class NanocodexSession extends DurableComputerSession {
     }
     if (request.method === "POST" && url.pathname === "/credential-binding/commit") {
       if (this.#deleting || this.#deleted) return new Response(null, { status: 409 });
+      if (this.#durabilityImportState === "pending") return new Response(null, { status: 409 });
       const ownership = await this.#refreshCredentialPreparation();
       const session = this.#session();
       if (!ownership || !session
@@ -1440,6 +1617,103 @@ export class NanocodexSession extends DurableComputerSession {
       }
       await this.#scheduleNextAlarm();
       return new Response(null, { status: 204 });
+    }
+    if (request.method === "POST" && url.pathname === "/durability/import") {
+      if (this.#durabilityImportTask) {
+        return json({ error: "durability_import_pending" }, {
+          status: 409,
+          headers: { "cache-control": "no-store", "retry-after": "1" },
+        });
+      }
+      const ownership = {
+        deletionGeneration: this.#deletionGeneration,
+        promise: undefined as unknown as Promise<Response>,
+      };
+      ownership.promise = Promise.resolve().then(
+        () => this.#performDurabilityImport(request, ownership),
+      );
+      this.#durabilityImportTask = ownership;
+      try {
+        return await ownership.promise;
+      } finally {
+        if (this.#durabilityImportTask === ownership) this.#durabilityImportTask = undefined;
+      }
+    }
+    if (request.method === "POST" && url.pathname === "/durability/adoption") {
+      if (!this.#durabilityExported || this.#deleting || this.#deleted) {
+        return json({ error: "durability_adoption_conflict" }, { status: 409 });
+      }
+      const deletionGeneration = this.#deletionGeneration;
+      try {
+        const archive = await this.#managedDurabilityArchive();
+        if (this.#deleting || this.#deleted
+          || this.#deletionGeneration !== deletionGeneration) {
+          return json({ error: "durability_adoption_conflict" }, { status: 409 });
+        }
+        if (!archive) {
+          return json({ stage: "exporting" }, {
+            status: 202,
+            headers: { "cache-control": "no-store", "retry-after": "1" },
+          });
+        }
+        return json({
+          archive,
+          source_storage_id: this.ctx.id.toString(),
+        }, { headers: { "cache-control": "no-store" } });
+      } catch (error) {
+        return json({ error: "durability_adoption_failed", message: errorMessage(error) }, {
+          status: 503,
+          headers: { "cache-control": "no-store", "retry-after": "1" },
+        });
+      }
+    }
+    if (request.method === "POST" && url.pathname === "/durability/export") {
+      if (this.#durabilityImportState === "pending") {
+        return json({ error: "durability_import_pending" }, { status: 409 });
+      }
+      if (this.#deleting || this.#deleted || !this.#sessionId()) {
+        return json({ error: "not_found" }, { status: 404 });
+      }
+      if (this.#turns.size > 0 || this.#pendingTurnIds.size > 0
+        || this.#admissionTasks.size > 0 || this.#recoverableTurnCount() > 0
+        || this.#cancellationTasks.size > 0 || this.#realtimeOperations.size > 0
+        || this.#pendingDeviceToolCalls.size > 0 || this.#inFlight.size > 0
+        || this.#hostedTools.hasPendingCalls()
+        || this.#agentPromise !== undefined || this.#managedRealtimeSession() !== undefined
+        || this.ctx.storage.sql.exec<{ count: number }>(
+          "SELECT COUNT(*) AS count FROM managed_realtime_operations WHERE state = 'pending' AND blocked = 0",
+        ).one().count > 0) {
+        return json({ error: "agent_busy" }, { status: 409 });
+      }
+      this.#durabilityExported = true;
+      // Fence socket-owned mutation synchronously with the admission flag.
+      // No request may cross an await between observing active admission and
+      // these owners being retired.
+      this.#hostedTools.shutdown("durability state exported");
+      for (const socket of this.ctx.getWebSockets()) {
+        closeSocket(socket, 1000, "durability state exported");
+      }
+      await this.ctx.storage.put(DURABILITY_EXPORTED_KEY, true);
+      try {
+        await this.#shutdownAgent(true);
+        const archive = await this.#managedDurabilityArchive();
+        if (!archive) {
+          return json({ stage: "exporting" }, {
+            status: 202,
+            headers: { "cache-control": "no-store", "retry-after": "1" },
+          });
+        }
+        return json(archive, { headers: { "cache-control": "no-store" } });
+      } catch (error) {
+        return json({ error: "durability_export_failed", message: errorMessage(error) }, {
+          status: 503,
+          headers: { "cache-control": "no-store", "retry-after": "1" },
+        });
+      }
+    }
+    if (this.#durabilityExported
+      && !(request.method === "DELETE" && url.pathname === "/session")) {
+      return json({ error: "durability_exported" }, { status: 409 });
     }
     const forwardedOrigin = url.searchParams.get("public_origin");
     if (!this.#deleting
@@ -1588,6 +1862,13 @@ export class NanocodexSession extends DurableComputerSession {
       if (event) this.#publish(event);
       return new Response(null, { status: 204 });
     }
+    if (this.#durabilityImportState === "pending"
+      && !(request.method === "DELETE" && url.pathname === "/session")) {
+      return json({ error: "durability_import_pending" }, {
+        status: 409,
+        headers: { "cache-control": "no-store", "retry-after": "1" },
+      });
+    }
     if (request.method === "GET" && url.pathname === "/socket")
       return this.#upgrade(turnAuthorization);
     if (request.method === "GET" && url.pathname === "/tool-host") {
@@ -1724,6 +2005,9 @@ export class NanocodexSession extends DurableComputerSession {
       });
     }
     if (request.method === "POST" && url.pathname === "/turns") {
+      if (this.#durabilityExported) {
+        return json({ error: "durability_exported" }, { status: 409 });
+      }
       return this.#submitHttpTurn(request, turnAuthorization);
     }
     if (request.method === "POST" && url.pathname === "/turns/archive") {
@@ -1808,6 +2092,10 @@ export class NanocodexSession extends DurableComputerSession {
   }
 
   async webSocketMessage(socket: WebSocket, message: string | ArrayBuffer): Promise<void> {
+    if (this.#durabilityExported || this.#durabilityImportState === "pending") {
+      closeSocket(socket, 1008, "agent durability transfer fenced this connection");
+      return;
+    }
     if (this.#hostedTools.owns(socket)) {
       if (typeof message !== "string") {
         closeSocket(socket, 1003, "Hosted Tools requires text frames");
@@ -1925,6 +2213,9 @@ export class NanocodexSession extends DurableComputerSession {
 
   #upgrade(authorization: TurnAuthorization): Response {
     if (this.#deleting) return new Response("Agent is being deleted", { status: 409 });
+    if (this.#durabilityExported) {
+      return new Response("Agent durability state was exported", { status: 409 });
+    }
     const session = this.#sessionStatus();
     if (!session) return new Response("Unknown session", { status: 404 });
     if (authorization.connectGrant
@@ -1954,6 +2245,9 @@ export class NanocodexSession extends DurableComputerSession {
 
   #upgradeDeviceHost(): Response {
     if (this.#deleting) return new Response("Agent is being deleted", { status: 409 });
+    if (this.#durabilityExported || this.#durabilityImportState === "pending") {
+      return new Response("Agent durability transfer is pending", { status: 409 });
+    }
     const session = this.#sessionStatus();
     if (!session) return new Response("Unknown session", { status: 404 });
     if (this.#session()?.runtime_profile !== "managed") {
@@ -2226,6 +2520,14 @@ export class NanocodexSession extends DurableComputerSession {
       this.#send(socket, { type: "error", code: "agent_deleting", message: "the agent is being deleted" });
       return;
     }
+    if (this.#durabilityExported) {
+      this.#send(socket, {
+        type: "error",
+        code: "durability_exported",
+        message: "the agent durability state was exported",
+      });
+      return;
+    }
     if (command.type === "ping") {
       if (command.nonce === undefined) this.#sendEncoded(socket, ENCODED_PONG);
       else this.#send(socket, { type: "pong", nonce: command.nonce });
@@ -2244,6 +2546,7 @@ export class NanocodexSession extends DurableComputerSession {
     if (command.type === "cancel") {
       try {
         const row = await this.#findManagedTurn(command.id);
+        this.#assertDurabilityAdmissionActive();
         if (!row) throw new ManagedRequestError(404, "turn_not_found", `turn ${command.id} does not exist`);
         if (isTerminalState(row.state)) {
           this.#send(socket, messageForManagedTurn(row));
@@ -2264,6 +2567,7 @@ export class NanocodexSession extends DurableComputerSession {
         return;
       }
       try {
+        this.#assertDurabilityAdmissionActive();
         await turn.steer({ input: appendMemoryReviewCheckpoint(command.input) });
       } catch (error) {
         this.#send(socket, { type: "error", code: "steer_failed", message: errorMessage(error) });
@@ -2404,6 +2708,9 @@ export class NanocodexSession extends DurableComputerSession {
     if (this.#deleting || this.#deleted) {
       return json({ error: "agent_deleting" }, { status: 409 });
     }
+    if (this.#durabilityExported) {
+      return json({ error: "durability_transfer_pending" }, { status: 409 });
+    }
     if (authorization.connectGrant
       && !authorization.connectGrant.connectors.includes("chatgpt")) {
       return json({ error: "connector_forbidden" }, { status: 403 });
@@ -2492,6 +2799,9 @@ export class NanocodexSession extends DurableComputerSession {
         ...(parsed.input === undefined ? {} : { input: parsed.input }),
       }),
     );
+    if (this.#durabilityExported || this.#durabilityImportState === "pending") {
+      return json({ error: "durability_transfer_pending" }, { status: 409 });
+    }
     try {
       const result = await this.#runRealtimeOperation(
         parsed,
@@ -2665,19 +2975,22 @@ export class NanocodexSession extends DurableComputerSession {
     }
 
     const now = Date.now();
-    this.ctx.storage.sql.exec(
-      `INSERT INTO managed_realtime_operations (
+    this.ctx.storage.transactionSync(() => {
+      this.#assertDurabilityAdmissionActive();
+      this.ctx.storage.sql.exec(
+        `INSERT INTO managed_realtime_operations (
          voice_session_id, operation_id, kind, request_hash, state, blocked,
          response_json, created_at, updated_at
        ) VALUES (?, ?, ?, ?, 'pending', 0, NULL, ?, ?)
        ON CONFLICT (voice_session_id, operation_id) DO UPDATE SET updated_at = excluded.updated_at`,
-      request.voiceSessionId,
-      request.operationId,
-      kind,
-      requestHash,
-      now,
-      now,
-    );
+        request.voiceSessionId,
+        request.operationId,
+        kind,
+        requestHash,
+        now,
+        now,
+      );
+    });
     const task = this.#track(
       (async () => {
         try {
@@ -2759,6 +3072,9 @@ export class NanocodexSession extends DurableComputerSession {
     });
     await previous.catch(() => {});
     try {
+      // Waiting for the prior routed operation yields to export. Recheck
+      // immediately before the Rust route can create any model/tool effect.
+      this.#assertRealtimeRouteAvailable();
       this.#realtimeEventBuffer = [];
       let turn: Turn | undefined;
       try {
@@ -2824,6 +3140,9 @@ export class NanocodexSession extends DurableComputerSession {
   }
 
   async #steerHttpTurn(id: string, request: Request): Promise<Response> {
+    if (this.#durabilityExported || this.#durabilityImportState === "pending") {
+      return json({ error: "durability_transfer_pending" }, { status: 409 });
+    }
     let row: ManagedTurnRow | undefined;
     try { row = await this.#findManagedTurn(id); }
     catch (error) { return managedErrorResponse(error, "turn_archive_unavailable"); }
@@ -2853,6 +3172,7 @@ export class NanocodexSession extends DurableComputerSession {
         );
       }
       validatePromptInput(value.input);
+      this.#assertDurabilityAdmissionActive();
       await turn.steer({ input: appendMemoryReviewCheckpoint(value.input as PromptInput) });
       return json({ turn_id: id, state: "steering" }, { status: 202 });
     } catch (error) {
@@ -2869,22 +3189,21 @@ export class NanocodexSession extends DurableComputerSession {
   }
 
   async #cancelHttpTurn(id: string): Promise<Response> {
+    if (this.#durabilityExported || this.#durabilityImportState === "pending") {
+      return json({ error: "durability_transfer_pending" }, { status: 409 });
+    }
     let row: ManagedTurnRow | undefined;
     try { row = await this.#findManagedTurn(id); }
     catch (error) { return managedErrorResponse(error, "turn_archive_unavailable"); }
-    if (!row) return json({ error: "turn_not_found" }, { status: 404 });
-    if (isTerminalState(row.state)) return json(managedTurnView(row));
-    if (row.state === "blocked") {
-      return json(
-        {
-          error: "turn_blocked",
-          message:
-            row.error ??
-            "the durable operation requires explicit reconciliation",
-        },
-        { status: 409 },
-      );
+    if (!row) {
+      try {
+        row = this.#reservePreAdmissionCancellation(id);
+      } catch (error) {
+        return managedErrorResponse(error, "cancel_failed");
+      }
+      if (!row) return json({ turn_id: id, state: "cancelling" }, { status: 202 });
     }
+    if (isTerminalState(row.state)) return json(managedTurnView(row));
     try {
       const cancelling = this.#markCancelling(id);
       this.#scheduleCancellation(cancelling.id);
@@ -2902,21 +3221,14 @@ export class NanocodexSession extends DurableComputerSession {
         "the agent is being deleted",
       );
     }
+    if (this.#durabilityExported || this.#durabilityImportState === "pending") {
+      throw new ManagedRequestError(409, "durability_transfer_pending", "durability transfer fenced admission");
+    }
     if (this.#streamError) {
       throw new ManagedRequestError(
         503,
         "event_stream_failed",
         this.#streamError,
-      );
-    }
-    const blocked = this.#managedTurns(
-      "WHERE state = 'blocked' ORDER BY updated_at LIMIT 1",
-    )[0];
-    if (blocked) {
-      throw new ManagedRequestError(
-        409,
-        "agent_blocked",
-        `turn ${blocked.id} requires reconciliation before new work`,
       );
     }
     if (this.#unfinishedTurnCount() >= MAX_ACTIVE_TURNS) {
@@ -2969,6 +3281,7 @@ export class NanocodexSession extends DurableComputerSession {
     const firstPrompt = promptInputText(input);
     let event: DurableEvent<StreamMessage> | undefined;
     this.ctx.storage.transactionSync(() => {
+      this.#assertDurabilityAdmissionActive();
       if (this.#managedTurn(id) || this.#managedTurnByRequestKey(requestKey)) {
         throw new ManagedRequestError(
           409,
@@ -3046,7 +3359,7 @@ export class NanocodexSession extends DurableComputerSession {
       turn.dispose();
       if (this.#deleting) return;
       const failure = classifyTurnFailure(id, error);
-      this.#commitManagedFailure(id, error, false, failure.terminal);
+      this.#commitManagedResolution(id, failure);
       if (failure.reopenAgent) await this.#reopenAgent(id);
       this.#scheduleRecovery();
       await this.#scheduleNextAlarm();
@@ -3064,12 +3377,16 @@ export class NanocodexSession extends DurableComputerSession {
     if (this.#deleting || this.#deleted) {
       throw new ManagedRequestError(409, "agent_deleting", "the agent is being deleted");
     }
+    if (this.#durabilityExported || this.#durabilityImportState === "pending") {
+      throw new ManagedRequestError(409, "durability_transfer_pending", "durability transfer fenced admission");
+    }
     const archived = await Promise.all([
       this.#managedTurn(id) ? Promise.resolve(undefined) : this.#archivedTurnById(id),
       requestKey === null || this.#managedTurnByRequestKey(requestKey)
         ? Promise.resolve(undefined)
         : this.#archivedTurnByRequestKey(requestKey),
     ]);
+    this.#assertDurabilityAdmissionActive();
     if (this.#deleting || this.#deleted) {
       throw new ManagedRequestError(409, "agent_deleting", "the agent is being deleted");
     }
@@ -3093,9 +3410,8 @@ export class NanocodexSession extends DurableComputerSession {
       }
       if (existing.state === "cancelling") {
         this.#scheduleCancellation(existing.id);
-      } else if (!isTerminalState(existing.state) && existing.state !== "blocked") {
-        if (existing.state === "retryable"
-          && existing.retry_at !== null
+      } else if (!isTerminalState(existing.state)) {
+        if (existing.retry_at !== null
           && existing.retry_at > Date.now()) {
           // Idempotent polling must preserve the retained retry deadline. It
           // may race the recovery task that just wrote the row, so install the
@@ -3117,14 +3433,6 @@ export class NanocodexSession extends DurableComputerSession {
     if (this.#streamError) {
       throw new ManagedRequestError(503, "event_stream_failed", this.#streamError);
     }
-    const blocked = this.#managedTurns("WHERE state = 'blocked' ORDER BY updated_at LIMIT 1")[0];
-    if (blocked) {
-      throw new ManagedRequestError(
-        409,
-        "agent_blocked",
-        `turn ${blocked.id} requires reconciliation before new work`,
-      );
-    }
     if (this.#unfinishedTurnCount() >= MAX_ACTIVE_TURNS) {
       throw new ManagedRequestError(429, "turn_queue_full", `at most ${MAX_ACTIVE_TURNS} turns may be unfinished`);
     }
@@ -3136,26 +3444,43 @@ export class NanocodexSession extends DurableComputerSession {
     const accepted: StreamMessage = { type: "turn_accepted", id, input, replayed: false };
     const firstPrompt = promptInputText(input);
     let event: DurableEvent<StreamMessage> | undefined;
+    let cancellingEvent: DurableEvent<StreamMessage> | undefined;
+    let cancellationRequested = false;
     this.ctx.storage.transactionSync(() => {
+      this.#assertDurabilityAdmissionActive();
       if (this.#deleting || !this.#sessionId()) {
         throw new ManagedRequestError(409, "agent_deleting", "the agent is being deleted");
       }
+      cancellationRequested = this.ctx.storage.sql.exec<{ turn_id: string }>(
+        "SELECT turn_id FROM managed_turn_cancel_intents WHERE turn_id = ?",
+        id,
+      ).toArray()[0] !== undefined;
       event = this.#eventLog.append(accepted, id);
+      if (cancellationRequested) {
+        cancellingEvent = this.#eventLog.append({ type: "turn_cancelling", id }, id, true);
+      }
       this.ctx.storage.sql.exec(
         `INSERT INTO managed_turns (
            id, request_key, request_hash, input_json, authorization_json, state,
            accepted_cursor, may_have_inner_operation, created_at, accepted_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, 'accepted', CAST(? AS INTEGER), 0, ?, ?, ?)`,
+         ) VALUES (?, ?, ?, ?, ?, ?, CAST(? AS INTEGER), 0, ?, ?, ?)`,
         id,
         requestKey,
         requestHash,
         JSON.stringify(input),
         JSON.stringify(authorization),
+        cancellationRequested ? "cancelling" : "accepted",
         event.cursor,
         now,
         now,
         now,
       );
+      if (cancellationRequested) {
+        this.ctx.storage.sql.exec(
+          "DELETE FROM managed_turn_cancel_intents WHERE turn_id = ?",
+          id,
+        );
+      }
       this.ctx.storage.sql.exec(
         `UPDATE session_state
          SET accepted_turns = accepted_turns + 1,
@@ -3165,6 +3490,7 @@ export class NanocodexSession extends DurableComputerSession {
       );
     });
     this.#publish(event!);
+    if (cancellingEvent) this.#publish(cancellingEvent);
     this.#observe("managed.turn.accepted", {
       turn_id: id,
       transport: "managed",
@@ -3174,17 +3500,55 @@ export class NanocodexSession extends DurableComputerSession {
     });
     const row = this.#managedTurn(id);
     if (!row) throw new Error("managed turn disappeared after acceptance");
-    this.#scheduleRecovery();
+    if (cancellationRequested) this.#scheduleCancellation(id);
+    else this.#scheduleRecovery();
     return { created: true, row };
+  }
+
+  #reservePreAdmissionCancellation(id: string): ManagedTurnRow | undefined {
+    let concurrent: ManagedTurnRow | undefined;
+    this.ctx.storage.transactionSync(() => {
+      this.#assertDurabilityAdmissionActive();
+      concurrent = this.#managedTurn(id);
+      if (concurrent) return;
+      const existing = this.ctx.storage.sql.exec<{ turn_id: string }>(
+        "SELECT turn_id FROM managed_turn_cancel_intents WHERE turn_id = ?",
+        id,
+      ).toArray()[0];
+      if (existing) return;
+      const count = this.ctx.storage.sql.exec<{ count: number }>(
+        "SELECT COUNT(*) AS count FROM managed_turn_cancel_intents",
+      ).one().count;
+      if (count >= MAX_PRE_ADMISSION_CANCELLATIONS) {
+        throw new ManagedRequestError(
+          429,
+          "cancellation_queue_full",
+          `at most ${MAX_PRE_ADMISSION_CANCELLATIONS} pre-admission cancellations may be retained`,
+        );
+      }
+      this.ctx.storage.sql.exec(
+        "INSERT INTO managed_turn_cancel_intents (turn_id, created_at) VALUES (?, ?)",
+        id,
+        Date.now(),
+      );
+    });
+    return concurrent;
+  }
+
+  #assertDurabilityAdmissionActive(): void {
+    if (this.#durabilityExported || this.#durabilityImportState === "pending") {
+      throw new ManagedRequestError(
+        409,
+        "durability_transfer_pending",
+        "durability transfer fenced admission",
+      );
+    }
   }
 
   #markCancelling(id: string): ManagedTurnRow {
     const current = this.#managedTurn(id);
     if (!current) throw new ManagedRequestError(404, "turn_not_found", `turn ${id} does not exist`);
     if (isTerminalState(current.state) || current.state === "cancelling") return current;
-    if (current.state === "blocked") {
-      throw new ManagedRequestError(409, "turn_blocked", current.error ?? "turn requires reconciliation");
-    }
     const message: StreamMessage = { type: "turn_cancelling", id };
     let event: DurableEvent<StreamMessage> | undefined;
     this.ctx.storage.transactionSync(() => {
@@ -3194,7 +3558,7 @@ export class NanocodexSession extends DurableComputerSession {
       this.ctx.storage.sql.exec(
         `UPDATE managed_turns
          SET state = 'cancelling', error = NULL, retry_at = NULL, updated_at = ?
-         WHERE id = ? AND state IN ('accepted', 'retryable')`,
+         WHERE id = ? AND state = 'accepted'`,
         Date.now(),
         id,
       );
@@ -3218,7 +3582,7 @@ export class NanocodexSession extends DurableComputerSession {
 
   async #cancelManagedTurn(id: string): Promise<void> {
     let row = this.#managedTurn(id);
-    if (!row || isTerminalState(row.state) || row.state === "blocked") return;
+    if (!row || isTerminalState(row.state)) return;
     if (row.state === "cancelling" && row.retry_at !== null && row.retry_at > Date.now()) {
       await this.#scheduleNextAlarm();
       return;
@@ -3226,7 +3590,7 @@ export class NanocodexSession extends DurableComputerSession {
     const admission = this.#admissionTasks.get(id);
     if (admission) await admission;
     row = this.#managedTurn(id);
-    if (!row || isTerminalState(row.state) || row.state === "blocked") return;
+    if (!row || isTerminalState(row.state)) return;
     let turn = this.#turns.get(id);
     if (!turn && row.may_have_inner_operation === 0) {
       this.#commitManagedMessage(id, { type: "turn_cancelled", id });
@@ -3234,8 +3598,10 @@ export class NanocodexSession extends DurableComputerSession {
       return;
     }
     if (!turn) {
+      const cancellingAdmission = row.state === "cancelling";
       row = await this.#admitManagedTurn(row, true);
-      if (isTerminalState(row.state) || row.state === "blocked") return;
+      if (isTerminalState(row.state)) return;
+      if (cancellingAdmission) return;
       turn = this.#turns.get(id);
     }
     if (!turn) {
@@ -3246,7 +3612,7 @@ export class NanocodexSession extends DurableComputerSession {
       await turn.cancel();
     } catch (error) {
       if (this.#managedTurn(id)?.state === "cancelling") {
-        this.#commitManagedFailure(id, error, true);
+        this.#commitManagedResolution(id, classifyTurnFailure(id, error));
       }
       throw error;
     }
@@ -3269,8 +3635,8 @@ export class NanocodexSession extends DurableComputerSession {
 
   async #startManagedTurn(row: ManagedTurnRow, replayed: boolean): Promise<ManagedTurnRow> {
     const latest = this.#managedTurn(row.id);
-    if (!latest || isTerminalState(latest.state) || latest.state === "blocked") return latest ?? row;
-    if (latest.state === "retryable" && latest.retry_at !== null && latest.retry_at > Date.now()) {
+    if (!latest || isTerminalState(latest.state)) return latest ?? row;
+    if (latest.retry_at !== null && latest.retry_at > Date.now()) {
       await this.#scheduleNextAlarm();
       return latest;
     }
@@ -3283,7 +3649,6 @@ export class NanocodexSession extends DurableComputerSession {
       const agent = await this.#ensureAgent();
       if (this.#deleting || this.#agent !== agent) throw retryableError("agent became unavailable during admission");
       let dispatchInputJson = this.#managedDispatchInput(row);
-      let legacyDispatchCandidates: string[] | undefined;
       if (dispatchInputJson === undefined) {
         const initialAccountContext = await this.#initialAccountContext();
         const accountInput = initialAccountContext?.turn_id === row.id
@@ -3294,17 +3659,9 @@ export class NanocodexSession extends DurableComputerSession {
         const checkpointed = initialAccountContext !== undefined
           && initialAccountContext.turn_id !== row.id;
         dispatchInputJson = checkpointed ? checkpointInputJson : plainInputJson;
-        if (row.may_have_inner_operation === 1) {
-          // Before dispatch freezing, ordinary turns used either enriched
-          // form. Rust's exact durable-input check selects the historical form
-          // that already owns this operation.
-          legacyDispatchCandidates = checkpointed
-            ? [checkpointInputJson, plainInputJson]
-            : [plainInputJson, checkpointInputJson];
-        }
       }
       const dispatchable = this.#managedTurn(row.id);
-      if (!dispatchable || isTerminalState(dispatchable.state) || dispatchable.state === "blocked") {
+      if (!dispatchable || isTerminalState(dispatchable.state)) {
         this.#pendingTurnIds.delete(row.id);
         this.#turnInputs.delete(row.id);
         return dispatchable ?? row;
@@ -3316,47 +3673,16 @@ export class NanocodexSession extends DurableComputerSession {
       }
       dispatchInputJson = this.#managedDispatchInput(dispatchable) ?? dispatchInputJson;
       this.#eventTurnQueue.push(row.id);
-      if (legacyDispatchCandidates === undefined) {
-        // This transaction must stay immediately before prompt dispatch with
-        // no await between them. It freezes the exact Rust admission input
-        // before the operation can exist. A false positive is safely
-        // replayable; a false negative could orphan an accepted operation.
-        this.#freezeManagedDispatchInput(row.id, dispatchInputJson);
-      }
-      const candidates = legacyDispatchCandidates ?? [dispatchInputJson];
-      let durableId: string | undefined;
-      let acceptedInputJson: string | undefined;
-      for (let index = 0; index < candidates.length; index += 1) {
-        const candidate = candidates[index]!;
-        turn = agent.turn.prompt({
-          id: row.id,
-          input: JSON.parse(candidate) as PromptInput,
-        });
-        this.#turns.set(row.id, turn);
-        try {
-          durableId = await turn.accepted();
-          acceptedInputJson = candidate;
-          break;
-        } catch (error) {
-          if (legacyDispatchCandidates === undefined
-            || index === candidates.length - 1
-            || !isDurableInputConflict(error)) {
-            throw error;
-          }
-          if (this.#turns.get(row.id) === turn) this.#turns.delete(row.id);
-          turn.dispose();
-          turn = undefined;
-        }
-      }
-      if (acceptedInputJson === undefined || !turn) {
-        throw new Error(`durable admission did not settle turn ${row.id}`);
-      }
-      if (legacyDispatchCandidates !== undefined) {
-        // The operation predates this schema, so Rust is authoritative for
-        // which historical enrichment form was admitted. Freeze the exact
-        // candidate it accepted for every later replay.
-        this.#freezeManagedDispatchInput(row.id, acceptedInputJson);
-      }
+      // Freeze the exact Rust admission input immediately before dispatch.
+      // This is the only accepted representation of a managed operation.
+      this.#freezeManagedDispatchInput(row.id, dispatchInputJson);
+      turn = agent.turn.prompt({
+        id: row.id,
+        input: JSON.parse(dispatchInputJson) as PromptInput,
+      });
+      this.#turns.set(row.id, turn);
+      const cancellation = dispatchable.state === "cancelling" ? turn.cancel() : undefined;
+      const [durableId] = await Promise.all([turn.accepted(), cancellation]);
       if (durableId !== undefined && durableId !== row.id) {
         throw new Error(`durable admission returned unexpected turn id ${durableId}`);
       }
@@ -3367,20 +3693,19 @@ export class NanocodexSession extends DurableComputerSession {
       this.#pendingTurnIds.delete(row.id);
       this.ctx.storage.sql.exec(
         `UPDATE managed_turns
-         SET state = CASE
-               WHEN state = 'cancelling' THEN 'cancelling'
-               WHEN state = 'retryable' THEN 'retryable'
-               ELSE 'accepted'
-             END,
-             error = CASE WHEN state = 'retryable' THEN error ELSE NULL END,
-             retry_at = CASE WHEN state = 'retryable' THEN retry_at ELSE NULL END,
+         SET state = CASE WHEN state = 'cancelling' THEN 'cancelling' ELSE 'accepted' END,
+             error = NULL,
+             retry_at = NULL,
              updated_at = ?
-         WHERE id = ? AND state IN ('accepted', 'retryable', 'cancelling')`,
+         WHERE id = ? AND state IN ('accepted', 'cancelling')`,
         Date.now(),
         row.id,
       );
       this.ctx.waitUntil(this.#track(this.#complete(row.id, turn)));
-      if (this.#managedTurn(row.id)?.state === "cancelling") this.#scheduleCancellation(row.id);
+      if (cancellation === undefined
+        && this.#managedTurn(row.id)?.state === "cancelling") {
+        this.#scheduleCancellation(row.id);
+      }
       return this.#managedTurn(row.id) ?? row;
     } catch (error) {
       this.#releaseEventTurn(row.id);
@@ -3390,9 +3715,171 @@ export class NanocodexSession extends DurableComputerSession {
       this.#turnInputs.delete(row.id);
       if (this.#deleting) return this.#managedTurn(row.id) ?? row;
       const failure = classifyTurnFailure(row.id, error);
-      const failed = this.#commitManagedFailure(row.id, error, replayed, failure.terminal);
+      const failed = this.#commitManagedResolution(row.id, failure);
       if (failure.reopenAgent) await this.#reopenAgent(row.id);
       return failed;
+    }
+  }
+
+  async #performDurabilityImport(
+    request: Request,
+    ownership: DurabilityImportOwnership,
+  ): Promise<Response> {
+    if (this.#deleting || this.#deleted || this.#durabilityExported
+      || this.#durabilityImportState === undefined) {
+      return json({ error: "durability_import_conflict" }, { status: 409 });
+    }
+    const session = this.#session();
+    if (!session || session.completed_turns !== 0 || this.#agent || this.#agentPromise
+      || this.#recoverableTurnCount() !== 0) {
+      return json({ error: "durability_import_conflict" }, { status: 409 });
+    }
+    let archive: ManagedDurabilityImport;
+    try {
+      const value = await request.json<ManagedDurabilityImport>();
+      this.#assertDurabilityImportOwnership(ownership);
+      if (!value || typeof value !== "object" || Array.isArray(value)
+        || Object.keys(value).some((key) => key !== "durability" && key !== "turn_archive_adoption")
+        || !("durability" in value)) {
+        throw new Error("invalid managed durability import envelope");
+      }
+      archive = value;
+    } catch (error) {
+      if (!this.#ownsDurabilityImport(ownership)) {
+        return json({ error: "durability_import_conflict" }, { status: 409 });
+      }
+      return json({ error: "invalid_durability_import", message: errorMessage(error) }, {
+        status: 400,
+      });
+    }
+    let importReceipt = await this.ctx.storage.get<DurabilityImportReceipt>(
+      DURABILITY_IMPORT_RECEIPT_KEY,
+    );
+    this.#assertDurabilityImportOwnership(ownership);
+    if (!importReceipt || importReceipt.owner_id !== session.owner_id) {
+      return json({ error: "durability_import_conflict" }, { status: 409 });
+    }
+    if (importReceipt.stage === "pending") {
+      importReceipt = {
+        ...importReceipt,
+        ...(archive.turn_archive_adoption === undefined
+          ? {}
+          : { adoption: archive.turn_archive_adoption }),
+        stage: "authorized",
+      };
+      await this.ctx.storage.put(DURABILITY_IMPORT_RECEIPT_KEY, importReceipt);
+      this.#assertDurabilityImportOwnership(ownership);
+    } else if (importReceipt.stage === "authorized"
+      && JSON.stringify(importReceipt.adoption) !== JSON.stringify(archive.turn_archive_adoption)) {
+      return json({ error: "durability_import_conflict" }, { status: 409 });
+    }
+    try {
+      const imported = await CloudflareAgent.importDurabilityState(
+        this,
+        archive.durability as Parameters<typeof CloudflareAgent.importDurabilityState>[1],
+      );
+      this.#assertDurabilityImportOwnership(ownership);
+      try {
+        if (archive.turn_archive_adoption) {
+          await this.#refreshCredentialPreparation(ownership);
+          this.#assertDurabilityImportOwnership(ownership);
+          const adopted = await this.#turnArchive.adoptBatch(
+            archive.turn_archive_adoption.source_storage_id,
+            archive.turn_archive_adoption.turn_receipts,
+            () => this.#assertDurabilityImportOwnership(ownership),
+          );
+          this.#assertDurabilityImportOwnership(ownership);
+          await this.#refreshCredentialPreparation(ownership);
+          this.#assertDurabilityImportOwnership(ownership);
+          if (!adopted.complete) {
+            return json({ stage: "adopting" }, {
+              status: 202,
+              headers: { "cache-control": "no-store", "retry-after": "1" },
+            });
+          }
+          const adoptedEvents = await this.#portabilityArchive.adoptBatch(
+            "events",
+            archive.turn_archive_adoption.source_storage_id,
+            archive.turn_archive_adoption.events.archive,
+            () => this.#assertDurabilityImportOwnership(ownership),
+          );
+          this.#assertDurabilityImportOwnership(ownership);
+          if (!adoptedEvents.complete) {
+            return json({ stage: "adopting_events" }, {
+              status: 202,
+              headers: { "cache-control": "no-store", "retry-after": "1" },
+            });
+          }
+          const adoptedRealtime = await this.#portabilityArchive.adoptBatch(
+            "realtime",
+            archive.turn_archive_adoption.source_storage_id,
+            archive.turn_archive_adoption.realtime.archive,
+            () => this.#assertDurabilityImportOwnership(ownership),
+          );
+          this.#assertDurabilityImportOwnership(ownership);
+          if (!adoptedRealtime.complete) {
+            return json({ stage: "adopting_realtime" }, {
+              status: 202,
+              headers: { "cache-control": "no-store", "retry-after": "1" },
+            });
+          }
+          this.#restoreManagedPortability(archive.turn_archive_adoption, ownership);
+        } else if (this.#turnArchive.capacity().archived_receipts !== 0) {
+          throw new Error("unclaimed managed turn archive exists at import destination");
+        }
+      } catch (error) {
+        if (!this.#ownsDurabilityImport(ownership)) {
+          return json({ error: "durability_import_conflict" }, { status: 409 });
+        }
+        return json({ error: "durability_adoption_failed", message: errorMessage(error) }, {
+          status: 503,
+          headers: { "cache-control": "no-store", "retry-after": "1" },
+        });
+      }
+      await this.ctx.storage.transaction(async (transaction) => {
+        const [deleting, retainedGeneration] = await Promise.all([
+          transaction.get<boolean>(SESSION_DELETING_KEY),
+          transaction.get<number>(SESSION_DELETION_GENERATION_KEY),
+        ]);
+        this.#assertDurabilityImportOwnership(ownership);
+        if (deleting === true || (retainedGeneration ?? 0) !== ownership.deletionGeneration) {
+          throw new Error("managed durability import lost its durable deletion fence");
+        }
+        await transaction.put(DURABILITY_IMPORT_STATE_KEY, "complete");
+        await transaction.put(DURABILITY_IMPORT_RECEIPT_KEY, {
+          ...importReceipt,
+          stage: "complete",
+        } satisfies DurabilityImportReceipt);
+      });
+      this.#assertDurabilityImportOwnership(ownership);
+      this.#durabilityImportState = "complete";
+      return json(imported, { headers: { "cache-control": "no-store" } });
+    } catch (error) {
+      if (!this.#ownsDurabilityImport(ownership)) {
+        return json({ error: "durability_import_conflict" }, { status: 409 });
+      }
+      const message = errorMessage(error);
+      const conflict = message.includes("pristine Durable Object");
+      return json({
+        error: conflict ? "durability_import_conflict" : "invalid_durability_import",
+        message,
+      }, {
+        status: conflict ? 409 : 400,
+        headers: { "cache-control": "no-store" },
+      });
+    }
+  }
+
+  #ownsDurabilityImport(ownership: DurabilityImportOwnership): boolean {
+    return !this.#deleting
+      && !this.#deleted
+      && this.#durabilityImportTask === ownership
+      && this.#deletionGeneration === ownership.deletionGeneration;
+  }
+
+  #assertDurabilityImportOwnership(ownership: DurabilityImportOwnership): void {
+    if (!this.#ownsDurabilityImport(ownership)) {
+      throw new Error("managed durability import lost its deletion-generation fence");
     }
   }
 
@@ -3502,7 +3989,7 @@ export class NanocodexSession extends DurableComputerSession {
     });
     // A socket or admission event may have resumed while external cleanup was
     // awaited. The durable deletion marker makes those paths fail closed; close
-    // once more before dropping the owned journal and event history.
+    // once more before dropping the owned state and event history.
     for (const socket of this.ctx.getWebSockets()) closeSocket(socket, 1000, "session deleted");
     this.#assertDeletionGeneration(generation);
     while (this.#eventArchiveTask || this.#turnArchiveTask || this.#realtimeArchiveTask) {
@@ -3522,14 +4009,17 @@ export class NanocodexSession extends DurableComputerSession {
     this.ctx.storage.transactionSync(() => {
       this.ctx.storage.sql.exec("DELETE FROM managed_turn_dispatch_chunks");
       this.ctx.storage.sql.exec("DELETE FROM managed_turns");
+      this.ctx.storage.sql.exec("DELETE FROM managed_turn_cancel_intents");
       this.ctx.storage.sql.exec("DELETE FROM history_projection_outbox");
       this.ctx.storage.sql.exec("DELETE FROM turn_history_citations");
       this.#eventLog.clear();
       this.#eventArchive.clearLocalState();
       this.#turnArchive.clearLocalState();
       this.#realtimeArchive.clearLocalState();
+      this.#portabilityArchive.clearLocalState();
       this.ctx.storage.sql.exec("DELETE FROM managed_realtime_operations");
       this.ctx.storage.sql.exec("DELETE FROM managed_realtime_session");
+      this.ctx.storage.sql.exec("DELETE FROM managed_portability_restoration");
       this.ctx.storage.sql.exec("DELETE FROM session_state");
     });
     await this.ctx.storage.transaction(async (transaction) => {
@@ -3540,12 +4030,16 @@ export class NanocodexSession extends DurableComputerSession {
       }
       await transaction.delete(CREDENTIAL_BINDING_KEY);
       await transaction.delete(CLEANUP_RETRY_ATTEMPT_KEY);
+      await transaction.delete(DURABILITY_EXPORTED_KEY);
+      await transaction.delete(DURABILITY_IMPORT_STATE_KEY);
+      await transaction.delete(DURABILITY_IMPORT_RECEIPT_KEY);
       await transaction.delete(INITIAL_ACCOUNT_CONTEXT_KEY);
       await transaction.delete(SESSION_DELETING_KEY);
       await transaction.deleteAlarm();
     });
     this.#assertDeletionGeneration(generation);
     this.#credentialBinding = undefined;
+    this.#durabilityImportState = undefined;
     this.#initialAccountContextTask = undefined;
     this.#deleting = false;
   }
@@ -3556,6 +4050,7 @@ export class NanocodexSession extends DurableComputerSession {
     const shutdown = this.#agentShutdownPromise;
     const turns = [...this.#turns.values()];
     const inFlight = [...this.#inFlight];
+    if (this.#durabilityImportTask) inFlight.push(this.#durabilityImportTask.promise);
 
     this.#runtimeOwnershipGeneration += 1;
     this.#agent = undefined;
@@ -3641,16 +4136,14 @@ export class NanocodexSession extends DurableComputerSession {
   async #runRecovery(observedAt: number): Promise<void> {
     if (this.#deleting || !this.#sessionId() || this.#streamError) return;
     const rows = this.#managedTurns(
-      `WHERE state IN ('accepted', 'cancelling', 'retryable', 'blocked')
+      `WHERE state IN ('accepted', 'cancelling')
        ORDER BY created_at, rowid`,
     );
     for (const row of rows) {
       if (this.#deleting) return;
       const current = this.#managedTurn(row.id);
       if (!current || isTerminalState(current.state)) continue;
-      if (current.state === "blocked") break;
-      if ((current.state === "retryable" || current.state === "cancelling")
-        && current.retry_at !== null && current.retry_at > observedAt) break;
+      if (current.retry_at !== null && current.retry_at > observedAt) break;
       if (current.state === "cancelling") {
         const cancellation = this.#cancellationTasks.get(row.id);
         try {
@@ -3675,17 +4168,16 @@ export class NanocodexSession extends DurableComputerSession {
         validatePromptInput(JSON.parse(current.input_json));
         await this.#admitManagedTurn(current, true);
       } catch (error) {
-        this.#commitManagedFailure(current.id, error, true);
+        this.#commitManagedResolution(current.id, classifyTurnFailure(current.id, error));
       }
       const admitted = this.#managedTurn(current.id);
-      if (admitted && (admitted.state === "retryable"
-        || admitted.state === "cancelling"
-        || admitted.state === "blocked")) break;
+      if (admitted && (admitted.state === "cancelling" || admitted.retry_at !== null)) break;
     }
     await this.#scheduleNextAlarm();
   }
 
   async #ensureAgent(): Promise<CloudflareAgent.Agent> {
+    if (this.#durabilityExported) throw new Error("durability state was exported");
     if (this.#deleting) throw retryableError("agent is being deleted");
     if (this.#agentShutdownPromise) {
       try {
@@ -3949,17 +4441,6 @@ export class NanocodexSession extends DurableComputerSession {
     const constructionStartedAt = performance.now();
     const session = this.#session();
     if (!session) throw new Error("session is not initialized");
-    let retainedJournalBatches = 0;
-    try {
-      retainedJournalBatches = this.ctx.storage.sql.exec<{ batches: number }>(
-        "SELECT COUNT(*) AS batches FROM nanocodex_journal_batches",
-      ).one().batches;
-    } catch { /* The first construction has not initialized the journal yet. */ }
-    if (retainedJournalBatches > 1) {
-      await CloudflareAgent.compactDurability(this, {
-        terminalReceiptRetention: MANAGED_TERMINAL_RECEIPT_RETENTION,
-      });
-    }
     const multiplayer = session.runtime_profile === "multiplayer";
     if (!multiplayer) await this.#ensureCredentialBinding(session);
     const workspace = await getWorkspace(this);
@@ -4124,7 +4605,14 @@ export class NanocodexSession extends DurableComputerSession {
       preparedTools = multiplayer
         ? undefined
         : await createDefaultManagedTools(cloudTools);
+      let durabilityId = session.session_id;
+      try {
+        durabilityId = this.ctx.storage.sql.exec<{ state_id: string }>(
+          "SELECT state_id FROM nanocodex_cloudflare_durability WHERE singleton = 1",
+        ).toArray()[0]?.state_id ?? durabilityId;
+      } catch { /* The adapter creates its identity table on first construction. */ }
       const agentOptions: NonNullable<Parameters<typeof CloudflareAgent.create>[1]> = {
+        durabilityId,
         eventPersistence: "caller",
         terminalReceiptRetention: MANAGED_TERMINAL_RECEIPT_RETENTION,
         instructions: multiplayer
@@ -4350,20 +4838,18 @@ export class NanocodexSession extends DurableComputerSession {
   async #complete(id: string, turn: Turn): Promise<void> {
     let reopenAgent = false;
     try {
-      let materialized = await materializeTurnTerminal(id, turn);
+      let materialized = await materializeTurnResolution(id, turn);
       if (this.#deleting) return;
       if (this.#reopenInterruptedTurnIds.has(id)
+        && materialized.kind === "terminal"
         && materialized.terminal.type === "turn_cancelled") {
         materialized = {
-          terminal: {
-            type: "turn_retryable",
-            id,
-            error: "turn was interrupted while reopening the durable Agent",
-          },
+          kind: "retry",
+          error: "turn was interrupted while reopening the durable Agent",
           reopenAgent: false,
         };
       }
-      if (materialized.terminal.type === "turn_completed") {
+      if (materialized.kind === "terminal" && materialized.terminal.type === "turn_completed") {
         materialized = {
           ...materialized,
           terminal: {
@@ -4374,7 +4860,7 @@ export class NanocodexSession extends DurableComputerSession {
       }
       reopenAgent = materialized.reopenAgent;
       try {
-        this.#commitManagedMessage(id, materialized.terminal);
+        this.#commitManagedResolution(id, materialized);
       } catch (error) {
         if (this.#deleting) return;
         try {
@@ -4400,21 +4886,25 @@ export class NanocodexSession extends DurableComputerSession {
     }
   }
 
-  #commitManagedFailure(
-    id: string,
-    error: unknown,
-    _replayed: boolean,
-    classified?: TurnTerminal,
-  ): ManagedTurnRow {
-    const failure = classified ?? classifyTurnFailure(id, error).terminal;
+  #commitManagedResolution(id: string, resolution: TurnResolution): ManagedTurnRow {
     const row = this.#managedTurn(id);
-    if (row?.state === "cancelling"
-      && failure.type !== "turn_cancelled"
-      && failure.type !== "turn_blocked") {
+    if (resolution.kind === "retry") {
+      return this.#commitManagedMessage(id, row?.state === "cancelling" ? {
+        type: "turn_cancelling",
+        id,
+        error: resolution.error,
+      } : {
+        type: "turn_retryable",
+        id,
+        error: resolution.error,
+      });
+    }
+    const failure = resolution.terminal;
+    if (row?.state === "cancelling" && failure.type !== "turn_cancelled") {
       return this.#commitManagedMessage(id, {
         type: "turn_cancelling",
         id,
-        error: "error" in failure ? failure.error : errorMessage(error),
+        error: "error" in failure ? failure.error : "cancellation did not settle",
       });
     }
     return this.#commitManagedMessage(id, failure);
@@ -4429,14 +4919,14 @@ export class NanocodexSession extends DurableComputerSession {
     this.ctx.storage.transactionSync(() => {
       const row = this.#managedTurn(id);
       if (!row) throw new Error(`managed turn ${id} disappeared`);
-      if (isTerminalState(row.state) || row.state === "blocked") {
+      if (isTerminalState(row.state)) {
         committed = row;
         return;
       }
 
       let message: ManagedTransition = requested;
       let state = managedStateForMessage(message);
-      if (row.state === "cancelling" && state === "retryable") {
+      if (row.state === "cancelling" && message.type === "turn_retryable") {
         message = {
           type: "turn_cancelling",
           id,
@@ -4446,7 +4936,7 @@ export class NanocodexSession extends DurableComputerSession {
       }
       let attemptCount = row.attempt_count;
       let retryAt: number | null = null;
-      const retrying = state === "retryable"
+      const retrying = message.type === "turn_retryable"
         || (state === "cancelling" && "error" in message && message.error !== undefined);
       if (retrying) {
         const detail = "error" in message ? message.error ?? null : null;
@@ -4457,25 +4947,6 @@ export class NanocodexSession extends DurableComputerSession {
         attemptCount = Math.min(Number.MAX_SAFE_INTEGER, attemptCount + 1);
         retryAt = now + retryDelayMs(attemptCount);
         if (message.type === "turn_cancelling") message = { ...message, retry_at: retryAt };
-        if (row.state === state) {
-          this.ctx.storage.sql.exec(
-            `UPDATE managed_turns
-             SET error = ?, attempt_count = ?, retry_at = ?, updated_at = ?
-             WHERE id = ? AND state = ?`,
-            detail,
-            attemptCount,
-            retryAt,
-            now,
-            id,
-            state,
-          );
-          this.ctx.storage.sql.exec(
-            "UPDATE session_state SET last_active = ? WHERE singleton = 1",
-            now,
-          );
-          committed = this.#managedTurn(id) ?? row;
-          return;
-        }
       }
 
       const terminal = isTerminalState(state);
@@ -4540,7 +5011,7 @@ export class NanocodexSession extends DurableComputerSession {
           ? "success"
           : committed.state === "cancelled"
           ? "cancelled"
-          : committed.state === "failed" || committed.state === "blocked"
+          : committed.state === "failed"
           ? "failure"
           : "pending",
         message_type: event.message.type,
@@ -4812,14 +5283,19 @@ export class NanocodexSession extends DurableComputerSession {
     return observed;
   }
 
-  #sealTurnArchive(force: boolean): Promise<ManagedTurnSealResult> {
+  #sealTurnArchive(
+    force: boolean,
+    retainTerminalTurns?: number,
+  ): Promise<ManagedTurnSealResult> {
     if (this.#deleting) return Promise.reject(new Error("agent deletion fenced turn archival"));
     const active = this.#turnArchiveTask;
     if (active) {
-      return force ? active.then(() => this.#sealTurnArchive(true)) : active;
+      return force
+        ? active.then(() => this.#sealTurnArchive(true, retainTerminalTurns))
+        : active;
     }
     const started = performance.now();
-    const observed = this.#turnArchive.seal(force).then((result) => {
+    const observed = this.#turnArchive.seal(force, retainTerminalTurns).then((result) => {
       if (result.sealed) {
         this.#logCapacity("archive_seal", {
           archived_receipt_bytes: result.archived_bytes,
@@ -4839,6 +5315,146 @@ export class NanocodexSession extends DurableComputerSession {
     }).catch(() => {});
     this.ctx.waitUntil(observed.catch(() => {}));
     return observed;
+  }
+
+  async #managedDurabilityArchive(): Promise<ManagedDurabilityArchive | undefined> {
+    const session = this.#session();
+    if (!session) throw new Error("managed durability export has no session identity");
+    if ((await this.#sealEventArchive(true)).sealed) return undefined;
+    if ((await this.#sealTurnArchive(true, 0)).sealed) return undefined;
+    if ((await this.#sealRealtimeArchive(true)).sealed) return undefined;
+    const [turns, events, realtime] = await Promise.all([
+      this.#turnArchive.identityBatch(),
+      this.#portabilityArchive.identityBatch("events"),
+      this.#portabilityArchive.identityBatch("realtime"),
+    ]);
+    if (!turns.complete || !turns.identity
+      || !events.complete || !events.identity
+      || !realtime.complete || !realtime.identity) return undefined;
+    const sessionState = this.ctx.storage.sql.exec<{
+      accepted_turns: number;
+      completed_turns: number;
+      first_prompt: string;
+      last_active: number;
+      stream_error: string | null;
+    }>(
+      `SELECT accepted_turns, completed_turns, first_prompt, last_active, stream_error
+       FROM session_state WHERE singleton = 1`,
+    ).one();
+    const durability = await CloudflareAgent.exportDurabilityState(this);
+    return {
+      durability: durability as PortableDurabilityArchive,
+      format: "nanocodex-managed-durability-state-v1",
+      managed_events: {
+        archive: events.identity,
+        state: this.#eventArchive.portableState(),
+        tail: this.#eventLog.portableTail(this.#eventArchive.archivedThrough()),
+      },
+      managed_realtime: {
+        archive: realtime.identity,
+        state: this.#realtimeArchive.portableState(),
+        tail: this.#portableRealtimeTail(),
+      },
+      managed_session: {
+        ...sessionState,
+        title: conversationTitle(sessionState.first_prompt),
+      },
+      managed_turn_receipts: turns.identity,
+      source_agent_id: session.session_id,
+    };
+  }
+
+  #portableRealtimeTail(): ManagedRealtimePortableOperation[] {
+    return this.ctx.storage.sql.exec<ManagedRealtimePortableOperation>(
+      `SELECT voice_session_id, operation_id, kind, request_hash, state, blocked,
+              response_json, created_at, updated_at
+       FROM managed_realtime_operations
+       ORDER BY created_at, updated_at, voice_session_id, operation_id`,
+    ).toArray();
+  }
+
+  #restoreManagedPortability(
+    adoption: ManagedTurnArchiveAdoption,
+    ownership: DurabilityImportOwnership,
+  ): void {
+    this.#assertDurabilityImportOwnership(ownership);
+    this.ctx.storage.transactionSync(() => {
+      this.#assertDurabilityImportOwnership(ownership);
+      const restored = this.ctx.storage.sql.exec<{
+        events_digest: string;
+        realtime_digest: string;
+        source_storage_id: string;
+        turn_receipts_digest: string;
+      }>(
+        `SELECT source_storage_id, events_digest, realtime_digest, turn_receipts_digest
+         FROM managed_portability_restoration WHERE singleton = 1`,
+      ).toArray()[0];
+      if (restored) {
+        if (restored.source_storage_id !== adoption.source_storage_id
+          || restored.events_digest !== adoption.events.archive.digest
+          || restored.realtime_digest !== adoption.realtime.archive.digest
+          || restored.turn_receipts_digest !== adoption.turn_receipts.digest) {
+          throw new Error("managed portability restoration conflicts with retained identity");
+        }
+        return;
+      }
+      const session = this.ctx.storage.sql.exec<{
+        accepted_turns: number;
+        completed_turns: number;
+      }>(
+        "SELECT accepted_turns, completed_turns FROM session_state WHERE singleton = 1",
+      ).one();
+      const realtimeRows = this.ctx.storage.sql.exec<{ count: number }>(
+        "SELECT COUNT(*) AS count FROM managed_realtime_operations",
+      ).one().count;
+      if (session.accepted_turns !== 0 || session.completed_turns !== 0
+        || realtimeRows !== 0 || this.#eventArchive.capacity().archived_events !== 0
+        || this.#realtimeArchive.capacity().archived_receipts !== 0) {
+        throw new Error("managed portability adoption requires a pristine destination");
+      }
+      this.#eventArchive.adoptState(adoption.events.state);
+      this.#eventLog.adoptTail(adoption.events.tail, false);
+      this.#realtimeArchive.adoptState(adoption.realtime.state);
+      for (const operation of adoption.realtime.tail) {
+        this.ctx.storage.sql.exec(
+          `INSERT INTO managed_realtime_operations (
+             voice_session_id, operation_id, kind, request_hash, state, blocked,
+             response_json, created_at, updated_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          operation.voice_session_id,
+          operation.operation_id,
+          operation.kind,
+          operation.request_hash,
+          operation.state,
+          operation.blocked,
+          operation.response_json,
+          operation.created_at,
+          operation.updated_at,
+        );
+      }
+      this.ctx.storage.sql.exec(
+        `UPDATE session_state
+         SET accepted_turns = ?, completed_turns = ?, first_prompt = ?,
+             last_active = ?, stream_error = ?
+         WHERE singleton = 1`,
+        adoption.session.accepted_turns,
+        adoption.session.completed_turns,
+        adoption.session.first_prompt,
+        adoption.session.last_active,
+        adoption.session.stream_error,
+      );
+      this.ctx.storage.sql.exec(
+        `INSERT INTO managed_portability_restoration (
+           singleton, source_storage_id, events_digest, realtime_digest, turn_receipts_digest
+         ) VALUES (1, ?, ?, ?, ?)`,
+        adoption.source_storage_id,
+        adoption.events.archive.digest,
+        adoption.realtime.archive.digest,
+        adoption.turn_receipts.digest,
+      );
+      this.#assertDurabilityImportOwnership(ownership);
+    });
+    this.#streamError = adoption.session.stream_error ?? undefined;
   }
 
   #sealRealtimeArchive(force: boolean): Promise<ManagedRealtimeSealResult> {
@@ -5114,7 +5730,7 @@ export class NanocodexSession extends DurableComputerSession {
     const chunks = dispatchInputChunks(inputJson);
     this.ctx.storage.transactionSync(() => {
       const current = this.#managedTurn(id);
-      if (!current || isTerminalState(current.state) || current.state === "blocked") return;
+      if (!current || isTerminalState(current.state)) return;
       const retained = this.#managedDispatchInput(current);
       if (retained !== undefined) {
         if (retained !== inputJson) {
@@ -5135,7 +5751,7 @@ export class NanocodexSession extends DurableComputerSession {
         `UPDATE managed_turns
          SET dispatch_input_chunks = COALESCE(dispatch_input_chunks, ?),
              may_have_inner_operation = 1, updated_at = ?
-         WHERE id = ? AND state IN ('accepted', 'retryable', 'cancelling')`,
+         WHERE id = ? AND state IN ('accepted', 'cancelling')`,
         chunks.length,
         Date.now(),
         id,
@@ -5145,13 +5761,13 @@ export class NanocodexSession extends DurableComputerSession {
 
   #unfinishedTurnCount(): number {
     return this.ctx.storage.sql.exec<{ count: number }>(
-      "SELECT COUNT(*) AS count FROM managed_turns WHERE state IN ('accepted', 'cancelling', 'retryable', 'blocked')",
+      "SELECT COUNT(*) AS count FROM managed_turns WHERE state IN ('accepted', 'cancelling')",
     ).toArray()[0]?.count ?? 0;
   }
 
   #recoverableTurnCount(): number {
     return this.ctx.storage.sql.exec<{ count: number }>(
-      "SELECT COUNT(*) AS count FROM managed_turns WHERE state IN ('accepted', 'cancelling', 'retryable')",
+      "SELECT COUNT(*) AS count FROM managed_turns WHERE state IN ('accepted', 'cancelling')",
     ).toArray()[0]?.count ?? 0;
   }
 
@@ -5180,7 +5796,7 @@ export class NanocodexSession extends DurableComputerSession {
     }
     if (!this.#streamError) {
       for (const row of this.#managedTurns(
-        "WHERE state IN ('accepted', 'cancelling', 'retryable') ORDER BY created_at",
+        "WHERE state IN ('accepted', 'cancelling') ORDER BY created_at",
       )) {
         if (row.state === "cancelling") {
           if (!this.#cancellationTasks.has(row.id)) {
@@ -5196,7 +5812,7 @@ export class NanocodexSession extends DurableComputerSession {
           break;
         }
         if (this.#cancellationTasks.has(row.id)) break;
-        if (row.state === "retryable" && row.retry_at !== null) targets.push(row.retry_at);
+        if (row.retry_at !== null) targets.push(row.retry_at);
         else targets.push(now + 1);
         break;
       }
@@ -5270,12 +5886,16 @@ export class NanocodexSession extends DurableComputerSession {
     this.#deleted = true;
   }
 
-  async #refreshCredentialPreparation(): Promise<CredentialBindingOwnership | undefined> {
+  async #refreshCredentialPreparation(
+    importOwnership?: DurabilityImportOwnership,
+  ): Promise<CredentialBindingOwnership | undefined> {
     const current = this.#credentialBinding;
     if (!current || current.state !== "preparing") return current;
     let retained: CredentialBindingOwnership | undefined;
     await this.ctx.storage.transaction(async (transaction) => {
+      if (importOwnership) this.#assertDurabilityImportOwnership(importOwnership);
       const stored = await transaction.get<CredentialBindingOwnership>(CREDENTIAL_BINDING_KEY);
+      if (importOwnership) this.#assertDurabilityImportOwnership(importOwnership);
       if (!stored || stored.state !== "preparing") {
         retained = stored;
         return;
@@ -5290,6 +5910,7 @@ export class NanocodexSession extends DurableComputerSession {
       await transaction.put(CREDENTIAL_BINDING_KEY, retained);
       await transaction.setAlarm(retained.cleanup_at);
     });
+    if (importOwnership) this.#assertDurabilityImportOwnership(importOwnership);
     const observed = this.#credentialBinding;
     if (!observed || observed.state === "active") return observed;
     this.#credentialBinding = retained;
@@ -5383,10 +6004,6 @@ function dispatchInputChunks(input: string): string[] {
   return chunks;
 }
 
-function isDurableInputConflict(error: unknown): boolean {
-  return /durable operation `[^`]+` already has different input/.test(errorMessage(error));
-}
-
 function isHighSurrogate(codeUnit: number): boolean {
   return codeUnit >= 0xd800 && codeUnit <= 0xdbff;
 }
@@ -5438,11 +6055,8 @@ function messageForManagedTurn(row: ManagedTurnRow): ServerMessage {
     };
   }
   const input = JSON.parse(row.input_json) as PromptInput;
-  if (row.state === "retryable") {
+  if (row.state === "accepted" && row.retry_at !== null) {
     return { type: "turn_retryable", id: row.id, error: row.error ?? "turn will be retried" };
-  }
-  if (row.state === "blocked") {
-    return { type: "turn_blocked", id: row.id, error: row.error ?? "turn requires reconciliation" };
   }
   if (row.state === "cancelling") {
     return {
@@ -5470,8 +6084,7 @@ function managedStateForMessage(message: ManagedTransition): ManagedTurnState {
     case "turn_cancelling": return "cancelling";
     case "turn_completed": return "completed";
     case "turn_cancelled": return "cancelled";
-    case "turn_retryable": return "retryable";
-    case "turn_blocked": return "blocked";
+    case "turn_retryable": return "accepted";
     case "turn_failed": return "failed";
   }
 }
@@ -5504,8 +6117,273 @@ function managedMultiplayerTimeoutMs(env: Env): number {
     : DEFAULT_MULTIPLAYER_IO_TIMEOUT_MS;
 }
 
+async function resolveManagedDurabilityImport(
+  env: Env,
+  principal: Principal,
+  value: unknown,
+  timeoutMs: number,
+): Promise<ManagedDurabilityImport> {
+  if (!value || typeof value !== "object" || Array.isArray(value)
+    || (value as { format?: unknown }).format !== "nanocodex-managed-durability-state-v1") {
+    return { durability: value };
+  }
+  const archive = validateManagedDurabilityArchive(value);
+  const headers = new Headers();
+  forwardPrincipalAssertions(headers, principal);
+  const source = env.NANOCODEX_SESSIONS.getByName(archive.source_agent_id);
+  const response = await fetchWithDeadline(
+    source,
+    "https://session.internal/durability/adoption",
+    { method: "POST", headers },
+    timeoutMs,
+    "managed durability adoption authorization",
+  );
+  if (!response.ok) {
+    await response.body?.cancel();
+    if (response.status === 404 || response.status === 409) {
+      throw new ManagedRequestError(
+        400,
+        "invalid_durability_import",
+        "managed durability source is unavailable for adoption",
+      );
+    }
+    throw new Error(`managed durability source returned ${response.status}`);
+  }
+  const adopted = await response.json<{
+    archive?: unknown;
+    source_storage_id?: unknown;
+  }>();
+  const authoritative = validateManagedDurabilityArchive(adopted.archive);
+  if (JSON.stringify(authoritative) !== JSON.stringify(archive)
+    || typeof adopted.source_storage_id !== "string"
+    || !/^[0-9a-f]{64}$/.test(adopted.source_storage_id)) {
+    throw new ManagedRequestError(
+      400,
+      "invalid_durability_import",
+      "managed durability archive does not match its authoritative source",
+    );
+  }
+  return {
+    durability: authoritative.durability,
+    turn_archive_adoption: {
+      events: authoritative.managed_events,
+      realtime: authoritative.managed_realtime,
+      session: authoritative.managed_session,
+      source_storage_id: adopted.source_storage_id,
+      turn_receipts: authoritative.managed_turn_receipts,
+    },
+  };
+}
+
+function validateManagedDurabilityArchive(value: unknown): ManagedDurabilityArchive {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new ManagedRequestError(400, "invalid_durability_import", "managed durability archive is invalid");
+  }
+  const archive = value as Record<string, unknown>;
+  const durability = archive.durability as Record<string, unknown> | undefined;
+  const identity = archive.managed_turn_receipts as Record<string, unknown> | undefined;
+  const events = archive.managed_events;
+  const realtime = archive.managed_realtime;
+  const session = archive.managed_session;
+  if (Object.keys(archive).some((key) => ![
+    "durability",
+    "format",
+    "managed_events",
+    "managed_realtime",
+    "managed_session",
+    "managed_turn_receipts",
+    "source_agent_id",
+  ].includes(key))
+    || archive.format !== "nanocodex-managed-durability-state-v1"
+    || typeof archive.source_agent_id !== "string" || !SESSION_ID.test(archive.source_agent_id)
+    || !durability || Array.isArray(durability)
+    || Object.keys(durability).some((key) => !["format", "stateId", "revision", "payload"].includes(key))
+    || durability.format !== "nanocodex-durability-state-v1"
+    || typeof durability.stateId !== "string" || durability.stateId.length === 0
+    || typeof durability.revision !== "string" || !/^[1-9][0-9]*$/.test(durability.revision)
+    || typeof durability.payload !== "string"
+    || !identity || Array.isArray(identity)
+    || Object.keys(identity).some((key) => ![
+      "archived_bytes",
+      "archived_receipts",
+      "digest",
+      "objects",
+      "version",
+    ].includes(key))
+    || identity.version !== 1
+    || !Number.isSafeInteger(identity.archived_bytes) || Number(identity.archived_bytes) < 0
+    || !Number.isSafeInteger(identity.archived_receipts) || Number(identity.archived_receipts) < 0
+    || !Number.isSafeInteger(identity.objects) || Number(identity.objects) < 0
+    || Number(identity.archived_receipts) > Number(identity.objects)
+    || typeof identity.digest !== "string" || !/^[0-9a-f]{64}$/.test(identity.digest)
+    || !validManagedEventPortability(events)
+    || !validManagedRealtimePortability(realtime)
+    || !validManagedSessionPortability(session)) {
+    throw new ManagedRequestError(400, "invalid_durability_import", "managed durability archive is invalid");
+  }
+  return value as ManagedDurabilityArchive;
+}
+
+function validManagedEventPortability(value: unknown): value is ManagedEventPortability {
+  if (!isRecord(value) || !exactKeys(value, ["archive", "state", "tail"])
+    || !validManagedPortableArchiveIdentity(value.archive)
+    || !isRecord(value.state) || !exactKeys(value.state, [
+      "archived_bytes", "archived_events", "archived_through", "index_node_count",
+      "index_root_key", "recent_json", "segment_count",
+    ])
+    || !nonnegativeSafeInteger(value.state.archived_bytes)
+    || !nonnegativeSafeInteger(value.state.archived_events)
+    || !validCursor(value.state.archived_through)
+    || !nonnegativeSafeInteger(value.state.index_node_count)
+    || (value.state.index_root_key !== null && typeof value.state.index_root_key !== "string")
+    || typeof value.state.recent_json !== "string"
+    || !nonnegativeSafeInteger(value.state.segment_count)
+    || !validManagedEventTail(value.tail)) return false;
+  let recent: unknown;
+  try { recent = JSON.parse(value.state.recent_json); } catch { return false; }
+  const archivedThrough = value.state.archived_through;
+  return Array.isArray(recent) && recent.length <= 16
+    && (value.state.index_node_count === 0) === (value.state.index_root_key === null)
+    && value.state.archived_events >= value.state.segment_count
+    && value.archive.objects === value.state.segment_count + value.state.index_node_count
+    && value.archive.bytes >= value.state.archived_bytes
+    && BigInt(value.tail.high_water_cursor) >= BigInt(value.state.archived_through)
+    && value.tail.events.every(
+      (event) => BigInt(event.cursor) > BigInt(archivedThrough),
+    );
+}
+
+function validManagedEventTail(value: unknown): value is DurableEventTail<StreamMessage> {
+  if (!isRecord(value) || !exactKeys(value, ["events", "high_water_cursor"])
+    || !validCursor(value.high_water_cursor) || !Array.isArray(value.events)
+    || value.events.length > 256) return false;
+  let previous = "0";
+  for (const event of value.events) {
+    if (!isRecord(event) || !exactKeys(event, ["created_at", "cursor", "message", "turn_id"])
+      || !validCursor(event.cursor) || event.cursor === "0"
+      || BigInt(event.cursor) <= BigInt(previous)
+      || BigInt(event.cursor) > BigInt(value.high_water_cursor)
+      || !nonnegativeSafeInteger(event.created_at)
+      || (event.turn_id !== null && typeof event.turn_id !== "string")
+      || !isRecord(event.message) || typeof event.message.type !== "string") return false;
+    previous = event.cursor;
+  }
+  return true;
+}
+
+function validManagedRealtimePortability(value: unknown): value is ManagedRealtimePortability {
+  if (!isRecord(value) || !exactKeys(value, ["archive", "state", "tail"])
+    || !validManagedPortableArchiveIdentity(value.archive)
+    || !isRecord(value.state) || !exactKeys(value.state, [
+      "archived_bytes", "archived_receipts", "object_count",
+    ])
+    || !nonnegativeSafeInteger(value.state.archived_bytes)
+    || !nonnegativeSafeInteger(value.state.archived_receipts)
+    || !nonnegativeSafeInteger(value.state.object_count)
+    || value.state.archived_receipts !== value.state.object_count
+    || !Array.isArray(value.tail) || value.tail.length > 512) return false;
+  const identities = new Set<string>();
+  return value.archive.objects === value.state.object_count
+    && value.archive.bytes === value.state.archived_bytes
+    && value.tail.every((operation) => {
+    if (!isRecord(operation) || !exactKeys(operation, [
+      "blocked", "created_at", "kind", "operation_id", "request_hash", "response_json",
+      "state", "updated_at", "voice_session_id",
+    ])) return false;
+    const complete = operation.state === "completed";
+    if ((operation.blocked !== 0 && operation.blocked !== 1)
+      || !nonnegativeSafeInteger(operation.created_at)
+      || !nonnegativeSafeInteger(operation.updated_at)
+      || Number(operation.updated_at) < Number(operation.created_at)
+      || !["start", "delegate", "stop"].includes(String(operation.kind))
+      || typeof operation.operation_id !== "string" || operation.operation_id.length === 0
+      || typeof operation.voice_session_id !== "string" || operation.voice_session_id.length === 0
+      || typeof operation.request_hash !== "string" || !/^[0-9a-f]{64}$/.test(operation.request_hash)
+      || (complete ? typeof operation.response_json !== "string" : operation.response_json !== null)
+      || (!complete && operation.state !== "pending")
+      || (complete && operation.blocked !== 0)
+      || (!complete && operation.blocked !== 1)) return false;
+    const identity = `${operation.voice_session_id}\0${operation.operation_id}`;
+    if (identities.has(identity)) return false;
+    identities.add(identity);
+    if (complete) {
+      try { JSON.parse(operation.response_json as string); } catch { return false; }
+    }
+    return true;
+    });
+}
+
+function validManagedSessionPortability(value: unknown): value is ManagedSessionPortability {
+  return isRecord(value) && exactKeys(value, [
+    "accepted_turns", "completed_turns", "first_prompt", "last_active", "stream_error", "title",
+  ])
+    && nonnegativeSafeInteger(value.accepted_turns)
+    && nonnegativeSafeInteger(value.completed_turns)
+    && Number(value.completed_turns) <= Number(value.accepted_turns)
+    && typeof value.first_prompt === "string"
+    && nonnegativeSafeInteger(value.last_active)
+    && (value.stream_error === null || typeof value.stream_error === "string")
+    && typeof value.title === "string"
+    && value.title === conversationTitle(value.first_prompt);
+}
+
+function validManagedPortableArchiveIdentity(value: unknown): value is ManagedPortableArchiveIdentity {
+  return isRecord(value) && exactKeys(value, ["bytes", "digest", "objects", "version"])
+    && value.version === 1
+    && nonnegativeSafeInteger(value.bytes)
+    && nonnegativeSafeInteger(value.objects)
+    && typeof value.digest === "string" && /^[0-9a-f]{64}$/.test(value.digest);
+}
+
+function validCursor(value: unknown): value is string {
+  return typeof value === "string" && parseCursor(value) === value;
+}
+
+function nonnegativeSafeInteger(value: unknown): value is number {
+  return Number.isSafeInteger(value) && Number(value) >= 0;
+}
+
+function exactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
+  return Object.keys(value).length === keys.length
+    && Object.keys(value).every((key) => keys.includes(key));
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function portableDurabilityStateId(value: unknown): string {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("portable durability archive is invalid");
+  }
+  const archive = value as Record<string, unknown>;
+  if (Object.keys(archive).some((key) => !["format", "stateId", "revision", "payload"].includes(key))
+    || archive.format !== "nanocodex-durability-state-v1"
+    || typeof archive.stateId !== "string" || archive.stateId.length === 0
+    || typeof archive.revision !== "string" || !/^[1-9][0-9]*$/.test(archive.revision)
+    || typeof archive.payload !== "string") {
+    throw new Error("portable durability archive is invalid");
+  }
+  return archive.stateId;
+}
+
+function validDurabilityImportPreparation(value: unknown): boolean {
+  if (value === null) return true;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const prepared = value as Record<string, unknown>;
+  return !Object.keys(prepared).some((key) => ![
+    "request_hash",
+    "source_agent_id",
+    "state_id",
+  ].includes(key))
+    && typeof prepared.request_hash === "string" && /^[0-9a-f]{64}$/.test(prepared.request_hash)
+    && (prepared.source_agent_id === null
+      || (typeof prepared.source_agent_id === "string" && SESSION_ID.test(prepared.source_agent_id)))
+    && typeof prepared.state_id === "string" && prepared.state_id.length > 0;
+}
+
 async function requestSessionCleanup(
-  stub: DurableObjectStub<NanocodexSession>,
+  stub: DurableObjectStub<DurableAgentSession>,
   timeoutMs: number,
 ): Promise<void> {
   try {
@@ -5585,7 +6463,6 @@ function managedHttpError(error: unknown, fallbackCode = "managed_request_failed
   const code = (error as { code?: unknown } | null)?.code;
   if (code === "invalid_request") return { status: 400, code, message: errorMessage(error) };
   if (code === "conflict") return { status: 409, code, message: errorMessage(error) };
-  if (code === "blocked") return { status: 409, code, message: errorMessage(error) };
   if (code === "retryable") return { status: 503, code, message: errorMessage(error) };
   return { status: 500, code: fallbackCode, message: errorMessage(error) };
 }

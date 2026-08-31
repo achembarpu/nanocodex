@@ -2,13 +2,14 @@ import WebSocket from "ws";
 
 import {
   managedAccountFetch,
-  managedAccountWebSocketOptions,
+  managedAccountSessionWebSocketOptions,
   parseManagedAgentReceipt,
-  requireManagedApiKey,
 } from "./managed-account-auth.mjs";
+import { resolveManagedSmokeCredentials } from "./local-smoke-account.mjs";
 
 const baseUrl = process.env.NANOCODEX_WORKER_URL ?? "http://127.0.0.1:8787";
-const apiKey = requireManagedApiKey();
+const credentials = await resolveManagedSmokeCredentials(baseUrl, "managed WebSocket stress");
+const { accountCookie, apiKey } = credentials;
 const clients = Number(process.env.NANOCODEX_STRESS_CLIENTS ?? 32);
 const pingsPerClient = Number(process.env.NANOCODEX_STRESS_PINGS ?? 128);
 const expected = clients * pingsPerClient;
@@ -29,7 +30,7 @@ try {
   await Promise.all(Array.from({ length: clients }, async () => {
     const socket = new WebSocket(
       agent.websocket_url,
-      managedAccountWebSocketOptions(apiKey),
+      managedAccountSessionWebSocketOptions(accountCookie, baseUrl),
     );
     await onceMessage(socket, (message) => message.type === "ready", 10_000);
     sockets.push(socket);
@@ -67,6 +68,7 @@ try {
   await managedAccountFetch(apiKey, `${baseUrl}/v1/agents/${agent.agent_id}`, {
     method: "DELETE",
   }).catch(() => {});
+  await credentials.cleanup();
 }
 
 function onceMessage(socket, predicate, timeoutMs) {

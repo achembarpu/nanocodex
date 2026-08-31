@@ -9,6 +9,7 @@ mod platform;
 use std::{future::Future, pin::Pin, sync::Arc};
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use sha2::{Digest, Sha256};
 
 use crate::{
     NanocodexError, Result,
@@ -54,7 +55,8 @@ pub enum ExecutionAdmission {
 pub enum ExecutionRetry {
     /// An interrupted effect may be executed again.
     Idempotent,
-    /// An interrupted effect has an ambiguous outcome and must not be repeated.
+    /// An interrupted effect has an unknown external outcome and must not be
+    /// repeated.
     Never,
 }
 
@@ -64,6 +66,19 @@ pub enum ExecutionStepAdmission {
     Execute,
     /// Reuse the exact JSON output retained by a prior attempt.
     Replay(String),
+    /// Do not repeat an interrupted at-most-once effect whose outcome is unknown.
+    /// The caller must commit an explicit unknown result before continuing.
+    Unknown,
+}
+
+/// Authoritative durable result of reconciling one step during cancellation.
+pub enum ExecutionStepReconciliation {
+    /// The effect boundary was never committed or its execution permit was
+    /// definitely not observed, so no synthetic output was retained.
+    NotStarted,
+    /// The exact retained output, whether committed by the effect itself or by
+    /// cancellation while an at-most-once effect remained pending.
+    Completed(String),
 }
 
 /// Serializable result retained at a completed agent boundary.
@@ -105,15 +120,11 @@ pub trait ExecutionPolicy: Send + Sync {
         })
     }
 
-    /// Fences a model-only external effect immediately before it begins. The
-    /// default fails closed so omission cannot authorize an effect.
-    fn authorize_model_effect<'a>(
-        &'a self,
-        _kind: &'static str,
-    ) -> ExecutionFuture<'a, Result<()>> {
+    /// Fences a standalone checkpoint effect immediately before it begins.
+    fn fence_checkpoint_effect<'a>(&'a self) -> ExecutionFuture<'a, Result<()>> {
         Box::pin(async {
             Err(NanocodexError::ExecutionPolicyCapabilityUnsupported {
-                capability: "authorize_model_effect",
+                capability: "fence_checkpoint_effect",
             })
         })
     }
@@ -171,6 +182,23 @@ pub trait ExecutionPolicy: Send + Sync {
         output_json: String,
     ) -> ExecutionFuture<'a, Result<()>>;
 
+    /// Atomically inspects and settles one at-most-once step during explicit
+    /// cancellation. Policies that durably retain `Never` steps must override
+    /// this method. The default fails closed so omission cannot falsely claim
+    /// that an authorized effect did not start.
+    fn reconcile_cancelled_step<'a>(
+        &'a self,
+        _operation_id: String,
+        _step_id: String,
+        _unknown_output_json: String,
+    ) -> ExecutionFuture<'a, Result<ExecutionStepReconciliation>> {
+        Box::pin(async {
+            Err(NanocodexError::ExecutionPolicyCapabilityUnsupported {
+                capability: "reconcile_cancelled_step",
+            })
+        })
+    }
+
     /// Atomically commits a terminal turn output and its resumable boundary.
     fn complete<'a>(
         &'a self,
@@ -223,15 +251,11 @@ pub trait ExecutionPolicy: Send + Sync {
         })
     }
 
-    /// Fences a model-only external effect immediately before it begins. The
-    /// default fails closed.
-    fn authorize_model_effect<'a>(
-        &'a self,
-        _kind: &'static str,
-    ) -> ExecutionFuture<'a, Result<()>> {
+    /// Fences a standalone checkpoint effect immediately before it begins.
+    fn fence_checkpoint_effect<'a>(&'a self) -> ExecutionFuture<'a, Result<()>> {
         Box::pin(async {
             Err(NanocodexError::ExecutionPolicyCapabilityUnsupported {
-                capability: "authorize_model_effect",
+                capability: "fence_checkpoint_effect",
             })
         })
     }
@@ -280,6 +304,22 @@ pub trait ExecutionPolicy: Send + Sync {
         step_id: String,
         output_json: String,
     ) -> ExecutionFuture<'a, Result<()>>;
+    /// Atomically inspects and settles one at-most-once step during explicit
+    /// cancellation. Policies that durably retain `Never` steps must override
+    /// this method. The default fails closed so omission cannot falsely claim
+    /// that an authorized effect did not start.
+    fn reconcile_cancelled_step<'a>(
+        &'a self,
+        _operation_id: String,
+        _step_id: String,
+        _unknown_output_json: String,
+    ) -> ExecutionFuture<'a, Result<ExecutionStepReconciliation>> {
+        Box::pin(async {
+            Err(NanocodexError::ExecutionPolicyCapabilityUnsupported {
+                capability: "reconcile_cancelled_step",
+            })
+        })
+    }
     /// Commits a terminal turn and resumable boundary.
     fn complete<'a>(
         &'a self,
@@ -402,6 +442,24 @@ pub(crate) enum AdmittedExecution {
     Cancelled,
 }
 
+#[derive(Serialize)]
+struct StandaloneCompactionInput {
+    kind: &'static str,
+    base_checkpoint: Option<StandaloneCompactionBase>,
+    model: &'static str,
+    effort: &'static str,
+    fast_mode: bool,
+    workspace: Option<String>,
+}
+
+#[derive(Serialize)]
+struct StandaloneCompactionBase {
+    lineage_id: String,
+    prompt_cache_key: String,
+    workspace: String,
+    history: Vec<nanocodex_oai_api::responses::ResponseItem>,
+}
+
 impl Execution {
     #[cfg(not(target_family = "wasm"))]
     pub(crate) const fn info(&self) -> Option<&RolloutInfo> {
@@ -475,22 +533,64 @@ impl Execution {
         }
     }
 
+    pub(crate) async fn admit_compaction(
+        &self,
+        base_checkpoint: Option<&CommittedSession>,
+        model: nanocodex_oai_api::Model,
+        effort: nanocodex_oai_api::Thinking,
+        fast_mode: bool,
+        workspace: Option<&str>,
+    ) -> Result<(Option<String>, AdmittedExecution)> {
+        let Some(policy) = &self.policy else {
+            return Ok((None, AdmittedExecution::Execute));
+        };
+        policy.fence_checkpoint_effect().await?;
+        let base_checkpoint = base_checkpoint.map(|checkpoint| {
+            let mut history = checkpoint.model().snapshot_history();
+            for item in &mut history {
+                item.strip_id();
+            }
+            StandaloneCompactionBase {
+                lineage_id: checkpoint.lineage_id().to_owned(),
+                prompt_cache_key: checkpoint.model().prompt_cache_key().to_owned(),
+                workspace: checkpoint.model().workspace().to_owned(),
+                history,
+            }
+        });
+        let input = StandaloneCompactionInput {
+            kind: "standalone_compaction",
+            base_checkpoint,
+            model: model.as_str(),
+            effort: effort.as_str(),
+            fast_mode,
+            workspace: workspace.map(str::to_owned),
+        };
+        let input_json = encode(&input)?;
+        let digest = Sha256::digest(input_json.as_bytes());
+        let digest = digest
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let candidate_operation_id = format!("standalone-compaction-{digest}");
+        let (operation_id, admission) = policy
+            .admit_automatic(candidate_operation_id, input_json)
+            .await?;
+        Ok((Some(operation_id), map_admission(admission)))
+    }
+
     #[cfg_attr(target_family = "wasm", allow(clippy::missing_const_for_fn))]
-    pub(crate) fn start_compaction(&self, effort: nanocodex_oai_api::Thinking) -> ExecutionTurn {
+    pub(crate) fn start_compaction(
+        &self,
+        effort: nanocodex_oai_api::Thinking,
+        operation_id: Option<String>,
+    ) -> ExecutionTurn {
         ExecutionTurn {
             platform: self.platform.start_compaction(effort),
             policy: self.policy.clone(),
-            operation_id: None,
+            operation_id,
             operation_input: None,
             outcome: ExecutionOutcome::Started,
         }
-    }
-
-    pub(crate) async fn authorize_compaction(&self) -> Result<()> {
-        if let Some(policy) = &self.policy {
-            policy.authorize_model_effect("compaction").await?;
-        }
-        Ok(())
     }
 
     pub(crate) async fn persist(
@@ -515,12 +615,15 @@ impl Execution {
         checkpoint: &CommittedSession,
         turn: ExecutionTurn,
     ) -> Result<()> {
-        if let Some(policy) = &self.policy {
-            policy.commit_checkpoint(checkpoint.snapshot()).await?;
-        }
-        self.platform
-            .persist_compaction(checkpoint, turn.platform)
-            .await;
+        let ExecutionTurn {
+            platform,
+            policy,
+            operation_id,
+            operation_input,
+            outcome,
+        } = turn;
+        persist_operation(policy, operation_id, operation_input, outcome, checkpoint).await?;
+        self.platform.persist_compaction(checkpoint, platform).await;
         Ok(())
     }
 
@@ -546,17 +649,6 @@ impl Execution {
                 "agent turn failed before checkpointing".to_owned(),
             )
             .await
-    }
-
-    pub(crate) async fn release_turn(&self, turn: ExecutionTurn) {
-        let ExecutionTurn {
-            policy,
-            operation_id,
-            ..
-        } = turn;
-        if let (Some(policy), Some(operation_id)) = (policy, operation_id) {
-            policy.release(operation_id).await;
-        }
     }
 
     #[cfg(not(target_family = "wasm"))]
@@ -597,18 +689,15 @@ pub(crate) struct ExecutionSteps {
 pub(crate) enum ExecutionStep<O> {
     Execute,
     Replay(O),
+    Unknown,
+}
+
+pub(crate) enum ReconciledExecutionStep<O> {
+    NotStarted,
+    Completed(O),
 }
 
 impl ExecutionSteps {
-    /// Durably authorizes an operation-owned model effect immediately before
-    /// entering the transport.
-    ///
-    /// Authorization fences owners that were already stale. Once it returns,
-    /// takeover can still fence the result but cannot retract an in-flight call.
-    pub(crate) async fn authorize_model_effect(&self, kind: &'static str) -> Result<()> {
-        self.policy.authorize_model_effect(kind).await
-    }
-
     pub(crate) async fn begin<I, O>(
         &self,
         step_id: impl Into<String>,
@@ -633,6 +722,7 @@ impl ExecutionSteps {
         {
             ExecutionStepAdmission::Execute => Ok(ExecutionStep::Execute),
             ExecutionStepAdmission::Replay(output) => Ok(ExecutionStep::Replay(decode(&output)?)),
+            ExecutionStepAdmission::Unknown => Ok(ExecutionStep::Unknown),
         }
     }
 
@@ -644,6 +734,30 @@ impl ExecutionSteps {
         self.policy
             .complete_step(self.operation_id.clone(), step_id.into(), encode(output)?)
             .await
+    }
+
+    pub(crate) async fn reconcile_cancelled<O>(
+        &self,
+        step_id: impl Into<String>,
+        unknown_output: &O,
+    ) -> Result<ReconciledExecutionStep<O>>
+    where
+        O: DeserializeOwned + Serialize,
+    {
+        match self
+            .policy
+            .reconcile_cancelled_step(
+                self.operation_id.clone(),
+                step_id.into(),
+                encode(unknown_output)?,
+            )
+            .await?
+        {
+            ExecutionStepReconciliation::NotStarted => Ok(ReconciledExecutionStep::NotStarted),
+            ExecutionStepReconciliation::Completed(output) => {
+                Ok(ReconciledExecutionStep::Completed(decode(&output)?))
+            }
+        }
     }
 }
 
@@ -689,6 +803,10 @@ impl ExecutionTurn {
     #[cfg_attr(target_family = "wasm", allow(clippy::missing_const_for_fn))]
     pub(crate) fn completed_without_message(mut self) -> Self {
         self.platform = self.platform.completed_without_message();
+        self.outcome = ExecutionOutcome::Completed(ExecutionOutput {
+            final_message: String::new(),
+            usage: TurnUsage::default(),
+        });
         self
     }
 
@@ -709,6 +827,14 @@ impl ExecutionTurn {
         self.outcome = ExecutionOutcome::Failed {
             error: error.into(),
             retryable,
+        };
+        self
+    }
+
+    pub(crate) fn retain_pending_attempt(mut self, error: impl Into<String>) -> Self {
+        self.outcome = ExecutionOutcome::Failed {
+            error: error.into(),
+            retryable: true,
         };
         self
     }
@@ -778,10 +904,18 @@ async fn cancel_with_reclaim(
         .await
         .map_err(reopen_after_cancel_retry)?;
     match admission {
-        ExecutionAdmission::Execute => policy
-            .cancel(operation_id, snapshot)
-            .await
-            .map_err(reopen_after_cancel_retry),
+        ExecutionAdmission::Execute => {
+            if snapshot.is_some() {
+                policy
+                    .begin_attempt(operation_id.clone())
+                    .await
+                    .map_err(reopen_after_cancel_retry)?;
+            }
+            policy
+                .cancel(operation_id, snapshot)
+                .await
+                .map_err(reopen_after_cancel_retry)
+        }
         ExecutionAdmission::Cancelled => Ok(()),
         ExecutionAdmission::Completed { .. } | ExecutionAdmission::Failed { .. } => {
             Err(NanocodexError::InvalidExecutionPolicy(format!(

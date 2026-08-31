@@ -6,7 +6,7 @@ Vercel Workflows and native Vercel Function WebSockets.
 Each Workflow run is one agent session:
 
 - a typed Workflow hook accepts prompts and processes them sequentially;
-- each Function step opens the same application-owned PostgreSQL journal through
+- each Function step opens the same application-owned PostgreSQL state store through
   the `DATABASE_URL` injected by a Vercel Marketplace database integration;
 - every accepted prompt, typed agent event, and terminal result is appended to
   the Workflow's resumable stream;
@@ -32,7 +32,7 @@ browser B ─ WebSocket Function ─┘             │
                                               ▼
                                   Nanocodex WASM Function step
                                      ├─ Responses WebSocket → OpenAI
-                                     ├─ atomic journal append → PostgreSQL
+                                     ├─ atomic state replace → PostgreSQL
                                      └─ named persistent Vercel Sandbox
                                           └─ files, commands, preview domains
 
@@ -43,8 +43,8 @@ browser terminal ─ controller PTY WebSocket ─ same named Vercel Sandbox
 The WebSocket connection itself is disposable and bounded by the Vercel
 Function duration. The browser reconnects automatically. Workflow durably owns
 prompt serialization and the replayable client event stream; PostgreSQL stores
-the opaque Rust journal at model, tool, and terminal boundaries. A replacement
-Function step reconstructs the agent from that journal, so Rust/WASM retains
+the opaque Rust total state at model, tool, and terminal boundaries. A replacement
+Function step reconstructs the agent from that state, so Rust/WASM retains
 deduplication, checkpoint reconstruction, and recovery policy without a second
 JavaScript state machine.
 
@@ -53,16 +53,18 @@ and immediately registers the pool with `attachDatabasePool`. A fixed
 transaction-scoped PostgreSQL advisory lock serializes schema creation across
 cold instances. Revisions are
 `NUMERIC(20,0)` values read and written as unsigned decimal strings, preserving
-Rust's complete `u64` range. Compare-and-append conditionally advances the head
-and inserts the opaque batch in one transaction. A rejected `COMMIT` is an
-unknown outcome: the adapter throws, Rust poisons and stops that live journal
-owner, and a new step reloads the database before doing more work.
+Rust's complete `u64` range. Compare-and-replace conditionally advances the
+revision and replaces the opaque state in one transaction. If a `COMMIT`
+response is lost, the adapter discards that connection and retries the exact
+idempotent request on a fresh connection. It returns the committed revision,
+a normal conflict/fence result, or a retry-safe availability error—never an
+ambiguous write outcome.
 
 The browser keeps its agent transcript in application code: an `@wterm/react`
 terminal fed by a small ANSI renderer over the replayable, client-safe Workflow
 event stream. That consumer boundary is the replacement seam: an application
 can render the snapshot with xterm.js or ordinary React without changing the
-headless Nanocodex agent, its durable journal, or its transport. The example
+headless Nanocodex agent, its durable state, or its transport. The example
 keeps the adapter local because UI frameworks and terminal renderers consume
 Agent events directly rather than defining a core UI abstraction.
 
@@ -88,7 +90,7 @@ Workflow socket never carries terminal bytes.
 
 These lifetimes are intentionally different:
 
-- PostgreSQL retains the opaque Rust journal and committed conversation state;
+- PostgreSQL retains the opaque Rust total state and committed conversation state;
 - the Workflow actor serializes prompts and retains replayable client events;
 - the named persistent Sandbox retains files across VM stop/resume;
 - each terminal attachment owns one ephemeral login shell; reconnecting requests
@@ -116,7 +118,7 @@ npx vercel env pull examples/vercel-workflows/.env.local
 ```
 
 Importing or building the application does not open a database connection. The
-first durability load or append creates the pool and current schema.
+first durability load or replacement creates the pool and current schema.
 
 For API-key authentication, use Vercel CLI's local runtime because native
 WebSocket upgrades require Vercel's Function adapter:
@@ -240,12 +242,20 @@ experimental. Connections are expected to close when a Function reaches its
 maximum duration; automatic cursor-based reconnection is part of the demo's
 normal lifecycle.
 
-The focused durability tests run the production PostgreSQL SQL against PGlite,
-a deterministic WASM PostgreSQL build. They cover schema-lock acquisition,
+The focused deterministic durability tests run the PostgreSQL adapter against
+PGlite. A separate CI test runs the same adapter through a real `pg.Pool`
+connected to PostgreSQL 17. Together they cover schema-lock acquisition,
 expected-revision conflicts, numeric load order, the exact `u64` maximum,
-confirmed rollback, commit ambiguity, and recreation from the retained journal
-without requiring external credentials. Live multi-session contention remains
-a deployment smoke against the selected Marketplace provider.
+confirmed rollback, commit ambiguity, and recreation from the retained state
+without requiring external credentials. The portability tests additionally run
+a real Nanocodex WASM agent through the Cloudflare SQLite and PostgreSQL store
+contracts, and run the managed Cloudflare HTTP API inside the Workers runtime
+with actual Durable Object SQLite. They verify exact revision transfer, fresh
+runtime identities, duplicate terminal replay without a model call,
+full-history provider requests without stale previous-response handles, and
+continued execution after cutover. Only the OpenAI Responses endpoint is
+simulated. Live PostgreSQL CAS, fencing, import conflict, and continuation are
+mandatory in CI; Marketplace deployment remains an environment-specific smoke.
 
 References:
 

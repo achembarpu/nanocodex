@@ -389,7 +389,7 @@ where
         };
         let terminal = matches!(
             turn.state,
-            TurnState::Blocked | TurnState::Completed | TurnState::Cancelled | TurnState::Failed
+            TurnState::Completed | TurnState::Cancelled | TurnState::Failed
         ) || turn.terminal.is_some();
         let turn_id = turn.turn_id.clone();
         if turn
@@ -556,10 +556,6 @@ where
             ManagedEventData::TurnCancelled { id } => {
                 self.complete(&id, |_| Err(NanocodexError::TurnCancelled));
             }
-            ManagedEventData::TurnBlocked { id, error } => {
-                let outcome = turn_error(id.clone(), "blocked", error);
-                self.complete(&id, |_| Err(outcome));
-            }
             ManagedEventData::TurnFailed { id, error } => {
                 let outcome = turn_error(id.clone(), "failed", error);
                 self.complete(&id, |_| Err(outcome));
@@ -665,7 +661,6 @@ fn retained_result(
             ))
         }
         ManagedEventData::TurnCancelled { .. } => Err(NanocodexError::TurnCancelled),
-        ManagedEventData::TurnBlocked { id, error } => Err(turn_error(id, "blocked", error)),
         ManagedEventData::TurnFailed { id, error } => Err(turn_error(id, "failed", error)),
         _ => {
             return Err(backend_error(ManagedError::InvalidResponse(

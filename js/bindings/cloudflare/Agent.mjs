@@ -5,11 +5,17 @@ import {
   observeAgentRelease,
   routePrompt,
 } from "../internal.mjs";
-import { compactDurableSession } from "../pkg-web/nanocodex.js";
+import { pruneDurableReceipts as pruneWasmDurableReceipts } from "../pkg-web/nanocodex.js";
 import * as Transport from "../browser/Transport.mjs";
 import { initializeBrowserEngine } from "../browser/engine.mjs";
 import { createCloudflareDurabilityStore } from "../runtime/cloudflare-durability-store.mjs";
-import { durabilityRevision } from "../runtime/durability-store.mjs";
+import {
+  createMemoryDurabilityStore,
+  durabilityRevision,
+  exportDurabilityState as exportPortableState,
+  exportDurabilityStatePage as exportPortableStatePage,
+  importDurabilityState as importPortableState,
+} from "../runtime/durability-store.mjs";
 import { cloudflareEgress } from "./egress.mjs";
 import { scopeCloudflareEgress } from "./egress-subject.mjs";
 import {
@@ -31,6 +37,7 @@ const EPHEMERAL_APPLICATION_OPTIONS = new Set([
   "workspace",
 ]);
 const APPLICATION_OPTIONS = new Set([
+  "durabilityId",
   "eventPersistence",
   "instructions",
   "terminalReceiptRetention",
@@ -41,10 +48,12 @@ const lifecycles = new WeakMap();
 /** @internal Binds the package-owned module to the public Cloudflare namespace. */
 export function bindAgent(module, hostAgent = HostAgent) {
   return Object.freeze({
-    compactDurability: (owner, options) => compactDurability(module, owner, options),
+    pruneDurableReceipts: (owner, options) => pruneDurableReceipts(module, owner, options),
     create: (owner, options) => create(module, owner, options, hostAgent),
     createEphemeral: (owner, options) => createEphemeral(module, owner, options),
     destroy,
+    exportDurabilityState,
+    importDurabilityState: (owner, archive) => importDurabilityState(owner, archive, module),
     route,
   });
 }
@@ -67,45 +76,166 @@ export function destroy(owner) {
   const storage = context.storage;
   createCloudflareDurabilityStore(storage);
   initializeAgentStorage(storage);
-  const sessionId = storedSessionId(storage);
+  const stateId = storedStateId(storage) ?? legacyStateId(storage);
   storage.transactionSync(() => {
-    if (sessionId !== undefined) {
-      const journalId = `cloudflare:${sessionId}`;
+    if (stateId !== undefined) {
       const retained = storage.sql.exec(
-        "SELECT fence FROM nanocodex_journal_owners WHERE journal_id = ?",
-        journalId,
+        "SELECT fence FROM nanocodex_durable_owners WHERE state_id = ?",
+        stateId,
       ).toArray();
       const fence = durabilityRevision(
         BigInt(durabilityRevision(retained[0]?.fence ?? "0")) + 1n,
       );
       storage.sql.exec(
-        `INSERT INTO nanocodex_journal_owners (journal_id, owner_id, fence) VALUES (?, ?, ?)
-         ON CONFLICT (journal_id) DO UPDATE SET owner_id = excluded.owner_id, fence = excluded.fence`,
-        journalId,
+        `INSERT INTO nanocodex_durable_owners (state_id, owner_id, fence) VALUES (?, ?, ?)
+         ON CONFLICT (state_id) DO UPDATE SET owner_id = excluded.owner_id, fence = excluded.fence`,
+        stateId,
         `destroy:${globalThis.crypto.randomUUID()}`,
         fence,
       );
       storage.sql.exec(
-        "DELETE FROM nanocodex_journal_batch_chunks WHERE journal_id = ?",
-        journalId,
+        "DELETE FROM nanocodex_durable_chunk_heads WHERE state_id = ?",
+        stateId,
       );
       storage.sql.exec(
-        "DELETE FROM nanocodex_journal_batches WHERE journal_id = ?",
-        journalId,
+        "DELETE FROM nanocodex_durable_state_chunks WHERE state_id = ?",
+        stateId,
       );
       storage.sql.exec(
-        "DELETE FROM nanocodex_journals WHERE journal_id = ?",
-        journalId,
+        "DELETE FROM nanocodex_durable_states WHERE state_id = ?",
+        stateId,
       );
     }
     clearCloudflareEventSocket(context);
   });
 }
 
-/** Compacts retained durable history before constructing the full Agent runtime. */
-export async function compactDurability(module, owner, options = {}) {
+/** Fences and exports this inactive Cloudflare Agent's provider-neutral state. */
+export async function exportDurabilityState(owner, request) {
+  const context = reserveInactiveLifecycle(owner, "exporting durability state");
+  try {
+    const storage = context.storage;
+    const durability = createCloudflareDurabilityStore(storage);
+    initializeAgentStorage(storage);
+    const stateId = storedStateId(storage) ?? legacyStateId(storage);
+    if (stateId === undefined) {
+      throw new Error("Cloudflare Agent has no durability state to export");
+    }
+    return request === undefined
+      ? await exportPortableState(durability, stateId)
+      : await exportPortableStatePage(durability, stateId, request);
+  } finally {
+    lifecycleFor(context).creating = false;
+  }
+}
+
+/** Imports provider-neutral state into a pristine Cloudflare Agent owner. */
+export async function importDurabilityState(owner, archive, module) {
+  const context = reserveInactiveLifecycle(owner, "importing durability state");
+  try {
+    const storage = context.storage;
+    const durability = createCloudflareDurabilityStore(storage);
+    initializeAgentStorage(storage);
+    const validationStateId = typeof archive?.stateId === "string" && archive.stateId
+      ? archive.stateId
+      : "nanocodex-invalid-import";
+    const validationStore = createMemoryDurabilityStore(validationStateId);
+    const validated = await importPortableState(validationStore, archive);
+    if (module !== undefined) {
+      const routeHost = {};
+      const route = (await loadDurabilityRuntime()).own(
+        routeHost,
+        validationStore,
+        validationStateId,
+      );
+      try {
+        installHostBridge();
+        await initializeBrowserEngine({ module });
+        // Opening the Rust durability session validates the complete canonical
+        // state. Pruning happens only in this throwaway memory copy.
+        await pruneWasmDurableReceipts(route.id, validationStateId, 4_096);
+      } finally {
+        route.abandon();
+      }
+    }
+    const retainedSessionId = storedSessionId(storage);
+    const retainedStateId = storedStateId(storage);
+    if (retainedSessionId !== undefined || retainedStateId !== undefined) {
+      if (retainedSessionId !== undefined
+        && retainedStateId === archive?.stateId
+        && archive?.format === "nanocodex-durability-state-v1") {
+        const retained = await durability.load(retainedStateId);
+        if (retained.revision === validated.revision
+          && retained.payload === validated.payload) {
+          return retained;
+        }
+      }
+      throw new Error("Cloudflare Agent durability import requires a pristine Durable Object");
+    }
+    const imported = await importPortableState(durability, archive);
+    const sessionId = uuidV7();
+    try {
+      storage.transactionSync(() => {
+        storage.sql.exec(
+          "INSERT INTO nanocodex_cloudflare_agent (singleton, session_id) VALUES (1, ?)",
+          sessionId,
+        );
+        storage.sql.exec(
+          "INSERT INTO nanocodex_cloudflare_durability (singleton, state_id) VALUES (1, ?)",
+          archive.stateId,
+        );
+      });
+    } catch (error) {
+      try {
+        storage.transactionSync(() => {
+          storage.sql.exec(
+            "DELETE FROM nanocodex_durable_chunk_heads WHERE state_id = ?",
+            archive.stateId,
+          );
+          storage.sql.exec(
+            "DELETE FROM nanocodex_durable_state_chunks WHERE state_id = ?",
+            archive.stateId,
+          );
+          storage.sql.exec(
+            "DELETE FROM nanocodex_durable_states WHERE state_id = ?",
+            archive.stateId,
+          );
+          storage.sql.exec(
+            "DELETE FROM nanocodex_durable_owners WHERE state_id = ?",
+            archive.stateId,
+          );
+        });
+      } catch (rollbackError) {
+        throw new AggregateError(
+          [error, rollbackError],
+          "Cloudflare Agent durability import metadata and rollback both failed",
+        );
+      }
+      throw error;
+    }
+    return imported;
+  } finally {
+    lifecycleFor(context).creating = false;
+  }
+}
+
+function reserveInactiveLifecycle(owner, operation) {
+  const context = resolveContext(owner);
+  const lifecycle = lifecycleFor(context);
+  if (lifecycle.creating) {
+    throw new Error("Cloudflare Agent lifecycle operation is already in progress");
+  }
+  if (lifecycle.active !== undefined) {
+    throw new Error(`Cloudflare Agent shutdown must complete before ${operation}`);
+  }
+  lifecycle.creating = true;
+  return context;
+}
+
+/** Prunes old terminal receipts before constructing the full Agent runtime. */
+export async function pruneDurableReceipts(module, owner, options = {}) {
   if (!options || typeof options !== "object" || Array.isArray(options)) {
-    throw new TypeError("Cloudflare durability compaction options must be an object");
+    throw new TypeError("Cloudflare durability receipt-pruning options must be an object");
   }
   const terminalReceiptRetention = options.terminalReceiptRetention ?? 512;
   if (!Number.isSafeInteger(terminalReceiptRetention)
@@ -119,26 +249,25 @@ export async function compactDurability(module, owner, options = {}) {
     throw new Error("Cloudflare Agent lifecycle operation is already in progress");
   }
   if (lifecycle.active !== undefined) {
-    throw new Error("Cloudflare Agent shutdown must complete before compacting durability");
+    throw new Error("Cloudflare Agent shutdown must complete before pruning durability receipts");
   }
   lifecycle.creating = true;
   try {
     const storage = context.storage;
     const durability = createCloudflareDurabilityStore(storage);
     initializeAgentStorage(storage);
-    const sessionId = storedSessionId(storage);
-    if (sessionId === undefined) return;
-    const journalId = `cloudflare:${sessionId}`;
+    const stateId = storedStateId(storage) ?? legacyStateId(storage);
+    if (stateId === undefined) return;
     const routeHost = {};
     const route = (await loadDurabilityRuntime()).own(
       routeHost,
       durability,
-      journalId,
+      stateId,
     );
     try {
       installHostBridge();
       await initializeBrowserEngine({ module });
-      await compactDurableSession(route.id, journalId, terminalReceiptRetention);
+      await pruneWasmDurableReceipts(route.id, stateId, terminalReceiptRetention);
     } finally {
       route.abandon();
     }
@@ -169,6 +298,7 @@ async function createOwned(module, resolved, options, hostAgent, lifecycle) {
   const { context, egress, subject } = resolved;
   const configured = applicationOptions(options);
   const {
+    durabilityId,
     eventPersistence = "durable",
     [INTERNAL_RUNTIME]: internalRuntime,
     ...agentOptions
@@ -182,7 +312,7 @@ async function createOwned(module, resolved, options, hostAgent, lifecycle) {
     : undefined;
   if (eventPersistence === "caller") clearCloudflareEventSocket(context);
   const durability = createCloudflareDurabilityStore(context.storage);
-  const sessionId = durableSessionId(context.storage);
+  const { sessionId, stateId } = durableIdentity(context.storage, durabilityId);
   const endpoint = cloudflareEgress({
     binding: scopeCloudflareEgress(egress, subject),
   });
@@ -217,7 +347,7 @@ async function createOwned(module, resolved, options, hostAgent, lifecycle) {
       transport,
       sessionId,
       durability,
-      durabilityId: `cloudflare:${sessionId}`,
+      durabilityId: stateId,
     });
     await withTimeout(
       startup.promise,
@@ -368,7 +498,7 @@ function applicationOptions(options) {
   for (const name of Object.keys(options)) {
     if (!APPLICATION_OPTIONS.has(name)) {
       throw new TypeError(
-        `Cloudflare Agent.create does not accept ${name}; only eventPersistence, instructions, terminalReceiptRetention, and tools are configurable`,
+        `Cloudflare Agent.create does not accept ${name}; only durabilityId, eventPersistence, instructions, terminalReceiptRetention, and tools are configurable`,
       );
     }
   }
@@ -404,20 +534,42 @@ function ephemeralApplicationOptions(options) {
   return options;
 }
 
-function durableSessionId(storage) {
+function durableIdentity(storage, configuredStateId) {
   initializeAgentStorage(storage);
-  let sessionId = storedSessionId(storage);
-  if (sessionId !== undefined) return sessionId;
-  const generated = uuidV7();
-  storage.sql.exec(
-    "INSERT OR IGNORE INTO nanocodex_cloudflare_agent (singleton, session_id) VALUES (1, ?)",
-    generated,
-  );
-  sessionId = storedSessionId(storage);
+  if (configuredStateId !== undefined
+    && (typeof configuredStateId !== "string" || !configuredStateId.trim())) {
+    throw new TypeError("Cloudflare Agent durabilityId must be a non-empty string");
+  }
+  const previousSessionId = storedSessionId(storage);
+  const previousStateId = storedStateId(storage);
+  if (previousStateId !== undefined
+    && configuredStateId !== undefined
+    && previousStateId !== configuredStateId) {
+    throw new Error("Cloudflare Agent durabilityId does not match the retained state identity");
+  }
+  const generated = previousSessionId ?? uuidV7();
+  const generatedStateId = previousStateId
+    ?? configuredStateId
+    ?? (previousSessionId === undefined ? generated : `cloudflare:${previousSessionId}`);
+  storage.transactionSync(() => {
+    storage.sql.exec(
+      "INSERT OR IGNORE INTO nanocodex_cloudflare_agent (singleton, session_id) VALUES (1, ?)",
+      generated,
+    );
+    storage.sql.exec(
+      "INSERT OR IGNORE INTO nanocodex_cloudflare_durability (singleton, state_id) VALUES (1, ?)",
+      generatedStateId,
+    );
+  });
+  const sessionId = storedSessionId(storage);
+  const stateId = storedStateId(storage);
   if (typeof sessionId !== "string" || !sessionId) {
     throw new Error("Cloudflare Agent failed to persist its runtime session ID");
   }
-  return sessionId;
+  if (typeof stateId !== "string" || !stateId) {
+    throw new Error("Cloudflare Agent failed to persist its durability state ID");
+  }
+  return { sessionId, stateId };
 }
 
 function initializeAgentStorage(storage) {
@@ -427,12 +579,29 @@ function initializeAgentStorage(storage) {
       session_id TEXT NOT NULL UNIQUE
     )
   `);
+  storage.sql.exec(`
+    CREATE TABLE IF NOT EXISTS nanocodex_cloudflare_durability (
+      singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+      state_id TEXT NOT NULL UNIQUE
+    )
+  `);
 }
 
 function storedSessionId(storage) {
   return storage.sql.exec(
     "SELECT session_id FROM nanocodex_cloudflare_agent WHERE singleton = 1",
   ).toArray()[0]?.session_id;
+}
+
+function storedStateId(storage) {
+  return storage.sql.exec(
+    "SELECT state_id FROM nanocodex_cloudflare_durability WHERE singleton = 1",
+  ).toArray()[0]?.state_id;
+}
+
+function legacyStateId(storage) {
+  const sessionId = storedSessionId(storage);
+  return sessionId === undefined ? undefined : `cloudflare:${sessionId}`;
 }
 
 function uuidV7() {

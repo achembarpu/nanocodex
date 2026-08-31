@@ -41,7 +41,6 @@ export type ServerMessage = (
   | TurnCompleted
   | { type: "turn_cancelled"; id: string }
   | { type: "turn_retryable"; id: string; error: string }
-  | { type: "turn_blocked"; id: string; error: string }
   | { type: "turn_failed"; id: string; error: string }
   | { type: "event"; event: AgentEvent }
   | { type: "stream_failed"; error: string }

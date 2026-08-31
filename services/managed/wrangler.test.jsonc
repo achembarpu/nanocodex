@@ -18,7 +18,7 @@
   ],
   "durable_objects": {
     "bindings": [
-      { "name": "NANOCODEX_SESSIONS", "class_name": "NanocodexSession" },
+      { "name": "NANOCODEX_SESSIONS", "class_name": "DurableAgentSession" },
       { "name": "NANOCODEX_ROOMS", "class_name": "MultiplayerRoom" },
       { "name": "NANOCODEX_MULTIPLAYER_QUOTA", "class_name": "MultiplayerQuota" },
       { "name": "NANOCODEX_AUTH", "class_name": "NonceStorage" },
@@ -38,7 +38,12 @@
       "new_sqlite_classes": ["NonceStorage", "UserAccount", "ApiKeyRecord"]
     },
     { "tag": "v3", "new_sqlite_classes": ["MemoryScope"] },
-    { "tag": "v4", "new_sqlite_classes": ["Organization"] }
+    { "tag": "v4", "new_sqlite_classes": ["Organization"] },
+    {
+      "tag": "v5",
+      "new_sqlite_classes": ["DurableAgentSession"],
+      "deleted_classes": ["NanocodexSession"]
+    }
   ],
   "vars": {
     "AGENT_IDLE_TIMEOUT_MS": "30000"

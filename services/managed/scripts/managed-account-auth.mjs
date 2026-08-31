@@ -1,4 +1,5 @@
 const ACCOUNT_API_KEY = /^ncx_live_[A-Za-z0-9_-]{12}_[A-Za-z0-9_-]{43}$/;
+const ACCOUNT_COOKIE = /^nanocodex_account=[0-9a-f]{64}$/;
 
 export function requireManagedApiKey(environment = process.env) {
   const apiKey = environment.NANOCODEX_API_KEY;
@@ -24,8 +25,23 @@ export async function managedAccountFetch(apiKey, input, init = {}) {
   });
 }
 
-export function managedAccountWebSocketOptions(apiKey, initial = {}) {
-  const headers = managedAccountHeaders(apiKey, initial.headers);
+export function requireManagedAccountCookie(environment = process.env) {
+  const cookie = environment.NANOCODEX_ACCOUNT_COOKIE;
+  if (typeof cookie !== "string" || !ACCOUNT_COOKIE.test(cookie)) {
+    throw new Error(
+      "NANOCODEX_ACCOUNT_COOKIE must be one exact passkey session cookie",
+    );
+  }
+  return cookie;
+}
+
+export function managedAccountSessionWebSocketOptions(cookie, origin, initial = {}) {
+  requireManagedAccountCookie({ NANOCODEX_ACCOUNT_COOKIE: cookie });
+  const parsedOrigin = new URL(origin).origin;
+  const headers = new Headers(initial.headers);
+  headers.set("cookie", cookie);
+  headers.set("origin", parsedOrigin);
+  headers.delete("authorization");
   return {
     ...initial,
     headers: Object.fromEntries(headers),
@@ -33,9 +49,10 @@ export function managedAccountWebSocketOptions(apiKey, initial = {}) {
 }
 
 export function parseManagedAgentReceipt(value) {
-  const fields = ["agent_id", "session_id", "events_url", "websocket_url"];
+  const fields = ["agent_id", "durability_id", "session_id", "events_url", "websocket_url"];
   if (!isRecord(value)
     || typeof value.agent_id !== "string"
+    || typeof value.durability_id !== "string"
     || typeof value.session_id !== "string"
     || typeof value.events_url !== "string"
     || typeof value.websocket_url !== "string") {
@@ -46,6 +63,7 @@ export function parseManagedAgentReceipt(value) {
   }
   return {
     agent_id: value.agent_id,
+    durability_id: value.durability_id,
     session_id: value.session_id,
     events_url: value.events_url,
     websocket_url: value.websocket_url,

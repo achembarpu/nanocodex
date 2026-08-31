@@ -11,7 +11,7 @@ repository.workspace = true
 readme = "README.md"
 keywords.workspace = true
 categories.workspace = true
-description = "Portable durable execution journal and stores for Nanocodex"
+description = "Portable durable execution state and stores for Nanocodex"
 
 [package.metadata.docs.rs]
 all-features = true

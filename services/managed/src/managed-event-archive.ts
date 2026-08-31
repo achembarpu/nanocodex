@@ -26,7 +26,7 @@ type EventIndexRow = Omit<EventRow, "message_json"> & {
   message_bytes: number;
 };
 
-type ArchiveStateRow = {
+export type ManagedEventArchiveState = Readonly<{
   archived_bytes: number;
   archived_events: number;
   archived_through: string;
@@ -34,7 +34,9 @@ type ArchiveStateRow = {
   index_root_key: string | null;
   recent_json: string;
   segment_count: number;
-};
+}>;
+
+type ArchiveStateRow = ManagedEventArchiveState;
 
 type ArchiveReadFence = Readonly<{
   archived_events: number;
@@ -160,6 +162,33 @@ export class ManagedEventArchive<Message extends { type: string }> {
       recent_descriptors: this.#decodeDescriptors(state.recent_json).length,
       segments: state.segment_count,
     };
+  }
+
+  portableState(): ManagedEventArchiveState {
+    return { ...this.#state() };
+  }
+
+  adoptState(state: ManagedEventArchiveState): void {
+    validatePortableState(state);
+    const current = this.#state();
+    if (current.archived_events !== 0 || current.segment_count !== 0
+      || current.index_node_count !== 0) {
+      throw new Error("managed event archive adoption requires an empty destination archive");
+    }
+    this.#decodeDescriptors(state.recent_json);
+    this.#storage.sql.exec(
+      `UPDATE managed_event_archive_state
+       SET archived_through = CAST(? AS INTEGER), archived_events = ?, archived_bytes = ?,
+           segment_count = ?, index_node_count = ?, index_root_key = ?, recent_json = ?
+       WHERE singleton = 1`,
+      state.archived_through,
+      state.archived_events,
+      state.archived_bytes,
+      state.segment_count,
+      state.index_node_count,
+      state.index_root_key,
+      state.recent_json,
+    );
   }
 
   archivedThrough(): string {
@@ -551,7 +580,7 @@ export class ManagedEventArchive<Message extends { type: string }> {
     cache: SegmentReadCache<Message>,
   ): Promise<DurableEvent<Message>[]> {
     if (cache.segment?.key === descriptor.key) return cache.segment.events;
-    const object = await this.#bucket.get(descriptor.key);
+    const object = await this.#bucket.get(this.#portableObjectKey(descriptor.key));
     if (!object || !object.body) throw new Error("managed event archive segment is unavailable");
     if (object.size !== descriptor.bytes || object.size > MAX_ARCHIVE_OBJECT_BYTES) {
       await object.body.cancel();
@@ -612,6 +641,13 @@ export class ManagedEventArchive<Message extends { type: string }> {
     return value;
   }
 
+  #portableObjectKey(key: string): string {
+    const marker = "/managed-events/";
+    const markerOffset = key.indexOf(marker);
+    const suffix = markerOffset === -1 ? key : key.slice(markerOffset + marker.length);
+    return key.startsWith(this.#prefix) ? key : `${this.#prefix}${suffix}`;
+  }
+
   async #putImmutable(
     key: string,
     body: Uint8Array,
@@ -653,14 +689,16 @@ export class ManagedEventArchive<Message extends { type: string }> {
     if (!row) throw new Error("managed event archive state is unavailable");
     this.#decodeDescriptors(row.recent_json);
     if (row.index_root_key !== null
-      && !row.index_root_key.startsWith(`${this.#prefix}indexes/`)) {
+      && !/^agents\/[0-9a-f]{64}\/managed-events\/indexes\/[0-9]{16}\.json$/.test(
+        row.index_root_key,
+      )) {
       throw new Error("managed event archive root escapes its agent namespace");
     }
     if ((row.index_node_count === 0) !== (row.index_root_key === null)) {
       throw new Error("managed event archive index manifest is inconsistent");
     }
     if (row.index_node_count > 0
-      && row.index_root_key !== this.#indexKey(row.index_node_count - 1)) {
+      && this.#portableObjectKey(row.index_root_key!) !== this.#indexKey(row.index_node_count - 1)) {
       throw new Error("managed event archive index root does not match its manifest");
     }
     return row;
@@ -683,7 +721,11 @@ export class ManagedEventArchive<Message extends { type: string }> {
 
   #decodeDescriptors(encoded: string): SegmentDescriptor[] {
     const descriptors = decodeDescriptors(encoded);
-    if (descriptors.some(({ key }) => !key.startsWith(`${this.#prefix}segments/`))) {
+    if (descriptors.some(({ key }) => (
+      !/^agents\/[0-9a-f]{64}\/managed-events\/segments\/[0-9]{19}-[0-9]{19}-[0-9a-f]{64}\.json$/.test(
+        key,
+      )
+    ))) {
       throw new Error("managed event archive descriptor escapes its agent namespace");
     }
     return descriptors;
@@ -716,6 +758,22 @@ function decodeDescriptors(encoded: string): SegmentDescriptor[] {
     }
   }
   return descriptors as SegmentDescriptor[];
+}
+
+function validatePortableState(value: ManagedEventArchiveState): void {
+  if (!value || typeof value !== "object"
+    || typeof value.archived_through !== "string"
+    || !/^[0-9]+$/.test(value.archived_through)
+    || !Number.isSafeInteger(value.archived_events) || value.archived_events < 0
+    || !Number.isSafeInteger(value.archived_bytes) || value.archived_bytes < 0
+    || !Number.isSafeInteger(value.segment_count) || value.segment_count < 0
+    || !Number.isSafeInteger(value.index_node_count) || value.index_node_count < 0
+    || (value.index_root_key !== null && typeof value.index_root_key !== "string")
+    || typeof value.recent_json !== "string"
+    || (value.index_node_count === 0) !== (value.index_root_key === null)
+    || value.archived_events < value.segment_count) {
+    throw new Error("managed event archive portable state is invalid");
+  }
 }
 
 function boundedInteger(

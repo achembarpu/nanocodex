@@ -1,11 +1,9 @@
 import { durabilityRevision } from "../runtime/durability-store.mjs";
 
-const DATABASE_NAME = "nanocodex-browser-durability-v1";
-const DATABASE_VERSION = 2;
-const OWNERS_STORE = "owners";
-const JOURNALS_STORE = "journals";
-const BATCHES_STORE = "batches";
-const JOURNAL_INDEX = "journalId";
+const DATABASE_NAME = "nanocodex-browser-durability-v2";
+const DATABASE_VERSION = 1;
+const OWNERS = "owners";
+const STATES = "states";
 const MAX_REVISION = "18446744073709551615";
 
 /** Creates the Worker-local IndexedDB durability capability. */
@@ -15,9 +13,7 @@ export function createIndexedDbDurabilityStore(options = {}) {
     throw new TypeError("browser durability requires IndexedDB");
   }
   const databaseName = options.databaseName ?? DATABASE_NAME;
-  if (typeof databaseName !== "string" || !databaseName) {
-    throw new TypeError("browser durability database name must be a non-empty string");
-  }
+  requireId(databaseName, "browser durability database name");
   let database;
   const open = () => {
     if (database) return database;
@@ -32,203 +28,74 @@ export function createIndexedDbDurabilityStore(options = {}) {
   };
 
   return Object.freeze({
-    async load(journalId) {
-      validateJournalId(journalId);
+    async load(stateId) {
+      requireId(stateId, "durability state ID");
       const db = await open();
-      const transaction = db.transaction([JOURNALS_STORE, BATCHES_STORE], "readonly");
-      const completed = transactionCompletion(transaction);
-      const journalRequest = requestResult(transaction.objectStore(JOURNALS_STORE).get(journalId));
-      const batchRequest = requestResult(
-        transaction.objectStore(BATCHES_STORE).index(JOURNAL_INDEX).getAll(journalId),
-      );
-      const [journal, storedBatches] = await Promise.all([
-        journalRequest,
-        batchRequest,
-        completed,
-      ]);
-      const revision = durabilityRevision(journal?.revision ?? "0");
-      const batches = storedBatches.map((batch) => ({
-        revision: durabilityRevision(batch.revision),
-        payload: validatePayload(batch.payload),
-      }));
-      batches.sort((left, right) => compareRevisions(left.revision, right.revision));
-      return Object.freeze({
-        revision,
-        batches: Object.freeze(batches.map((batch) => Object.freeze(batch))),
-      });
+      const transaction = db.transaction([STATES], "readonly");
+      const state = await requestResult(transaction.objectStore(STATES).get(stateId));
+      await transactionCompletion(transaction);
+      return storedState(state, stateId);
     },
 
-    async acquire(journalId, request) {
-      validateJournalId(journalId);
-      const ownerId = validateOwnerId(request?.ownerId);
+    async acquire(stateId, request) {
+      requireId(stateId, "durability state ID");
+      const ownerId = requireId(request?.ownerId, "durability owner ID");
       const db = await open();
-      const transaction = db.transaction(
-        [OWNERS_STORE, JOURNALS_STORE, BATCHES_STORE],
-        "readwrite",
-      );
+      const transaction = db.transaction([OWNERS, STATES], "readwrite");
       const completed = transactionCompletion(transaction);
       try {
-        const outcome = acquireOwner(
-          transaction,
-          transaction.objectStore(OWNERS_STORE),
-          transaction.objectStore(JOURNALS_STORE),
-          transaction.objectStore(BATCHES_STORE),
-          journalId,
-          ownerId,
-        );
-        const [result] = await Promise.all([outcome, completed]);
-        return result;
-      } catch (error) {
-        await completed.catch(() => {});
-        throw error;
-      }
-    },
-
-    async append(journalId, request) {
-      validateJournalId(journalId);
-      const ownerId = validateOwnerId(request?.ownerId);
-      const fence = durabilityRevision(request?.fence);
-      const expectedRevision = durabilityRevision(request?.expectedRevision);
-      const payload = validatePayload(request?.payload);
-      const db = await open();
-      const transaction = db.transaction(
-        [OWNERS_STORE, JOURNALS_STORE, BATCHES_STORE],
-        "readwrite",
-      );
-      const completed = transactionCompletion(transaction);
-      const owners = transaction.objectStore(OWNERS_STORE);
-      const journals = transaction.objectStore(JOURNALS_STORE);
-      const batches = transaction.objectStore(BATCHES_STORE);
-      try {
-        const outcome = compareAndAppend(
-          transaction,
-          owners,
-          journals,
-          batches,
-          journalId,
-          ownerId,
-          fence,
-          expectedRevision,
-          payload,
-        );
-        const [result] = await Promise.all([outcome, completed]);
-        return result;
-      } catch (error) {
-        await completed.catch(() => {});
-        throw error;
-      }
-    },
-  });
-}
-
-function acquireOwner(transaction, owners, journals, batches, journalId, ownerId) {
-  return new Promise((resolve, reject) => {
-    const ownerRequest = owners.get(journalId);
-    ownerRequest.onerror = () => reject(
-      ownerRequest.error ?? new Error("reading durability owner failed"),
-    );
-    ownerRequest.onsuccess = () => {
-      try {
-        const previousFence = durabilityRevision(ownerRequest.result?.fence ?? "0");
-        if (previousFence === MAX_REVISION) {
-          try { transaction.abort(); } catch {}
-          reject(new RangeError("IndexedDB durability fence overflow"));
-          return;
-        }
+        const owners = transaction.objectStore(OWNERS);
+        const previous = await requestResult(owners.get(stateId));
+        const previousFence = previous === undefined ? "0" : storedOwner(previous, stateId).fence;
+        if (previousFence === MAX_REVISION) throw new RangeError("IndexedDB durability fence overflow");
         const fence = durabilityRevision(BigInt(previousFence) + 1n);
-        const ownerWrite = requestResult(owners.put({ journalId, ownerId, fence }));
-        const journalRead = requestResult(journals.get(journalId));
-        const batchesRead = requestResult(batches.index(JOURNAL_INDEX).getAll(journalId));
-        Promise.all([ownerWrite, journalRead, batchesRead]).then(
-          ([, journal, storedBatches]) => {
-            try {
-              const revision = durabilityRevision(journal?.revision ?? "0");
-              const loadedBatches = storedBatches.map((batch) => ({
-                revision: durabilityRevision(batch.revision),
-                payload: validatePayload(batch.payload),
-              }));
-              loadedBatches.sort((left, right) => (
-                compareRevisions(left.revision, right.revision)
-              ));
-              resolve(Object.freeze({
-                ownerId,
-                fence,
-                revision,
-                batches: Object.freeze(loadedBatches.map((batch) => Object.freeze(batch))),
-              }));
-            } catch (error) {
-              try { transaction.abort(); } catch {}
-              reject(error);
-            }
-          },
-          reject,
-        );
+        await requestResult(owners.put({ stateId, ownerId, fence }));
+        const state = storedState(await requestResult(transaction.objectStore(STATES).get(stateId)), stateId);
+        await completed;
+        return Object.freeze({ ownerId, fence, ...state });
       } catch (error) {
         try { transaction.abort(); } catch {}
-        reject(error);
+        await completed.catch(() => {});
+        throw error;
       }
-    };
-  });
-}
+    },
 
-function compareAndAppend(
-  transaction,
-  owners,
-  journals,
-  batches,
-  journalId,
-  ownerId,
-  fence,
-  expectedRevision,
-  payload,
-) {
-  return new Promise((resolve, reject) => {
-    const ownerRequest = owners.get(journalId);
-    ownerRequest.onerror = () => reject(
-      ownerRequest.error ?? new Error("reading durability owner failed"),
-    );
-    ownerRequest.onsuccess = () => {
+    async replace(stateId, request) {
+      requireId(stateId, "durability state ID");
+      const ownerId = requireId(request?.ownerId, "durability owner ID");
+      const fence = durabilityRevision(request?.fence);
+      const db = await open();
+      const transaction = db.transaction([OWNERS, STATES], "readwrite");
+      const completed = transactionCompletion(transaction);
       try {
-        const storedOwner = ownerRequest.result;
-        if (
-          storedOwner?.ownerId !== ownerId
-          || durabilityRevision(storedOwner?.fence ?? "0") !== fence
-        ) {
-          resolve({ status: "fenced" });
-          return;
+        const ownerValue = await requestResult(transaction.objectStore(OWNERS).get(stateId));
+        const owner = ownerValue === undefined ? undefined : storedOwner(ownerValue, stateId);
+        if (owner?.ownerId !== ownerId || durabilityRevision(owner?.fence ?? "0") !== fence) {
+          await completed;
+          return { status: "fenced" };
         }
-        const journalRequest = journals.get(journalId);
-        journalRequest.onerror = () => reject(
-          journalRequest.error ?? new Error("reading durability revision failed"),
-        );
-        journalRequest.onsuccess = () => {
-          try {
-            const actualRevision = durabilityRevision(journalRequest.result?.revision ?? "0");
-            if (actualRevision !== expectedRevision) {
-              resolve({ status: "conflict", actualRevision });
-              return;
-            }
-            if (actualRevision === MAX_REVISION) {
-              resolve({
-                status: "not_committed",
-                message: "IndexedDB durability revision overflow",
-              });
-              return;
-            }
-            const revision = durabilityRevision(BigInt(actualRevision) + 1n);
-            journals.put({ journalId, revision });
-            batches.add({ journalId, revision, payload });
-            resolve({ status: "appended", revision });
-          } catch (error) {
-            try { transaction.abort(); } catch {}
-            reject(error);
-          }
-        };
+        const expectedRevision = durabilityRevision(request?.expectedRevision);
+        const states = transaction.objectStore(STATES);
+        const state = storedState(await requestResult(states.get(stateId)), stateId);
+        if (state.revision !== expectedRevision) {
+          await completed;
+          return { status: "conflict", actualRevision: state.revision };
+        }
+        if (expectedRevision === MAX_REVISION) {
+          await completed;
+          return { status: "not_committed", message: "IndexedDB durability revision overflow" };
+        }
+        const payload = requirePayload(request?.payload);
+        const revision = durabilityRevision(BigInt(expectedRevision) + 1n);
+        await requestResult(states.put({ stateId, revision, payload }));
+        await completed;
+        return { status: "replaced", revision };
       } catch (error) {
         try { transaction.abort(); } catch {}
-        reject(error);
+        await completed.catch(() => {});
+        throw error;
       }
-    };
+    },
   });
 }
 
@@ -238,44 +105,70 @@ function openDatabase(indexedDb, databaseName, invalidate) {
     const request = indexedDb.open(databaseName, DATABASE_VERSION);
     request.onupgradeneeded = () => {
       const database = request.result;
-      if (!database.objectStoreNames.contains(OWNERS_STORE)) {
-        database.createObjectStore(OWNERS_STORE, { keyPath: "journalId" });
-      }
-      if (!database.objectStoreNames.contains(JOURNALS_STORE)) {
-        database.createObjectStore(JOURNALS_STORE, { keyPath: "journalId" });
-      }
-      if (!database.objectStoreNames.contains(BATCHES_STORE)) {
-        const batches = database.createObjectStore(BATCHES_STORE, {
-          keyPath: ["journalId", "revision"],
-        });
-        batches.createIndex(JOURNAL_INDEX, "journalId", { unique: false });
-      }
+      database.createObjectStore(OWNERS, { keyPath: "stateId" });
+      database.createObjectStore(STATES, { keyPath: "stateId" });
     };
-    request.onerror = () => {
-      if (settled) return;
-      settled = true;
-      reject(request.error ?? new Error("opening browser durability failed"));
-    };
-    request.onblocked = () => {
-      if (settled) return;
-      settled = true;
-      reject(new Error("opening browser durability was blocked"));
-    };
+    request.onerror = () => settle(reject, request.error ?? new Error("opening browser durability failed"));
+    request.onblocked = () => settle(reject, new Error("opening browser durability was blocked"));
     request.onsuccess = () => {
-      const database = request.result;
-      if (settled) {
-        database.close();
-        return;
+      const opened = request.result;
+      if (settled) return opened.close();
+      const stores = Array.from(opened.objectStoreNames).sort();
+      if (stores.length !== 2 || stores[0] !== OWNERS || stores[1] !== STATES
+        || !validStoreSchema(opened, OWNERS) || !validStoreSchema(opened, STATES)) {
+        opened.close();
+        return settle(reject, new Error("incompatible IndexedDB durability schema; delete the database"));
       }
       settled = true;
-      database.onversionchange = () => {
-        invalidate();
-        database.close();
-      };
-      database.onclose = () => invalidate();
-      resolve(database);
+      opened.onversionchange = () => { invalidate(); opened.close(); };
+      opened.onclose = () => invalidate();
+      resolve(opened);
     };
+    function settle(callback, value) {
+      if (settled) return;
+      settled = true;
+      callback(value);
+    }
   });
+}
+
+function validStoreSchema(database, name) {
+  try {
+    const store = database.transaction([name], "readonly").objectStore(name);
+    return store.keyPath === "stateId" && store.autoIncrement === false;
+  } catch {
+    return false;
+  }
+}
+
+function storedState(value, stateId) {
+  if (value === undefined) return Object.freeze({ revision: "0", payload: null });
+  exactRecord(value, ["stateId", "revision", "payload"], "IndexedDB durability state");
+  if (value.stateId !== stateId) throw new TypeError("IndexedDB durability state ID mismatch");
+  return Object.freeze({
+    revision: durabilityRevision(value.revision),
+    payload: requirePayload(value.payload),
+  });
+}
+
+function storedOwner(value, stateId) {
+  exactRecord(value, ["stateId", "ownerId", "fence"], "IndexedDB durability owner");
+  if (value.stateId !== stateId) throw new TypeError("IndexedDB durability owner ID mismatch");
+  return Object.freeze({
+    ownerId: requireId(value.ownerId, "durability owner ID"),
+    fence: durabilityRevision(value.fence),
+  });
+}
+
+function exactRecord(value, expected, label) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError(`${label} must be an object`);
+  }
+  const actual = Object.keys(value).sort();
+  const required = [...expected].sort();
+  if (actual.length !== required.length || actual.some((key, index) => key !== required[index])) {
+    throw new TypeError(`${label} has an invalid shape`);
+  }
 }
 
 function requestResult(request) {
@@ -288,37 +181,17 @@ function requestResult(request) {
 function transactionCompletion(transaction) {
   return new Promise((resolve, reject) => {
     transaction.oncomplete = () => resolve();
-    transaction.onerror = () => reject(
-      transaction.error ?? new Error("IndexedDB durability transaction failed"),
-    );
-    transaction.onabort = () => reject(
-      transaction.error ?? new Error("IndexedDB durability transaction was aborted"),
-    );
+    transaction.onerror = () => reject(transaction.error ?? new Error("IndexedDB durability transaction failed"));
+    transaction.onabort = () => reject(transaction.error ?? new Error("IndexedDB durability transaction was aborted"));
   });
 }
 
-function validateJournalId(journalId) {
-  if (typeof journalId !== "string" || !journalId) {
-    throw new TypeError("durability journal ID must be a non-empty string");
-  }
+function requireId(value, label) {
+  if (typeof value !== "string" || !value.trim()) throw new TypeError(`${label} must be a non-empty string`);
+  return value;
 }
 
-function validatePayload(payload) {
-  if (typeof payload !== "string") {
-    throw new TypeError("durability batch payload must be a string");
-  }
-  return payload;
-}
-
-function validateOwnerId(ownerId) {
-  if (typeof ownerId !== "string" || !ownerId.trim()) {
-    throw new TypeError("durability owner ID must be a non-empty string");
-  }
-  return ownerId;
-}
-
-function compareRevisions(left, right) {
-  const leftRevision = BigInt(left);
-  const rightRevision = BigInt(right);
-  return leftRevision < rightRevision ? -1 : leftRevision > rightRevision ? 1 : 0;
+function requirePayload(value) {
+  if (typeof value !== "string") throw new TypeError("durability payload must be a string");
+  return value;
 }

@@ -341,10 +341,6 @@ pub enum TurnState {
     Accepted,
     /// Cancellation was requested.
     Cancelling,
-    /// Execution failed transiently and may retry.
-    Retryable,
-    /// Execution is blocked on an unavailable capability.
-    Blocked,
     /// Execution completed successfully.
     Completed,
     /// Execution was cancelled.
@@ -505,13 +501,6 @@ pub enum ManagedEventData {
         /// Retryable failure detail.
         error: String,
     },
-    /// A turn is blocked on an unavailable capability.
-    TurnBlocked {
-        /// Stable managed turn identifier.
-        id: String,
-        /// Blocking failure detail.
-        error: String,
-    },
     /// A turn failed terminally.
     TurnFailed {
         /// Stable managed turn identifier.
@@ -638,13 +627,6 @@ impl ManagedEventData {
                     error: value.error,
                 })
             }
-            "turn_blocked" => {
-                let value: Failure = decode_raw(raw)?;
-                Ok(Self::TurnBlocked {
-                    id: value.id,
-                    error: value.error,
-                })
-            }
             "turn_failed" => {
                 let value: Failure = decode_raw(raw)?;
                 Ok(Self::TurnFailed {
@@ -699,7 +681,6 @@ impl ManagedEventData {
             | Self::TurnCompleted { id, .. }
             | Self::TurnCancelled { id }
             | Self::TurnRetryable { id, .. }
-            | Self::TurnBlocked { id, .. }
             | Self::TurnFailed { id, .. } => Some(id),
             Self::AgentCreated { .. } | Self::Event { .. } | Self::StreamFailed { .. } => None,
         }
@@ -718,11 +699,6 @@ impl ManagedEventData {
                 state: "cancelled".to_owned(),
                 message: "managed turn was cancelled".to_owned(),
             })),
-            Self::TurnBlocked { id, error } if id == turn_id => Some(Err(ManagedError::Turn {
-                turn_id: id.clone(),
-                state: "blocked".to_owned(),
-                message: error.clone(),
-            })),
             Self::TurnFailed { id, error } if id == turn_id => Some(Err(ManagedError::Turn {
                 turn_id: id.clone(),
                 state: "failed".to_owned(),
@@ -740,7 +716,6 @@ impl ManagedEventData {
             Self::TurnCompleted { .. } => "turn_completed",
             Self::TurnCancelled { .. } => "turn_cancelled",
             Self::TurnRetryable { .. } => "turn_retryable",
-            Self::TurnBlocked { .. } => "turn_blocked",
             Self::TurnFailed { .. } => "turn_failed",
             Self::Event { .. } => "event",
             Self::StreamFailed { .. } => "stream_failed",

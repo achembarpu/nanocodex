@@ -205,6 +205,44 @@ test("retained history merges older pages by durable turn and exposes load state
   }
 });
 
+test("retained history projects a repeated tool call once", async () => {
+  const frames = fakeAnimationFrames();
+  const source = fakeAgent();
+  source.history = [
+    event(1, "managed.prompt", { text: "use a tool", turn_id: "turn-1" }),
+    event(2, "tool.call", {
+      call_id: "call-retained", tool: "exec_command",
+      arguments: { cmd: "pwd" }, turn_id: "turn-1",
+    }),
+    event(2, "tool.call", {
+      call_id: "call-retained", tool: "exec_command",
+      arguments: { cmd: "pwd" }, turn_id: "turn-1",
+    }),
+    event(3, "tool.result", {
+      call_id: "call-retained", status: "completed", result: "done", turn_id: "turn-1",
+    }),
+  ];
+  let controller;
+
+  function Consumer() {
+    controller = useAgentController(source.agent);
+    return null;
+  }
+
+  let root;
+  try {
+    await act(async () => { root = create(createElement(Consumer)); });
+    await flushFrames(frames);
+    const tools = controller.entries.filter((entry) => entry.kind === "tool");
+    assert.equal(tools.length, 1);
+    assert.equal(tools[0].id, "tool-call-retained");
+    assert.equal(tools[0].tool.status, "completed");
+    await act(async () => root.unmount());
+  } finally {
+    frames.restore();
+  }
+});
+
 test("hidden controllers reduce bursts and publish one visible catch-up snapshot", async () => {
   const frames = fakeAnimationFrames();
   const source = fakeAgent();

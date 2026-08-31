@@ -8,6 +8,12 @@ import type {
 } from "../types.mjs";
 import type { CloudflareDurableObjectStorage } from "../runtime/cloudflare-durability-store.mjs";
 import type { Tool as SubagentTool } from "../runtime/subagents.mjs";
+import type {
+  DurabilityExportPageRequest,
+  DurabilityPortableStateArchive,
+  DurabilityPortableStatePage,
+  DurabilityStoredState,
+} from "../types.mjs";
 
 export type DurableObjectContext = Readonly<{
   storage: CloudflareDurableObjectStorage;
@@ -49,8 +55,25 @@ export type Agent<extended extends object = {}> =
 /** Removes the package-owned durable history for one Cloudflare Agent. */
 export function destroy(owner: DurableObjectOwner): void;
 
-/** Compacts retained durable history before constructing the full Agent runtime. */
-export function compactDurability(
+/** Fences and exports this inactive Cloudflare Agent's provider-neutral state. */
+export function exportDurabilityState(
+  owner: DurableObjectOwner,
+): Promise<DurabilityPortableStateArchive>;
+
+/** Fences once and exports one resumable page of an exact revision range. */
+export function exportDurabilityState(
+  owner: DurableObjectOwner,
+  request: DurabilityExportPageRequest,
+): Promise<DurabilityPortableStatePage>;
+
+/** Imports provider-neutral state into a pristine Cloudflare Agent owner. */
+export function importDurabilityState(
+  owner: DurableObjectOwner,
+  archive: DurabilityPortableStateArchive,
+): Promise<DurabilityStoredState>;
+
+/** Prunes old terminal receipts before constructing the full Agent runtime. */
+export function pruneDurableReceipts(
   owner: DurableObjectOwner,
   options?: Readonly<{ terminalReceiptRetention?: number | undefined }>,
 ): Promise<void>;
@@ -66,6 +89,8 @@ export function create(owner: create.Owner, options?: create.Options): Promise<c
 export declare namespace create {
   type Owner = DurableObjectOwner;
   type Options = Readonly<{
+    /** Stable portable state identity. It cannot change after first construction or import. */
+    durabilityId?: string | undefined;
     /**
      * `durable` retains the adapter's resumable event socket. `caller` leaves
      * event retention to the embedding Durable Object and disables connect().
@@ -73,7 +98,7 @@ export declare namespace create {
     eventPersistence?: "durable" | "caller" | undefined;
     instructions?: string | undefined;
     /**
-     * Bounds terminal receipts retained in the hot Rust journal checkpoint.
+     * Bounds terminal receipts retained in the hot Rust state checkpoint.
      * The caller must preserve older exact-ID results before selecting this.
      */
     terminalReceiptRetention?: number | undefined;

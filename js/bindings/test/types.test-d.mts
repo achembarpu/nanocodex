@@ -72,20 +72,28 @@ import { nanocodexTools } from "../tools/vite.mjs";
 import { nanocodex } from "../vite/index.mjs";
 import {
   createMemoryDurabilityStore,
+  DurabilityImportConflictError,
   durabilityRevision,
-  type DurabilityAcquiredJournal,
+  durabilityStateDigest,
+  exportDurabilityState,
+  exportDurabilityStatePage,
+  importDurabilityState,
+  importDurabilityStatePages,
+  type DurabilityAcquiredState,
   type DurabilityAcquireRequest,
-  type DurabilityAppendRequest,
-  type DurabilityAppendResult,
+  type DurabilityReplaceRequest,
+  type DurabilityReplaceResult,
   type DurabilityFence,
+  type DurabilityPortableStateArchive,
+  type DurabilityPortableStatePage,
+  type DurabilityPortableStore,
   type DurabilityRevision,
   type DurabilitySqliteQuery,
   type DurabilitySqliteRow,
   type DurabilitySqliteTransaction,
   type DurabilitySqliteValue,
   type DurabilityStore,
-  type DurabilityStoredBatch,
-  type DurabilityStoredJournal,
+  type DurabilityStoredState,
   type MemoryDurabilityStore,
   type SqliteDurabilityStoreOptions,
 } from "nanocodex/durability";
@@ -94,7 +102,7 @@ import {
   type PostgresDurabilityClient,
   type PostgresDurabilityPool,
   type PostgresDurabilityQueryResult,
-  UnknownPostgresCommitOutcomeError,
+  PostgresDurabilityUnavailableError,
 } from "../runtime/postgres-durability-store.mjs";
 import {
   createCloudflareDurabilityStore,
@@ -169,39 +177,53 @@ async function check() {
   parallelTool.supportsParallelToolCalls = "yes";
   // @ts-expect-error MCP parallel allowlists contain remote tool names.
   parallelMcp.parallelTools = [1];
-  const storedJournal: DurabilityStoredJournal = {
+  const storedState: DurabilityStoredState = {
     revision: durabilityRevision(0n),
-    batches: [],
+    payload: null,
   };
-  const revision: DurabilityRevision = storedJournal.revision;
-  const batch: DurabilityStoredBatch | undefined = storedJournal.batches[0];
+  const revision: DurabilityRevision = storedState.revision;
   const memoryStore: MemoryDurabilityStore = createMemoryDurabilityStore("typed-memory");
+  const portableStore: DurabilityPortableStore = memoryStore;
+  const portableArchive: DurabilityPortableStateArchive = await exportDurabilityState(
+    portableStore,
+    "typed-memory",
+  );
+  await importDurabilityState(portableStore, portableArchive);
+  const portablePage: DurabilityPortableStatePage = await exportDurabilityStatePage(
+    portableStore,
+    "typed-memory",
+    { from: durabilityRevision("0"), limit: 1024 },
+  );
+  const stateDigest: string = await durabilityStateDigest(storedState);
+  await importDurabilityStatePages(createMemoryDurabilityStore("typed-memory"), [portablePage]);
+  const importConflict: Error = new DurabilityImportConflictError("typed-memory");
   const sqliteValue: DurabilitySqliteValue = revision;
   const sqliteRow: DurabilitySqliteRow = { revision: sqliteValue };
   const sqliteQuery: DurabilitySqliteQuery = <Row extends DurabilitySqliteRow>() => [] as Row[];
   const sqliteTransaction: DurabilitySqliteTransaction = (callback) => callback(sqliteQuery);
   const sqliteOptions: SqliteDurabilityStoreOptions = { transaction: sqliteTransaction };
-  void batch;
   void memoryStore;
+  void importConflict;
+  void stateDigest;
   void sqliteOptions;
   const durabilityStore: DurabilityStore = {
-    load: () => storedJournal,
+    load: () => storedState,
     acquire: (
-      _journalId: string,
+      _stateId: string,
       request: DurabilityAcquireRequest,
-    ): DurabilityAcquiredJournal => ({
-      ...storedJournal,
+    ): DurabilityAcquiredState => ({
+      ...storedState,
       ownerId: request.ownerId,
       fence: "1" as DurabilityFence,
     }),
-    append: (_journalId: string, request: DurabilityAppendRequest): DurabilityAppendResult => ({
+    replace: (_stateId: string, request: DurabilityReplaceRequest): DurabilityReplaceResult => ({
       status: "not_committed",
       message: `revision ${request.expectedRevision} was not committed`,
     }),
   };
   const acquired = await durabilityStore.acquire("typed-leaf", { ownerId: "typed-owner" });
   const fence: DurabilityFence = acquired.fence;
-  await durabilityStore.append("typed-leaf", {
+  await durabilityStore.replace("typed-leaf", {
     ownerId: acquired.ownerId,
     fence,
     expectedRevision: acquired.revision,
@@ -224,7 +246,7 @@ async function check() {
   extendedCloudflareAgent.events.connect(new Request("https://agent.internal/events"));
   const cloudflareApplication: true = extendedCloudflareAgent.application;
   void cloudflareApplication;
-  await CloudflareAgent.compactDurability(cloudflareOwner, {
+  await CloudflareAgent.pruneDurableReceipts(cloudflareOwner, {
     terminalReceiptRetention: 0,
   });
   CloudflareAgent.destroy(cloudflareOwner);
@@ -274,7 +296,7 @@ async function check() {
       "SELECT revision::text AS revision",
     );
   postgresClient.release(true);
-  new UnknownPostgresCommitOutcomeError("typed-leaf", new Error("connection closed"));
+  new PostgresDurabilityUnavailableError("typed-leaf", new Error("connection closed"));
   void postgresStore;
   void postgresResult;
   void cloudflareStore;

@@ -209,9 +209,6 @@ test("managed history projects exact outer terminals without duplicate raw assis
     managedOuterEnvelope("5", "turn-failed", {
       type: "turn_failed", id: "turn-failed", error: "permanent failure",
     }),
-    managedOuterEnvelope("6", "turn-blocked", {
-      type: "turn_blocked", id: "turn-blocked", error: "needs reconciliation",
-    }),
     managedOuterEnvelope("7", "turn-retryable", {
       type: "turn_retryable", id: "turn-retryable", error: "try this turn again",
     }),
@@ -246,7 +243,6 @@ test("managed history projects exact outer terminals without duplicate raw assis
     turnId: payload.turn_id,
   })), [
     { disposition: "failed", status: "failed", turnId: "turn-failed" },
-    { disposition: "blocked", status: "failed", turnId: "turn-blocked" },
     { disposition: "cancelled", status: "cancelled", turnId: "turn-cancelled" },
     { disposition: "stream_failed", status: "failed", turnId: undefined },
   ]);

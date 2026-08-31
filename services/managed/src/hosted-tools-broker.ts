@@ -151,7 +151,7 @@ export interface HostedToolsDynamicProvider {
   setCatalogValidator(validator: HostedToolsCatalogValidator | undefined): void;
 }
 
-/** Injectable durable journal boundary; the production default is Durable Object SQLite. */
+/** Injectable durable call ledger boundary; the production default is Durable Object SQLite. */
 export interface HostedToolsBrokerPersistence {
   initialize(now: number): HostedToolsStateRow | undefined;
   transaction<T>(callback: () => T): T;
@@ -309,6 +309,8 @@ export class HostedToolsBroker {
   }
 
   isReady(): boolean { return this.#definitions().length > 0; }
+
+  hasPendingCalls(): boolean { return this.#pending.size > 0; }
 
   provider(): HostedToolsDynamicProvider { return this.#provider; }
 
@@ -727,9 +729,9 @@ export class HostedToolsBroker {
       const socket = state.lease_id === leaseId && state.generation === binding.generation
         ? this.#socketForState(state)
         : undefined;
-      if (socket) this.#fence(socket, "Hosted Tools generation exhausted its durable call journal");
+      if (socket) this.#fence(socket, "Hosted Tools generation exhausted its durable call ledger");
       else if (state.lease_id === leaseId && state.generation === binding.generation) {
-        this.#retireState(state, "Hosted Tools generation exhausted its durable call journal");
+        this.#retireState(state, "Hosted Tools generation exhausted its durable call ledger");
       }
       return Promise.resolve(unavailable("Hosted Tools generation reached its durable call limit"));
     }

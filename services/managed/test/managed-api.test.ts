@@ -7,7 +7,7 @@ import {
 } from "cloudflare:test";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
-import { MemoryScope, NanocodexSession, UserAccount, type Env } from "../src/index";
+import { DurableAgentSession, MemoryScope, UserAccount, type Env } from "../src/index";
 import { DurableEventLog } from "../src/durable-events";
 import { ManagedEventArchive } from "../src/managed-event-archive";
 import type { OrganizationCapability } from "../src/account-auth";
@@ -24,6 +24,7 @@ const HOSTED_PASSKEY_PUBLIC_KEY = "0x046b17d1f2e12c4247f8bce6e563a440f277037d812
 const HOSTED_PASSKEY_ADDRESS = "0xd3a9f047ad43d7e2e4e7e491f1fe2e657a2651b6";
 const OWNER_CAPABILITIES = [
   "agents:read",
+  "agents:portability",
   "agents:write",
   "api_keys:read",
   "api_keys:write",
@@ -223,13 +224,13 @@ describe("managed agents REST and resumable SSE", () => {
     const capacity = await response.json<{
       archived_turns: { archived_bytes: number; archived_receipts: number; objects: number };
       database_size_bytes: number;
-      journal: { bytes: number; max_batch_bytes: number; revision: string; rows: number };
+      durable_state: { bytes: number; revision: string; rows: number };
       known_payload_bytes: number;
       managed_events: { bytes: number; rows: number };
       raw_events: { bytes: number; rows: number };
       turns: {
-        blocked_rows: number;
         input_bytes: number;
+        retry_rows: number;
         terminal_bytes: number;
         terminal_rows: number;
         total_rows: number;
@@ -239,16 +240,14 @@ describe("managed agents REST and resumable SSE", () => {
     }>();
 
     expect(capacity.database_size_bytes).toBeGreaterThan(0);
-    expect(capacity.journal).toMatchObject({ rows: expect.any(Number) });
-    expect(capacity.journal.rows).toBeGreaterThan(0);
-    expect(capacity.journal.bytes).toBeGreaterThan(0);
-    expect(capacity.journal.max_batch_bytes).toBeGreaterThan(0);
-    expect(BigInt(capacity.journal.revision)).toBeGreaterThan(0n);
+    expect(capacity.durable_state).toMatchObject({ rows: 1 });
+    expect(capacity.durable_state.bytes).toBeGreaterThan(0);
+    expect(BigInt(capacity.durable_state.revision)).toBeGreaterThan(0n);
     expect(capacity.managed_events.rows).toBeGreaterThan(0);
     expect(capacity.managed_events.bytes).toBeGreaterThan(0);
     expect(capacity.raw_events).toEqual({ rows: 0, bytes: 0 });
     expect(capacity.turns).toMatchObject({
-      blocked_rows: 0,
+      retry_rows: 0,
       terminal_rows: 1,
       total_rows: 1,
       unfinished_rows: 0,
@@ -560,7 +559,7 @@ describe("managed agents REST and resumable SSE", () => {
     expect(await corrupt.json()).toMatchObject({ error: "turn_archive_unavailable" });
   }, 30_000);
 
-  it("compacts a terminal journal prefix and cold-reopens from the retained checkpoint", async () => {
+  it("prunes terminal receipts and cold-reopens from the retained state", async () => {
     const agent = await createAgent();
     for (let index = 0; index < 22; index += 1) {
       const id = `turn-compaction-${index}`;
@@ -570,10 +569,10 @@ describe("managed agents REST and resumable SSE", () => {
 
     const session = testEnv.NANOCODEX_SESSIONS.getByName(agent.agent_id);
     const before = await (await session.fetch("https://session.internal/capacity")).json<{
-      journal: { revision: string; rows: number };
+      durable_state: { revision: string; rows: number };
     }>();
-    expect(BigInt(before.journal.revision)).toBeGreaterThanOrEqual(66n);
-    expect(BigInt(before.journal.rows)).toBeLessThan(BigInt(before.journal.revision));
+    expect(BigInt(before.durable_state.revision)).toBeGreaterThanOrEqual(44n);
+    expect(before.durable_state.rows).toBe(1);
 
     let pendingProjections = Number.POSITIVE_INFINITY;
     for (let attempt = 0; attempt < 4 && pendingProjections > 0; attempt += 1) {
@@ -601,34 +600,37 @@ describe("managed agents REST and resumable SSE", () => {
     await submit(agent, "turn-after-compaction-reopen", "AFTER_COMPACTION_REOPEN");
     await waitForTurnState(agent, "turn-after-compaction-reopen", "completed");
     const after = await (await session.fetch("https://session.internal/capacity")).json<{
-      journal: { revision: string; rows: number };
+      durable_state: { revision: string; rows: number };
       turns: { terminal_rows: number };
     }>();
-    expect(BigInt(after.journal.revision)).toBeGreaterThan(BigInt(before.journal.revision));
-    expect(BigInt(after.journal.rows)).toBeLessThan(BigInt(after.journal.revision));
+    expect(BigInt(after.durable_state.revision)).toBeGreaterThan(
+      BigInt(before.durable_state.revision),
+    );
+    expect(after.durable_state.rows).toBe(1);
     expect(after.turns.terminal_rows).toBe(23);
   }, 60_000);
 
-  it("compacts multiple retained journal batches before cold Agent construction", async () => {
+  it("retains exactly one total state across cold Agent construction", async () => {
     const agent = await createAgent();
     await submit(agent, "turn-before-cold-preconstruction", "BEFORE_COLD_PRECONSTRUCTION");
     await waitForTurnState(agent, "turn-before-cold-preconstruction", "completed");
 
     const session = testEnv.NANOCODEX_SESSIONS.getByName(agent.agent_id);
     const before = await (await session.fetch("https://session.internal/capacity")).json<{
-      journal: { revision: string; rows: number };
+      durable_state: { revision: string; rows: number };
     }>();
-    expect(before.journal.rows).toBeGreaterThan(1);
+    expect(before.durable_state.rows).toBe(1);
     await evictDurableObject(session);
 
     await submit(agent, "turn-after-cold-preconstruction", "AFTER_COLD_PRECONSTRUCTION");
     await waitForTurnState(agent, "turn-after-cold-preconstruction", "completed");
     const after = await (await session.fetch("https://session.internal/capacity")).json<{
-      journal: { revision: string; rows: number };
+      durable_state: { revision: string; rows: number };
     }>();
-    const appended = Number(BigInt(after.journal.revision) - BigInt(before.journal.revision));
-    expect(appended).toBeGreaterThan(0);
-    expect(after.journal.rows).toBe(1 + appended);
+    expect(BigInt(after.durable_state.revision)).toBeGreaterThan(
+      BigInt(before.durable_state.revision),
+    );
+    expect(after.durable_state.rows).toBe(1);
   }, 30_000);
 
   it("keeps connector OAuth state and credentials behind a persistent account", async () => {
@@ -679,7 +681,7 @@ describe("managed agents REST and resumable SSE", () => {
     expect(anonymousEgress.status).toBe(401);
 
     const connectorUserId = "55555555-5555-4555-8555-555555555555";
-    const connectorToken = "c".repeat(43);
+    const connectorToken = "c".repeat(64);
     await seedPasskeySession(connectorUserId, connectorToken);
     const cookie = `nanocodex_account=${connectorToken}`;
 
@@ -831,7 +833,7 @@ describe("managed agents REST and resumable SSE", () => {
 
   it("projects an owner-bound MCP catalog without broker-private connection material", async () => {
     const userId = "66666666-6666-4666-8666-666666666666";
-    const token = "m".repeat(43);
+    const token = "a".repeat(64);
     const cookie = `nanocodex_account=${token}`;
     const connectionId = "L".repeat(43);
     await seedPasskeySession(userId, token);
@@ -1100,7 +1102,7 @@ describe("managed agents REST and resumable SSE", () => {
       expect(brokerRequests).toHaveLength(0);
 
       const userId = "88888888-8888-4888-8888-888888888888";
-      const token = "p".repeat(43);
+      const token = "b".repeat(64);
       await seedPasskeySession(userId, token);
       const cookie = `nanocodex_account=${token}`;
 
@@ -1179,7 +1181,7 @@ describe("managed agents REST and resumable SSE", () => {
 
   it("links a Tempo account to one persistent Nanocodex profile through a one-time code", async () => {
     const userId = "66666666-6666-4666-8666-666666666666";
-    const sessionToken = "l".repeat(43);
+    const sessionToken = "c".repeat(64);
     const cookie = `nanocodex_account=${sessionToken}`;
     const accountAddress = "0x1111111111111111111111111111111111111111";
     const state = "s".repeat(43);
@@ -1291,7 +1293,7 @@ describe("managed agents REST and resumable SSE", () => {
 
   it("authorizes the signed Connect account from its existing first-party session", async () => {
     const userId = "77777777-7777-4777-8777-777777777777";
-    const sessionToken = "m".repeat(43);
+    const sessionToken = "a".repeat(64);
     const cookie = `nanocodex_account=${sessionToken}`;
     const accountAddress = "0x2222222222222222222222222222222222222222";
     const state = "t".repeat(43);
@@ -1338,8 +1340,8 @@ describe("managed agents REST and resumable SSE", () => {
   it("issues and atomically exchanges a hosted authorization derived from the active passkey", async () => {
     const userId = "88888888-8888-4888-8888-888888888888";
     const otherUserId = "99999999-9999-4999-8999-999999999999";
-    const token = "h".repeat(43);
-    const otherToken = "j".repeat(43);
+    const token = "d".repeat(64);
+    const otherToken = "a".repeat(64);
     const cookie = `nanocodex_account=${token}`;
     const resources = [
       "urn:nanocodex:capability:agent.run",
@@ -1432,7 +1434,7 @@ describe("managed agents REST and resumable SSE", () => {
 
   it("strictly bounds hosted authorization authority and rejects MPP", async () => {
     const userId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
-    const token = "i".repeat(43);
+    const token = "e".repeat(64);
     const cookie = `nanocodex_account=${token}`;
     await seedPasskeySession(userId, token, HOSTED_PASSKEY_PUBLIC_KEY);
     const authorize = (body: unknown) => RAW_SELF.fetch(
@@ -1453,7 +1455,7 @@ describe("managed agents REST and resumable SSE", () => {
     const sessionUserId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
     const passkeyUserId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
     const mismatchedToken = `a_${"p".repeat(43)}`;
-    await seedPasskeySession(sessionUserId, "k".repeat(43), HOSTED_PASSKEY_PUBLIC_KEY);
+    await seedPasskeySession(sessionUserId, "b".repeat(64), HOSTED_PASSKEY_PUBLIC_KEY);
     await seedPasskeySession(passkeyUserId, mismatchedToken, HOSTED_PASSKEY_PUBLIC_KEY);
     await seedBrowserAccountSession(sessionUserId, mismatchedToken);
     const mismatchedIdentity = await RAW_SELF.fetch(
@@ -1536,13 +1538,14 @@ describe("managed agents REST and resumable SSE", () => {
       );
     }
 
+    const expiredPasskeyToken = "9".repeat(64);
     const expiredPasskey = await RAW_SELF.fetch("https://example.test/v1/me", {
-      headers: { cookie: `nanocodex_account=${"z".repeat(43)}` },
+      headers: { cookie: `nanocodex_account=${expiredPasskeyToken}` },
     });
     expect(expiredPasskey.status).toBe(401);
     expect(await expiredPasskey.json()).toEqual({ error: "reauthentication_required" });
     expect(expiredPasskey.headers.get("set-cookie")).toBe(
-      `nanocodex_account=${"z".repeat(43)}; Path=/; Max-Age=31536000; HttpOnly; SameSite=Lax; Secure`,
+      `nanocodex_account=${expiredPasskeyToken}; Path=/; Max-Age=31536000; HttpOnly; SameSite=Lax; Secure`,
     );
 
     const unrelatedCookie = await RAW_SELF.fetch("https://example.test/v1/me", {
@@ -1554,8 +1557,11 @@ describe("managed agents REST and resumable SSE", () => {
     );
   });
 
-  it("recognizes passkey sessions even when their random token begins with the anonymous prefix", async () => {
-    const tokens = ["w".repeat(43), `a_${"w".repeat(41)}`];
+  it("recognizes only the exact generated passkey-session token shape", async () => {
+    const tokens = [
+      "0123456789abcdef".repeat(4),
+      "fedcba9876543210".repeat(4),
+    ];
     for (const [index, token] of tokens.entries()) {
       const userId = `22222222-2222-4222-8222-22222222222${index}`;
       await seedPasskeySession(userId, token);
@@ -2062,7 +2068,7 @@ describe("managed agents REST and resumable SSE", () => {
       { headers: { upgrade: "websocket" } },
     )).status).toBe(400);
 
-    const token = "v".repeat(43);
+    const token = "f".repeat(64);
     await seedPasskeySession(USER_ID, token);
     const cookie = `nanocodex_account=${token}`;
     const crossOrigin = await RAW_SELF.fetch(`${route}/calls`, {
@@ -2105,7 +2111,7 @@ describe("managed agents REST and resumable SSE", () => {
     expect(anonymousCookie).toMatch(/^nanocodex_account=a_[A-Za-z0-9_-]{43}$/);
 
     const passkeyUserId = "44444444-4444-4444-8444-444444444444";
-    const passkeyToken = `a_${"z".repeat(41)}`;
+    const passkeyToken = "d".repeat(64);
     await seedPasskeySession(passkeyUserId, passkeyToken);
     const principals = [
       { kind: "anonymous", cookie: anonymousCookie! },
@@ -2602,7 +2608,7 @@ describe("managed agents REST and resumable SSE", () => {
   it("keeps managed realtime mutations same-origin, owner-asserted, and bounded", async () => {
     const agent = await createAgent();
     const realtimeUrl = agent.events_url.replace(/\/events$/, "/realtime/start");
-    const token = "r".repeat(43);
+    const token = "1".repeat(64);
     await seedPasskeySession(USER_ID, token);
     const cookie = `nanocodex_account=${token}`;
     const body = JSON.stringify({
@@ -2938,7 +2944,7 @@ describe("managed agents REST and resumable SSE", () => {
     await runInDurableObject(session, (_instance, state) => {
       state.storage.sql.exec(
         `UPDATE managed_turns
-         SET state = 'retryable', terminal_json = NULL,
+         SET state = 'accepted', terminal_json = NULL,
              terminal_cursor = NULL, error = 'injected routed projection gap', retry_at = 0
          WHERE id = ?`,
         routed.turn_id,
@@ -3183,6 +3189,25 @@ describe("managed agents REST and resumable SSE", () => {
     });
     expect(missingTools.status).toBe(403);
 
+    const durabilityUrl = agent.events_url.replace(/\/events$/, "/durability");
+    expect((await RAW_SELF.fetch(durabilityUrl, {
+      method: "POST",
+      headers: writeOnly,
+    })).status).toBe(403);
+    expect((await RAW_SELF.fetch(`${durabilityUrl}?unexpected=1`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${API_KEY}` },
+    })).status).toBe(400);
+    expect((await RAW_SELF.fetch("https://example.test/v1/agents?unexpected=1", {
+      method: "POST",
+      headers: { authorization: `Bearer ${API_KEY}` },
+    })).status).toBe(400);
+    expect((await RAW_SELF.fetch("https://example.test/v1/agents", {
+      method: "POST",
+      headers: { ...writeOnly, "content-type": "application/json" },
+      body: JSON.stringify({ durability: { format: "unauthorized-import" } }),
+    })).status).toBe(403);
+
     const websocket = await RAW_SELF.fetch(agent.websocket_url.replace("wss:", "https:"), {
       headers: {
         authorization: `Bearer ${API_KEY}`,
@@ -3233,7 +3258,7 @@ describe("managed agents REST and resumable SSE", () => {
   it("forwards one owner-asserted session request and overwrites caller assertions", async () => {
     const agent = await createAgent();
     const stateUrl = agent.events_url.replace(/\/events$/, "");
-    const originalFetch = NanocodexSession.prototype.fetch;
+    const originalFetch = DurableAgentSession.prototype.fetch;
     const forwarded: Array<{
       owner: string | null;
       organization: string | null;
@@ -3242,8 +3267,8 @@ describe("managed agents REST and resumable SSE", () => {
       capabilities: string | null;
       path: string;
     }> = [];
-    const fetchSpy = vi.spyOn(NanocodexSession.prototype, "fetch").mockImplementation(
-      async function (this: NanocodexSession, request: Request): Promise<Response> {
+    const fetchSpy = vi.spyOn(DurableAgentSession.prototype, "fetch").mockImplementation(
+      async function (this: DurableAgentSession, request: Request): Promise<Response> {
         forwarded.push({
           owner: request.headers.get("x-nanocodex-owner-id"),
           organization: request.headers.get("x-nanocodex-session-organization-id"),
@@ -3523,7 +3548,7 @@ describe("managed agents REST and resumable SSE", () => {
     try {
       await submit(agent, "turn-bounded-cold-rebind", "retry after a nonsettling rebind");
       await within(started, "nonsettling cold rebind");
-      const retryable = await waitForTurnState(agent, "turn-bounded-cold-rebind", "retryable");
+      const retryable = await waitForTurnRetry(agent, "turn-bounded-cold-rebind");
       expect(retryable.attempt_count).toBe(1);
       expect(retryable.error).toMatch(/credential subject binding timed out/i);
       expect(retryable.retry_at).not.toBeNull();
@@ -3766,7 +3791,7 @@ describe("managed agents REST and resumable SSE", () => {
 
   it("retains durable cleanup ownership when binding and the first unbind both fail", async () => {
     const originalBroker = testEnv.NANOCODEX;
-    let session: DurableObjectStub<NanocodexSession> | undefined;
+    let session: DurableObjectStub<DurableAgentSession> | undefined;
     let subject: string | undefined;
     let unbindAttempts = 0;
     let rejectUnbind = true;
@@ -3821,7 +3846,7 @@ describe("managed agents REST and resumable SSE", () => {
 
   it("keeps a bound subject owned after initialization and first cleanup fail", async () => {
     const originalBroker = testEnv.NANOCODEX;
-    let session: DurableObjectStub<NanocodexSession> | undefined;
+    let session: DurableObjectStub<DurableAgentSession> | undefined;
     let subject: string | undefined;
     let unbindAttempts = 0;
     let rejectUnbind = true;
@@ -3839,9 +3864,9 @@ describe("managed agents REST and resumable SSE", () => {
         return originalBroker.fetch(request);
       },
     } as Fetcher;
-    const originalFetch = NanocodexSession.prototype.fetch;
-    const fetchSpy = vi.spyOn(NanocodexSession.prototype, "fetch").mockImplementation(
-      async function (this: NanocodexSession, request: Request): Promise<Response> {
+    const originalFetch = DurableAgentSession.prototype.fetch;
+    const fetchSpy = vi.spyOn(DurableAgentSession.prototype, "fetch").mockImplementation(
+      async function (this: DurableAgentSession, request: Request): Promise<Response> {
         if (request.method === "PUT" && new URL(request.url).pathname === "/initialize") {
           return Response.json({ error: "injected_initialize_failure" }, { status: 503 });
         }
@@ -4152,7 +4177,7 @@ describe("managed agents REST and resumable SSE", () => {
       const now = Date.now();
       for (const agentId of ids) {
         state.storage.sql.exec(
-          `INSERT INTO user_agents
+          `INSERT INTO agent_registry
              (id, title, created_at, updated_at, turn_count, deleted_at)
            VALUES (?, '', ?, ?, 0, NULL)`,
           agentId,
@@ -4176,46 +4201,6 @@ describe("managed agents REST and resumable SSE", () => {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ agentId: ids[2_048] }),
     })).status).toBe(410);
-  });
-
-  it("adopts the aggregate account registry without losing deletion fences", async () => {
-    const account = testEnv.NANOCODEX_USERS.getByName(`registry-migration-${crypto.randomUUID()}`);
-    const activeId = "10000000-0000-4000-8000-000000000001";
-    const deletedId = "10000000-0000-4000-8000-000000000002";
-    await runInDurableObject(account, async (_instance, state) => {
-      await state.storage.put({
-        agents: [activeId],
-        agentSummaries: {
-          [activeId]: {
-            id: activeId,
-            title: "Retained title",
-            createdAt: 10,
-            updatedAt: 20,
-            turnCount: 3,
-          },
-        },
-        [`agent-tombstone:${deletedId}`]: true,
-      });
-    });
-    await evictDurableObject(account);
-
-    expect(await (await account.fetch("https://user.internal/agents")).json()).toEqual([{
-      id: activeId,
-      title: "Retained title",
-      createdAt: 10,
-      updatedAt: 20,
-      turnCount: 3,
-    }]);
-    expect((await account.fetch("https://user.internal/agents", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ agentId: deletedId }),
-    })).status).toBe(410);
-    expect(await runInDurableObject(account, async (_instance, state) => ({
-      agents: await state.storage.get("agents"),
-      summaries: await state.storage.get("agentSummaries"),
-      tombstone: await state.storage.get(`agent-tombstone:${deletedId}`),
-    }))).toEqual({ agents: undefined, summaries: undefined, tombstone: undefined });
   });
 
   it("lists durable conversation summaries without probing every agent session", async () => {
@@ -4245,10 +4230,10 @@ describe("managed agents REST and resumable SSE", () => {
   it("carries Unicode conversation summaries through an ASCII-only internal header", async () => {
     const agent = await createAgent();
     const prompt = "Ship 🦀 a durable conversation title that is deliberately longer than fifty-six characters";
-    const originalFetch = NanocodexSession.prototype.fetch;
+    const originalFetch = DurableAgentSession.prototype.fetch;
     let internalHeader: string | null = null;
-    const fetchSpy = vi.spyOn(NanocodexSession.prototype, "fetch").mockImplementation(
-      async function (this: NanocodexSession, request: Request): Promise<Response> {
+    const fetchSpy = vi.spyOn(DurableAgentSession.prototype, "fetch").mockImplementation(
+      async function (this: DurableAgentSession, request: Request): Promise<Response> {
         const response = await originalFetch.call(this, request);
         if (request.method === "POST" && new URL(request.url).pathname === "/turns") {
           internalHeader = response.headers.get("x-nanocodex-turn-summary");
@@ -4528,6 +4513,63 @@ describe("managed agents REST and resumable SSE", () => {
     );
   });
 
+  it("retains cancellation that arrives before turn admission", async () => {
+    const agent = await createAgent();
+    const id = "turn-cancel-before-admission";
+    const turnsUrl = agent.events_url.replace(/\/events$/, "/turns");
+    const cancelUrl = `${turnsUrl}/${id}/cancel`;
+
+    const firstCancel = await SELF.fetch(cancelUrl, { method: "POST" });
+    expect(firstCancel.status).toBe(202);
+    expect(await firstCancel.json()).toEqual({ turn_id: id, state: "cancelling" });
+    const duplicateCancel = await SELF.fetch(cancelUrl, { method: "POST" });
+    expect(duplicateCancel.status).toBe(202);
+    expect(await duplicateCancel.json()).toEqual({ turn_id: id, state: "cancelling" });
+
+    const submitted = await SELF.fetch(turnsUrl, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "idempotency-key": `request-${id}`,
+      },
+      body: JSON.stringify({ id, input: "must never reach the runtime" }),
+    });
+    expect(submitted.status).toBe(202);
+    expect(await submitted.json<ManagedTurnView>()).toMatchObject({
+      state: "cancelling",
+      turn_id: id,
+    });
+
+    await waitForTurnState(agent, id, "cancelled");
+    const history = await managedHistory(agent);
+    expect(history.data.filter(({ type, turn_id }) => turn_id === id && (
+      type === "turn_accepted" || type === "turn_cancelling" || type === "turn_cancelled"
+    )).map(({ type }) => type)).toEqual([
+      "turn_accepted",
+      "turn_cancelling",
+      "turn_cancelled",
+    ]);
+    expect(history.data.some(({ type, turn_id }) => (
+      turn_id === id && type === "event"
+    ))).toBe(false);
+    expect(await runInDurableObject(
+      testEnv.NANOCODEX_SESSIONS.getByName(agent.agent_id),
+      (_instance, state) => ({
+        intentCount: state.storage.sql.exec<{ count: number }>(
+          "SELECT COUNT(*) AS count FROM managed_turn_cancel_intents WHERE turn_id = ?",
+          id,
+        ).one().count,
+        turn: state.storage.sql.exec<{ may_have_inner_operation: number; state: string }>(
+          "SELECT may_have_inner_operation, state FROM managed_turns WHERE id = ?",
+          id,
+        ).one(),
+      }),
+    )).toEqual({
+      intentCount: 0,
+      turn: { may_have_inner_operation: 0, state: "cancelled" },
+    });
+  });
+
   it("uses Last-Event-ID before the query cursor and rejects cursors ahead of storage", async () => {
     const agent = await createAgent();
     await submit(agent, "turn-a", "alpha");
@@ -4624,11 +4666,11 @@ describe("managed agents REST and resumable SSE", () => {
     await waitForTurnState(agent, "turn-before-alarm", "completed");
     const id = new URL(agent.events_url).pathname.split("/").at(-2)!;
     const stub = testEnv.NANOCODEX_SESSIONS.getByName(id);
-    const originalAlarm = NanocodexSession.prototype.alarm;
+    const originalAlarm = DurableAgentSession.prototype.alarm;
     let entered!: () => void;
     const alarmEntered = new Promise<void>((resolve) => { entered = resolve; });
-    const alarmSpy = vi.spyOn(NanocodexSession.prototype, "alarm").mockImplementation(
-      async function (this: NanocodexSession): Promise<void> {
+    const alarmSpy = vi.spyOn(DurableAgentSession.prototype, "alarm").mockImplementation(
+      async function (this: DurableAgentSession): Promise<void> {
         entered();
         return originalAlarm.call(this);
       },
@@ -4649,7 +4691,7 @@ describe("managed agents REST and resumable SSE", () => {
       ))).toHaveLength(1);
       expect(history.data.some(({ type, turn_id }) => (
         turn_id === "turn-during-alarm"
-          && (type === "turn_failed" || type === "turn_retryable" || type === "turn_blocked")
+          && (type === "turn_failed" || type === "turn_retryable")
       ))).toBe(false);
     } finally {
       alarmSpy.mockRestore();
@@ -4879,7 +4921,7 @@ describe("managed agents REST and resumable SSE", () => {
     } as Fetcher;
     try {
       expect((await SELF.fetch(turnsUrl, request)).status).toBe(202);
-      const retryable = await waitForTurnState(agent, id, "retryable");
+      const retryable = await waitForTurnRetry(agent, id);
       expect(retryable.error).toMatch(/HTTP 503/i);
     } finally {
       testEnv.NANOCODEX = originalBroker;
@@ -4909,7 +4951,7 @@ describe("managed agents REST and resumable SSE", () => {
       turn_id === id && type === "turn_completed"
     ))).toHaveLength(1);
     expect(history.data.some(({ type, turn_id }) => (
-      turn_id === id && (type === "turn_failed" || type === "turn_blocked")
+      turn_id === id && type === "turn_failed"
     ))).toBe(false);
   });
 
@@ -4942,7 +4984,7 @@ describe("managed agents REST and resumable SSE", () => {
     try {
       expect((await SELF.fetch(turnsUrl, turnRequest)).status).toBe(202);
       const retryable = await waitForTurnAttempt(agent, id, 1);
-      expect(retryable.state).toBe("retryable");
+      expect(retryable.state).toBe("accepted");
       expect(retryable.error).toMatch(/HTTP 503/i);
       const upgradesBeforeCancel = upgradeCount;
 
@@ -4980,7 +5022,7 @@ describe("managed agents REST and resumable SSE", () => {
         type === "turn_cancelled" && turn_id === id
       ))).toHaveLength(1);
       expect(history.data.some(({ type, turn_id }) => (
-        turn_id === id && (type === "turn_failed" || type === "turn_blocked")
+        turn_id === id && type === "turn_failed"
       ))).toBe(false);
       expect(await runInDurableObject(
         testEnv.NANOCODEX_SESSIONS.getByName(agent.agent_id),
@@ -5084,7 +5126,7 @@ describe("managed agents REST and resumable SSE", () => {
         },
         body: JSON.stringify({ id, input: "wait for cancellation" }),
       })).status).toBe(202);
-      for (let attempt = 0; attempt < 100; attempt += 1) {
+      for (let attempt = 0; attempt < 1_000; attempt += 1) {
         const dispatched = await runInDurableObject(session, (_instance, state) => (
           state.storage.sql.exec<{ may_have_inner_operation: number }>(
             "SELECT may_have_inner_operation FROM managed_turns WHERE id = ?",
@@ -5107,14 +5149,12 @@ describe("managed agents REST and resumable SSE", () => {
         };
         const originalExec = sql.exec;
         let failed = false;
-        sql.exec = function injectedJournalFailure(query, ...bindings) {
+        sql.exec = function injectedStateFailure(query, ...bindings) {
           if (!failed
-            && query.includes("INSERT INTO nanocodex_journal_batches")
-            && bindings.some((binding) => (
-              typeof binding === "string" && binding.includes("\"operation_cancelled\"")
-            ))) {
+            && (query.includes("INSERT INTO nanocodex_durable_states")
+              || query.includes("INSERT INTO nanocodex_durable_state_chunks"))) {
             failed = true;
-            throw new Error("injected cancellation journal failure");
+            throw new Error("injected cancellation state failure");
           }
           return originalExec.call(sql, query, ...bindings);
         };
@@ -5130,7 +5170,7 @@ describe("managed agents REST and resumable SSE", () => {
       const retryAt = cancelling.retry_at!;
       restoreJournal();
 
-      for (let attempt = 0; attempt < 100; attempt += 1) {
+      for (let attempt = 0; attempt < 1_000; attempt += 1) {
         const alarm = await runInDurableObject(
           session,
           (_instance, state) => state.storage.getAlarm(),
@@ -5170,7 +5210,7 @@ describe("managed agents REST and resumable SSE", () => {
       errorSpy.mockRestore();
       vi.useRealTimers();
     }
-  });
+  }, 15_000);
 
   it("does not dispatch a newer turn past a pre-runtime retry", async () => {
     const agent = await createAgent();
@@ -5199,7 +5239,7 @@ describe("managed agents REST and resumable SSE", () => {
 
     try {
       expect((await submit("turn-fifo-first")).status).toBe(202);
-      await waitForTurnState(agent, "turn-fifo-first", "retryable");
+      await waitForTurnRetry(agent, "turn-fifo-first");
       expect(upgradeCount).toBe(1);
 
       expect((await submit("turn-fifo-second")).status).toBe(202);
@@ -5218,143 +5258,10 @@ describe("managed agents REST and resumable SSE", () => {
       })).status).toBe(202);
       await waitForTurnState(agent, "turn-fifo-first", "cancelled");
       await waitForTurnState(agent, "turn-fifo-second", "completed");
-
-      const history = await managedHistory(agent);
-      expect(history.data.some(({ type, turn_id }) => (
-        type === "turn_blocked"
-        && (turn_id === "turn-fifo-first" || turn_id === "turn-fifo-second")
-      ))).toBe(false);
     } finally {
       testEnv.NANOCODEX = originalBroker;
     }
   });
-
-  it("conservatively marks legacy unfinished turns as possibly dispatched", async () => {
-    const agent = await createAgent();
-    const session = testEnv.NANOCODEX_SESSIONS.getByName(agent.agent_id);
-    const turnsUrl = agent.events_url.replace(/\/events$/, "/turns");
-    await runInDurableObject(session, (_instance, state) => {
-      state.storage.sql.exec("DROP TABLE managed_turns");
-      state.storage.sql.exec(`
-        CREATE TABLE managed_turns (
-          id TEXT PRIMARY KEY,
-          request_key TEXT,
-          request_hash TEXT NOT NULL,
-          input_json TEXT NOT NULL,
-          state TEXT NOT NULL CHECK (
-            state IN ('accepted', 'cancelling', 'retryable', 'blocked', 'completed', 'cancelled', 'failed')
-          ),
-          accepted_cursor INTEGER NOT NULL,
-          terminal_json TEXT,
-          terminal_cursor INTEGER,
-          error TEXT,
-          attempt_count INTEGER NOT NULL DEFAULT 0,
-          retry_at INTEGER,
-          created_at INTEGER NOT NULL,
-          accepted_at INTEGER NOT NULL,
-          updated_at INTEGER NOT NULL
-        )
-      `);
-      state.storage.sql.exec(
-        `INSERT INTO managed_turns (
-           id, request_key, request_hash, input_json, state, accepted_cursor,
-           error, created_at, accepted_at, updated_at
-         ) VALUES (?, NULL, ?, ?, 'blocked', 0, ?, ?, ?, ?)`,
-        "legacy-unfinished-turn",
-        "legacy-request-hash",
-        JSON.stringify("legacy input"),
-        "legacy row requires conservative reconciliation",
-        Date.now(),
-        Date.now(),
-        Date.now(),
-      );
-    });
-
-    await evictDurableObject(session);
-    expect((await SELF.fetch(`${turnsUrl}/legacy-unfinished-turn`)).status).toBe(200);
-    expect(await runInDurableObject(session, (_instance, state) => ({
-      dispatchColumn: state.storage.sql.exec<{ name: string }>(
-        "PRAGMA table_info(managed_turns)",
-      ).toArray().some(({ name }) => name === "dispatch_input_chunks"),
-      dispatchTable: state.storage.sql.exec<{ count: number }>(
-        `SELECT COUNT(*) AS count FROM sqlite_master
-         WHERE type = 'table' AND name = 'managed_turn_dispatch_chunks'`,
-      ).one().count,
-      ownershipColumn: state.storage.sql.exec<{ name: string }>(
-        "PRAGMA table_info(managed_turns)",
-      ).toArray().some(({ name }) => name === "may_have_inner_operation"),
-      marker: state.storage.sql.exec<{ may_have_inner_operation: number }>(
-        "SELECT may_have_inner_operation FROM managed_turns WHERE id = 'legacy-unfinished-turn'",
-      ).one().may_have_inner_operation,
-    }))).toEqual({
-      dispatchColumn: true,
-      dispatchTable: 1,
-      marker: 1,
-      ownershipColumn: true,
-    });
-  });
-
-  it("quarantines legacy realtime rows whose managed and durable identities diverged", async () => {
-    const agent = await createAgent();
-    const session = testEnv.NANOCODEX_SESSIONS.getByName(agent.agent_id);
-    const legacyId = `realtime:${"a".repeat(48)}`;
-    await runInDurableObject(session, (_instance, state) => {
-      state.storage.sql.exec("DROP TABLE managed_turns");
-      state.storage.sql.exec(`
-        CREATE TABLE managed_turns (
-          id TEXT PRIMARY KEY,
-          request_key TEXT,
-          request_hash TEXT NOT NULL,
-          input_json TEXT NOT NULL,
-          authorization_json TEXT NOT NULL,
-          state TEXT NOT NULL CHECK (
-            state IN ('accepted', 'cancelling', 'retryable', 'blocked', 'completed', 'cancelled', 'failed')
-          ),
-          accepted_cursor INTEGER NOT NULL,
-          terminal_json TEXT,
-          terminal_cursor INTEGER,
-          error TEXT,
-          may_have_inner_operation INTEGER NOT NULL DEFAULT 1,
-          attempt_count INTEGER NOT NULL DEFAULT 0,
-          retry_at INTEGER,
-          created_at INTEGER NOT NULL,
-          accepted_at INTEGER NOT NULL,
-          updated_at INTEGER NOT NULL
-        )
-      `);
-      state.storage.sql.exec(
-        `INSERT INTO managed_turns (
-           id, request_key, request_hash, input_json, authorization_json, state,
-           accepted_cursor, created_at, accepted_at, updated_at
-         ) VALUES (?, 'realtime:legacy-voice:legacy-operation', ?, ?, '{}',
-                   'accepted', 0, ?, ?, ?)`,
-        legacyId,
-        "legacy-request-hash",
-        JSON.stringify("legacy routed input"),
-        Date.now(),
-        Date.now(),
-        Date.now(),
-      );
-    });
-
-    await evictDurableObject(session);
-    expect(await runInDurableObject(session, (_instance, state) => ({
-      journalRows: state.storage.sql.exec<{ count: number }>(
-        `SELECT COUNT(*) AS count FROM sqlite_master
-         WHERE type = 'table' AND name = 'nanocodex_journals'`,
-      ).one().count,
-      row: state.storage.sql.exec<{ error: string; state: string }>(
-        "SELECT state, error FROM managed_turns WHERE id = ?",
-        legacyId,
-      ).one(),
-    }))).toEqual({
-      journalRows: 0,
-      row: {
-        error: "pre-upgrade realtime turn has an indeterminate durable operation identity",
-        state: "blocked",
-      },
-    });
-  }, 30_000);
 
   it("does not let an idempotent submission bypass a durable admission retry deadline", async () => {
     const agent = await createAgent();
@@ -5385,7 +5292,7 @@ describe("managed agents REST and resumable SSE", () => {
     try {
       expect((await SELF.fetch(turnsUrl, request)).status).toBe(202);
       const retryable = await waitForTurnAttempt(agent, id, 1);
-      expect(retryable.state).toBe("retryable");
+      expect(retryable.state).toBe("accepted");
       expect(retryable.retry_at).not.toBeNull();
       await waitForScheduledAlarm(session);
       const retryAt = await runInDurableObject(session, async (_instance, state) => {
@@ -5409,7 +5316,7 @@ describe("managed agents REST and resumable SSE", () => {
       expect(beforeDeadline).toMatchObject({
         attempt_count: 1,
         retry_at: retryAt,
-        state: "retryable",
+        state: "accepted",
       });
       expect(upgradeCount).toBe(upgradesBeforeDeadline);
       expect(await runInDurableObject(session, (_instance, state) => state.storage.getAlarm()))
@@ -5426,7 +5333,7 @@ describe("managed agents REST and resumable SSE", () => {
       });
       expect(await runDurableObjectAlarm(session)).toBe(true);
       const retried = await waitForTurnAttempt(agent, id, 2);
-      expect(retried.state).toBe("retryable");
+      expect(retried.state).toBe("accepted");
       expect(upgradeCount).toBe(upgradesBeforeDeadline + 1);
     } finally {
       testEnv.NANOCODEX = originalBroker;
@@ -5451,21 +5358,25 @@ describe("managed agents REST and resumable SSE", () => {
 
     try {
       await submit(agent, id, "remain retryable under capped backoff");
-      let turn = await waitForTurnAttempt(agent, id, 1);
+      let turn = await waitForTurnRetry(agent, id, 1);
       for (let expected = 2; expected <= 10; expected += 1) {
-        expect(turn.state).toBe("retryable");
+        expect(turn.state).toBe("accepted");
         expect(turn.retry_at).not.toBeNull();
         expect(turn.retry_at! - turn.updated_at).toBeLessThanOrEqual(60_000);
-        vi.setSystemTime(turn.retry_at!);
-        expect(await runDurableObjectAlarm(session)).toBe(true);
-        turn = await waitForTurnAttempt(agent, id, expected);
+        const alarm = await waitForScheduledAlarm(session, turn.retry_at!);
+        vi.setSystemTime(alarm);
+        // Advancing fake time can let Miniflare dispatch the due alarm before
+        // the explicit runner wins the race. Either path is valid; the next
+        // retry attempt is the observable contract we need to prove.
+        await runDurableObjectAlarm(session);
+        turn = await waitForTurnRetry(agent, id, expected);
       }
-      expect(turn).toMatchObject({ attempt_count: 10, state: "retryable" });
+      expect(turn).toMatchObject({ attempt_count: 10, state: "accepted" });
       expect(turn.error).not.toMatch(/retry limit reached/i);
       const history = await managedHistory(agent);
       expect(history.data.filter(({ type, turn_id }) => (
         type === "turn_retryable" && turn_id === id
-      ))).toHaveLength(1);
+      ))).toHaveLength(turn.attempt_count);
     } finally {
       testEnv.NANOCODEX = originalBroker;
       vi.useRealTimers();
@@ -5480,7 +5391,7 @@ describe("managed agents REST and resumable SSE", () => {
     await submit(agent, "turn-reopen-sibling", "remain retryable across sibling reopen");
     await runInDurableObject(session, (_instance, state) => {
       state.storage.sql.exec(
-        `UPDATE nanocodex_journal_owners
+        `UPDATE nanocodex_durable_owners
          SET owner_id = 'injected-new-owner', fence = CAST(fence AS INTEGER) + 1`,
       );
     });
@@ -5513,8 +5424,8 @@ describe("managed agents REST and resumable SSE", () => {
          WHERE turn_id = ? ORDER BY chunk_index`,
         replayId,
       ).toArray().map(({ input_json }) => input_json).join(""),
-      journalRevision: state.storage.sql.exec<{ revision: string }>(
-        "SELECT revision FROM nanocodex_journals",
+      stateRevision: state.storage.sql.exec<{ revision: string }>(
+        "SELECT revision FROM nanocodex_durable_states",
       ).one().revision,
       terminalJson: state.storage.sql.exec<{ terminal_json: string }>(
         "SELECT terminal_json FROM managed_turns WHERE id = ?",
@@ -5527,7 +5438,7 @@ describe("managed agents REST and resumable SSE", () => {
     await runInDurableObject(session, (_instance, state) => {
       state.storage.sql.exec(
         `UPDATE managed_turns
-         SET state = 'retryable', terminal_json = NULL, terminal_cursor = NULL,
+         SET state = 'accepted', terminal_json = NULL, terminal_cursor = NULL,
              error = 'injected outer projection gap', retry_at = 0
          WHERE id = ?`,
         replayId,
@@ -5545,24 +5456,25 @@ describe("managed agents REST and resumable SSE", () => {
     });
     expect(replay.status).toBe(200);
     await waitForTurnState(agent, replayId, "completed");
-    expect(await runInDurableObject(session, (_instance, state) => ({
+    const replayed = await runInDurableObject(session, (_instance, state) => ({
       dispatchInputJson: state.storage.sql.exec<{ input_json: string }>(
         `SELECT input_json FROM managed_turn_dispatch_chunks
          WHERE turn_id = ? ORDER BY chunk_index`,
         replayId,
       ).toArray().map(({ input_json }) => input_json).join(""),
-      journalRevision: state.storage.sql.exec<{ revision: string }>(
-        "SELECT revision FROM nanocodex_journals",
+      stateRevision: state.storage.sql.exec<{ revision: string }>(
+        "SELECT revision FROM nanocodex_durable_states",
       ).one().revision,
       terminalJson: state.storage.sql.exec<{ terminal_json: string }>(
         "SELECT terminal_json FROM managed_turns WHERE id = ?",
         replayId,
       ).one().terminal_json,
-    }))).toEqual({
+    }));
+    expect(replayed).toMatchObject({
       dispatchInputJson: frozen.dispatchInputJson,
-      journalRevision: frozen.journalRevision,
       terminalJson: frozen.terminalJson,
     });
+    expect(replayed.stateRevision).toBe(frozen.stateRevision);
     await submit(agent, "turn-after-raw-replay", "start only after replay attribution");
     await waitForTurnState(agent, "turn-after-raw-replay", "completed");
     await waitForHistoryEvent(agent, ({ cursor, event, turn_id }) => (
@@ -5590,56 +5502,662 @@ describe("managed agents REST and resumable SSE", () => {
     expect(BigInt(followingStarted!.cursor)).toBeLessThan(BigInt(followingCompleted!.cursor));
   });
 
-  it("recovers and freezes a pre-upgrade durable dispatch form", async () => {
-    const agent = await createAgent();
-    const id = "turn-legacy-dispatch-input";
-    const input = "retain the pre-upgrade dispatch input";
-    await submit(agent, id, input);
-    await waitForTurnState(agent, id, "completed");
-    const session = testEnv.NANOCODEX_SESSIONS.getByName(agent.agent_id);
-    const original = await runInDurableObject(session, (_instance, state) => (
-      state.storage.sql.exec<{ input_json: string }>(
-        `SELECT input_json FROM managed_turn_dispatch_chunks
-         WHERE turn_id = ? ORDER BY chunk_index`,
-        id,
-      ).toArray().map(({ input_json }) => input_json).join("")
-    ));
-    expect(original).not.toContain("<memory_review_checkpoint>");
+  it("ports a compacted multi-turn Agent with tools and subagents through real Durable Object SQLite", async () => {
+    expect((await testEnv.NANOCODEX.fetch(
+      "https://broker.internal/test/model-commands",
+      { method: "DELETE" },
+    )).status).toBe(204);
+    const source = await createAgent();
+    const sourceTurns = [
+      {
+        id: "turn-portable-compaction-seed",
+        input: "E2E_PORTABILITY_COMPACTION_SEED",
+        finalMessage: "PORTABILITY_COMPACTION_SEEDED",
+      },
+      {
+        id: "turn-portable-computer",
+        input: "E2E_COMPUTER_RUNTIME",
+        finalMessage: "COMPUTER_TOOLS_OK",
+      },
+      {
+        id: "turn-portable-web-image",
+        input: "E2E_MANAGED_WEB",
+        finalMessage: "MANAGED_WEB_OK",
+      },
+      {
+        id: "turn-portable-core-tools",
+        input: "E2E_MANAGED_CORE_TOOLS",
+        finalMessage: "MANAGED_CORE_TOOLS_OK",
+      },
+      {
+        id: "turn-portable-subagents",
+        input: "E2E_MANAGED_SUBAGENTS",
+        finalMessage: "MANAGED_SUBAGENTS_OK",
+      },
+    ] as const;
+    const sourceTerminals = new Map<string, Awaited<ReturnType<typeof waitForTurnState>>>();
+    for (const turn of sourceTurns) {
+      await submit(source, turn.id, turn.input);
+      const terminal = await waitForTurnState(source, turn.id, "completed", 15_000);
+      expect(terminal.terminal).toMatchObject({ final_message: turn.finalMessage });
+      sourceTerminals.set(turn.id, terminal);
+    }
+    const realtimeStartRequest = {
+      operation_id: "portable-realtime-start",
+      voice_session_id: "portable-realtime-session",
+    } as const;
+    const realtimeStopRequest = {
+      operation_id: "portable-realtime-stop",
+      voice_session_id: "portable-realtime-session",
+    } as const;
+    const realtimeStart = await managedRealtime(source, "start", realtimeStartRequest);
+    expect(realtimeStart.status).toBe(200);
+    const realtimeStartValue = await realtimeStart.json<ManagedRealtimeLifecycleResponse>();
+    const realtimeStop = await managedRealtime(source, "stop", realtimeStopRequest);
+    expect(realtimeStop.status).toBe(200);
+    const realtimeStopValue = await realtimeStop.json<ManagedRealtimeLifecycleResponse>();
+    const commandsBeforeExport = await modelCommandCount();
+    expect(commandsBeforeExport).toBeGreaterThan(sourceTurns.length);
+    const sourceCapacity = await testEnv.NANOCODEX_SESSIONS
+      .getByName(source.agent_id)
+      .fetch("https://session.internal/capacity");
+    expect((await sourceCapacity.json<{ durable_state: { rows: number } }>()).durable_state.rows)
+      .toBe(1);
+    const sourceStateBeforeExport = await (await SELF.fetch(
+      source.events_url.replace(/\/events$/, ""),
+    )).json<{
+      completed_turns: number;
+      first_prompt: string;
+      latest_event_cursor: string;
+    }>();
+    const sourceHistoryBeforeExport = await managedHistory(source);
 
-    await runInDurableObject(session, (_instance, state) => {
-      state.storage.transactionSync(() => {
-        state.storage.sql.exec(
-          "DELETE FROM managed_turn_dispatch_chunks WHERE turn_id = ?",
-          id,
-        );
-        state.storage.sql.exec(
-          `UPDATE managed_turns
-           SET dispatch_input_chunks = NULL, state = 'retryable', terminal_json = NULL,
-               terminal_cursor = NULL, error = 'injected pre-upgrade projection gap', retry_at = 0
-           WHERE id = ?`,
-          id,
-        );
-      });
+    const exported = await pollDurabilityExport(source);
+    expect(exported.status).toBe(200);
+    const archive = await exported.json<{
+      format: string;
+      durability: { stateId: string; revision: string; payload: string };
+      managed_events: { archive: { digest: string }; tail: { high_water_cursor: string } };
+      managed_realtime: {
+        archive: { digest: string };
+        state: { archived_receipts: number; object_count: number };
+        tail: unknown[];
+      };
+      managed_session: {
+        accepted_turns: number;
+        completed_turns: number;
+        first_prompt: string;
+        title: string;
+      };
+      managed_turn_receipts: { archived_receipts: number; digest: string; objects: number };
+      source_agent_id: string;
+    }>();
+    expect(archive).toMatchObject({
+      format: "nanocodex-managed-durability-state-v1",
+      durability: {
+        revision: expect.stringMatching(/^[1-9][0-9]*$/),
+        payload: expect.any(String),
+      },
+      managed_turn_receipts: {
+        digest: expect.stringMatching(/^[0-9a-f]{64}$/),
+      },
+      managed_events: {
+        archive: { digest: expect.stringMatching(/^[0-9a-f]{64}$/) },
+        tail: { high_water_cursor: sourceStateBeforeExport.latest_event_cursor },
+      },
+      managed_realtime: {
+        archive: { digest: expect.stringMatching(/^[0-9a-f]{64}$/) },
+        state: { archived_receipts: 1, object_count: 1 },
+        tail: [expect.objectContaining({ operation_id: realtimeStopRequest.operation_id })],
+      },
+      managed_session: {
+        completed_turns: sourceStateBeforeExport.completed_turns,
+        first_prompt: sourceStateBeforeExport.first_prompt,
+      },
+      source_agent_id: source.agent_id,
     });
-    await evictDurableObject(session);
+    const portableState = JSON.parse(archive.durability.payload).nanocodex_durable_state;
+    expect(portableState.latest_checkpoint).toBeTruthy();
+    expect(JSON.stringify(portableState.latest_checkpoint)).toContain(
+      "portable-managed-compaction",
+    );
+    for (const turn of sourceTurns) {
+      expect(portableState.operations).toHaveProperty(turn.id);
+    }
+    const sourceSession = testEnv.NANOCODEX_SESSIONS.getByName(source.agent_id);
+    let pendingProjections = Number.POSITIVE_INFINITY;
+    for (let attempt = 0; attempt < 8 && pendingProjections > 0; attempt += 1) {
+      await runInDurableObject(sourceSession, async (_instance, state) => {
+        await state.storage.setAlarm(Date.now());
+      });
+      await runDurableObjectAlarm(sourceSession);
+      pendingProjections = await runInDurableObject(sourceSession, (_instance, state) => (
+        state.storage.sql.exec<{ count: number }>(
+          "SELECT COUNT(*) AS count FROM history_projection_outbox",
+        ).one().count
+      ));
+    }
+    expect(pendingProjections).toBe(0);
+    await evictDurableObject(sourceSession);
+    const repeatedExport = await SELF.fetch(
+      source.events_url.replace(/\/events$/, "/durability"),
+      { method: "POST" },
+    );
+    expect(repeatedExport.status).toBe(200);
+    await expect(repeatedExport.json()).resolves.toEqual(archive);
+    expect((await SELF.fetch(source.events_url.replace(/\/events$/, "/turns"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: "after-export", input: "must not resume source" }),
+    })).status).toBe(409);
 
-    const replay = await SELF.fetch(agent.events_url.replace(/\/events$/, "/turns"), {
+    const importKey = `portable-${crypto.randomUUID()}`;
+    const createImported = () => SELF.fetch("https://example.test/v1/agents", {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        "idempotency-key": `request-${id}`,
+        "idempotency-key": importKey,
       },
-      body: JSON.stringify({ id, input }),
+      body: JSON.stringify({ durability: archive }),
+    });
+    const importedResponse = await createImported();
+    expect(importedResponse.status).toBe(201);
+    const imported = await importedResponse.json<AgentReceipt>();
+    createdAgents.add(imported.agent_id);
+    expect(imported.agent_id).not.toBe(source.agent_id);
+    expect(imported.durability_id).toBe(archive.durability.stateId);
+    const importedState = await (await SELF.fetch(
+      imported.events_url.replace(/\/events$/, ""),
+    )).json<{
+      completed_turns: number;
+      first_prompt: string;
+      latest_event_cursor: string;
+    }>();
+    expect(importedState).toMatchObject({
+      completed_turns: sourceStateBeforeExport.completed_turns,
+      first_prompt: sourceStateBeforeExport.first_prompt,
+      latest_event_cursor: sourceStateBeforeExport.latest_event_cursor,
+    });
+    await expect(managedHistory(imported)).resolves.toEqual(sourceHistoryBeforeExport);
+    const importedListing = await (await SELF.fetch(
+      "https://example.test/v1/agents",
+    )).json<{ summaries: Record<string, { title: string; turn_count: number }> }>();
+    expect(importedListing.summaries[imported.agent_id]).toMatchObject({
+      title: archive.managed_session.title,
+      turn_count: archive.managed_session.accepted_turns,
+    });
+    await expect((await managedRealtime(
+      imported,
+      "start",
+      realtimeStartRequest,
+    )).json()).resolves.toEqual(realtimeStartValue);
+    await expect((await managedRealtime(
+      imported,
+      "stop",
+      realtimeStopRequest,
+    )).json()).resolves.toEqual(realtimeStopValue);
+    await expect(modelCommandCount()).resolves.toBe(commandsBeforeExport);
+
+    const replayedCreate = await createImported();
+    expect(replayedCreate.status).toBe(201);
+    await expect(replayedCreate.json()).resolves.toMatchObject({
+      agent_id: imported.agent_id,
+      durability_id: archive.durability.stateId,
+    });
+
+    for (const turn of sourceTurns) {
+      const replay = await SELF.fetch(imported.events_url.replace(/\/events$/, "/turns"), {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": `request-${turn.id}`,
+        },
+        body: JSON.stringify({ id: turn.id, input: turn.input }),
+      });
+      expect([200, 202]).toContain(replay.status);
+      const importedTerminal = await waitForTurnState(imported, turn.id, "completed", 10_000);
+      expect(importedTerminal.terminal).toEqual(sourceTerminals.get(turn.id)!.terminal);
+      await expect(modelCommandCount()).resolves.toBe(commandsBeforeExport);
+    }
+
+    const destinationTurns = [
+      {
+        id: "turn-tool-after-cutover",
+        input: "E2E_COMPUTER_RUNTIME",
+        finalMessage: "COMPUTER_TOOLS_OK",
+      },
+      {
+        id: "turn-subagent-after-cutover",
+        input: "E2E_MANAGED_SUBAGENTS",
+        finalMessage: "MANAGED_SUBAGENTS_OK",
+      },
+    ] as const;
+    for (const turn of destinationTurns) {
+      const accepted = await submit(imported, turn.id, turn.input);
+      expect(BigInt(accepted.accepted_cursor)).toBeGreaterThan(
+        BigInt(archive.managed_events.tail.high_water_cursor),
+      );
+      const terminal = await waitForTurnState(imported, turn.id, "completed", 15_000);
+      expect(BigInt(terminal.terminal_cursor!)).toBeGreaterThan(
+        BigInt(archive.managed_events.tail.high_water_cursor),
+      );
+      expect(terminal.terminal).toMatchObject({
+        final_message: expect.stringContaining(turn.finalMessage),
+      });
+    }
+    await expect(modelCommandCount()).resolves.toBeGreaterThan(commandsBeforeExport);
+    const identities = await Promise.all([
+      runInDurableObject(
+        testEnv.NANOCODEX_SESSIONS.getByName(source.agent_id),
+        (_instance, state) => state.storage.sql.exec<{ session_id: string }>(
+          "SELECT session_id FROM nanocodex_cloudflare_agent WHERE singleton = 1",
+        ).one().session_id,
+      ),
+      runInDurableObject(
+        testEnv.NANOCODEX_SESSIONS.getByName(imported.agent_id),
+        (_instance, state) => state.storage.sql.exec<{ session_id: string; state_id: string }>(
+          `SELECT a.session_id, d.state_id
+           FROM nanocodex_cloudflare_agent a
+           CROSS JOIN nanocodex_cloudflare_durability d
+           WHERE a.singleton = 1 AND d.singleton = 1`,
+        ).one(),
+      ),
+    ]);
+    expect(identities[1]).toMatchObject({ state_id: archive.durability.stateId });
+    expect(identities[1].session_id).not.toBe(identities[0]);
+    const deletedSource = await SELF.fetch(
+      `https://example.test/v1/agents/${source.agent_id}`,
+      { method: "DELETE" },
+    );
+    expect(deletedSource.status).toBe(204);
+    createdAgents.delete(source.agent_id);
+    await expect((await managedRealtime(
+      imported,
+      "start",
+      realtimeStartRequest,
+    )).json()).resolves.toEqual(realtimeStartValue);
+    await expect((await managedRealtime(
+      imported,
+      "stop",
+      realtimeStopRequest,
+    )).json()).resolves.toEqual(realtimeStopValue);
+  }, 90_000);
+
+  it("adopts archived receipts beyond the Rust replay window before destination admission", async () => {
+    expect((await testEnv.NANOCODEX.fetch(
+      "https://broker.internal/test/model-commands",
+      { method: "DELETE" },
+    )).status).toBe(204);
+    const source = await createAgent();
+    const oldestId = "turn-portable-archive-000";
+    const oldestInput = "E2E_COMPUTER_RUNTIME";
+    const totalTurns = 513;
+    await submit(source, "turn-portable-state-seed", "establish real portable Rust state");
+    await waitForTurnState(source, "turn-portable-state-seed", "completed", 15_000);
+    const seeded = await Promise.all(Array.from({ length: totalTurns }, async (_unused, index) => {
+      const id = `turn-portable-archive-${String(index).padStart(3, "0")}`;
+      const input = index === 0 ? oldestInput : `portable archived receipt ${index}`;
+      return {
+        id,
+        inputJson: JSON.stringify(input),
+        requestHash: await testHash(JSON.stringify(input)),
+        requestKey: `request-${id}`,
+        terminalJson: JSON.stringify({
+          type: "turn_completed",
+          id,
+          final_message: `retained terminal ${index}`,
+        }),
+      };
+    }));
+    const seededCursors = new Map<string, { accepted: string; terminal: string }>();
+    const sourceSession = testEnv.NANOCODEX_SESSIONS.getByName(source.agent_id);
+    await runInDurableObject(sourceSession, (_instance, state) => {
+      const eventLog = new DurableEventLog<{ type: string } & Record<string, unknown>>(state.storage);
+      state.storage.transactionSync(() => {
+        for (let index = 0; index < seeded.length; index += 1) {
+          const turn = seeded[index]!;
+          const createdAt = index * 3 + 1;
+          const accepted = eventLog.append({
+            type: "turn_accepted",
+            id: turn.id,
+            input: JSON.parse(turn.inputJson),
+          }, turn.id);
+          const terminal = eventLog.append(JSON.parse(turn.terminalJson), turn.id, true);
+          seededCursors.set(turn.id, {
+            accepted: accepted.cursor,
+            terminal: terminal.cursor,
+          });
+          state.storage.sql.exec(
+            `INSERT INTO managed_turns (
+               id, request_key, request_hash, input_json, authorization_json, state,
+               accepted_cursor, terminal_json, terminal_cursor, may_have_inner_operation,
+               attempt_count, created_at, accepted_at, updated_at
+             ) VALUES (?, ?, ?, ?, '{"capabilities":[]}', 'completed', ?, ?, ?, 0, 0, ?, ?, ?)`,
+            turn.id,
+            turn.requestKey,
+            turn.requestHash,
+            turn.inputJson,
+            accepted.cursor,
+            turn.terminalJson,
+            terminal.cursor,
+            createdAt,
+            createdAt + 1,
+            createdAt + 2,
+          );
+        }
+        state.storage.sql.exec(
+          `UPDATE session_state
+           SET accepted_turns = accepted_turns + ?, completed_turns = completed_turns + ?
+           WHERE singleton = 1`,
+          totalTurns,
+          totalTurns,
+        );
+      });
+    });
+    const commandsBeforeExport = await modelCommandCount();
+    expect(commandsBeforeExport).toBe(1);
+
+    const { response: exported, pendingResponses } = await pollDurabilityExportWithProgress(source);
+    expect(pendingResponses).toBeGreaterThan(1);
+    expect(exported.status).toBe(200);
+    const archive = await exported.json<{
+      durability: { stateId: string };
+      managed_events: {
+        archive: { bytes: number; objects: number };
+        state: { archived_bytes: number; archived_through: string; segment_count: number };
+        tail: { events: Array<{ cursor: string }>; high_water_cursor: string };
+      };
+      managed_realtime: {
+        archive: { bytes: number; objects: number };
+        state: { archived_bytes: number; object_count: number };
+        tail: unknown[];
+      };
+      managed_session: { title: string };
+      managed_turn_receipts: { archived_receipts: number; digest: string; objects: number };
+    }>();
+    expect(archive.managed_turn_receipts).toMatchObject({
+      archived_receipts: 514,
+      objects: 1_028,
+    });
+
+    const originalSessions = testEnv.NANOCODEX_SESSIONS;
+    const destinationLookups: string[] = [];
+    testEnv.NANOCODEX_SESSIONS = {
+      ...originalSessions,
+      getByName(name: string) {
+        destinationLookups.push(name);
+        return originalSessions.getByName(name);
+      },
+    } as Env["NANOCODEX_SESSIONS"];
+    try {
+      const keylessImport = await SELF.fetch("https://example.test/v1/agents", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ durability: archive }),
+      });
+      expect(keylessImport.status).toBe(400);
+      await expect(keylessImport.json()).resolves.toEqual({
+        error: "idempotency_required",
+        message: "managed durability imports require Idempotency-Key",
+      });
+      expect(destinationLookups).toEqual([]);
+    } finally {
+      testEnv.NANOCODEX_SESSIONS = originalSessions;
+    }
+
+    const incoherentArchives = [
+      (() => {
+        const changed = structuredClone(archive);
+        changed.managed_events.archive.objects += 1;
+        return changed;
+      })(),
+      (() => {
+        const changed = structuredClone(archive);
+        changed.managed_events.tail.events[0]!.cursor = changed.managed_events.state.archived_through;
+        return changed;
+      })(),
+      (() => {
+        const changed = structuredClone(archive);
+        changed.managed_realtime.archive.bytes += 1;
+        return changed;
+      })(),
+      (() => {
+        const changed = structuredClone(archive);
+        changed.managed_session.title = "conflicting imported title";
+        return changed;
+      })(),
+    ];
+    for (const [index, incoherent] of incoherentArchives.entries()) {
+      const rejected = await SELF.fetch("https://example.test/v1/agents", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": `incoherent-${index}-${crypto.randomUUID()}`,
+        },
+        body: JSON.stringify({ durability: incoherent }),
+      });
+      expect(rejected.status).toBe(400);
+      await expect(rejected.json()).resolves.toMatchObject({
+        error: "invalid_durability_import",
+      });
+    }
+
+    const importKey = `portable-archive-${crypto.randomUUID()}`;
+    const pendingImport = await SELF.fetch("https://example.test/v1/agents", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "idempotency-key": importKey,
+      },
+      body: JSON.stringify({ durability: archive }),
+    });
+    expect(pendingImport.status).toBe(503);
+    await expect(pendingImport.json()).resolves.toMatchObject({
+      error: "durability_import_pending",
+    });
+    const pendingAgentId = await testIdempotentAgentId(USER_ID, importKey);
+    createdAgents.add(pendingAgentId);
+    const pendingDestination = testEnv.NANOCODEX_SESSIONS.getByName(pendingAgentId);
+    const partialCapacity = await runInDurableObject(
+      pendingDestination,
+      (_instance, state) => state.storage.sql.exec<{
+        archived_bytes: number;
+        archived_receipts: number;
+        objects: number;
+      }>(
+        `SELECT archived_bytes, archived_receipts, object_count AS objects
+         FROM managed_turn_archive_state WHERE singleton = 1`,
+      ).one(),
+    );
+    expect(partialCapacity).toEqual({
+      archived_bytes: 0,
+      archived_receipts: 0,
+      objects: 0,
+    });
+    await evictDurableObject(pendingDestination);
+    const poisonedExport = await pendingDestination.fetch(
+      "https://session.internal/durability/export",
+      { method: "POST" },
+    );
+    expect(poisonedExport.status).toBe(409);
+    await expect(poisonedExport.json()).resolves.toMatchObject({
+      error: "durability_import_pending",
+    });
+    await expect(runInDurableObject(
+      pendingDestination,
+      async (_instance, state) => state.storage.get("nanocodex:durability-exported"),
+    )).resolves.toBeUndefined();
+    const importedResponse = await pollImportedCreate(importKey, archive);
+    expect(importedResponse.status).toBe(201);
+    const imported = await importedResponse.json<AgentReceipt>();
+    createdAgents.add(imported.agent_id);
+    expect(imported.durability_id).toBe(archive.durability.stateId);
+
+    const destination = testEnv.NANOCODEX_SESSIONS.getByName(imported.agent_id);
+    const adopted = await (await destination.fetch(
+      "https://session.internal/capacity",
+    )).json<{ archived_turns: { archived_receipts: number; objects: number } }>();
+    expect(adopted.archived_turns).toMatchObject({
+      archived_receipts: 514,
+      objects: 1_028,
+    });
+
+    const replay = await SELF.fetch(imported.events_url.replace(/\/events$/, "/turns"), {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "idempotency-key": `request-${oldestId}`,
+      },
+      body: JSON.stringify({ id: oldestId, input: oldestInput }),
     });
     expect(replay.status).toBe(200);
-    await waitForTurnState(agent, id, "completed");
-    expect(await runInDurableObject(session, (_instance, state) => (
-      state.storage.sql.exec<{ input_json: string }>(
-        `SELECT input_json FROM managed_turn_dispatch_chunks
-         WHERE turn_id = ? ORDER BY chunk_index`,
-        id,
-      ).toArray().map(({ input_json }) => input_json).join("")
-    ))).toBe(original);
+    expect(replay.headers.get("x-nanocodex-turn-created")).toBeNull();
+    await expect(replay.json()).resolves.toMatchObject({
+      state: "completed",
+      turn_id: oldestId,
+    });
+    await expect(modelCommandCount()).resolves.toBe(commandsBeforeExport);
+    const oldestCursors = seededCursors.get(oldestId)!;
+    const oldestHistory = await (await SELF.fetch(
+      `${imported.events_url}/history?before=${BigInt(oldestCursors.terminal) + 1n}&limit=2`,
+    )).json<{ data: Array<{ cursor: string }> }>();
+    expect(oldestHistory.data.map(({ cursor }) => cursor)).toEqual([
+      oldestCursors.accepted,
+      oldestCursors.terminal,
+    ]);
+
+    const raceKey = `portable-delete-race-${crypto.randomUUID()}`;
+    const raceAgentId = await testIdempotentAgentId(USER_ID, raceKey);
+    const raceStorageId = testEnv.NANOCODEX_SESSIONS.idFromName(raceAgentId).toString();
+    createdAgents.add(raceAgentId);
+    const originalHistory = testEnv.NANOCODEX_HISTORY;
+    let notifyCopyStarted!: () => void;
+    let releaseCopy!: () => void;
+    const copyStarted = new Promise<void>((resolve) => { notifyCopyStarted = resolve; });
+    const copyHeld = new Promise<void>((resolve) => { releaseCopy = resolve; });
+    let held = false;
+    testEnv.NANOCODEX_HISTORY = new Proxy(originalHistory, {
+      get(target, property) {
+        if (property === "put") {
+          return async (...args: Parameters<R2Bucket["put"]>) => {
+            const key = String(args[0]);
+            if (!held && key.startsWith(`agents/${raceStorageId}/managed-`)) {
+              held = true;
+              notifyCopyStarted();
+              await copyHeld;
+            }
+            return target.put(...args);
+          };
+        }
+        const retained = Reflect.get(target, property);
+        return typeof retained === "function" ? retained.bind(target) : retained;
+      },
+    });
+    try {
+      const racingCreate = SELF.fetch("https://example.test/v1/agents", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": raceKey,
+        },
+        body: JSON.stringify({ durability: archive }),
+      });
+      await within(copyStarted, "managed durability adoption copy", 5_000);
+      const racingDestination = testEnv.NANOCODEX_SESSIONS.getByName(raceAgentId);
+      const deleting = SELF.fetch(
+        `https://example.test/v1/agents/${raceAgentId}`,
+        { method: "DELETE" },
+      );
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        const marked = await runInDurableObject(
+          racingDestination,
+          async (_instance, state) => state.storage.get("nanocodex:session-deleting"),
+        );
+        if (marked === true) break;
+        if (attempt === 99) throw new Error("delete did not fence the paused durability import");
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      releaseCopy();
+      const [creationResponse, deletionResponse] = await Promise.all([racingCreate, deleting]);
+      expect(creationResponse.status).not.toBe(201);
+      expect([409, 503]).toContain(creationResponse.status);
+      expect(deletionResponse.status).toBe(204);
+      createdAgents.delete(raceAgentId);
+      const retainedObjects = await originalHistory.list({
+        prefix: `agents/${raceStorageId}/`,
+      });
+      expect(retainedObjects.objects).toHaveLength(0);
+      expect((await SELF.fetch(
+        `https://example.test/v1/agents/${raceAgentId}`,
+      )).status).toBe(404);
+    } finally {
+      releaseCopy();
+      testEnv.NANOCODEX_HISTORY = originalHistory;
+    }
+
+    const deletedSource = await SELF.fetch(
+      `https://example.test/v1/agents/${source.agent_id}`,
+      { method: "DELETE" },
+    );
+    expect(deletedSource.status).toBe(204);
+    createdAgents.delete(source.agent_id);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await evictDurableObject(testEnv.NANOCODEX_SESSIONS.getByName(imported.agent_id));
+    const replayWithoutSource = await pollImportedCreate(importKey, archive);
+    expect(replayWithoutSource.status).toBe(201);
+    await expect(replayWithoutSource.json()).resolves.toMatchObject({
+      agent_id: imported.agent_id,
+      durability_id: imported.durability_id,
+    });
+
+    const changedArchive = structuredClone(archive);
+    changedArchive.managed_turn_receipts.digest = "0".repeat(64);
+    const changedReplay = await SELF.fetch("https://example.test/v1/agents", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "idempotency-key": importKey,
+      },
+      body: JSON.stringify({ durability: changedArchive }),
+    });
+    expect(changedReplay.status).toBe(409);
+    await expect(changedReplay.json()).resolves.toMatchObject({
+      error: "durability_import_conflict",
+    });
+
+    const unavailableKey = `portable-archive-unavailable-${crypto.randomUUID()}`;
+    createdAgents.add(await testIdempotentAgentId(USER_ID, unavailableKey));
+    const unavailableSource = await SELF.fetch("https://example.test/v1/agents", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "idempotency-key": unavailableKey,
+      },
+      body: JSON.stringify({ durability: archive }),
+    });
+    expect(unavailableSource.status).toBe(400);
+    await expect(unavailableSource.json()).resolves.toMatchObject({
+      error: "invalid_durability_import",
+    });
+  }, 60_000);
+
+  it("rejects corrupt canonical durability before creating a managed Agent", async () => {
+    const response = await SELF.fetch("https://example.test/v1/agents", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        durability: {
+          format: "nanocodex-durability-state-v1",
+          stateId: `corrupt-${crypto.randomUUID()}`,
+          revision: "1",
+          payload: "{}",
+        },
+      }),
+    });
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({
+      error: "invalid_durability_import",
+    });
   });
 
   it("persists cursors across eviction and tails strictly after the acknowledged cursor", async () => {
@@ -5777,6 +6295,7 @@ describe("managed agents REST and resumable SSE", () => {
 
 type AgentReceipt = {
   agent_id: string;
+  durability_id: string;
   events_url: string;
   websocket_url: string;
 };
@@ -5788,6 +6307,7 @@ type ManagedTurnView = {
   input: unknown;
   retry_at: number | null;
   state: string;
+  terminal?: unknown;
   terminal_cursor: string | null;
   turn_id: string;
   updated_at: number;
@@ -5836,11 +6356,71 @@ async function createAgent(): Promise<AgentReceipt> {
   return receipt;
 }
 
+async function pollDurabilityExport(agent: AgentReceipt): Promise<Response> {
+  return (await pollDurabilityExportWithProgress(agent)).response;
+}
+
+async function pollDurabilityExportWithProgress(
+  agent: AgentReceipt,
+): Promise<{ pendingResponses: number; response: Response }> {
+  let pendingResponses = 0;
+  for (let attempt = 0; attempt < 80; attempt += 1) {
+    const response = await SELF.fetch(
+      agent.events_url.replace(/\/events$/, "/durability"),
+      { method: "POST" },
+    );
+    if (response.status !== 202) return { pendingResponses, response };
+    pendingResponses += 1;
+    await response.body?.cancel();
+  }
+  throw new Error("managed durability export did not complete within 80 bounded batches");
+}
+
+async function pollImportedCreate(importKey: string, archive: unknown): Promise<Response> {
+  for (let attempt = 0; attempt < 80; attempt += 1) {
+    const response = await SELF.fetch("https://example.test/v1/agents", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "idempotency-key": importKey,
+      },
+      body: JSON.stringify({ durability: archive }),
+    });
+    if (response.status !== 503) return response;
+    const body: { error?: string } = await response.clone()
+      .json<{ error?: string }>()
+      .catch(() => ({}));
+    if (body.error !== "durability_import_pending") return response;
+    await response.body?.cancel();
+  }
+  throw new Error("managed durability import did not complete within 80 bounded retries");
+}
+
+async function testIdempotentAgentId(userId: string, requestKey: string): Promise<string> {
+  const digest = new Uint8Array(await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(`${userId}\0${requestKey}`),
+  ));
+  const bytes = digest.slice(0, 16);
+  bytes[6] = (bytes[6]! & 0x0f) | 0x80;
+  bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+  const hex = [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
 async function managedFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
   const request = new Request(input, init);
   const headers = new Headers(request.headers);
   headers.set("authorization", `Bearer ${API_KEY}`);
   return RAW_SELF.fetch(new Request(request, { headers }));
+}
+
+async function modelCommandCount(): Promise<number> {
+  const response = await testEnv.NANOCODEX.fetch(
+    "https://broker.internal/test/model-commands",
+  );
+  expect(response.status).toBe(200);
+  return (await response.json<{ count: number }>()).count;
 }
 
 function connectGrantHeaders(
@@ -6149,7 +6729,7 @@ async function waitForTurnState(
     if (response.ok) {
       const turn = await response.json<ManagedTurnView>();
       if (turn.state === expected) return turn;
-      if (turn.state === "failed" || turn.state === "blocked") {
+      if (turn.state === "failed") {
         throw new Error(
           `turn ${id} entered ${turn.state} while waiting for ${expected}: ${turn.error ?? "unknown error"}`,
         );
@@ -6170,13 +6750,36 @@ async function waitForTurnAttempt(
     if (response.ok) {
       const turn = await response.json<ManagedTurnView>();
       if (turn.attempt_count >= expected) return turn;
-      if (turn.state === "failed" || turn.state === "blocked" || turn.state === "cancelled") {
+      if (turn.state === "failed" || turn.state === "cancelled") {
         throw new Error(`turn ${id} entered ${turn.state} before retry attempt ${expected}`);
       }
     }
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   throw new Error(`timed out waiting for turn ${id} retry attempt ${expected}`);
+}
+
+async function waitForTurnRetry(
+  agent: AgentReceipt,
+  id: string,
+  expectedAttempt = 1,
+): Promise<ManagedTurnView> {
+  for (let poll = 0; poll < 200; poll += 1) {
+    const response = await SELF.fetch(agent.events_url.replace(/\/events$/, `/turns/${id}`));
+    if (response.ok) {
+      const turn = await response.json<ManagedTurnView>();
+      if (turn.state === "accepted"
+        && turn.attempt_count >= expectedAttempt
+        && turn.retry_at !== null) {
+        return turn;
+      }
+      if (turn.state === "failed" || turn.state === "cancelled") {
+        throw new Error(`turn ${id} entered ${turn.state} before retry was scheduled`);
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`timed out waiting for turn ${id} retry schedule`);
 }
 
 async function managedHistory(agent: AgentReceipt): Promise<ManagedHistory> {
@@ -6198,19 +6801,19 @@ async function waitForHistoryEvent(
 }
 
 async function waitForScheduledAlarm(
-  stub: DurableObjectStub<NanocodexSession>,
-): Promise<void> {
-  const deadline = Date.now() + 2_000;
-  while (Date.now() < deadline) {
+  stub: DurableObjectStub<DurableAgentSession>,
+  earliest = Number.NEGATIVE_INFINITY,
+): Promise<number> {
+  for (let poll = 0; poll < 200; poll += 1) {
     const alarm = await runInDurableObject(stub, (_instance, state) => state.storage.getAlarm());
-    if (alarm !== null) return;
+    if (alarm !== null && alarm >= earliest) return alarm;
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   throw new Error("timed out waiting for a scheduled Durable Object alarm");
 }
 
 async function cleanupMarkers(
-  stub: DurableObjectStub<NanocodexSession>,
+  stub: DurableObjectStub<DurableAgentSession>,
 ): Promise<{ binding: boolean; deleting: boolean }> {
   return runInDurableObject(stub, async (_instance, state) => ({
     binding: await state.storage.get("nanocodex:credential-binding") !== undefined,
@@ -6223,7 +6826,7 @@ function expireCredentialPreparation(): void {
 }
 
 async function waitForCleanupDeletion(
-  stub: DurableObjectStub<NanocodexSession>,
+  stub: DurableObjectStub<DurableAgentSession>,
 ): Promise<void> {
   const deadline = Date.now() + 2_000;
   while (Date.now() < deadline) {
@@ -6234,7 +6837,7 @@ async function waitForCleanupDeletion(
 }
 
 async function runCleanupAlarmsUntilDeleted(
-  stub: DurableObjectStub<NanocodexSession>,
+  stub: DurableObjectStub<DurableAgentSession>,
 ): Promise<void> {
   const deadline = Date.now() + 2_000;
   while (Date.now() < deadline) {
@@ -6245,7 +6848,7 @@ async function runCleanupAlarmsUntilDeleted(
   throw new Error("timed out running Durable Object cleanup alarms");
 }
 
-function sessionForSubject(subject: string): DurableObjectStub<NanocodexSession> {
+function sessionForSubject(subject: string): DurableObjectStub<DurableAgentSession> {
   return testEnv.NANOCODEX_SESSIONS.get(
     testEnv.NANOCODEX_SESSIONS.idFromString(subject),
   );

@@ -72,6 +72,20 @@ test("CLI device registration accepts exact hosted capabilities without implicit
   assert.deepEqual(parseCliRegisterBody(registration(resources)).resources, resources);
 });
 
+test("CLI durability portability must be an exact signed resource", () => {
+  const resources = [
+    ...base,
+    "urn:nanocodex:agent:history:read",
+    "urn:nanocodex:agent:trace:read",
+    "urn:nanocodex:agent:durability:portability",
+  ];
+  assert.deepEqual(parseCliRegisterBody(registration(resources)).resources, resources);
+  assert.throws(() => parseCliRegisterBody(registration([
+    ...base,
+    "urn:nanocodex:agent:durability:portability:export",
+  ])), /resources/);
+});
+
 test("CLI connector focus is signed, singular, and part of the granted connector set", () => {
   const focused = [
     ...base,

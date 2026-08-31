@@ -255,7 +255,7 @@ function managedConfig() {
     services: [{ binding: "EGRESS", service: brokerName }],
     durable_objects: {
       bindings: [
-        { name: "NANOCODEX_SESSIONS", class_name: "NanocodexSession" },
+        { name: "NANOCODEX_SESSIONS", class_name: "DurableAgentSession" },
         { name: "NANOCODEX_ROOMS", class_name: "MultiplayerRoom" },
         { name: "NANOCODEX_MULTIPLAYER_QUOTA", class_name: "MultiplayerQuota" },
       ],
@@ -263,7 +263,7 @@ function managedConfig() {
     migrations: [
       {
         tag: "v1",
-        new_sqlite_classes: ["NanocodexSession", "MultiplayerRoom"],
+        new_sqlite_classes: ["DurableAgentSession", "MultiplayerRoom"],
       },
       { tag: "v5", new_sqlite_classes: ["MultiplayerQuota"] },
     ],

@@ -4,26 +4,27 @@ use nanocodex_agent::{
     ExecutionPolicyDisposition, NanocodexBuilder, NanocodexError, Result as AgentResult,
     execution::{
         ExecutionAdmission, ExecutionFuture, ExecutionOutput, ExecutionPolicy, ExecutionRetry,
-        ExecutionStepAdmission,
+        ExecutionStepAdmission, ExecutionStepReconciliation,
     },
     session::SessionSnapshot,
 };
 use serde_json::value::RawValue;
 
-use crate::{Admission, BeginStep, DurableSession, Error, RetryPolicy, session::DurableOwner};
+use crate::{
+    Admission, BeginStep, DurableSession, Error, ReconciledStep, RetryPolicy, session::DurableOwner,
+};
 
-/// Fluent compatibility extension that attaches portable durability to an
-/// otherwise independent agent builder.
+/// Fluent builder extension that attaches portable durability to an agent.
 pub trait DurableAgentExt: Sized {
-    /// Restores the journal's latest checkpoint and installs its execution
+    /// Restores the state's latest checkpoint and installs its execution
     /// policy at the agent's neutral lifecycle seam.
-    fn durability(self, journal: DurableSession) -> impl Future<Output = AgentResult<Self>>;
+    fn durability(self, state: DurableSession) -> impl Future<Output = AgentResult<Self>>;
 }
 
 impl<F> DurableAgentExt for NanocodexBuilder<F> {
-    async fn durability(self, journal: DurableSession) -> AgentResult<Self> {
-        let mut builder = self.default_prompt_cache_key(journal.journal_id().to_owned());
-        let (owner, checkpoint) = journal.acquire_agent().await.map_err(agent_error)?;
+    async fn durability(self, state: DurableSession) -> AgentResult<Self> {
+        let mut builder = self.default_prompt_cache_key(state.state_id().to_owned());
+        let (owner, checkpoint) = state.acquire_agent().await.map_err(agent_error)?;
         if let Some(checkpoint) = checkpoint {
             let restored = checkpoint
                 .decode::<SessionSnapshot>()
@@ -34,7 +35,7 @@ impl<F> DurableAgentExt for NanocodexBuilder<F> {
                     != checkpoint.json()
             {
                 return Err(NanocodexError::InvalidSessionSnapshot(
-                    "configured resume snapshot does not match the durability journal".to_owned(),
+                    "configured resume snapshot does not match the durability state".to_owned(),
                 ));
             }
             builder = builder.resume(restored);
@@ -51,7 +52,7 @@ impl<F> DurableAgentExt for NanocodexBuilder<F> {
                 .take()
                 .ok_or_else(|| {
                     NanocodexError::InvalidExecutionPolicy(
-                        "a durability-attached builder can build only one agent; attach durability again to reopen the journal"
+                        "a durability-attached builder can build only one agent; attach durability again to reopen the state"
                             .to_owned(),
                     )
                 })?;
@@ -82,13 +83,10 @@ impl ExecutionPolicy for DurableExecution {
         })
     }
 
-    fn authorize_model_effect<'a>(
-        &'a self,
-        kind: &'static str,
-    ) -> ExecutionFuture<'a, AgentResult<()>> {
+    fn fence_checkpoint_effect<'a>(&'a self) -> ExecutionFuture<'a, AgentResult<()>> {
         Box::pin(async move {
             self.owner
-                .authorize_model_effect(kind)
+                .fence_checkpoint_effect()
                 .await
                 .map_err(agent_error)
         })
@@ -168,16 +166,18 @@ impl ExecutionPolicy for DurableExecution {
     ) -> ExecutionFuture<'a, AgentResult<ExecutionStepAdmission>> {
         Box::pin(async move {
             let input = raw(input_json)?;
-            self.owner
+            match self
+                .owner
                 .begin_step(operation_id, step_id, kind, &input, map_retry(retry))
                 .await
-                .map(|admission| match admission {
-                    BeginStep::Execute => ExecutionStepAdmission::Execute,
-                    BeginStep::Replay(output) => {
-                        ExecutionStepAdmission::Replay(output.json().to_owned())
-                    }
-                })
-                .map_err(agent_error)
+            {
+                Ok(BeginStep::Execute) => Ok(ExecutionStepAdmission::Execute),
+                Ok(BeginStep::Replay(output)) => {
+                    Ok(ExecutionStepAdmission::Replay(output.json().to_owned()))
+                }
+                Ok(BeginStep::Unknown) => Ok(ExecutionStepAdmission::Unknown),
+                Err(error) => Err(agent_error(error)),
+            }
         })
     }
 
@@ -193,6 +193,28 @@ impl ExecutionPolicy for DurableExecution {
                 .complete_step(operation_id, step_id, &output)
                 .await
                 .map_err(agent_error)
+        })
+    }
+
+    fn reconcile_cancelled_step<'a>(
+        &'a self,
+        operation_id: String,
+        step_id: String,
+        unknown_output_json: String,
+    ) -> ExecutionFuture<'a, AgentResult<ExecutionStepReconciliation>> {
+        Box::pin(async move {
+            let unknown_output = raw(unknown_output_json)?;
+            match self
+                .owner
+                .reconcile_cancelled_step(operation_id, step_id, &unknown_output)
+                .await
+            {
+                Ok(ReconciledStep::NotStarted) => Ok(ExecutionStepReconciliation::NotStarted),
+                Ok(ReconciledStep::Completed(output)) => Ok(
+                    ExecutionStepReconciliation::Completed(output.json().to_owned()),
+                ),
+                Err(error) => Err(agent_error(error)),
+            }
         })
     }
 
@@ -269,7 +291,6 @@ fn agent_error(error: Error) -> NanocodexError {
         Error::Store(crate::StoreError::NotCommitted(_))
         | Error::OperationBlocked { .. }
         | Error::OperationActive { .. } => ExecutionPolicyDisposition::Retry,
-        Error::AmbiguousStep { .. } => ExecutionPolicyDisposition::Blocked,
         Error::Store(
             crate::StoreError::Fenced
             | crate::StoreError::Conflict { .. }
@@ -296,18 +317,11 @@ mod tests {
                 ExecutionPolicyDisposition::Retry,
             ),
             (
-                Error::AmbiguousStep {
-                    operation_id: "turn".to_owned(),
-                    step_id: "tool".to_owned(),
-                },
-                ExecutionPolicyDisposition::Blocked,
-            ),
-            (
                 Error::Store(crate::StoreError::Fenced),
                 ExecutionPolicyDisposition::Reopen,
             ),
             (
-                Error::InvalidJournal("broken".to_owned()),
+                Error::InvalidState("broken".to_owned()),
                 ExecutionPolicyDisposition::Fatal,
             ),
         ];

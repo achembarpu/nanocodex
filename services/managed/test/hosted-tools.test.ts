@@ -8,7 +8,7 @@ import type { Env } from "../src/index";
 const testEnv = env as unknown as Env;
 const USER_ID = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
 const API_KEY = `ncx_live_${"d".repeat(12)}_${"h".repeat(43)}`;
-const ACCOUNT_SESSION = "t".repeat(43);
+const ACCOUNT_SESSION = "b".repeat(64);
 const MESSAGE_TIMEOUT_MS = 20_000;
 const createdAgents = new Set<string>();
 

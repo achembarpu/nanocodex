@@ -25,6 +25,11 @@ caf = "caf"
 # and `ded4eacdbd`.
 ede = "ede"
 ded = "ded"
+# These are hexadecimal fragments in reviewed Codex commit hashes, not prose.
+daed = "daed"
+abd = "abd"
+dbe = "dbe"
+daa = "daa"
 # `iz` appears inside the exact retained benchmark flag
 # `flag{gc0d3_iz_ch4LLenGiNg}`.
 iz = "iz"

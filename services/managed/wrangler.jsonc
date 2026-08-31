@@ -43,7 +43,7 @@
     "bindings": [
       {
         "name": "NANOCODEX_SESSIONS",
-        "class_name": "NanocodexSession"
+        "class_name": "DurableAgentSession"
       },
       {
         "name": "NANOCODEX_ROOMS",
@@ -91,6 +91,11 @@
     {
       "tag": "v4",
       "new_sqlite_classes": ["Organization"]
+    },
+    {
+      "tag": "v5",
+      "new_sqlite_classes": ["DurableAgentSession"],
+      "deleted_classes": ["NanocodexSession"]
     }
   ],
   "vars": {

@@ -11,6 +11,7 @@ const MIB = 1024 * 1024;
 const OUTPUT_LIMIT = 128 * 1024;
 const context = {
   callId: "call",
+  model: "gpt-5.6-sol",
   parentCallId: "parent",
   sessionId: "session",
   signal: new AbortController().signal,

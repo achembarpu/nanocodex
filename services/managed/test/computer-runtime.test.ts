@@ -16,6 +16,7 @@ describe("managed Computer runtime", () => {
 
     const context = {
       callId: "shared-computer",
+      model: "gpt-5.6-sol",
       parentCallId: "",
       sessionId: "test",
       signal: new AbortController().signal,
@@ -60,6 +61,7 @@ describe("managed Computer runtime", () => {
       cmd: "gh repo clone paradigmxyz/centaur centaur -- --depth 1 && cat centaur/README.md",
     }, {
       callId: "clone-centaur",
+      model: "gpt-5.6-sol",
       parentCallId: "",
       sessionId: "test",
       signal: new AbortController().signal,
@@ -94,6 +96,7 @@ describe("managed Computer runtime", () => {
       workdir: "/workspace",
     }, {
       callId: "absolute-clone-centaur",
+      model: "gpt-5.6-sol",
       parentCallId: "",
       sessionId: "test",
       signal: new AbortController().signal,
@@ -130,6 +133,7 @@ describe("managed Computer runtime", () => {
     });
     const context = {
       callId: "retry-clone-centaur",
+      model: "gpt-5.6-sol",
       parentCallId: "",
       sessionId: "test",
       signal: new AbortController().signal,

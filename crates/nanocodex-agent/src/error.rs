@@ -12,8 +12,6 @@ pub use nanocodex_oai_api::transport::ResponsesError;
 pub enum ExecutionPolicyDisposition {
     /// The same live policy owner may safely retry the operation.
     Retry,
-    /// The operation remains pending but automatic execution is blocked.
-    Blocked,
     /// This policy owner must stop and be rebuilt from authoritative state.
     Reopen,
     /// The operation cannot be retried automatically.

@@ -8,9 +8,10 @@ import WebSocket from "ws";
 import { credentialSafeHttpOrigin, credentialSafeUrl } from "./credential-origin.mjs";
 import {
   managedAccountFetch,
-  managedAccountWebSocketOptions,
+  managedAccountSessionWebSocketOptions,
   parseManagedAgentReceipt,
   parseManagedReplState,
+  requireManagedAccountCookie,
   requireManagedApiKey,
 } from "./managed-account-auth.mjs";
 
@@ -19,6 +20,7 @@ const baseUrl = credentialSafeHttpOrigin(
   "NANOCODEX_WORKER_URL",
 ).origin;
 const apiKey = requireManagedApiKey();
+const accountCookie = requireManagedAccountCookie();
 const statePath = resolve(process.env.NANOCODEX_REPL_STATE ?? ".nanocodex/cloudflare-repl.json");
 let state = await loadState();
 let client;
@@ -55,7 +57,7 @@ const detach = () => {
 process.once("SIGINT", detach);
 
 try {
-  client = connect(state.websocket_url, apiKey);
+  client = connect(state.websocket_url, accountCookie);
   const ready = await client.ready;
   process.stdout.write(
     `Nanocodex Cloudflare REPL (${state.agent_id}${ready.restored ? ", restored" : ""})\n`,
@@ -104,18 +106,15 @@ async function completePending(pending, resumed) {
   if (terminal.type === "turn_failed") {
     throw new Error(`turn ${terminal.id} failed: ${terminal.error}`);
   }
-  if (terminal.type === "turn_blocked") {
-    throw new Error(`turn ${terminal.id} was blocked: ${terminal.error}`);
-  }
   if (terminal.type === "turn_cancelled") {
     throw new Error(`turn ${terminal.id} was cancelled`);
   }
   process.stdout.write(`${terminal.final_message}\n`);
 }
 
-function connect(url, accountApiKey) {
+function connect(url, cookie) {
   credentialSafeUrl(url, "managed agent WebSocket URL");
-  const socket = new WebSocket(url, managedAccountWebSocketOptions(accountApiKey));
+  const socket = new WebSocket(url, managedAccountSessionWebSocketOptions(cookie, baseUrl));
   let readySettled = false;
   let resolveReady;
   let rejectReady;
@@ -132,7 +131,7 @@ function connect(url, accountApiKey) {
       resolveReady(message);
       return;
     }
-    if (!["turn_completed", "turn_failed", "turn_blocked", "turn_cancelled"].includes(message.type)) {
+    if (!["turn_completed", "turn_failed", "turn_cancelled"].includes(message.type)) {
       return;
     }
     const waiter = waiters.get(message.id);

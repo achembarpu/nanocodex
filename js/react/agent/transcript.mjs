@@ -471,6 +471,7 @@ function eventIdentity(event) {
 function applyToolCall(entries, event, turnId) {
   const payload = event.payload ?? {};
   const callId = payloadString(payload, "call_id") ?? `tool-${eventIdentity(event)}`;
+  if (hasToolCall(entries, callId, turnId)) return;
   const name = payloadString(payload, "tool") ?? "tool";
   const tool = {
     callId, name, arguments: summarizeToolArguments(name, payload.arguments),
@@ -493,6 +494,13 @@ function applyToolCall(entries, event, turnId) {
     id: `tool-${callId}`, kind: "tool", tool,
     ...(turnId === undefined ? {} : { turnId }),
   });
+}
+
+function hasToolCall(entries, callId, turnId) {
+  return entries.some((entry) => entry.kind === "tool"
+    && (turnId === undefined || entry.turnId === turnId)
+    && (entry.tool.callId === callId
+      || entry.tool.children.some((child) => child.callId === callId)));
 }
 
 function applyToolResult(entries, event, turnId) {

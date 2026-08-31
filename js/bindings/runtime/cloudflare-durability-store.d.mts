@@ -1,7 +1,7 @@
 import type {
   DurabilitySqliteRow,
   DurabilitySqliteValue,
-  DurabilityStore,
+  DurabilityPortableStore,
 } from "../types.mjs";
 
 export type CloudflareDurableObjectStorage = Readonly<{
@@ -18,9 +18,9 @@ export type CloudflareDurableObjectStorage = Readonly<{
 }>;
 
 /**
- * Initializes and adapts one Durable Object's colocated SQLite journal.
- * Rust owns every opaque batch; the host only provides atomic storage.
+ * Initializes and adapts one Durable Object's colocated SQLite durable state.
+ * Rust owns the opaque total-state payload; the host only provides atomic storage.
  */
 export declare function createCloudflareDurabilityStore(
   storage: CloudflareDurableObjectStorage,
-): DurabilityStore;
+): DurabilityPortableStore;

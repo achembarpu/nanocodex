@@ -32,6 +32,7 @@ describe("Nanocodex managed Just Bash commands", () => {
       cmd: "curl -s 'https://www.googleapis.com/drive/v3/files?pageSize=1&fields=files(id)'",
     }, {
       callId: "drive-curl",
+      model: "gpt-5.6-sol",
       parentCallId: "",
       sessionId: "test",
       signal: new AbortController().signal,

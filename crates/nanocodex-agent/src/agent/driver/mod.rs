@@ -384,7 +384,66 @@ where
                     );
                     drop(parent);
                     let compact_started = web_time::Instant::now();
-                    if let Err(error) = self.execution.authorize_compaction().await {
+                    let compact_base_checkpoint = latest_fork_checkpoint.clone();
+                    let admitted = self
+                        .execution
+                        .admit_compaction(
+                            compact_base_checkpoint.as_deref(),
+                            thread_model,
+                            default_thinking,
+                            default_fast_mode,
+                            self.workspace.as_deref(),
+                        )
+                        .await;
+                    let (compaction_operation_id, admission) = match admitted {
+                        Ok(admitted) => admitted,
+                        Err(error) => {
+                            let reopen = matches!(
+                                error.execution_policy_disposition(),
+                                Some(crate::ExecutionPolicyDisposition::Reopen)
+                            );
+                            span.record("status", "failed");
+                            span.record("otel.status_code", "ERROR");
+                            span.record(
+                                "duration_ns",
+                                u64::try_from(compact_started.elapsed().as_nanos())
+                                    .unwrap_or(u64::MAX),
+                            );
+                            drop(result.send(Err(error)));
+                            if reopen {
+                                begin_shutdown(
+                                    &mut self.commands,
+                                    &mut queued_turns,
+                                    default_thinking,
+                                    default_fast_mode,
+                                )
+                                .await;
+                                commands_open = false;
+                            }
+                            continue;
+                        }
+                    };
+                    if !matches!(admission, AdmittedExecution::Execute) {
+                        let error = NanocodexError::InvalidExecutionPolicy(
+                            "standalone compaction identity resolved to an unexpected terminal operation"
+                                .to_owned(),
+                        );
+                        span.record("status", "failed");
+                        span.record("otel.status_code", "ERROR");
+                        span.record(
+                            "duration_ns",
+                            u64::try_from(compact_started.elapsed().as_nanos()).unwrap_or(u64::MAX),
+                        );
+                        drop(result.send(Err(error)));
+                        continue;
+                    }
+                    let execution_turn = self
+                        .execution
+                        .start_compaction(default_thinking, compaction_operation_id.clone());
+                    if let Err(error) = execution_turn.begin().await {
+                        if let Some(operation_id) = &compaction_operation_id {
+                            self.execution.release_claim(operation_id).await;
+                        }
                         let reopen = matches!(
                             error.execution_policy_disposition(),
                             Some(crate::ExecutionPolicyDisposition::Reopen)
@@ -408,8 +467,7 @@ where
                         }
                         continue;
                     }
-                    let compact_base_checkpoint = latest_fork_checkpoint.clone();
-                    let execution_turn = self.execution.start_compaction(default_thinking);
+                    let execution_steps = execution_turn.steps();
                     let mut compact_replaced = false;
                     let (cancel_compaction, mut cancel_compaction_rx) = oneshot::channel();
                     let mut cancel_compaction = Some(cancel_compaction);
@@ -421,6 +479,7 @@ where
                                 default_fast_mode,
                                 logical_turn_index,
                                 &mut cancel_compaction_rx,
+                                execution_steps,
                             )
                             .instrument(span.clone()),
                     );
@@ -680,7 +739,10 @@ where
                                 execution_turn.replaced()
                             } else {
                                 execution_turn.interrupted()
-                            };
+                            }
+                            .retain_pending_attempt(
+                                "standalone compaction was interrupted before durable settlement",
+                            );
                             let persisted = self
                                 .execution
                                 .persist(&checkpoint, execution_turn)
@@ -688,8 +750,6 @@ where
                                 .await;
                             match persisted {
                                 Ok(()) => {
-                                    compact_checkpoint_committed = true;
-                                    latest_fork_checkpoint = Some(checkpoint);
                                     model.replace_client(ResponsesClient::new((self
                                         .spawner
                                         .service_factory)(
@@ -706,27 +766,16 @@ where
                                 thread_model,
                                 checkpoint,
                             ));
-                            let retryable = error
-                                .responses_error()
-                                .is_some_and(|source| source.retry_advice().is_some())
-                                || matches!(
-                                    error.execution_policy_disposition(),
-                                    Some(crate::ExecutionPolicyDisposition::Retry)
-                                );
                             let persisted = self
                                 .execution
                                 .persist(
                                     &checkpoint,
-                                    execution_turn.failed(error.to_string(), retryable),
+                                    execution_turn.failed(error.to_string(), true),
                                 )
                                 .instrument(span.clone())
                                 .await;
                             match persisted {
-                                Ok(()) => {
-                                    compact_checkpoint_committed = true;
-                                    latest_fork_checkpoint = Some(checkpoint);
-                                    Err(error)
-                                }
+                                Ok(()) => Err(error),
                                 Err(error) => Err(error),
                             }
                         }
@@ -1271,10 +1320,6 @@ where
                         checkpoint,
                     ));
                     match error.execution_policy_disposition() {
-                        Some(crate::ExecutionPolicyDisposition::Blocked) => {
-                            self.execution.release_turn(execution_turn).await;
-                            (model.emit_terminal("failed").and(Err(error)), false, None)
-                        }
                         Some(crate::ExecutionPolicyDisposition::Reopen) => {
                             (model.emit_terminal("failed").and(Err(error)), false, None)
                         }
@@ -1306,10 +1351,6 @@ where
                     }
                 }
                 Err(error) => match error.execution_policy_disposition() {
-                    Some(crate::ExecutionPolicyDisposition::Blocked) => {
-                        self.execution.release_turn(execution_turn).await;
-                        (model.emit_terminal("failed").and(Err(error)), false, None)
-                    }
                     Some(crate::ExecutionPolicyDisposition::Reopen) => {
                         (model.emit_terminal("failed").and(Err(error)), false, None)
                     }

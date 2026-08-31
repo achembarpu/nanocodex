@@ -110,17 +110,32 @@ where
             prompt_history: &recorded_prompt_history,
         };
         let recovered = if let Some(steps) = &execution_steps {
+            // A reopened durable step cannot distinguish a provider rejection
+            // from a submitted-and-billing-uncertain request. The live client
+            // still owns safe retries within this one uninterrupted attempt.
             match steps
                 .begin::<_, RecordedModelResult>(
                     &step_id,
                     "model_call",
                     &step_input,
-                    crate::agent::execution::ExecutionRetry::Idempotent,
+                    crate::agent::execution::ExecutionRetry::Never,
                 )
                 .await?
             {
                 crate::agent::ExecutionStep::Execute => None,
                 crate::agent::ExecutionStep::Replay(output) => Some(output),
+                crate::agent::ExecutionStep::Unknown => {
+                    span.record("status", "failed");
+                    span.record("otel.status_code", "ERROR");
+                    span.record("duration_ns", elapsed_ns(started_at));
+                    return self.model_call_failed(
+                        call_index,
+                        started_at,
+                        NanocodexError::InvalidAttemptState {
+                            detail: "model call provider outcome is unknown after durable recovery; refusing to resubmit",
+                        },
+                    );
+                }
             }
         } else {
             None

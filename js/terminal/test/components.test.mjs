@@ -156,9 +156,10 @@ test("ready voice control separates transport, coding-turn cancel, status, and f
   await act(async () => renderer.unmount());
 });
 
-test("composer keeps send stable while exposing stop separately", async () => {
+test("composer keeps stop available beside send throughout an active turn", async () => {
   assert.equal(terminalComposerAction(true, ""), "stop");
-  assert.equal(terminalComposerAction(true, "steer"), "send");
+  assert.equal(terminalComposerAction(true, "steer"), "stop");
+  assert.equal(terminalComposerAction(false, "steer"), "send");
   const changes = [];
   const submissions = [];
   const textareaNode = { value: "ship it" };
@@ -212,9 +213,10 @@ test("composer keeps send stable while exposing stop separately", async () => {
   assert.equal(prevented, 1);
   assert.deepEqual(
     renderer.root.findAllByType("button").map((button) => button.props["aria-label"]),
-    ["Send message"],
+    ["Stop response", "Send message"],
   );
-  assert.equal(cancelled, 0);
+  await act(async () => renderer.root.findByProps({ "aria-label": "Stop response" }).props.onClick());
+  assert.equal(cancelled, 1);
 
   await act(async () => renderer.update(React.createElement(TerminalComposer, {
     draft: "",
@@ -231,7 +233,7 @@ test("composer keeps send stable while exposing stop separately", async () => {
   );
   assert.equal(renderer.root.findByProps({ "aria-label": "Send message" }).props.disabled, false);
   await act(async () => renderer.root.findByProps({ "aria-label": "Stop response" }).props.onClick());
-  assert.equal(cancelled, 1);
+  assert.equal(cancelled, 2);
   await act(async () => renderer.unmount());
 });
 

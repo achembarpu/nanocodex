@@ -1,7 +1,7 @@
 use super::*;
 
 #[tokio::test]
-async fn websocket_ephemeral_chains_on_connection_and_replays_a_fresh_fork() -> Result<()> {
+async fn websocket_ephemeral_chains_a_fresh_fork_from_its_checkpoint() -> Result<()> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let endpoint = format!("ws://{}", listener.local_addr()?);
     let server = tokio::spawn(async move {
@@ -24,12 +24,11 @@ async fn websocket_ephemeral_chains_on_connection_and_replays_a_fresh_fork() -> 
 
         let (stream, _) = listener.accept().await?;
         let mut branch = accept_async(stream).await?;
-        let replay = next_json(&mut branch).await?;
-        assert_eq!(replay["store"], false);
-        assert!(replay.get("previous_response_id").is_none());
-        let replay = replay.to_string();
-        assert!(replay.contains("first prompt"));
-        assert!(replay.contains("branch prompt"));
+        let request = next_json(&mut branch).await?;
+        assert_eq!(request["store"], false);
+        assert_eq!(request["previous_response_id"], "resp-first");
+        assert_eq!(request["input"].as_array().map(Vec::len), Some(1));
+        assert_eq!(request["input"][0]["content"][0]["text"], "branch prompt");
         send_final(&mut branch, "resp-branch").await
     });
 

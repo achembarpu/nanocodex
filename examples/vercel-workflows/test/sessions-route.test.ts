@@ -26,7 +26,7 @@ describe("session creation route", () => {
     else process.env.NANOCODEX_ADMIN_TOKEN = originalAdminToken;
   });
 
-  it("uses the Workflow run ID as the only public session identity", async () => {
+  it("uses the Workflow run ID as both identities for a new session", async () => {
     mocks.start.mockResolvedValue({ runId: "wrun_canonical" });
 
     const response = await POST(new Request("https://example.test/api/sessions", {
@@ -34,12 +34,38 @@ describe("session creation route", () => {
     }));
 
     expect(response.status).toBe(201);
-    await expect(response.json()).resolves.toEqual({ session_id: "wrun_canonical" });
+    await expect(response.json()).resolves.toEqual({
+      session_id: "wrun_canonical",
+      durability_id: "wrun_canonical",
+    });
     expect(mocks.start).toHaveBeenCalledOnce();
     expect(mocks.start).toHaveBeenCalledWith(mocks.nanocodexActor);
   });
 
-  it("accepts no compatibility session argument at the actor boundary", () => {
-    expectTypeOf(nanocodexActor).toEqualTypeOf<() => Promise<never>>();
+  it("starts an imported state under a fresh Workflow run identity", async () => {
+    mocks.start.mockResolvedValue({ runId: "wrun_imported" });
+    const durability = {
+      format: "nanocodex-durability-state-v1",
+      stateId: "portable-agent",
+      revision: "9",
+      payload: "opaque",
+    } as const;
+
+    const response = await POST(new Request("https://example.test/api/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ durability }),
+    }));
+
+    expect(response.status).toBe(201);
+    await expect(response.json()).resolves.toEqual({
+      session_id: "wrun_imported",
+      durability_id: "portable-agent",
+    });
+    expect(mocks.start).toHaveBeenCalledWith(mocks.nanocodexActor, [durability]);
+  });
+
+  it("accepts only a portable archive argument at the actor boundary", () => {
+    expectTypeOf(nanocodexActor).toBeFunction();
   });
 });

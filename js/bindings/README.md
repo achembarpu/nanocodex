@@ -170,7 +170,7 @@ credentials or places its reusable grant bearer in a WebSocket URL.
 ### Durable Cloudflare Agent
 
 `nanocodex/cloudflare` is the standard Durable Object consumer. It keeps the
-host transport, SQLite journal, private runtime identity, event persistence,
+host transport, SQLite durable state, private runtime identity, event persistence,
 hibernatable socket fan-out, and cursor replay inside the adapter:
 
 ```js
@@ -224,15 +224,15 @@ evaluator. Select `toolMode: "code"` only when also supplying an evaluator that
 is explicitly compatible with the deployed Worker runtime. Runtime-owned
 Subagents are installed by default, including on a durable root. Clean children
 use the existing in-memory Rust task tree and are closed with the live root;
-their lifecycles are not reconstructed from the durable journal. Use
+their lifecycles are not reconstructed from durable execution state. Use
 `Subagents.create({ maxConcurrency })` in `tools` only to override the default
 maximum concurrency of 32.
 
 Each Durable Object persists a private runtime identity in its own SQLite
-storage and derives its journal identity from it, so multiple objects in one
+storage and derives its state identity from it, so multiple objects in one
 isolate remain independent and eviction reuses the same identity. Before
 replacing an Agent inside a still-live object, await `agent.session.shutdown()`;
-deleting the Durable Object and its retained event/journal rows remains an
+deleting the Durable Object and its retained event/state rows remains an
 application-owned lifecycle operation.
 
 Internally this constructor uses `Transport.hostManaged` and an exact brokered
@@ -784,7 +784,7 @@ with the same instructions and tool definitions, and release the original
 agent before handing its snapshot to another writer.
 
 For crash recovery inside a turn, provide the generic durability host instead
-of manually persisting snapshots. The host stores opaque Rust journal batches;
+of manually persisting snapshots. The host stores one opaque Rust state value;
 model replay, tool ambiguity, operation deduplication, and checkpoint recovery
 remain in Rust/WASM:
 
@@ -794,12 +794,21 @@ import { Agent, Transport } from "nanocodex/host";
 const agent = await Agent.create({
   transport: Transport.openAi({ apiKey: process.env.OPENAI_API_KEY }),
   durability: {
-    async load(journalId) {
-      return database.loadJournal(journalId);
+    async load(stateId) {
+      return database.loadState(stateId);
     },
-    async append(journalId, { expectedRevision, payload }) {
-      return database.compareAndAppend(journalId, expectedRevision, payload);
-      // { status: "appended", revision: "8" }
+    async acquire(stateId, { ownerId }) {
+      return database.acquireState(stateId, ownerId);
+    },
+    async replace(stateId, { ownerId, fence, expectedRevision, payload }) {
+      return database.compareAndReplace(
+        stateId,
+        ownerId,
+        fence,
+        expectedRevision,
+        payload,
+      );
+      // { status: "replaced", revision: "8" }
       // or { status: "conflict", actualRevision: "8" }
       // or { status: "not_committed", message: "transaction rolled back" }
     },
@@ -807,7 +816,7 @@ const agent = await Agent.create({
   durabilityId: "customer-agent-123",
 });
 
-// Every prompt is journaled because durability is configured. Supply `id`
+// Every prompt is durable because the state store is configured. Supply `id`
 // only when an external retry must identify the same logical operation.
 const turn = agent.turn.prompt({ input: "Build the thing." });
 // const turn = agent.turn.prompt({ id: "request-7", input: "Build the thing." });
@@ -831,7 +840,7 @@ Revisions are unsigned decimal strings so JavaScript preserves Rust's full
 `nanocodex/durability` leaf. Durable step hosts can carry the memory store's
 `snapshot()` into the next step. SQLite hosts provide one transaction query
 adapter and execute the canonical schema; the platform never interprets the
-opaque Rust journal. See `services/managed`,
+opaque Rust state. See `services/managed`,
 `examples/vercel-workflows`, and `examples/rivet-actors` for all three host
 shapes.
 
@@ -854,6 +863,70 @@ const agent = await Agent.create({
 Vercel and other PostgreSQL hosts use `createPostgresDurabilityStore(pool)`
 from `nanocodex/durability/postgres`; connection ownership and secret policy
 remain in the application.
+
+The built-in stores can move one stopped agent across providers without
+decoding or rebasing its Rust state. Cloudflare owners should use the adapter's
+lifecycle-safe export instead of reconstructing its private state ID:
+
+```js
+import { Agent as CloudflareAgent } from "nanocodex/cloudflare";
+import { importDurabilityStatePages } from "nanocodex/durability";
+import { createPostgresDurabilityStore } from "nanocodex/durability/postgres";
+
+await cloudflareAgent.session.shutdown();
+const pages = [];
+let cursor;
+let to;
+do {
+  const page = await CloudflareAgent.exportDurabilityState(durableObjectOwner, {
+    from: "0", // exclusive destination revision
+    to,        // omit once, then repeat the selected inclusive source revision
+    cursor,
+  });
+  pages.push(page);
+  to = page.to;
+  cursor = page.nextCursor ?? undefined;
+} while (cursor !== undefined);
+
+// Send the pages through an authenticated, encrypted operator path.
+const destination = createPostgresDurabilityStore(vercelPostgresPool);
+await importDurabilityStatePages(destination, JSON.parse(JSON.stringify(pages)));
+
+const vercelAgent = await Agent.create({
+  module: wasmModule,
+  transport,
+  durability: destination,
+  durabilityId: pages[0].stateId,
+});
+```
+
+`from` is exclusive and `to` is inclusive. For a nonzero `from`, load the
+destination once, hash that exact state with `durabilityStateDigest`, and repeat
+the short `fromDigest` on every page request; revision zero's null-state digest
+is implied. Each page carries that SHA-256 lineage digest, so import atomically
+succeeds only if the destination still has the exact revision and payload
+selected at `from`.
+Because `to` is one complete Rust state, no intermediate revision log is
+needed. Export fences the old source owner, and PostgreSQL reconciles lost
+COMMIT responses internally by retrying the identical idempotent request, so
+the API never reports an ambiguous write outcome. Stop source admission before
+the first page and never resume it after cutover begins. Pages can contain
+conversation and tool state, so handle them as secrets. The Vercel example
+includes a WASM integration test that executes the
+same agent Cloudflare → PostgreSQL → Cloudflare, replays committed turn IDs
+without model calls, rebuilds the first new provider request from committed
+history without a previous-response handle, and then continues with new turns
+on each destination.
+
+The managed Cloudflare service exposes the same offline cutover at `POST
+/v1/agents/<agent-id>/durability`; the call permanently closes source admission.
+Create a destination with `POST /v1/agents`, an `Idempotency-Key` header, and
+`{ "durability": <archive> }`. The stable key owns resumable receipt adoption.
+The Vercel example accepts that same body at `POST /api/sessions` and exports a
+stopped PostgreSQL state through `POST /api/durability/export` with
+`{ "state_id": <durability-id>, "from": <revision>,
+"fromDigest": <required-for-nonzero-from>, "to": <optional-revision>,
+"cursor": <optional-cursor> }`.
 
 Node embedders whose bundler relocates package assets may compile and pass the
 web-target artifact explicitly. The runtime still uses the Node host for

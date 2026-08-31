@@ -102,6 +102,10 @@ test("managed agents have no provider-credential or direct transport path", asyn
   assert.match(launcher, /envLine\("LOCAL_CHATGPT_BOOTSTRAP", \{/);
   assert.match(launcher, /envLine\("NANOCODEX_BROKER_PROBE_TOKEN", brokerProbeToken\)/);
   assert.match(launcher, /env: agentProcessEnvironment\(\)/);
+  assert.match(launcher, /const localManagedConfigPath = join\(workersRoot, "wrangler\.test\.jsonc"\)/);
+  assert.match(launcher, /managedConfig \? managedConfigPath : localManagedConfigPath/);
+  assert.match(launcher, /process\.env\.NANOCODEX_DEV_STATE_ROOT/);
+  assert.match(launcher, /relay\.protocol === "http:" && relay\.hostname === "127\.0\.0\.1"/);
   const brokerSpawn = launcher.indexOf("const brokerHandle = spawnProcessGroup");
   const brokerProof = launcher.indexOf('description: "private broker deep readiness"');
   const managedSpawn = launcher.indexOf("const managedHandle = spawnProcessGroup");
@@ -414,6 +418,8 @@ test("multiplayer smoke reaches its RoomClient after async room setup", async ()
         env: {
           ...process.env,
           NANOCODEX_WORKER_URL: origin,
+          NANOCODEX_API_KEY: `ncx_live_${"a".repeat(12)}_${"b".repeat(43)}`,
+          NANOCODEX_ACCOUNT_COOKIE: `nanocodex_account=${"c".repeat(64)}`,
           NANOCODEX_MULTIPLAYER_TIMEOUT_MS: "1000",
           NANOCODEX_SMOKE_CLEANUP_TIMEOUT_MS: "1000",
         },

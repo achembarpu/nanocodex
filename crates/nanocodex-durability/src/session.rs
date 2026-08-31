@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{
         Arc,
         atomic::{AtomicU8, AtomicUsize, Ordering},
@@ -10,13 +10,12 @@ use serde::{Serialize, de::DeserializeOwned};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::{
-    EncodedPayload, Entry, Error, JournalState, JournalStore, OperationStatus, OwnerId, OwnerToken,
-    Result, RetryPolicy, StepStatus, StoreError, StoredJournal, journal::RetainedCheckpoint,
+    DurableState, EncodedPayload, Error, OperationStatus, OwnerId, OwnerToken, Result, RetryPolicy,
+    StateStore, StepStatus, StoreError, StoredState, Transition, state::RetainedCheckpoint,
 };
 
 const COMMAND_CAPACITY: usize = 64;
 const RELEASE_BURST_LIMIT: usize = 32;
-const COMPACTION_BATCH_THRESHOLD: usize = 64;
 
 /// Result of submitting one idempotent operation.
 #[derive(Clone, Debug)]
@@ -71,6 +70,20 @@ pub enum BeginStep<O = EncodedPayload> {
     Execute,
     /// A prior attempt completed; use this stored output instead of executing.
     Replay(O),
+    /// A prior owner crossed an at-most-once effect boundary without retaining
+    /// its output. The caller must persist an explicit unknown result and must
+    /// not repeat the effect.
+    Unknown,
+}
+
+/// Authoritative result of reconciling an at-most-once step during explicit
+/// cancellation.
+#[derive(Clone, Debug)]
+pub enum ReconciledStep<O = EncodedPayload> {
+    /// The effect definitely did not start, so no output was invented.
+    NotStarted,
+    /// The exact durable output retained for the step.
+    Completed(O),
 }
 
 enum StoredAdmission {
@@ -122,6 +135,51 @@ impl StoredAdmission {
 enum StoredBeginStep {
     Execute,
     Replay(EncodedPayload),
+    Unknown,
+}
+
+enum StoredReconciledStep {
+    NotStarted,
+    Completed(EncodedPayload),
+}
+
+const STEP_HANDOFF_WAITING: u8 = 0;
+const STEP_HANDOFF_AUTHORIZED: u8 = 1;
+const STEP_HANDOFF_ABANDONED: u8 = 2;
+
+struct StepStartHandoff {
+    state: Arc<AtomicU8>,
+    resolved: bool,
+}
+
+impl StepStartHandoff {
+    fn new() -> Self {
+        Self {
+            state: Arc::new(AtomicU8::new(STEP_HANDOFF_WAITING)),
+            resolved: false,
+        }
+    }
+
+    fn shared(&self) -> Arc<AtomicU8> {
+        Arc::clone(&self.state)
+    }
+
+    fn authorize(&mut self) {
+        self.state.store(STEP_HANDOFF_AUTHORIZED, Ordering::Release);
+        self.resolved = true;
+    }
+
+    fn disarm(&mut self) {
+        self.resolved = true;
+    }
+}
+
+impl Drop for StepStartHandoff {
+    fn drop(&mut self) {
+        if !self.resolved {
+            self.state.store(STEP_HANDOFF_ABANDONED, Ordering::Release);
+        }
+    }
 }
 
 #[derive(Clone, Eq, PartialEq)]
@@ -137,7 +195,7 @@ struct AgentAcquisition {
 
 enum Command {
     State {
-        result: oneshot::Sender<JournalState>,
+        result: oneshot::Sender<DurableState>,
     },
     LatestCheckpoint {
         result: oneshot::Sender<Option<EncodedPayload>>,
@@ -169,7 +227,7 @@ enum Command {
     BeginAttempt {
         caller: Caller,
         operation_id: String,
-        result: oneshot::Sender<Result<u32>>,
+        result: oneshot::Sender<Result<()>>,
     },
     BeginStep {
         caller: Caller,
@@ -178,6 +236,7 @@ enum Command {
         kind: String,
         input: EncodedPayload,
         retry: RetryPolicy,
+        handoff: Arc<AtomicU8>,
         result: oneshot::Sender<Result<StoredBeginStep>>,
     },
     CompleteStep {
@@ -186,6 +245,13 @@ enum Command {
         step_id: String,
         output: EncodedPayload,
         result: oneshot::Sender<Result<()>>,
+    },
+    ReconcileCancelledStep {
+        caller: Caller,
+        operation_id: String,
+        step_id: String,
+        unknown_output: EncodedPayload,
+        result: oneshot::Sender<Result<StoredReconciledStep>>,
     },
     Complete {
         caller: Caller,
@@ -204,7 +270,6 @@ enum Command {
     FailAttempt {
         caller: Caller,
         operation_id: String,
-        error: String,
         result: oneshot::Sender<Result<()>>,
     },
     Cancel {
@@ -213,7 +278,7 @@ enum Command {
         checkpoint: Option<EncodedPayload>,
         result: oneshot::Sender<Result<()>>,
     },
-    Compact {
+    PruneReceipts {
         caller: Caller,
         result: oneshot::Sender<Result<()>>,
     },
@@ -222,24 +287,23 @@ enum Command {
         checkpoint: EncodedPayload,
         result: oneshot::Sender<Result<()>>,
     },
-    AuthorizeModelEffect {
+    FenceCheckpointEffect {
         caller: Caller,
-        kind: String,
         result: oneshot::Sender<Result<()>>,
     },
 }
 
 struct Driver {
-    store: Box<dyn JournalStore>,
-    journal_id: Arc<str>,
-    state: JournalState,
-    retained_batches: usize,
+    store: Box<dyn StateStore>,
+    state_id: Arc<str>,
+    state: DurableState,
     terminal_receipt_limit: Option<usize>,
     owner: OwnerToken,
     next_agent_generation: u64,
     active_agent_generation: Option<u64>,
     claimed: HashMap<String, Caller>,
-    exact_retries: HashMap<String, Entry>,
+    running: HashSet<String>,
+    step_start_handoffs: HashMap<(String, String), Arc<AtomicU8>>,
     poisoned: bool,
     commands: mpsc::Receiver<Command>,
     releases: mpsc::UnboundedReceiver<ReleaseSignal>,
@@ -324,6 +388,8 @@ impl Driver {
                     {
                         self.active_agent_generation = None;
                         self.claimed.clear();
+                        self.running.clear();
+                        self.step_start_handoffs.clear();
                     }
                 }
                 Command::Admit {
@@ -405,8 +471,10 @@ impl Driver {
                     kind,
                     input,
                     retry,
+                    handoff,
                     result,
                 } => {
+                    let handoff_key = (operation_id.clone(), step_id.clone());
                     let outcome = match self.authorize(&caller) {
                         Ok(()) => {
                             self.begin_step(&caller, operation_id, step_id, kind, input, retry)
@@ -414,7 +482,12 @@ impl Driver {
                         }
                         Err(error) => Err(error),
                     };
+                    let started_never = retry == RetryPolicy::Never
+                        && matches!(&outcome, Ok(StoredBeginStep::Execute));
                     drop(result.send(outcome));
+                    if started_never {
+                        self.step_start_handoffs.insert(handoff_key, handoff);
+                    }
                 }
                 Command::CompleteStep {
                     caller,
@@ -423,10 +496,35 @@ impl Driver {
                     output,
                     result,
                 } => {
+                    let handoff_key = (operation_id.clone(), step_id.clone());
                     let outcome = match self.authorize(&caller) {
                         Ok(()) => {
                             self.complete_step(&caller, operation_id, step_id, output)
                                 .await
+                        }
+                        Err(error) => Err(error),
+                    };
+                    if outcome.is_ok() {
+                        self.step_start_handoffs.remove(&handoff_key);
+                    }
+                    drop(result.send(outcome));
+                }
+                Command::ReconcileCancelledStep {
+                    caller,
+                    operation_id,
+                    step_id,
+                    unknown_output,
+                    result,
+                } => {
+                    let outcome = match self.authorize(&caller) {
+                        Ok(()) => {
+                            self.reconcile_cancelled_step(
+                                &caller,
+                                operation_id,
+                                step_id,
+                                unknown_output,
+                            )
+                            .await
                         }
                         Err(error) => Err(error),
                     };
@@ -464,32 +562,12 @@ impl Driver {
                 Command::FailAttempt {
                     caller,
                     operation_id,
-                    error,
                     result,
                 } => {
                     let outcome = match self.authorize(&caller) {
                         Ok(()) => {
                             let outcome = match self.require_claimed(&caller, &operation_id) {
-                                Ok(()) => {
-                                    let entry = Entry::AttemptFailed {
-                                        operation_id: operation_id.clone(),
-                                        error,
-                                    };
-                                    match self.require_active_attempt(&operation_id).and_then(
-                                        |()| self.require_exact_retry(&operation_id, &entry),
-                                    ) {
-                                        Ok(()) => {
-                                            let outcome = self.append(entry.clone()).await;
-                                            self.track_terminal_attempt(
-                                                &operation_id,
-                                                entry,
-                                                &outcome,
-                                            );
-                                            outcome
-                                        }
-                                        Err(error) => Err(error),
-                                    }
-                                }
+                                Ok(()) => self.require_running(&operation_id),
                                 Err(error) => Err(error),
                             };
                             if finishing_attempt_releases_claim(&outcome) {
@@ -511,19 +589,31 @@ impl Driver {
                         Ok(()) => {
                             let outcome = match self.require_claimed(&caller, &operation_id) {
                                 Ok(()) => {
-                                    let proposed = Entry::OperationCancelled {
-                                        operation_id: operation_id.clone(),
-                                        checkpoint,
-                                    };
-                                    match self.terminal_retry_entry(&operation_id, proposed) {
-                                        Ok(entry) => {
-                                            let outcome = self.append_terminal(entry.clone()).await;
-                                            self.track_terminal_attempt(
-                                                &operation_id,
-                                                entry,
-                                                &outcome,
-                                            );
-                                            outcome
+                                    let admissible = match checkpoint.as_ref() {
+                                        Some(_) => self.require_running(&operation_id),
+                                        None if self.running.contains(&operation_id) => {
+                                            Err(Error::CancellationCheckpointRequired {
+                                                operation_id: operation_id.clone(),
+                                            })
+                                        }
+                                        None => Ok(()),
+                                    }
+                                    .and_then(|()| {
+                                        self.state
+                                            .operation(&operation_id)
+                                            .filter(|operation| !operation.status.is_terminal())
+                                            .ok_or_else(|| Error::OperationTerminal {
+                                                operation_id: operation_id.clone(),
+                                            })
+                                            .map(|_| ())
+                                    });
+                                    match admissible {
+                                        Ok(()) => {
+                                            self.apply_terminal(Transition::OperationCancelled {
+                                                operation_id: operation_id.clone(),
+                                                checkpoint,
+                                            })
+                                            .await
                                         }
                                         Err(error) => Err(error),
                                     }
@@ -539,9 +629,9 @@ impl Driver {
                     };
                     drop(result.send(outcome));
                 }
-                Command::Compact { caller, result } => {
+                Command::PruneReceipts { caller, result } => {
                     let outcome = match self.authorize(&caller) {
-                        Ok(()) => self.compact_retained(true).await,
+                        Ok(()) => self.prune_retained(true).await,
                         Err(error) => Err(error),
                     };
                     drop(result.send(outcome));
@@ -558,7 +648,7 @@ impl Driver {
                                 pending_id: pending_id.to_owned(),
                             }),
                             None => {
-                                self.append_terminal(Entry::CheckpointCommitted { checkpoint })
+                                self.apply_terminal(Transition::CheckpointCommitted { checkpoint })
                                     .await
                             }
                         },
@@ -566,22 +656,28 @@ impl Driver {
                     };
                     drop(result.send(outcome));
                 }
-                Command::AuthorizeModelEffect {
-                    caller,
-                    kind,
-                    result,
-                } => {
+                Command::FenceCheckpointEffect { caller, result } => {
                     let outcome = match self.authorize(&caller) {
-                        Ok(()) if kind == "compaction" => {
-                            match self.state.first_pending_operation() {
-                                Some((pending_id, _)) => Err(Error::OperationBlocked {
-                                    operation_id: "standalone-compaction".to_owned(),
-                                    pending_id: pending_id.to_owned(),
-                                }),
-                                None => self.append(Entry::ModelEffectStarted { kind }).await,
-                            }
+                        Ok(()) if self.state.checkpoint_effect_pending() => {
+                            Err(Error::InvalidState(
+                                "standalone checkpoint provider outcome is unknown after durable recovery; refusing to resubmit"
+                                    .to_owned(),
+                            ))
                         }
-                        Ok(()) => self.append(Entry::ModelEffectStarted { kind }).await,
+                        Ok(()) => match self.state.first_pending_operation() {
+                            Some((pending_id, _))
+                                if pending_id.starts_with("standalone-compaction-") =>
+                            {
+                                Ok(())
+                            }
+                            Some((pending_id, _)) => Err(Error::OperationBlocked {
+                                operation_id: "standalone-checkpoint".to_owned(),
+                                pending_id: pending_id.to_owned(),
+                            }),
+                            None => {
+                                Ok(())
+                            }
+                        },
                         Err(error) => Err(error),
                     };
                     drop(result.send(outcome));
@@ -599,12 +695,24 @@ impl Driver {
                 if self.active_agent_generation == Some(release.generation) {
                     self.active_agent_generation = None;
                     self.claimed.clear();
+                    self.running.clear();
+                    self.step_start_handoffs.clear();
                 }
                 release.state.finish();
             }
             ReleaseSignal::Direct(caller_id) => {
+                let released = self
+                    .claimed
+                    .iter()
+                    .filter(|(_, caller)| *caller == &Caller::Direct(caller_id.clone()))
+                    .map(|(operation_id, _)| operation_id.clone())
+                    .collect::<Vec<_>>();
                 self.claimed
                     .retain(|_, caller| caller != &Caller::Direct(caller_id.clone()));
+                for operation_id in released {
+                    self.running.remove(&operation_id);
+                    self.clear_step_start_handoffs(&operation_id);
+                }
             }
         }
     }
@@ -619,11 +727,7 @@ impl Driver {
     }
 
     async fn acquire_agent(&mut self) -> Result<AgentAcquisition> {
-        let acquired = match self
-            .store
-            .acquire_owner(&self.journal_id, OwnerId::new())
-            .await
-        {
+        let acquired = match self.store.acquire(&self.state_id, OwnerId::new()).await {
             Ok(acquired) => acquired,
             Err(error @ StoreError::NotCommitted(_)) => return Err(error.into()),
             Err(error) => {
@@ -631,7 +735,7 @@ impl Driver {
                 return Err(error.into());
             }
         };
-        let state = match reduce(acquired.journal) {
+        let state = match reduce(acquired.state) {
             Ok(state) => state,
             Err(error) => {
                 self.poisoned = true;
@@ -642,7 +746,7 @@ impl Driver {
             Some(generation) => generation,
             None => {
                 self.poisoned = true;
-                return Err(Error::InvalidJournal(
+                return Err(Error::InvalidState(
                     "model-owner generation exceeded the u64 range".to_owned(),
                 ));
             }
@@ -650,7 +754,8 @@ impl Driver {
         self.owner = acquired.owner;
         self.state = state;
         self.claimed.clear();
-        self.exact_retries.clear();
+        self.running.clear();
+        self.step_start_handoffs.clear();
         self.next_agent_generation = generation;
         self.active_agent_generation = Some(generation);
         Ok(AgentAcquisition {
@@ -672,27 +777,8 @@ impl Driver {
             if self.claimed.contains_key(&operation_id) {
                 return Err(Error::OperationActive { operation_id });
             }
-            if matches!(caller, Caller::Agent(_))
-                && let Some(entry @ Entry::AttemptFailed { .. }) =
-                    self.exact_retries.get(&operation_id).cloned()
-            {
-                self.append(entry).await?;
-                self.exact_retries.remove(&operation_id);
-            }
             let operation = self.state.operation(&operation_id).ok_or_else(|| {
-                Error::InvalidJournal(format!("operation `{operation_id}` disappeared"))
-            })?;
-            if matches!(operation.status, OperationStatus::Pending)
-                && operation.active_attempt
-                && !self.exact_retries.contains_key(&operation_id)
-            {
-                self.append(Entry::AttemptReleased {
-                    operation_id: operation_id.clone(),
-                })
-                .await?;
-            }
-            let operation = self.state.operation(&operation_id).ok_or_else(|| {
-                Error::InvalidJournal(format!("operation `{operation_id}` disappeared"))
+                Error::InvalidState(format!("operation `{operation_id}` disappeared"))
             })?;
             return match &operation.status {
                 OperationStatus::Pending => {
@@ -712,7 +798,7 @@ impl Driver {
                 OperationStatus::Cancelled { .. } => Ok(StoredAdmission::Cancelled),
             };
         }
-        self.append(Entry::OperationAccepted {
+        self.apply(Transition::OperationAccepted {
             operation_id: operation_id.clone(),
             input,
         })
@@ -729,9 +815,7 @@ impl Driver {
     ) -> Result<(String, StoredAdmission)> {
         if let Some((pending_id, operation)) = self
             .state
-            .pending_operations()
-            .into_iter()
-            .find(|(pending_id, _)| !self.claimed.contains_key(*pending_id))
+            .first_pending_operation_where(|pending_id| !self.claimed.contains_key(pending_id))
         {
             if operation.input != input {
                 return Err(Error::OperationBlocked {
@@ -752,7 +836,7 @@ impl Driver {
         Ok((candidate_operation_id, admission))
     }
 
-    async fn begin_attempt(&mut self, caller: &Caller, operation_id: String) -> Result<u32> {
+    async fn begin_attempt(&mut self, caller: &Caller, operation_id: String) -> Result<()> {
         self.require_claimed(caller, &operation_id)?;
         if let Some((pending_id, _)) = self.state.first_pending_operation()
             && pending_id != operation_id
@@ -763,25 +847,16 @@ impl Driver {
             });
         }
         let operation = self.state.operation(&operation_id).ok_or_else(|| {
-            Error::InvalidJournal(format!("operation `{operation_id}` was not accepted"))
+            Error::InvalidState(format!("operation `{operation_id}` was not accepted"))
         })?;
         if operation.status.is_terminal() {
             return Err(Error::OperationTerminal { operation_id });
         }
-        if self.exact_retries.contains_key(&operation_id) {
-            if !operation.active_attempt {
-                return Err(Error::AttemptNotStarted { operation_id });
-            }
-            return Ok(operation.attempts);
+        if self.running.contains(&operation_id) {
+            return Err(Error::AttemptActive { operation_id });
         }
-        self.append(Entry::AttemptStarted {
-            operation_id: operation_id.clone(),
-        })
-        .await?;
-        Ok(self
-            .state
-            .operation(&operation_id)
-            .map_or(0, |operation| operation.attempts))
+        self.running.insert(operation_id.clone());
+        Ok(())
     }
 
     async fn begin_step(
@@ -802,19 +877,14 @@ impl Driver {
                 pending_id: pending_id.to_owned(),
             });
         }
-        let operation = self.state.operation(&operation_id).ok_or_else(|| {
-            Error::InvalidJournal(format!("operation `{operation_id}` was not accepted"))
-        })?;
-        if !operation.active_attempt {
-            return Err(Error::AttemptNotStarted { operation_id });
-        }
+        self.require_running(&operation_id)?;
         if let Some(step) = self
             .state
             .operation(&operation_id)
             .and_then(|operation| operation.steps.get(&step_id))
         {
             if step.kind != kind || step.input != input || step.retry != retry {
-                return Err(Error::InvalidJournal(format!(
+                return Err(Error::InvalidState(format!(
                     "step `{step_id}` in operation `{operation_id}` changed definition"
                 )));
             }
@@ -822,24 +892,20 @@ impl Driver {
                 StepStatus::Completed(output) => {
                     return Ok(StoredBeginStep::Replay(output.clone()));
                 }
-                StepStatus::Started if retry == RetryPolicy::Never => {
-                    return Err(Error::AmbiguousStep {
-                        operation_id,
-                        step_id,
-                    });
+                StepStatus::EffectPending if retry == RetryPolicy::Never => {
+                    return Ok(StoredBeginStep::Unknown);
                 }
-                StepStatus::Started => {}
+                StepStatus::EffectPending => {}
             }
         }
-        let entry = Entry::StepStarted {
+        let entry = Transition::StepStarted {
             operation_id: operation_id.clone(),
             step_id,
             kind,
             input,
             retry,
         };
-        self.require_exact_retry(&operation_id, &entry)?;
-        self.append(entry).await?;
+        self.apply(entry).await?;
         Ok(StoredBeginStep::Execute)
     }
 
@@ -861,19 +927,88 @@ impl Driver {
                 step_id,
             });
         };
-        if matches!(step.status, StepStatus::Completed(_)) {
-            return Err(Error::InvalidJournal(format!(
+        let status = step.status.clone();
+        self.require_running(&operation_id)?;
+        match status {
+            StepStatus::Completed(_) => Err(Error::InvalidState(format!(
                 "step `{step_id}` in operation `{operation_id}` already completed"
+            ))),
+            StepStatus::EffectPending => {
+                self.apply(Transition::StepCompleted {
+                    operation_id,
+                    step_id,
+                    output,
+                })
+                .await
+            }
+        }
+    }
+
+    async fn reconcile_cancelled_step(
+        &mut self,
+        caller: &Caller,
+        operation_id: String,
+        step_id: String,
+        unknown_output: EncodedPayload,
+    ) -> Result<StoredReconciledStep> {
+        self.require_claimed(caller, &operation_id)?;
+        self.require_running(&operation_id)?;
+        let key = (operation_id.clone(), step_id.clone());
+        let Some((retry, status)) = self
+            .state
+            .operation(&operation_id)
+            .and_then(|operation| operation.steps.get(&step_id))
+            .map(|step| (step.retry, step.status.clone()))
+        else {
+            self.step_start_handoffs.remove(&key);
+            return Ok(StoredReconciledStep::NotStarted);
+        };
+        if retry != RetryPolicy::Never {
+            return Err(Error::InvalidState(format!(
+                "step `{step_id}` in operation `{operation_id}` is not an at-most-once effect"
             )));
         }
-        self.require_active_attempt(&operation_id)?;
-        let entry = Entry::StepCompleted {
-            operation_id: operation_id.clone(),
-            step_id,
-            output,
-        };
-        self.require_exact_retry(&operation_id, &entry)?;
-        self.append(entry).await
+        match status {
+            StepStatus::Completed(output) => {
+                self.step_start_handoffs.remove(&key);
+                Ok(StoredReconciledStep::Completed(output))
+            }
+            StepStatus::EffectPending => {
+                let handoff = self
+                    .step_start_handoffs
+                    .get(&key)
+                    .map_or(STEP_HANDOFF_AUTHORIZED, |handoff| {
+                        handoff.load(Ordering::Acquire)
+                    });
+                match handoff {
+                    STEP_HANDOFF_ABANDONED => {
+                        self.apply(Transition::StepAbandoned {
+                            operation_id,
+                            step_id,
+                        })
+                        .await?;
+                        self.step_start_handoffs.remove(&key);
+                        Ok(StoredReconciledStep::NotStarted)
+                    }
+                    STEP_HANDOFF_AUTHORIZED => {
+                        self.apply(Transition::StepCompleted {
+                            operation_id,
+                            step_id,
+                            output: unknown_output.clone(),
+                        })
+                        .await?;
+                        self.step_start_handoffs.remove(&key);
+                        Ok(StoredReconciledStep::Completed(unknown_output))
+                    }
+                    STEP_HANDOFF_WAITING => Err(Error::InvalidState(format!(
+                        "step `{step_id}` in operation `{operation_id}` cancellation raced an unresolved execution handoff"
+                    ))),
+                    state => Err(Error::InvalidState(format!(
+                        "step `{step_id}` in operation `{operation_id}` has invalid execution handoff state {state}"
+                    ))),
+                }
+            }
+        }
     }
 
     async fn complete(
@@ -884,15 +1019,13 @@ impl Driver {
         output: EncodedPayload,
     ) -> Result<()> {
         self.require_claimed(caller, &operation_id)?;
-        self.require_active_attempt(&operation_id)?;
-        let proposed = Entry::OperationCompleted {
+        self.require_running(&operation_id)?;
+        let entry = Transition::OperationCompleted {
             operation_id: operation_id.clone(),
             checkpoint,
             output,
         };
-        let entry = self.terminal_retry_entry(&operation_id, proposed)?;
-        let outcome = self.append_terminal(entry.clone()).await;
-        self.track_terminal_attempt(&operation_id, entry, &outcome);
+        let outcome = self.apply_terminal(entry).await;
         if finishing_attempt_releases_claim(&outcome) {
             self.release_claim_if_owned(caller, &operation_id);
         }
@@ -907,15 +1040,13 @@ impl Driver {
         error: String,
     ) -> Result<()> {
         self.require_claimed(caller, &operation_id)?;
-        self.require_active_attempt(&operation_id)?;
-        let proposed = Entry::OperationFailed {
+        self.require_running(&operation_id)?;
+        let entry = Transition::OperationFailed {
             operation_id: operation_id.clone(),
             checkpoint,
             error,
         };
-        let entry = self.terminal_retry_entry(&operation_id, proposed)?;
-        let outcome = self.append_terminal(entry.clone()).await;
-        self.track_terminal_attempt(&operation_id, entry, &outcome);
+        let outcome = self.apply_terminal(entry).await;
         if finishing_attempt_releases_claim(&outcome) {
             self.release_claim_if_owned(caller, &operation_id);
         }
@@ -932,60 +1063,16 @@ impl Driver {
         }
     }
 
-    fn require_exact_retry(&self, operation_id: &str, entry: &Entry) -> Result<()> {
-        if let Some(expected) = self.exact_retries.get(operation_id)
-            && expected != entry
-        {
-            return Err(Error::InvalidJournal(format!(
-                "operation `{operation_id}` must retry its definitely uncommitted mutation exactly"
-            )));
-        }
-        Ok(())
-    }
-
-    fn terminal_retry_entry(&self, operation_id: &str, proposed: Entry) -> Result<Entry> {
-        let Some(expected) = self.exact_retries.get(operation_id) else {
-            return Ok(proposed);
-        };
-        let compatible = match (expected, &proposed) {
-            (
-                Entry::OperationCompleted {
-                    output: expected, ..
-                },
-                Entry::OperationCompleted {
-                    output: proposed, ..
-                },
-            ) => expected == proposed,
-            (
-                Entry::OperationFailed {
-                    error: expected, ..
-                },
-                Entry::OperationFailed {
-                    error: proposed, ..
-                },
-            ) => expected == proposed,
-            (Entry::OperationCancelled { .. }, Entry::OperationCancelled { .. }) => true,
-            _ => false,
-        };
-        if compatible {
-            Ok(expected.clone())
-        } else {
-            Err(Error::InvalidJournal(format!(
-                "operation `{operation_id}` must retry its definitely uncommitted terminal mutation exactly"
-            )))
-        }
-    }
-
-    fn require_active_attempt(&self, operation_id: &str) -> Result<()> {
+    fn require_running(&self, operation_id: &str) -> Result<()> {
         let operation = self.state.operation(operation_id).ok_or_else(|| {
-            Error::InvalidJournal(format!("operation `{operation_id}` was not accepted"))
+            Error::InvalidState(format!("operation `{operation_id}` was not accepted"))
         })?;
         if operation.status.is_terminal() {
             return Err(Error::OperationTerminal {
                 operation_id: operation_id.to_owned(),
             });
         }
-        if !operation.active_attempt {
+        if !self.running.contains(operation_id) {
             return Err(Error::AttemptNotStarted {
                 operation_id: operation_id.to_owned(),
             });
@@ -993,44 +1080,53 @@ impl Driver {
         Ok(())
     }
 
-    fn track_terminal_attempt(&mut self, operation_id: &str, entry: Entry, outcome: &Result<()>) {
-        match outcome {
-            Err(Error::Store(StoreError::NotCommitted(_))) => {
-                self.exact_retries.insert(operation_id.to_owned(), entry);
-            }
-            Ok(()) => {
-                self.exact_retries.remove(operation_id);
-            }
-            Err(_) => {}
-        }
-    }
-
     fn release_claim(&mut self, caller: &Caller, operation_id: &str) -> Result<()> {
         self.require_claimed(caller, operation_id)?;
         self.claimed.remove(operation_id);
+        self.running.remove(operation_id);
+        self.clear_step_start_handoffs(operation_id);
         Ok(())
     }
 
     fn release_claim_if_owned(&mut self, caller: &Caller, operation_id: &str) {
         if self.claimed.get(operation_id) == Some(caller) {
             self.claimed.remove(operation_id);
+            self.running.remove(operation_id);
+            self.clear_step_start_handoffs(operation_id);
         }
     }
 
-    async fn append(&mut self, entry: Entry) -> Result<()> {
+    fn clear_step_start_handoffs(&mut self, operation_id: &str) {
+        self.step_start_handoffs
+            .retain(|(candidate, _), _| candidate != operation_id);
+    }
+
+    async fn apply(&mut self, entry: Transition) -> Result<()> {
         let expected_revision = self.state.revision().checked_add(1).ok_or_else(|| {
-            Error::InvalidJournal("journal revision exceeded the u64 range".to_owned())
+            Error::InvalidState("state revision exceeded the u64 range".to_owned())
         })?;
-        self.state.validate_batch(expected_revision, &entry)?;
-        let payload = serde_json::to_string(&entry)?;
+        let mut next = self.state.clone();
+        next.apply_transition(expected_revision, entry)?;
+        if let Some(limit) = self.terminal_receipt_limit {
+            let _ = next.retain_terminal_receipts(limit);
+        }
+        self.persist(next).await
+    }
+
+    async fn persist(&mut self, next: DurableState) -> Result<()> {
+        let expected_revision = self.state.revision().checked_add(1).ok_or_else(|| {
+            Error::InvalidState("state revision exceeded the u64 range".to_owned())
+        })?;
+        if next.revision() != expected_revision {
+            return Err(Error::InvalidState(format!(
+                "next current state has revision {}, expected {expected_revision}",
+                next.revision()
+            )));
+        }
+        let payload = next.checkpoint_payload()?;
         let revision = match self
             .store
-            .append(
-                &self.journal_id,
-                &self.owner,
-                self.state.revision(),
-                &payload,
-            )
+            .replace(&self.state_id, &self.owner, self.state.revision(), &payload)
             .await
         {
             Ok(revision) => revision,
@@ -1042,59 +1138,31 @@ impl Driver {
         };
         if revision != expected_revision {
             self.poisoned = true;
-            return Err(Error::InvalidJournal(format!(
-                "store returned revision {revision} after appending expected revision {expected_revision}"
+            return Err(Error::InvalidState(format!(
+                "store returned revision {revision} after replacing expected revision {expected_revision}"
             )));
         }
-        if let Err(error) = self.state.apply_batch(revision, &entry) {
-            self.poisoned = true;
-            return Err(error);
-        }
-        self.retained_batches = self.retained_batches.saturating_add(1);
+        self.state = next;
         Ok(())
     }
 
-    async fn append_terminal(&mut self, entry: Entry) -> Result<()> {
-        self.append(entry).await?;
-        if self.retained_batches < COMPACTION_BATCH_THRESHOLD {
-            return Ok(());
-        }
-        match self.compact_retained(false).await {
-            Err(Error::Store(StoreError::NotCommitted(_))) => Ok(()),
-            outcome => outcome,
-        }
+    async fn apply_terminal(&mut self, entry: Transition) -> Result<()> {
+        self.apply(entry).await
     }
 
-    async fn compact_retained(&mut self, explicit: bool) -> Result<()> {
-        if self.retained_batches == 0 || (!explicit && self.retained_batches == 1) {
+    async fn prune_retained(&mut self, _explicit: bool) -> Result<()> {
+        let Some(limit) = self.terminal_receipt_limit else {
+            return Ok(());
+        };
+        let mut next = self.state.clone();
+        if !next.retain_terminal_receipts(limit) {
             return Ok(());
         }
-        let revision = self.state.revision();
-        let payload = self.state.checkpoint_payload(self.terminal_receipt_limit)?;
-        match self
-            .store
-            .compact(&self.journal_id, &self.owner, revision, &payload)
-            .await
-        {
-            Ok(compacted_revision) if compacted_revision == revision => {
-                if let Some(limit) = self.terminal_receipt_limit {
-                    self.state.retain_terminal_receipts(limit);
-                }
-                self.retained_batches = 1;
-                Ok(())
-            }
-            Ok(compacted_revision) => {
-                self.poisoned = true;
-                Err(Error::InvalidJournal(format!(
-                    "store compacted revision {compacted_revision} while retaining revision {revision}"
-                )))
-            }
-            Err(error @ StoreError::NotCommitted(_)) => Err(error.into()),
-            Err(error) => {
-                self.poisoned = true;
-                Err(error.into())
-            }
-        }
+        let revision = self.state.revision().checked_add(1).ok_or_else(|| {
+            Error::InvalidState("state revision exceeded the u64 range".to_owned())
+        })?;
+        next.advance_revision(revision)?;
+        self.persist(next).await
     }
 }
 
@@ -1105,47 +1173,37 @@ const fn finishing_attempt_releases_claim(outcome: &Result<()>) -> bool {
     )
 }
 
-fn reduce(stored: StoredJournal) -> Result<JournalState> {
-    let mut state = JournalState::default();
-    for batch in stored.batches {
-        match serde_json::from_str::<RetainedCheckpoint>(&batch.payload) {
-            Ok(RetainedCheckpoint {
-                nanocodex_journal_state,
-            }) if state.revision() == 0 => {
-                state = JournalState::from_checkpoint(batch.revision, nanocodex_journal_state)?;
-            }
-            Ok(_) => {
-                return Err(Error::InvalidJournal(
-                    "a compacted journal checkpoint must be the first retained batch".to_owned(),
-                ));
-            }
-            Err(_) => {
-                let entry = serde_json::from_str::<Entry>(&batch.payload).map_err(|source| {
-                    Error::Decode {
-                        revision: batch.revision,
-                        source,
-                    }
-                })?;
-                state.apply_replayed_batch(batch.revision, &entry)?;
-            }
-        }
+fn reduce(stored: StoredState) -> Result<DurableState> {
+    let Some(payload) = stored.payload else {
+        return if stored.revision == 0 {
+            Ok(DurableState::default())
+        } else {
+            Err(Error::InvalidState(format!(
+                "store reported revision {} without a payload",
+                stored.revision
+            )))
+        };
+    };
+    if stored.revision == 0 {
+        return Err(Error::InvalidState(
+            "store retained a payload at revision zero".to_owned(),
+        ));
     }
-    if state.revision() != stored.revision {
-        return Err(Error::InvalidJournal(format!(
-            "store reported revision {}, but batches reduce to {}",
-            stored.revision,
-            state.revision()
-        )));
-    }
-    Ok(state)
+    let RetainedCheckpoint {
+        nanocodex_durable_state,
+    } = serde_json::from_str(&payload).map_err(|source| Error::Decode {
+        revision: stored.revision,
+        source,
+    })?;
+    DurableState::from_checkpoint(stored.revision, nanocodex_durable_state)
 }
 
-/// Cheap command handle for an owned durable-journal driver.
+/// Cheap command handle for an owned durable-state driver.
 ///
-/// The spawned driver is the sole owner of the reduced journal state and all
+/// The spawned driver is the sole owner of the reduced state state and all
 /// live operation claims. Clones only enqueue commands and await typed replies.
 pub struct DurableSession {
-    journal_id: Arc<str>,
+    state_id: Arc<str>,
     commands: mpsc::Sender<Command>,
     releases: mpsc::UnboundedSender<ReleaseSignal>,
     caller_id: OwnerId,
@@ -1155,7 +1213,7 @@ pub struct DurableSession {
 impl Clone for DurableSession {
     fn clone(&self) -> Self {
         Self {
-            journal_id: Arc::clone(&self.journal_id),
+            state_id: Arc::clone(&self.state_id),
             commands: self.commands.clone(),
             releases: self.releases.clone(),
             caller_id: OwnerId::new(),
@@ -1176,11 +1234,11 @@ impl Drop for DurableSession {
 
 impl DurableSession {
     /// Loads and validates a durable session, then spawns its owning driver.
-    pub async fn open<S>(store: S, journal_id: impl Into<String>) -> Result<Self>
+    pub async fn open<S>(store: S, state_id: impl Into<String>) -> Result<Self>
     where
-        S: JournalStore + 'static,
+        S: StateStore + 'static,
     {
-        Self::open_inner(store, journal_id.into(), None).await
+        Self::open_inner(store, state_id.into(), None).await
     }
 
     /// Loads a durable session whose compacted checkpoint retains at most the
@@ -1191,22 +1249,22 @@ impl DurableSession {
     /// model checkpoint are always retained.
     pub async fn open_with_terminal_receipt_limit<S>(
         store: S,
-        journal_id: impl Into<String>,
+        state_id: impl Into<String>,
         limit: usize,
     ) -> Result<Self>
     where
-        S: JournalStore + 'static,
+        S: StateStore + 'static,
     {
-        Self::open_inner(store, journal_id.into(), Some(limit)).await
+        Self::open_inner(store, state_id.into(), Some(limit)).await
     }
 
-    /// Compacts the retained journal into one current-state checkpoint.
+    /// Removes old terminal replay receipts from the complete retained state.
     ///
-    /// This lets an embedding host reduce a large recovered journal before it
+    /// This lets an embedding host reduce a large recovered state before it
     /// allocates the model and tool runtime that will consume the checkpoint.
-    pub async fn compact(&self) -> Result<()> {
+    pub async fn prune_receipts(&self) -> Result<()> {
         let (result, receiver) = oneshot::channel();
-        self.send(Command::Compact {
+        self.send(Command::PruneReceipts {
             caller: Caller::Direct(self.caller_id.clone()),
             result,
         })
@@ -1216,40 +1274,39 @@ impl DurableSession {
 
     async fn open_inner<S>(
         mut store: S,
-        journal_id: String,
+        state_id: String,
         terminal_receipt_limit: Option<usize>,
     ) -> Result<Self>
     where
-        S: JournalStore + 'static,
+        S: StateStore + 'static,
     {
-        if journal_id.trim().is_empty() {
-            return Err(Error::InvalidJournal(
-                "journal identity must not be empty".to_owned(),
+        if state_id.trim().is_empty() {
+            return Err(Error::InvalidState(
+                "state identity must not be empty".to_owned(),
             ));
         }
-        let acquired = store.acquire_owner(&journal_id, OwnerId::new()).await?;
-        let retained_batches = acquired.journal.batches.len();
-        let state = reduce(acquired.journal)?;
-        let journal_id = Arc::<str>::from(journal_id);
+        let acquired = store.acquire(&state_id, OwnerId::new()).await?;
+        let state = reduce(acquired.state)?;
+        let state_id = Arc::<str>::from(state_id);
         let (commands, receiver) = mpsc::channel(COMMAND_CAPACITY);
         let (releases, release_receiver) = mpsc::unbounded_channel();
         spawn_driver(Driver {
             store: Box::new(store),
-            journal_id: Arc::clone(&journal_id),
+            state_id: Arc::clone(&state_id),
             state,
-            retained_batches,
             terminal_receipt_limit,
             owner: acquired.owner,
             next_agent_generation: 0,
             active_agent_generation: None,
             claimed: HashMap::new(),
-            exact_retries: HashMap::new(),
+            running: HashSet::new(),
+            step_start_handoffs: HashMap::new(),
             poisoned: false,
             commands: receiver,
             releases: release_receiver,
         })?;
         Ok(Self {
-            journal_id,
+            state_id,
             commands,
             releases,
             caller_id: OwnerId::new(),
@@ -1257,21 +1314,21 @@ impl DurableSession {
         })
     }
 
-    /// Stable host-store journal identity.
+    /// Stable host-store state identity.
     #[must_use]
-    pub fn journal_id(&self) -> &str {
-        &self.journal_id
+    pub fn state_id(&self) -> &str {
+        &self.state_id
     }
 
     /// Copies the current reduced state from the owning driver.
-    pub async fn state(&self) -> Result<JournalState> {
+    pub async fn state(&self) -> Result<DurableState> {
         let (result, receiver) = oneshot::channel();
         self.send(Command::State { result }).await?;
         receiver.await.map_err(|_| Error::DriverStopped)
     }
 
     /// Copies the latest terminal checkpoint from the owning driver without
-    /// cloning the rest of the reduced journal.
+    /// cloning the rest of the reduced state.
     pub async fn latest_checkpoint(&self) -> Result<Option<EncodedPayload>> {
         let (result, receiver) = oneshot::channel();
         self.send(Command::LatestCheckpoint { result }).await?;
@@ -1292,7 +1349,7 @@ impl DurableSession {
     }
 
     /// Durably accepts and claims an operation, retaining terminal payloads in
-    /// their encoded journal form.
+    /// their encoded state form.
     pub async fn admit<I>(&self, operation_id: impl Into<String>, input: &I) -> Result<Admission>
     where
         I: Serialize + ?Sized,
@@ -1320,7 +1377,7 @@ impl DurableSession {
     }
 
     /// Durably admits automatically identified work, retaining terminal
-    /// payloads in their encoded journal form.
+    /// payloads in their encoded state form.
     ///
     /// The candidate identity is used for new work. If the oldest unclaimed
     /// pending operation has identical input, that operation is reclaimed and
@@ -1427,7 +1484,7 @@ impl DurableSession {
         Ok(admission)
     }
 
-    /// Releases a live claim without changing durable journal state.
+    /// Releases a live claim without changing durable state state.
     pub async fn release(&self, operation_id: impl Into<String>) -> Result<()> {
         let (result, receiver) = oneshot::channel();
         self.send(Command::Release {
@@ -1443,8 +1500,8 @@ impl DurableSession {
         outcome
     }
 
-    /// Records that an accepted operation is beginning another attempt.
-    pub async fn begin_attempt(&self, operation_id: impl Into<String>) -> Result<u32> {
+    /// Claims an accepted operation for one live execution attempt.
+    pub async fn begin_attempt(&self, operation_id: impl Into<String>) -> Result<()> {
         let (result, receiver) = oneshot::channel();
         self.send(Command::BeginAttempt {
             caller: Caller::Direct(self.caller_id.clone()),
@@ -1456,7 +1513,7 @@ impl DurableSession {
     }
 
     /// Begins or replays one stable step, retaining replay output in its
-    /// encoded journal form.
+    /// encoded state form.
     pub async fn begin_step<I>(
         &self,
         operation_id: impl Into<String>,
@@ -1480,6 +1537,7 @@ impl DurableSession {
         {
             StoredBeginStep::Execute => Ok(BeginStep::Execute),
             StoredBeginStep::Replay(output) => Ok(BeginStep::Replay(output)),
+            StoredBeginStep::Unknown => Ok(BeginStep::Unknown),
         }
     }
 
@@ -1508,6 +1566,7 @@ impl DurableSession {
         {
             StoredBeginStep::Execute => Ok(BeginStep::Execute),
             StoredBeginStep::Replay(output) => Ok(BeginStep::Replay(output.decode()?)),
+            StoredBeginStep::Unknown => Ok(BeginStep::Unknown),
         }
     }
 
@@ -1520,6 +1579,7 @@ impl DurableSession {
         retry: RetryPolicy,
     ) -> Result<StoredBeginStep> {
         let (result, receiver) = oneshot::channel();
+        let mut handoff = StepStartHandoff::new();
         self.send(Command::BeginStep {
             caller: Caller::Direct(self.caller_id.clone()),
             operation_id,
@@ -1527,10 +1587,17 @@ impl DurableSession {
             kind,
             input,
             retry,
+            handoff: handoff.shared(),
             result,
         })
         .await?;
-        receive(receiver).await
+        let outcome = receive(receiver).await?;
+        if matches!(&outcome, StoredBeginStep::Execute) {
+            handoff.authorize();
+        } else {
+            handoff.disarm();
+        }
+        Ok(outcome)
     }
 
     /// Commits a step output for future replay.
@@ -1550,6 +1617,29 @@ impl DurableSession {
         })
         .await?;
         receive(receiver).await
+    }
+
+    /// Reconciles an at-most-once step for explicit cancellation and returns
+    /// the exact output selected by durable state.
+    pub async fn reconcile_cancelled_step<T: Serialize + ?Sized>(
+        &self,
+        operation_id: impl Into<String>,
+        step_id: impl Into<String>,
+        unknown_output: &T,
+    ) -> Result<ReconciledStep> {
+        let (result, receiver) = oneshot::channel();
+        self.send(Command::ReconcileCancelledStep {
+            caller: Caller::Direct(self.caller_id.clone()),
+            operation_id: operation_id.into(),
+            step_id: step_id.into(),
+            unknown_output: EncodedPayload::encode(unknown_output)?,
+            result,
+        })
+        .await?;
+        match receive(receiver).await? {
+            StoredReconciledStep::NotStarted => Ok(ReconciledStep::NotStarted),
+            StoredReconciledStep::Completed(output) => Ok(ReconciledStep::Completed(output)),
+        }
     }
 
     /// Atomically terminalizes an operation with its checkpoint and result.
@@ -1598,17 +1688,20 @@ impl DurableSession {
         outcome
     }
 
-    /// Records a failed attempt while leaving the operation retryable.
+    /// Ends the live attempt while leaving the durable operation pending.
+    ///
+    /// The diagnostic is intentionally not persisted: attempts are live
+    /// scheduling state, while accepted input, effects, and terminals are the
+    /// durable protocol.
     pub async fn fail_attempt(
         &self,
         operation_id: impl Into<String>,
-        error: impl Into<String>,
+        _error: impl Into<String>,
     ) -> Result<()> {
         let (result, receiver) = oneshot::channel();
         self.send(Command::FailAttempt {
             caller: Caller::Direct(self.caller_id.clone()),
             operation_id: operation_id.into(),
-            error: error.into(),
             result,
         })
         .await?;
@@ -1620,6 +1713,9 @@ impl DurableSession {
     }
 
     /// Explicitly terminalizes an operation as cancelled.
+    ///
+    /// This is valid only before an attempt starts. Active Agent cancellation
+    /// commits its safe interrupted checkpoint through the execution policy.
     pub async fn cancel(&self, operation_id: impl Into<String>) -> Result<()> {
         let (result, receiver) = oneshot::channel();
         self.send(Command::Cancel {
@@ -1741,7 +1837,7 @@ impl DurableOwner {
         receive(receiver).await
     }
 
-    pub(crate) async fn begin_attempt(&self, operation_id: String) -> Result<u32> {
+    pub(crate) async fn begin_attempt(&self, operation_id: String) -> Result<()> {
         let (result, receiver) = oneshot::channel();
         self.send(Command::BeginAttempt {
             caller: self.caller()?,
@@ -1764,6 +1860,7 @@ impl DurableOwner {
         I: Serialize + ?Sized,
     {
         let (result, receiver) = oneshot::channel();
+        let mut handoff = StepStartHandoff::new();
         self.send(Command::BeginStep {
             caller: self.caller()?,
             operation_id,
@@ -1771,12 +1868,20 @@ impl DurableOwner {
             kind,
             input: EncodedPayload::encode(input)?,
             retry,
+            handoff: handoff.shared(),
             result,
         })
         .await?;
-        match receive(receiver).await? {
+        let outcome = receive(receiver).await?;
+        if matches!(&outcome, StoredBeginStep::Execute) {
+            handoff.authorize();
+        } else {
+            handoff.disarm();
+        }
+        match outcome {
             StoredBeginStep::Execute => Ok(BeginStep::Execute),
             StoredBeginStep::Replay(output) => Ok(BeginStep::Replay(output)),
+            StoredBeginStep::Unknown => Ok(BeginStep::Unknown),
         }
     }
 
@@ -1796,6 +1901,27 @@ impl DurableOwner {
         })
         .await?;
         receive(receiver).await
+    }
+
+    pub(crate) async fn reconcile_cancelled_step<T: Serialize + ?Sized>(
+        &self,
+        operation_id: String,
+        step_id: String,
+        unknown_output: &T,
+    ) -> Result<ReconciledStep> {
+        let (result, receiver) = oneshot::channel();
+        self.send(Command::ReconcileCancelledStep {
+            caller: self.caller()?,
+            operation_id,
+            step_id,
+            unknown_output: EncodedPayload::encode(unknown_output)?,
+            result,
+        })
+        .await?;
+        match receive(receiver).await? {
+            StoredReconciledStep::NotStarted => Ok(ReconciledStep::NotStarted),
+            StoredReconciledStep::Completed(output) => Ok(ReconciledStep::Completed(output)),
+        }
     }
 
     pub(crate) async fn complete<C: Serialize + ?Sized, O: Serialize + ?Sized>(
@@ -1834,12 +1960,11 @@ impl DurableOwner {
         receive(receiver).await
     }
 
-    pub(crate) async fn fail_attempt(&self, operation_id: String, error: String) -> Result<()> {
+    pub(crate) async fn fail_attempt(&self, operation_id: String, _error: String) -> Result<()> {
         let (result, receiver) = oneshot::channel();
         self.send(Command::FailAttempt {
             caller: self.caller()?,
             operation_id,
-            error,
             result,
         })
         .await?;
@@ -1876,11 +2001,10 @@ impl DurableOwner {
         receive(receiver).await
     }
 
-    pub(crate) async fn authorize_model_effect(&self, kind: &str) -> Result<()> {
+    pub(crate) async fn fence_checkpoint_effect(&self) -> Result<()> {
         let (result, receiver) = oneshot::channel();
-        self.send(Command::AuthorizeModelEffect {
+        self.send(Command::FenceCheckpointEffect {
             caller: self.caller()?,
-            kind: kind.to_owned(),
             result,
         })
         .await?;
@@ -1910,7 +2034,7 @@ impl DurableOwner {
             Err(OWNER_RELEASED) => return Ok(()),
             Err(OWNER_RELEASING) => {}
             Ok(_) | Err(_) => {
-                return Err(Error::InvalidJournal(
+                return Err(Error::InvalidState(
                     "durable owner entered an invalid release state".to_owned(),
                 ));
             }
@@ -2021,51 +2145,6 @@ mod tests {
 
     use super::*;
     use crate::MemoryStore;
-
-    #[derive(Clone)]
-    struct FailCompactionOnce {
-        inner: MemoryStore,
-        failed: Arc<std::sync::atomic::AtomicBool>,
-    }
-
-    impl JournalStore for FailCompactionOnce {
-        fn acquire_owner<'a>(
-            &'a mut self,
-            journal_id: &'a str,
-            owner_id: OwnerId,
-        ) -> crate::StoreFuture<'a, std::result::Result<crate::OwnedJournal, StoreError>> {
-            self.inner.acquire_owner(journal_id, owner_id)
-        }
-
-        fn append<'a>(
-            &'a mut self,
-            journal_id: &'a str,
-            owner: &'a OwnerToken,
-            expected_revision: u64,
-            payload: &'a str,
-        ) -> crate::StoreFuture<'a, std::result::Result<u64, StoreError>> {
-            self.inner
-                .append(journal_id, owner, expected_revision, payload)
-        }
-
-        fn compact<'a>(
-            &'a mut self,
-            journal_id: &'a str,
-            owner: &'a OwnerToken,
-            expected_revision: u64,
-            payload: &'a str,
-        ) -> crate::StoreFuture<'a, std::result::Result<u64, StoreError>> {
-            if !self.failed.swap(true, Ordering::SeqCst) {
-                return Box::pin(async {
-                    Err(StoreError::NotCommitted(
-                        "injected explicit compaction response loss".to_owned(),
-                    ))
-                });
-            }
-            self.inner
-                .compact(journal_id, owner, expected_revision, payload)
-        }
-    }
 
     #[cfg(not(target_family = "wasm"))]
     #[test]
@@ -2180,7 +2259,7 @@ mod tests {
             Err(Error::ModelOwnerFenced)
         ));
         assert!(matches!(
-            older.authorize_model_effect("compaction").await,
+            older.fence_checkpoint_effect().await,
             Err(Error::ModelOwnerFenced)
         ));
         assert_eq!(session.state().await.unwrap().revision(), revision);
@@ -2198,6 +2277,50 @@ mod tests {
             .await
             .unwrap();
         newer.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn rejected_step_completion_cannot_erase_an_unresolved_execution_handoff() {
+        let store = MemoryStore::new().unwrap();
+        let session = DurableSession::open(store, "rejected-step-completion-handoff")
+            .await
+            .unwrap();
+        let foreign = session.clone();
+        session.admit("turn-1", &"prompt").await.unwrap();
+        session.begin_attempt("turn-1").await.unwrap();
+
+        let mut handoff = StepStartHandoff::new();
+        let (result, receiver) = oneshot::channel();
+        session
+            .send(Command::BeginStep {
+                caller: Caller::Direct(session.caller_id.clone()),
+                operation_id: "turn-1".to_owned(),
+                step_id: "tool-1".to_owned(),
+                kind: "tool_call".to_owned(),
+                input: EncodedPayload::encode(&"effect").unwrap(),
+                retry: RetryPolicy::Never,
+                handoff: handoff.shared(),
+                result,
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            receive(receiver).await,
+            Ok(StoredBeginStep::Execute)
+        ));
+
+        assert!(matches!(
+            foreign
+                .complete_step("turn-1", "tool-1", &"stale output")
+                .await,
+            Err(Error::OperationNotClaimed { .. })
+        ));
+        let error = session
+            .reconcile_cancelled_step("turn-1", "tool-1", &"unknown")
+            .await
+            .expect_err("a rejected caller must leave the unresolved handoff fenced");
+        assert!(error.to_string().contains("unresolved execution handoff"));
+        handoff.disarm();
     }
 
     #[tokio::test]
@@ -2277,12 +2400,11 @@ mod tests {
         ));
         let state = session.state().await.unwrap();
         assert_eq!(state.revision(), revision);
-        assert!(state.operation("turn-1").unwrap().active_attempt);
         claimant.complete("turn-1", &1, &"done").await.unwrap();
     }
 
     #[tokio::test]
-    async fn owner_shutdown_observes_a_dead_journal_driver() {
+    async fn owner_shutdown_observes_a_dead_state_driver() {
         let (commands, receiver) = mpsc::channel(1);
         drop(receiver);
         let (releases, _release_receiver) = mpsc::unbounded_channel();
@@ -2326,6 +2448,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn queued_cancellation_cannot_publish_an_unexecuted_checkpoint() {
+        let store = MemoryStore::new().unwrap();
+        let session = DurableSession::open(store, "queued-cancel-checkpoint")
+            .await
+            .unwrap();
+        let (owner, _) = session.acquire_agent().await.unwrap();
+        owner
+            .admit_typed::<_, u32, String>("turn-1".to_owned(), &"one")
+            .await
+            .unwrap();
+        owner
+            .admit_typed::<_, u32, String>("turn-2".to_owned(), &"two")
+            .await
+            .unwrap();
+        owner.begin_attempt("turn-1".to_owned()).await.unwrap();
+        assert!(matches!(
+            owner.cancel("turn-2".to_owned(), Some(&99_u32)).await,
+            Err(Error::AttemptNotStarted { .. })
+        ));
+        owner
+            .cancel("turn-2".to_owned(), None::<&u32>)
+            .await
+            .unwrap();
+        owner
+            .complete("turn-1".to_owned(), &1_u32, &"done")
+            .await
+            .unwrap();
+        owner.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn terminal_boundary_compacts_the_prefix_without_rewinding_revision() {
         let store = MemoryStore::new().unwrap();
         let session = DurableSession::open(store.clone(), "bounded-prefix")
@@ -2351,12 +2504,11 @@ mod tests {
 
         let mut inspector = store.clone();
         let compacted = inspector
-            .acquire_owner("bounded-prefix", OwnerId::new())
+            .acquire("bounded-prefix", OwnerId::new())
             .await
             .unwrap();
-        assert_eq!(compacted.journal.revision, 66);
-        assert_eq!(compacted.journal.batches.len(), 1);
-        assert_eq!(compacted.journal.batches[0].revision, 66);
+        assert_eq!(compacted.state.revision, 44);
+        assert!(compacted.state.payload.is_some());
 
         let reopened = DurableSession::open(store, "bounded-prefix").await.unwrap();
         assert!(matches!(
@@ -2368,7 +2520,7 @@ mod tests {
                 output
             }) if output == "output-0"
         ));
-        assert_eq!(reopened.state().await.unwrap().revision(), 66);
+        assert_eq!(reopened.state().await.unwrap().revision(), 44);
     }
 
     #[tokio::test]
@@ -2418,14 +2570,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn explicit_zero_retention_compaction_propagates_not_committed_then_retries() {
-        let inner = MemoryStore::new().unwrap();
-        let store = FailCompactionOnce {
-            inner: inner.clone(),
-            failed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        };
+    async fn zero_retention_is_atomic_with_terminal_state() {
+        let store = MemoryStore::new().unwrap();
         let session =
-            DurableSession::open_with_terminal_receipt_limit(store, "explicit-zero-retention", 0)
+            DurableSession::open_with_terminal_receipt_limit(store.clone(), "zero-retention", 0)
                 .await
                 .unwrap();
         assert!(matches!(
@@ -2435,22 +2583,14 @@ mod tests {
         session.begin_attempt("turn-1").await.unwrap();
         session.complete("turn-1", &1_u32, &"done").await.unwrap();
 
-        assert!(matches!(
-            session.compact().await,
-            Err(Error::Store(StoreError::NotCommitted(message)))
-                if message == "injected explicit compaction response loss"
-        ));
-        assert!(session.state().await.unwrap().operation("turn-1").is_some());
-
-        session.compact().await.unwrap();
         assert!(session.state().await.unwrap().operation("turn-1").is_none());
-        let mut inspector = inner;
-        let compacted = inspector
-            .acquire_owner("explicit-zero-retention", OwnerId::new())
+        let mut inspector = store;
+        let retained = inspector
+            .acquire("zero-retention", OwnerId::new())
             .await
             .unwrap();
-        assert_eq!(compacted.journal.revision, 3);
-        assert_eq!(compacted.journal.batches.len(), 1);
+        assert_eq!(retained.state.revision, 2);
+        assert!(retained.state.payload.is_some());
     }
 
     #[tokio::test]
@@ -2465,7 +2605,7 @@ mod tests {
         ));
         session.begin_attempt("turn-1").await.unwrap();
         session.complete("turn-1", &1_u32, &"done").await.unwrap();
-        session.compact().await.unwrap();
+        session.prune_receipts().await.unwrap();
         drop(session);
 
         let reopened = DurableSession::open_with_terminal_receipt_limit(
@@ -2483,7 +2623,7 @@ mod tests {
                 .operation("turn-1")
                 .is_some()
         );
-        reopened.compact().await.unwrap();
+        reopened.prune_receipts().await.unwrap();
         assert!(
             reopened
                 .state()
@@ -2496,11 +2636,11 @@ mod tests {
 
         let mut inspector = store;
         let retained = inspector
-            .acquire_owner("rewrite-one-checkpoint", OwnerId::new())
+            .acquire("rewrite-one-checkpoint", OwnerId::new())
             .await
             .unwrap();
-        assert_eq!(retained.journal.revision, 3);
-        assert_eq!(retained.journal.batches.len(), 1);
+        assert_eq!(retained.state.revision, 3);
+        assert!(retained.state.payload.is_some());
     }
 
     #[tokio::test]
@@ -2535,5 +2675,30 @@ mod tests {
                 .unwrap(),
             2
         );
+    }
+
+    #[tokio::test]
+    async fn standalone_checkpoint_fence_is_read_only_across_a_cold_reopen() {
+        let store = MemoryStore::new().unwrap();
+        let session = DurableSession::open(store.clone(), "checkpoint-intent-reopen")
+            .await
+            .unwrap();
+        let (owner, _) = session.acquire_agent().await.unwrap();
+        let revision = session.state().await.unwrap().revision();
+        owner.fence_checkpoint_effect().await.unwrap();
+        assert_eq!(session.state().await.unwrap().revision(), revision);
+        assert!(!session.state().await.unwrap().checkpoint_effect_pending());
+        owner.shutdown().await.unwrap();
+        drop(session);
+
+        let reopened = DurableSession::open(store, "checkpoint-intent-reopen")
+            .await
+            .unwrap();
+        assert!(!reopened.state().await.unwrap().checkpoint_effect_pending());
+        let (owner, _) = reopened.acquire_agent().await.unwrap();
+        owner.fence_checkpoint_effect().await.unwrap();
+        owner.commit_checkpoint(&7_u32).await.unwrap();
+        assert!(!reopened.state().await.unwrap().checkpoint_effect_pending());
+        owner.shutdown().await.unwrap();
     }
 }

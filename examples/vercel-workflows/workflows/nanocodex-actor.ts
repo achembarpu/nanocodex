@@ -5,6 +5,10 @@ import {
   type DefaultAgent,
   type EventWatcher,
 } from "nanocodex";
+import {
+  importDurabilityState,
+  type DurabilityPortableStateArchive,
+} from "nanocodex/durability";
 import { defineHook, getWorkflowMetadata, getWritable } from "workflow";
 
 import type {
@@ -30,10 +34,13 @@ export function promptHookToken(sessionId: string): string {
   return `nanocodex_actor:${sessionId}`;
 }
 
-export async function nanocodexActor(): Promise<never> {
+export async function nanocodexActor(
+  archive?: DurabilityPortableStateArchive,
+): Promise<never> {
   "use workflow";
 
   const sessionId = getWorkflowMetadata().workflowRunId;
+  const durabilityId = await prepareNanocodexDurability(sessionId, archive);
   const receivePrompt = nanocodexPromptHook.create({
     token: promptHookToken(sessionId),
   });
@@ -42,7 +49,7 @@ export async function nanocodexActor(): Promise<never> {
   await writeSessionEvent({
     type: "ready",
     session_id: sessionId,
-    restored: false,
+    restored: archive !== undefined,
   });
 
   for await (const request of receivePrompt) {
@@ -52,7 +59,7 @@ export async function nanocodexActor(): Promise<never> {
       input: request.input,
       replayed: seen.has(request.id),
     });
-    const outcome = await runNanocodexTurn(sessionId, request);
+    const outcome = await runNanocodexTurn(sessionId, durabilityId, request);
     seen.add(request.id);
     if (!outcome.ok) {
       await writeSessionEvent({
@@ -69,6 +76,17 @@ export async function nanocodexActor(): Promise<never> {
   throw new Error("Nanocodex actor prompt hook closed unexpectedly");
 }
 
+export async function prepareNanocodexDurability(
+  sessionId: string,
+  archive?: DurabilityPortableStateArchive,
+): Promise<string> {
+  "use step";
+
+  if (archive === undefined) return sessionId;
+  await importDurabilityState(postgresDurabilityStore(), archive);
+  return archive.stateId;
+}
+
 export async function writeSessionEvent(event: SessionEvent): Promise<void> {
   "use step";
 
@@ -83,6 +101,7 @@ export async function writeSessionEvent(event: SessionEvent): Promise<void> {
 
 export async function runNanocodexTurn(
   sessionId: string,
+  durabilityId: string,
   request: PromptRequest,
 ): Promise<TurnOutcome> {
   "use step";
@@ -103,7 +122,7 @@ export async function runNanocodexTurn(
       instructions: "You are Nanocodex running as a durable Vercel Workflow actor. Use the sandbox_* tools for code, files, and previews; their /workspace is an isolated persistent Vercel Sandbox for this session.",
       module: await wasmBytes,
       durability,
-      durabilityId: sessionId,
+      durabilityId,
       sessionId,
       toolMode: "direct" as const,
       tools: {
@@ -179,7 +198,7 @@ export async function runNanocodexTurn(
       try {
         await agent.session.shutdown();
       } catch {
-        // The Rust journal result or typed failure above is authoritative.
+        // The Rust total-state result or typed failure above is authoritative.
       } finally {
         agent.dispose();
       }

@@ -157,8 +157,6 @@ export type Summary = Readonly<{
 export type TurnState =
   | "accepted"
   | "cancelling"
-  | "retryable"
-  | "blocked"
   | "completed"
   | "cancelled"
   | "failed";
@@ -189,7 +187,6 @@ export type EventData = Readonly<{
   | CompletedEventData
   | { type: "turn_cancelled"; id: string }
   | { type: "turn_retryable"; id: string; error: string }
-  | { type: "turn_blocked"; id: string; error: string }
   | { type: "turn_failed"; id: string; error: string }
   | { type: "event"; event: unknown }
   | { type: "stream_failed"; error: string }
@@ -207,7 +204,6 @@ export type CompletedEventData = Readonly<{
 export type TerminalEventData =
   | CompletedEventData
   | Readonly<{ type: "turn_cancelled"; id: string }>
-  | Readonly<{ type: "turn_blocked"; id: string; error: string }>
   | Readonly<{ type: "turn_failed"; id: string; error: string }>;
 
 export type Event = Readonly<{

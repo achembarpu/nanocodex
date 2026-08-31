@@ -1,6 +1,6 @@
 use nanocodex_durability::{
-    Admission, BeginStep, DurableSession, Error, JournalStore, MemoryStore, OwnedJournal, OwnerId,
-    OwnerToken, RetryPolicy, StoreError, StoreFuture, StoredBatch, StoredJournal,
+    Admission, BeginStep, DurableSession, Error, MemoryStore, OwnedState, OwnerId, OwnerToken,
+    ReconciledStep, RetryPolicy, StateStore, StepStatus, StoreError, StoreFuture, StoredState,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::{
@@ -45,51 +45,112 @@ struct NotCommittedOnceStore {
 }
 
 struct SeededStore {
-    journal: StoredJournal,
+    state: StoredState,
 }
 
-impl JournalStore for SeededStore {
-    fn acquire_owner<'a>(
+#[derive(Clone, Copy)]
+enum StepGateMoment {
+    BeforeStartCommit,
+    AfterCompletionCommit,
+}
+
+struct StepGateStore {
+    inner: MemoryStore,
+    moment: StepGateMoment,
+    entered: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+    used: Arc<AtomicBool>,
+}
+
+impl StateStore for StepGateStore {
+    fn acquire<'a>(
         &'a mut self,
-        _journal_id: &'a str,
+        state_id: &'a str,
         owner_id: OwnerId,
-    ) -> StoreFuture<'a, Result<OwnedJournal, StoreError>> {
-        let journal = self.journal.clone();
+    ) -> StoreFuture<'a, Result<OwnedState, StoreError>> {
+        self.inner.acquire(state_id, owner_id)
+    }
+
+    fn replace<'a>(
+        &'a mut self,
+        state_id: &'a str,
+        owner: &'a OwnerToken,
+        expected_revision: u64,
+        payload: &'a str,
+    ) -> StoreFuture<'a, Result<u64, StoreError>> {
+        let matches = match self.moment {
+            StepGateMoment::BeforeStartCommit => payload.contains("\"status\":\"effect_pending\""),
+            StepGateMoment::AfterCompletionCommit => payload.contains("\"status\":{\"completed\":"),
+        };
+        if matches && !self.used.swap(true, Ordering::SeqCst) {
+            let entered = Arc::clone(&self.entered);
+            let release = Arc::clone(&self.release);
+            return match self.moment {
+                StepGateMoment::BeforeStartCommit => Box::pin(async move {
+                    entered.notify_one();
+                    release.notified().await;
+                    self.inner
+                        .replace(state_id, owner, expected_revision, payload)
+                        .await
+                }),
+                StepGateMoment::AfterCompletionCommit => Box::pin(async move {
+                    let revision = self
+                        .inner
+                        .replace(state_id, owner, expected_revision, payload)
+                        .await?;
+                    entered.notify_one();
+                    release.notified().await;
+                    Ok(revision)
+                }),
+            };
+        }
+        self.inner
+            .replace(state_id, owner, expected_revision, payload)
+    }
+}
+
+impl StateStore for SeededStore {
+    fn acquire<'a>(
+        &'a mut self,
+        _state_id: &'a str,
+        owner_id: OwnerId,
+    ) -> StoreFuture<'a, Result<OwnedState, StoreError>> {
+        let state = self.state.clone();
         Box::pin(async move {
-            Ok(OwnedJournal {
+            Ok(OwnedState {
                 owner: OwnerToken::new(owner_id, 1),
-                journal,
+                state,
             })
         })
     }
 
-    fn append<'a>(
+    fn replace<'a>(
         &'a mut self,
-        _journal_id: &'a str,
+        _state_id: &'a str,
         _owner: &'a OwnerToken,
         _expected_revision: u64,
         _payload: &'a str,
     ) -> StoreFuture<'a, Result<u64, StoreError>> {
         Box::pin(async {
             Err(StoreError::Backend(
-                "the seeded legacy store is read-only".to_owned(),
+                "the seeded store is read-only".to_owned(),
             ))
         })
     }
 }
 
-impl JournalStore for NotCommittedOnceStore {
-    fn acquire_owner<'a>(
+impl StateStore for NotCommittedOnceStore {
+    fn acquire<'a>(
         &'a mut self,
-        journal_id: &'a str,
+        state_id: &'a str,
         owner_id: OwnerId,
-    ) -> StoreFuture<'a, Result<OwnedJournal, StoreError>> {
-        self.inner.acquire_owner(journal_id, owner_id)
+    ) -> StoreFuture<'a, Result<OwnedState, StoreError>> {
+        self.inner.acquire(state_id, owner_id)
     }
 
-    fn append<'a>(
+    fn replace<'a>(
         &'a mut self,
-        journal_id: &'a str,
+        state_id: &'a str,
         owner: &'a OwnerToken,
         expected_revision: u64,
         payload: &'a str,
@@ -97,27 +158,27 @@ impl JournalStore for NotCommittedOnceStore {
         if expected_revision == self.fail_at_revision && !self.failed.swap(true, Ordering::SeqCst) {
             return Box::pin(async {
                 Err(StoreError::NotCommitted(
-                    "injected retryable append failure".to_owned(),
+                    "injected retryable replacement failure".to_owned(),
                 ))
             });
         }
         self.inner
-            .append(journal_id, owner, expected_revision, payload)
+            .replace(state_id, owner, expected_revision, payload)
     }
 }
 
-impl JournalStore for CommitThenFailStore {
-    fn acquire_owner<'a>(
+impl StateStore for CommitThenFailStore {
+    fn acquire<'a>(
         &'a mut self,
-        journal_id: &'a str,
+        state_id: &'a str,
         owner_id: OwnerId,
-    ) -> StoreFuture<'a, Result<OwnedJournal, StoreError>> {
-        self.inner.acquire_owner(journal_id, owner_id)
+    ) -> StoreFuture<'a, Result<OwnedState, StoreError>> {
+        self.inner.acquire(state_id, owner_id)
     }
 
-    fn append<'a>(
+    fn replace<'a>(
         &'a mut self,
-        journal_id: &'a str,
+        state_id: &'a str,
         owner: &'a OwnerToken,
         expected_revision: u64,
         payload: &'a str,
@@ -125,11 +186,11 @@ impl JournalStore for CommitThenFailStore {
         Box::pin(async move {
             let revision = self
                 .inner
-                .append(journal_id, owner, expected_revision, payload)
+                .replace(state_id, owner, expected_revision, payload)
                 .await?;
             if expected_revision == self.fail_after_revision {
                 return Err(StoreError::Backend(
-                    "append response was lost after commit".to_owned(),
+                    "replacement response was lost after commit".to_owned(),
                 ));
             }
             Ok(revision)
@@ -159,7 +220,7 @@ async fn replays_completed_operations_and_steps_after_reopen() {
             .await,
         Ok(Admission::Accepted)
     ));
-    assert_eq!(session.begin_attempt("turn-1").await.unwrap(), 1);
+    session.begin_attempt("turn-1").await.unwrap();
     assert!(matches!(
         session
             .begin_step_typed::<_, ModelOutput>(
@@ -202,7 +263,7 @@ async fn replays_completed_operations_and_steps_after_reopen() {
     };
     assert_eq!(checkpoint, Checkpoint { version: 1 });
     assert_eq!(output.message, "done");
-    assert_eq!(reopened.state().await.unwrap().revision(), 5);
+    assert_eq!(reopened.state().await.unwrap().revision(), 4);
 }
 
 #[tokio::test]
@@ -232,7 +293,6 @@ async fn failed_operations_replay_their_error_and_do_not_block_follow_on_work() 
     assert_eq!(error, "invalid image");
 
     session.admit("turn-2", &"continue").await.unwrap();
-    session.begin_attempt("turn-2").await.unwrap();
     session.cancel("turn-2").await.unwrap();
 
     let reopened = DurableSession::open(store, "failed-session").await.unwrap();
@@ -270,8 +330,258 @@ async fn refuses_to_repeat_an_ambiguous_unsafe_step() {
         reopened
             .begin_step("turn-1", "tool-1", "tool", &"charge", RetryPolicy::Never)
             .await,
-        Err(Error::AmbiguousStep { .. })
+        Ok(BeginStep::Unknown)
     ));
+    let ReconciledStep::Completed(output) = reopened
+        .reconcile_cancelled_step("turn-1", "tool-1", &"unknown after reopen")
+        .await
+        .unwrap()
+    else {
+        panic!("a cold pending at-most-once effect must reconcile as unknown")
+    };
+    assert_eq!(output.decode::<String>().unwrap(), "unknown after reopen");
+}
+
+#[tokio::test]
+async fn cancellation_reconciliation_does_not_invent_unknown_before_begin_is_observed() {
+    let inner = MemoryStore::new().unwrap();
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let session = Arc::new(
+        DurableSession::open(
+            StepGateStore {
+                inner,
+                moment: StepGateMoment::BeforeStartCommit,
+                entered: Arc::clone(&entered),
+                release: Arc::clone(&release),
+                used: Arc::new(AtomicBool::new(false)),
+            },
+            "cancel-before-begin-observed",
+        )
+        .await
+        .unwrap(),
+    );
+    session.admit("turn-1", &"run tool").await.unwrap();
+    session.begin_attempt("turn-1").await.unwrap();
+    let revision_before_absent = session.state().await.unwrap().revision();
+    assert!(matches!(
+        session
+            .reconcile_cancelled_step("turn-1", "tool-absent", &"unknown")
+            .await
+            .unwrap(),
+        ReconciledStep::NotStarted
+    ));
+    assert_eq!(
+        session.state().await.unwrap().revision(),
+        revision_before_absent,
+        "an absent step must not create a durable transition"
+    );
+
+    let beginning = tokio::spawn({
+        let session = Arc::clone(&session);
+        async move {
+            session
+                .begin_step(
+                    "turn-1",
+                    "tool-1",
+                    "tool_call",
+                    &"effect",
+                    RetryPolicy::Never,
+                )
+                .await
+        }
+    });
+    entered.notified().await;
+    beginning.abort();
+    assert!(beginning.await.unwrap_err().is_cancelled());
+    release.notify_one();
+
+    assert!(matches!(
+        session
+            .reconcile_cancelled_step("turn-1", "tool-1", &"unknown")
+            .await
+            .unwrap(),
+        ReconciledStep::NotStarted
+    ));
+    assert!(
+        session
+            .state()
+            .await
+            .unwrap()
+            .operation("turn-1")
+            .unwrap()
+            .steps
+            .is_empty(),
+        "an unobserved execution permit must leave no durable step"
+    );
+}
+
+#[tokio::test]
+async fn cancellation_reconciliation_completes_an_authorized_pending_step_once_as_unknown() {
+    let session = DurableSession::open(
+        MemoryStore::new().unwrap(),
+        "cancel-authorized-pending-step",
+    )
+    .await
+    .unwrap();
+    session.admit("turn-1", &"run tool").await.unwrap();
+    session.begin_attempt("turn-1").await.unwrap();
+    assert!(matches!(
+        session
+            .begin_step(
+                "turn-1",
+                "tool-1",
+                "tool_call",
+                &"effect",
+                RetryPolicy::Never,
+            )
+            .await
+            .unwrap(),
+        BeginStep::Execute
+    ));
+
+    let ReconciledStep::Completed(output) = session
+        .reconcile_cancelled_step("turn-1", "tool-1", &"unknown")
+        .await
+        .unwrap()
+    else {
+        panic!("an authorized pending effect must settle as unknown")
+    };
+    assert_eq!(output.decode::<String>().unwrap(), "unknown");
+    let revision_after_completion = session.state().await.unwrap().revision();
+    let ReconciledStep::Completed(replayed) = session
+        .reconcile_cancelled_step("turn-1", "tool-1", &"different unknown")
+        .await
+        .unwrap()
+    else {
+        panic!("a settled effect must replay its first authoritative output")
+    };
+    assert_eq!(replayed.decode::<String>().unwrap(), "unknown");
+    assert_eq!(
+        session.state().await.unwrap().revision(),
+        revision_after_completion,
+        "reconciling a completed step must not append a second completion"
+    );
+    assert!(matches!(
+        session
+            .state()
+            .await
+            .unwrap()
+            .operation("turn-1")
+            .unwrap()
+            .steps["tool-1"]
+            .status,
+        StepStatus::Completed(_)
+    ));
+}
+
+#[tokio::test]
+async fn cancellation_reconciliation_does_not_overtake_a_live_begin_handoff() {
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let session = Arc::new(
+        DurableSession::open(
+            StepGateStore {
+                inner: MemoryStore::new().unwrap(),
+                moment: StepGateMoment::BeforeStartCommit,
+                entered: Arc::clone(&entered),
+                release: Arc::clone(&release),
+                used: Arc::new(AtomicBool::new(false)),
+            },
+            "cancel-live-begin-handoff",
+        )
+        .await
+        .unwrap(),
+    );
+    session.admit("turn-1", &"run tool").await.unwrap();
+    session.begin_attempt("turn-1").await.unwrap();
+    let beginning = tokio::spawn({
+        let session = Arc::clone(&session);
+        async move {
+            session
+                .begin_step(
+                    "turn-1",
+                    "tool-1",
+                    "tool_call",
+                    &"effect",
+                    RetryPolicy::Never,
+                )
+                .await
+        }
+    });
+    entered.notified().await;
+    tokio::spawn({
+        let release = Arc::clone(&release);
+        async move {
+            tokio::task::yield_now().await;
+            release.notify_one();
+        }
+    });
+
+    let error = session
+        .reconcile_cancelled_step("turn-1", "tool-1", &"unknown")
+        .await
+        .expect_err("a live execution permit cannot be reclassified by cancellation");
+    assert!(error.to_string().contains("unresolved execution handoff"));
+    assert!(matches!(
+        beginning.await.unwrap().unwrap(),
+        BeginStep::Execute
+    ));
+}
+
+#[tokio::test]
+async fn cancellation_reconciliation_retains_completion_committed_before_its_reply_is_observed() {
+    let inner = MemoryStore::new().unwrap();
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let session = Arc::new(
+        DurableSession::open(
+            StepGateStore {
+                inner,
+                moment: StepGateMoment::AfterCompletionCommit,
+                entered: Arc::clone(&entered),
+                release: Arc::clone(&release),
+                used: Arc::new(AtomicBool::new(false)),
+            },
+            "cancel-after-completion-commit",
+        )
+        .await
+        .unwrap(),
+    );
+    session.admit("turn-1", &"run tool").await.unwrap();
+    session.begin_attempt("turn-1").await.unwrap();
+    session
+        .begin_step(
+            "turn-1",
+            "tool-1",
+            "tool_call",
+            &"effect",
+            RetryPolicy::Never,
+        )
+        .await
+        .unwrap();
+
+    let completing = tokio::spawn({
+        let session = Arc::clone(&session);
+        async move {
+            session
+                .complete_step("turn-1", "tool-1", &"real output")
+                .await
+        }
+    });
+    entered.notified().await;
+    completing.abort();
+    assert!(completing.await.unwrap_err().is_cancelled());
+    release.notify_one();
+
+    let ReconciledStep::Completed(output) = session
+        .reconcile_cancelled_step("turn-1", "tool-1", &"unknown")
+        .await
+        .unwrap()
+    else {
+        panic!("the durable real output must remain authoritative")
+    };
+    assert_eq!(output.decode::<String>().unwrap(), "real output");
 }
 
 #[tokio::test]
@@ -289,100 +599,229 @@ async fn queues_admission_but_serializes_attempts() {
     session.begin_attempt("turn-2").await.unwrap();
 }
 
-#[tokio::test]
-async fn reopens_a_seeded_legacy_journal_with_repeated_attempt_starts() {
-    let batches = [
-        r#"{"operation_accepted":{"operation_id":"legacy-turn","input":"prompt"}}"#,
-        r#"{"attempt_started":{"operation_id":"legacy-turn"}}"#,
-        r#"{"attempt_started":{"operation_id":"legacy-turn"}}"#,
-        r#"{"operation_completed":{"operation_id":"legacy-turn","checkpoint":{"version":7},"output":{"message":"legacy done"}}}"#,
-    ]
-    .into_iter()
-    .enumerate()
-    .map(|(index, payload)| StoredBatch {
-        revision: u64::try_from(index + 1).unwrap(),
-        payload: payload.to_owned(),
-    })
-    .collect();
-    let session = DurableSession::open(
-        SeededStore {
-            journal: StoredJournal {
-                revision: 4,
-                batches,
-            },
-        },
-        "legacy-repeated-attempts",
-    )
-    .await
-    .unwrap();
-
-    let state = session.state().await.unwrap();
-    let operation = state.operation("legacy-turn").unwrap();
-    assert_eq!(operation.attempts, 2);
-    assert!(matches!(
-        &operation.status,
-        nanocodex_durability::OperationStatus::Completed { checkpoint, output }
-            if checkpoint.decode::<Checkpoint>().unwrap() == Checkpoint { version: 7 }
-                && output.decode::<TurnOutput>().unwrap().message == "legacy done"
-    ));
-}
-
-fn seeded_legacy_store(payloads: &[&str]) -> SeededStore {
-    let batches = payloads
-        .iter()
-        .enumerate()
-        .map(|(index, payload)| StoredBatch {
-            revision: u64::try_from(index + 1).unwrap(),
-            payload: (*payload).to_owned(),
-        })
-        .collect::<Vec<_>>();
+fn seeded_store(payloads: &[&str]) -> SeededStore {
+    assert_eq!(payloads.len(), 1, "durable state has no replay history");
     SeededStore {
-        journal: StoredJournal {
-            revision: u64::try_from(batches.len()).unwrap(),
-            batches,
+        state: StoredState {
+            revision: 1,
+            payload: Some(payloads[0].to_owned()),
         },
     }
 }
 
 #[tokio::test]
-async fn reopens_a_seeded_legacy_step_start_without_an_attempt_start() {
+async fn rejects_every_inconsistent_store_state_shape() {
+    for (name, state) in [
+        (
+            "payload-at-zero",
+            StoredState {
+                revision: 0,
+                payload: Some("{}".to_owned()),
+            },
+        ),
+        (
+            "missing-at-nonzero",
+            StoredState {
+                revision: 1,
+                payload: None,
+            },
+        ),
+    ] {
+        let error = match DurableSession::open(SeededStore { state }, name).await {
+            Ok(_) => panic!("inconsistent retained state was accepted"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, Error::InvalidState(_)));
+    }
+}
+
+#[tokio::test]
+async fn rejects_unknown_outer_state_fields() {
+    let error = match DurableSession::open(
+        seeded_store(&[r#"{"nanocodex_durable_state":{"format":1,"operations":{},"latest_checkpoint":null,"checkpoint_effect_pending":false},"unknown":true}"#]),
+        "unknown-outer-field",
+    )
+    .await
+    {
+        Ok(_) => panic!("unknown retained state field was accepted"),
+        Err(error) => error,
+    };
+    assert!(matches!(error, Error::Decode { revision: 1, .. }));
+}
+
+#[tokio::test]
+async fn rejects_noncanonical_checkpoint_fields() {
+    let payload = r#"{"nanocodex_durable_state":{"format":1,"operations":{},"latest_checkpoint":null,"checkpoint_effect_pending":false,"generation":1}}"#;
+    let error = match DurableSession::open(
+        SeededStore {
+            state: StoredState {
+                revision: 1,
+                payload: Some(payload.to_owned()),
+            },
+        },
+        "noncanonical-checkpoint",
+    )
+    .await
+    {
+        Ok(_) => panic!("checkpoint fields must match the current protocol exactly"),
+        Err(error) => error,
+    };
+
+    assert!(matches!(error, Error::Decode { revision: 1, .. }));
+}
+
+#[tokio::test]
+async fn rejects_retry_attempt_counter_overflow_without_advancing_state() {
+    let revision = u64::from(u32::MAX);
+    let payload = format!(
+        r#"{{"nanocodex_durable_state":{{"format":1,"operations":{{"turn":{{"input":"\"prompt\"","status":"pending","steps":{{"model":{{"kind":"model","input":"\"retry\"","retry":"idempotent","status":"effect_pending","attempts":{}}}}},"accepted_order":1}}}},"latest_checkpoint":null,"checkpoint_effect_pending":false}}}}"#,
+        u32::MAX,
+    );
     let session = DurableSession::open(
-        seeded_legacy_store(&[
-            r#"{"operation_accepted":{"operation_id":"legacy-turn","input":"prompt"}}"#,
-            r#"{"step_started":{"operation_id":"legacy-turn","step_id":"tool-1","kind":"tool","input":"charge","retry":"idempotent"}}"#,
-        ]),
-        "legacy-step-start",
+        SeededStore {
+            state: StoredState {
+                revision,
+                payload: Some(payload),
+            },
+        },
+        "attempt-overflow",
     )
     .await
     .unwrap();
+    assert!(matches!(
+        session.admit("turn", &"prompt").await,
+        Ok(Admission::Pending)
+    ));
+    session.begin_attempt("turn").await.unwrap();
+
+    let error = session
+        .begin_step("turn", "model", "model", &"retry", RetryPolicy::Idempotent)
+        .await
+        .expect_err("attempt overflow must not silently saturate");
+    assert!(matches!(error, Error::InvalidState(_)));
+    assert_eq!(session.state().await.unwrap().revision(), revision);
+}
+
+#[tokio::test]
+async fn rejects_the_deleted_journal_state_envelope() {
+    let payload = r#"{"nanocodex_journal_state":{"format":1,"operations":{},"latest_checkpoint":null,"checkpoint_effect_pending":false}}"#;
+    let error = match DurableSession::open(seeded_store(&[payload]), "deleted-state-envelope").await
+    {
+        Ok(_) => panic!("the current-state protocol must not adopt old state state"),
+        Err(error) => error,
+    };
+
+    assert!(matches!(error, Error::Decode { revision: 1, .. }));
+}
+
+#[tokio::test]
+async fn rejects_noncanonical_transition_shape() {
+    let error = match DurableSession::open(
+        seeded_store(&[r#"{"operation_accepted":{"operation_id":"turn","input":"prompt"}}"#]),
+        "noncanonical-entry",
+    )
+    .await
+    {
+        Ok(_) => panic!("state entries must use the current tagged shape"),
+        Err(error) => error,
+    };
+
+    assert!(matches!(error, Error::Decode { revision: 1, .. }));
+}
+
+#[tokio::test]
+async fn rejects_a_checkpoint_terminal_that_crosses_pending_work() {
+    let payload = r#"{"nanocodex_durable_state":{"format":1,"operations":{"turn-1":{"input":"\"first\"","status":"pending","steps":{},"accepted_order":1},"turn-2":{"input":"\"second\"","status":{"completed":{"checkpoint":"\"crossed\"","output":"\"done\""}},"steps":{},"accepted_order":2}},"latest_checkpoint":"\"crossed\"","checkpoint_effect_pending":false}}"#;
+    let error = match DurableSession::open(
+        SeededStore {
+            state: StoredState {
+                revision: 2,
+                payload: Some(payload.to_owned()),
+            },
+        },
+        "crossed-checkpoint-terminal",
+    )
+    .await
+    {
+        Ok(_) => panic!("checkpoint-bearing terminals must preserve operation order"),
+        Err(error) => error,
+    };
+
+    assert!(matches!(error, Error::InvalidState(_)));
+}
+
+#[tokio::test]
+async fn rejects_a_checkpoint_effect_that_crosses_pending_work() {
+    let payload = r#"{"nanocodex_durable_state":{"format":1,"operations":{"turn":{"input":"\"prompt\"","status":"pending","steps":{},"accepted_order":1}},"latest_checkpoint":null,"checkpoint_effect_pending":true}}"#;
+    let error =
+        match DurableSession::open(seeded_store(&[payload]), "crossed-checkpoint-effect").await {
+            Ok(_) => panic!("standalone checkpoint effects must not cross pending operations"),
+            Err(error) => error,
+        };
+
+    assert!(matches!(error, Error::InvalidState(_)));
+}
+
+#[tokio::test]
+async fn rejects_a_restarted_at_most_once_step() {
+    let payload = r#"{"nanocodex_durable_state":{"format":1,"operations":{"turn":{"input":"\"prompt\"","status":"pending","steps":{"tool-1":{"kind":"tool","input":"\"charge\"","retry":"never","status":"effect_pending","attempts":2}},"accepted_order":1}},"latest_checkpoint":null,"checkpoint_effect_pending":false}}"#;
+    let error =
+        match DurableSession::open(seeded_store(&[payload]), "restarted-at-most-once-step").await {
+            Ok(_) => panic!("at-most-once steps must have one committed start"),
+            Err(error) => error,
+        };
+
+    assert!(matches!(error, Error::InvalidState(_)));
+}
+
+#[tokio::test]
+async fn reopens_a_seeded_step_start() {
+    let store = MemoryStore::new().unwrap();
+    let session = DurableSession::open(store.clone(), "seeded-step-start")
+        .await
+        .unwrap();
+    session.admit("turn", &"prompt").await.unwrap();
+    session.begin_attempt("turn").await.unwrap();
+    session
+        .begin_step("turn", "tool-1", "tool", &"charge", RetryPolicy::Idempotent)
+        .await
+        .unwrap();
+    drop(session);
+    let session = DurableSession::open(store, "seeded-step-start")
+        .await
+        .unwrap();
 
     let state = session.state().await.unwrap();
-    let operation = state.operation("legacy-turn").unwrap();
-    assert_eq!(operation.attempts, 0);
-    assert!(!operation.active_attempt);
+    let operation = state.operation("turn").unwrap();
     assert!(matches!(
         operation.steps.get("tool-1").map(|step| &step.status),
-        Some(nanocodex_durability::StepStatus::Started)
+        Some(nanocodex_durability::StepStatus::EffectPending)
     ));
 }
 
 #[tokio::test]
-async fn reopens_a_seeded_legacy_step_completion_without_an_attempt_start() {
-    let session = DurableSession::open(
-        seeded_legacy_store(&[
-            r#"{"operation_accepted":{"operation_id":"legacy-turn","input":"prompt"}}"#,
-            r#"{"step_started":{"operation_id":"legacy-turn","step_id":"tool-1","kind":"tool","input":"charge","retry":"idempotent"}}"#,
-            r#"{"step_completed":{"operation_id":"legacy-turn","step_id":"tool-1","output":"receipt"}}"#,
-        ]),
-        "legacy-step-completion",
-    )
-    .await
-    .unwrap();
+async fn reopens_a_seeded_step_completion() {
+    let store = MemoryStore::new().unwrap();
+    let session = DurableSession::open(store.clone(), "seeded-step-completion")
+        .await
+        .unwrap();
+    session.admit("turn", &"prompt").await.unwrap();
+    session.begin_attempt("turn").await.unwrap();
+    session
+        .begin_step("turn", "tool-1", "tool", &"charge", RetryPolicy::Idempotent)
+        .await
+        .unwrap();
+    session
+        .complete_step("turn", "tool-1", &"receipt")
+        .await
+        .unwrap();
+    drop(session);
+    let session = DurableSession::open(store, "seeded-step-completion")
+        .await
+        .unwrap();
 
     let state = session.state().await.unwrap();
-    let operation = state.operation("legacy-turn").unwrap();
-    assert_eq!(operation.attempts, 0);
-    assert!(!operation.active_attempt);
+    let operation = state.operation("turn").unwrap();
     assert!(matches!(
         operation.steps.get("tool-1").map(|step| &step.status),
         Some(nanocodex_durability::StepStatus::Completed(output))
@@ -391,72 +830,65 @@ async fn reopens_a_seeded_legacy_step_completion_without_an_attempt_start() {
 }
 
 #[tokio::test]
-async fn reopens_a_seeded_legacy_attempt_failure_without_an_attempt_start() {
-    let session = DurableSession::open(
-        seeded_legacy_store(&[
-            r#"{"operation_accepted":{"operation_id":"legacy-turn","input":"prompt"}}"#,
-            r#"{"attempt_failed":{"operation_id":"legacy-turn","error":"temporary"}}"#,
-        ]),
-        "legacy-attempt-failure",
-    )
-    .await
-    .unwrap();
-
-    let state = session.state().await.unwrap();
-    let operation = state.operation("legacy-turn").unwrap();
-    assert_eq!(operation.attempts, 0);
-    assert!(!operation.active_attempt);
-    assert_eq!(operation.last_error.as_deref(), Some("temporary"));
-}
-
-#[tokio::test]
-async fn reopens_a_seeded_legacy_completion_without_an_attempt_start() {
-    let session = DurableSession::open(
-        seeded_legacy_store(&[
-            r#"{"operation_accepted":{"operation_id":"legacy-turn","input":"prompt"}}"#,
-            r#"{"operation_completed":{"operation_id":"legacy-turn","checkpoint":{"version":7},"output":{"message":"legacy done"}}}"#,
-        ]),
-        "legacy-completion",
-    )
-    .await
-    .unwrap();
+async fn reopens_a_seeded_completion() {
+    let store = MemoryStore::new().unwrap();
+    let session = DurableSession::open(store.clone(), "seeded-completion")
+        .await
+        .unwrap();
+    session.admit("turn", &"prompt").await.unwrap();
+    session.begin_attempt("turn").await.unwrap();
+    session
+        .complete(
+            "turn",
+            &Checkpoint { version: 7 },
+            &TurnOutput {
+                message: "done".to_owned(),
+            },
+        )
+        .await
+        .unwrap();
+    drop(session);
+    let session = DurableSession::open(store, "seeded-completion")
+        .await
+        .unwrap();
 
     let replay = session
-        .admit_typed::<_, Checkpoint, TurnOutput>("legacy-turn", &"prompt")
+        .admit_typed::<_, Checkpoint, TurnOutput>("turn", &"prompt")
         .await
         .unwrap();
     assert!(matches!(
         replay,
         Admission::Completed { checkpoint, output }
-            if checkpoint == Checkpoint { version: 7 } && output.message == "legacy done"
+            if checkpoint == Checkpoint { version: 7 } && output.message == "done"
     ));
-    let state = session.state().await.unwrap();
-    assert_eq!(state.operation("legacy-turn").unwrap().attempts, 0);
 }
 
 #[tokio::test]
-async fn reopens_a_seeded_legacy_terminal_failure_without_an_attempt_start() {
-    let session = DurableSession::open(
-        seeded_legacy_store(&[
-            r#"{"operation_accepted":{"operation_id":"legacy-turn","input":"prompt"}}"#,
-            r#"{"operation_failed":{"operation_id":"legacy-turn","checkpoint":{"version":8},"error":"legacy failure"}}"#,
-        ]),
-        "legacy-terminal-failure",
-    )
-    .await
-    .unwrap();
+async fn reopens_a_seeded_terminal_failure() {
+    let store = MemoryStore::new().unwrap();
+    let session = DurableSession::open(store.clone(), "seeded-terminal-failure")
+        .await
+        .unwrap();
+    session.admit("turn", &"prompt").await.unwrap();
+    session.begin_attempt("turn").await.unwrap();
+    session
+        .fail("turn", &Checkpoint { version: 8 }, "failure")
+        .await
+        .unwrap();
+    drop(session);
+    let session = DurableSession::open(store, "seeded-terminal-failure")
+        .await
+        .unwrap();
 
     let replay = session
-        .admit_typed::<_, Checkpoint, TurnOutput>("legacy-turn", &"prompt")
+        .admit_typed::<_, Checkpoint, TurnOutput>("turn", &"prompt")
         .await
         .unwrap();
     assert!(matches!(
         replay,
         Admission::Failed { checkpoint, error }
-            if checkpoint == Checkpoint { version: 8 } && error == "legacy failure"
+            if checkpoint == Checkpoint { version: 8 } && error == "failure"
     ));
-    let state = session.state().await.unwrap();
-    assert_eq!(state.operation("legacy-turn").unwrap().attempts, 0);
 }
 
 #[tokio::test]
@@ -481,7 +913,32 @@ async fn queued_unstarted_operation_can_cancel_behind_a_pending_predecessor() {
 }
 
 #[tokio::test]
-async fn definitely_uncommitted_terminal_append_reopens_the_exact_claim_for_retry() {
+async fn active_operation_cancellation_requires_a_checkpoint() {
+    let store = MemoryStore::new().unwrap();
+    let session = DurableSession::open(store, "active-cancel-checkpoint")
+        .await
+        .unwrap();
+    session.admit("turn-1", &"one").await.unwrap();
+    session.begin_attempt("turn-1").await.unwrap();
+
+    assert!(matches!(
+        session.cancel("turn-1").await,
+        Err(Error::CancellationCheckpointRequired { operation_id }) if operation_id == "turn-1"
+    ));
+    assert!(matches!(
+        session
+            .state()
+            .await
+            .unwrap()
+            .operation("turn-1")
+            .unwrap()
+            .status,
+        nanocodex_durability::OperationStatus::Pending
+    ));
+}
+
+#[tokio::test]
+async fn definitely_uncommitted_terminal_replace_reopens_the_exact_claim_for_retry() {
     let store = MemoryStore::new().unwrap();
     let failed = Arc::new(AtomicBool::new(false));
     let session = DurableSession::open(
@@ -519,7 +976,7 @@ async fn definitely_uncommitted_completion_reopens_the_exact_claim_for_retry() {
     let session = DurableSession::open(
         NotCommittedOnceStore {
             inner: store,
-            fail_at_revision: 2,
+            fail_at_revision: 1,
             failed: Arc::new(AtomicBool::new(false)),
         },
         "retry-completion-claim",
@@ -536,32 +993,26 @@ async fn definitely_uncommitted_completion_reopens_the_exact_claim_for_retry() {
         session.admit("turn-1", &"prompt").await,
         Ok(Admission::Pending)
     ));
+    session.begin_attempt("turn-1").await.unwrap();
     session.complete("turn-1", &1, &"answer").await.unwrap();
 }
 
 #[tokio::test]
-async fn definitely_uncommitted_attempt_failure_reopens_the_exact_claim_for_retry() {
+async fn attempt_failure_releases_the_claim_without_a_durable_write() {
     let store = MemoryStore::new().unwrap();
-    let session = DurableSession::open(
-        NotCommittedOnceStore {
-            inner: store,
-            fail_at_revision: 2,
-            failed: Arc::new(AtomicBool::new(false)),
-        },
-        "retry-attempt-failure-claim",
-    )
-    .await
-    .unwrap();
+    let session = DurableSession::open(store, "retry-attempt-failure-claim")
+        .await
+        .unwrap();
     session.admit("turn-1", &"prompt").await.unwrap();
     session.begin_attempt("turn-1").await.unwrap();
-    assert!(matches!(
-        session.fail_attempt("turn-1", "temporary").await,
-        Err(Error::Store(StoreError::NotCommitted(_)))
-    ));
+    let revision = session.state().await.unwrap().revision();
+    session.fail_attempt("turn-1", "temporary").await.unwrap();
+    assert_eq!(session.state().await.unwrap().revision(), revision);
     assert!(matches!(
         session.admit("turn-1", &"prompt").await,
         Ok(Admission::Pending)
     ));
+    session.begin_attempt("turn-1").await.unwrap();
     session.fail_attempt("turn-1", "temporary").await.unwrap();
     assert!(matches!(
         session.admit("turn-1", &"prompt").await,
@@ -819,7 +1270,7 @@ async fn automatic_admission_reclaims_multiple_queued_operations_in_order() {
 }
 
 #[tokio::test]
-async fn rejects_invalid_transitions_before_the_host_append() {
+async fn rejects_invalid_transitions_before_the_host_replace() {
     let store = MemoryStore::new().unwrap();
     let session = DurableSession::open(store.clone(), "session")
         .await
@@ -836,12 +1287,12 @@ async fn rejects_invalid_transitions_before_the_host_append() {
 }
 
 #[tokio::test]
-async fn stops_a_stale_owner_when_an_append_outcome_is_ambiguous() {
+async fn stops_a_stale_owner_when_a_replace_outcome_is_ambiguous() {
     let store = MemoryStore::new().unwrap();
     let session = DurableSession::open(
         CommitThenFailStore {
             inner: store.clone(),
-            fail_after_revision: 2,
+            fail_after_revision: 1,
         },
         "session",
     )
@@ -864,7 +1315,7 @@ async fn stops_a_stale_owner_when_an_append_outcome_is_ambiguous() {
 
 #[cfg(feature = "sqlite")]
 #[tokio::test]
-async fn sqlite_compare_and_append_survives_reopen() {
+async fn sqlite_compare_and_replace_survives_reopen() {
     use nanocodex_durability::SqliteStore;
 
     let directory = tempfile::tempdir().unwrap();

@@ -12,6 +12,7 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[89ab][0-9a-f]{3}-[0-9a-f]{12
 const testEnv = env as unknown as AccountAuthEnv;
 const OWNER_CAPABILITIES = [
   "agents:read",
+  "agents:portability",
   "agents:write",
   "api_keys:read",
   "api_keys:write",
@@ -23,7 +24,8 @@ const OWNER_CAPABILITIES = [
   "organization:write",
 ] as const satisfies readonly OrganizationCapability[];
 const LEGACY_OWNER_CAPABILITIES = OWNER_CAPABILITIES.filter((capability) => (
-  capability !== "history:read"
+  capability !== "agents:portability"
+  && capability !== "history:read"
   && capability !== "memory:read"
   && capability !== "memory:write"
 ));
@@ -71,6 +73,7 @@ describe("organization authorization foundation", () => {
       authorizationEpoch: 1,
       capabilities: [
         "agents:read",
+        "agents:portability",
         "agents:write",
         "api_keys:read",
         "api_keys:write",

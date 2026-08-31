@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 
 import WebSocket from "ws";
 
@@ -8,14 +8,16 @@ import {
   assertNoSecretDigestMatches,
   parseSecretDigestDescriptors,
 } from "./public-secret-scan.mjs";
+import { resolveManagedSmokeCredentials } from "./local-smoke-account.mjs";
 
 const baseUrl = credentialSafeHttpOrigin(
   process.env.NANOCODEX_WORKER_URL ?? "http://127.0.0.1:8787",
   "NANOCODEX_WORKER_URL",
 );
-const roomAllocatorToken = process.env.NANOCODEX_ROOM_ALLOCATOR_TOKEN
-  ?? "local-room-allocator-token";
 const serverAuthorized = process.env.NANOCODEX_MULTIPLAYER_SERVER_AUTH === "true";
+const credentials = serverAuthorized
+  ? undefined
+  : await resolveManagedSmokeCredentials(baseUrl, "managed multiplayer smoke");
 const forbiddenDigests = parseSecretDigestDescriptors(process.env.NANOCODEX_FORBIDDEN_DIGESTS);
 const timeoutMs = positiveInteger("NANOCODEX_MULTIPLAYER_TIMEOUT_MS", 180_000);
 const cleanupTimeoutMs = positiveInteger("NANOCODEX_SMOKE_CLEANUP_TIMEOUT_MS", 30_000);
@@ -179,9 +181,6 @@ try {
   if (process.env.OPENAI_API_KEY) {
     assert(!publicTraffic.includes(process.env.OPENAI_API_KEY), "public room traffic exposed OPENAI_API_KEY");
   }
-  if (!serverAuthorized) {
-    assert(!publicTraffic.includes(roomAllocatorToken), "public room traffic exposed the allocator token");
-  }
   assertNoSecretDigestMatches(publicTraffic, forbiddenDigests);
 
   result = {
@@ -210,6 +209,13 @@ try {
         : error;
     }
   }
+  try {
+    await credentials?.cleanup();
+  } catch (error) {
+    failure = failure
+      ? new AggregateError([failure, error], "Multiplayer smoke and credential cleanup failed")
+      : error;
+  }
 }
 
 if (failure) throw failure;
@@ -217,17 +223,19 @@ process.stdout.write(`${JSON.stringify(result)}\n`);
 }
 
 async function createRoom(displayName) {
+  const createId = randomReceiptId();
   const headers = new Headers({ "content-type": "application/json" });
   if (serverAuthorized) {
     headers.set("origin", baseUrl.origin);
     headers.set("authorization", "Bearer browser-supplied-token-must-be-stripped");
   } else {
-    headers.set("authorization", `Bearer ${roomAllocatorToken}`);
+    headers.set("cookie", credentials.accountCookie);
+    headers.set("origin", baseUrl.origin);
   }
   const response = await fetch(new URL("/v1/rooms", baseUrl), {
     method: "POST",
     headers,
-    body: JSON.stringify({ display_name: displayName }),
+    body: JSON.stringify({ create_id: createId, display_name: displayName }),
     signal: AbortSignal.timeout(30_000),
   });
   const receipt = await jsonResponse(response, "room creation");
@@ -237,19 +245,24 @@ async function createRoom(displayName) {
 }
 
 async function joinRoom(id, invite, displayName) {
+  const joinId = randomReceiptId();
   const response = await fetch(new URL(`/v1/rooms/${id}/join`, baseUrl), {
     method: "POST",
     headers: {
       "content-type": "application/json",
       ...(serverAuthorized ? { origin: baseUrl.origin } : {}),
     },
-    body: JSON.stringify({ invite, display_name: displayName }),
+    body: JSON.stringify({ invite, display_name: displayName, join_id: joinId }),
     signal: AbortSignal.timeout(30_000),
   });
   const receipt = await jsonResponse(response, `${displayName} join`);
   assert(response.status === 201, `${displayName} join returned HTTP ${response.status}`);
   assertRoomReceipt(receipt, false);
   return { receipt, cookie: responseCookie(response) };
+}
+
+function randomReceiptId() {
+  return randomBytes(32).toString("base64url");
 }
 
 async function deleteRoom(id, cookie) {

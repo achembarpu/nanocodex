@@ -11,7 +11,7 @@ sockets, and opaque durability journal. A separate Cloudflare Sandbox owns
 Linux execution; R2 backs its per-session workspace.
 
 ```text
-client -> Worker router -> NanocodexSession Durable Object
+client -> Worker router -> DurableAgentSession Durable Object
                           |- Rust/WASM agent
                           |- SQLite journal batches
                           |- hibernatable client sockets

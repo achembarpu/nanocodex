@@ -72,7 +72,7 @@ export async function runBoundedProcess(command, arguments_, {
     stdio: ["ignore", "pipe", "pipe"],
   });
   onSpawn?.(handle);
-  const output = boundedOutput(handle.child, maxOutputBytes);
+  const output = boundedProcessOutput(handle.child, maxOutputBytes);
   let timeout;
   let onAbort;
   const interruption = new Promise((_, reject) => {
@@ -121,7 +121,11 @@ export function redactSecrets(value, secrets) {
   return redacted;
 }
 
-function boundedOutput(child, limit) {
+/** Retains the newest bounded stdout/stderr from a long-lived child process. */
+export function boundedProcessOutput(child, limit = 256 * 1024) {
+  if (!Number.isSafeInteger(limit) || limit <= 0) {
+    throw new Error("child process output limit must be a positive integer");
+  }
   const chunks = [];
   let bytes = 0;
   for (const stream of [child.stdout, child.stderr]) {

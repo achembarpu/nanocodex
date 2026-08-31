@@ -5,6 +5,8 @@ pub(super) struct ActiveToolCall {
     pub(super) call_id: String,
     pub(super) name: String,
     pub(super) kind: CodeCallKind,
+    pub(super) execution_step_id: String,
+    pub(super) execution_retry: crate::agent::execution::ExecutionRetry,
     pub(super) started_at: Instant,
     pub(super) shell_abort_format: bool,
     pub(super) completion: Arc<Mutex<Option<CompletedToolCall>>>,
@@ -181,23 +183,34 @@ where
                     let started_at = active.started_at;
                     let step_id = format!("tool-{call_index}-{}", call.call_id);
                     let unavailable = unsupported_tool_message(tools, &call).is_some();
+                    let retry = active.execution_retry;
+                    let mut unknown = false;
                     let recovered = if let Some(steps) = &execution_steps {
                         match steps
-                            .begin::<_, CompletedToolCall>(
-                                &step_id,
-                                "tool_call",
-                                &call,
-                                crate::agent::execution::ExecutionRetry::Never,
-                            )
+                            .begin::<_, CompletedToolCall>(&step_id, "tool_call", &call, retry)
                             .await?
                         {
                             crate::agent::ExecutionStep::Execute => None,
                             crate::agent::ExecutionStep::Replay(output) => Some(output),
+                            crate::agent::ExecutionStep::Unknown => {
+                                unknown = true;
+                                None
+                            }
                         }
                     } else {
                         None
                     };
-                    let (result, executed) = if let Some(completed) = recovered {
+                    let (result, persist_result) = if unknown {
+                        let completed = Self::unknown_recovered_tool_call(&active);
+                        record_tool_span_terminal(
+                            &active.span,
+                            "failed",
+                            "ERROR",
+                            completed.duration_ns,
+                            &completed.output,
+                        );
+                        (Ok(completed), true)
+                    } else if let Some(completed) = recovered {
                         if unavailable {
                             (Ok(Self::unavailable_recovered_tool_call(&active)), false)
                         } else {
@@ -257,7 +270,7 @@ where
                     };
                     match result {
                         Ok(mut completed) => {
-                            if executed {
+                            if persist_result {
                                 completed.work_duration_ns =
                                     Self::completed_tool_work_duration(&active);
                                 if let Some(steps) = &execution_steps {
@@ -336,6 +349,12 @@ where
             call_id: call.call_id.clone(),
             name: qualified_name,
             kind: call.kind,
+            execution_step_id: format!("tool-{call_index}-{}", call.call_id),
+            execution_retry: if matches!(call.kind, CodeCallKind::ToolSearch) {
+                crate::agent::execution::ExecutionRetry::Idempotent
+            } else {
+                crate::agent::execution::ExecutionRetry::Never
+            },
             started_at,
             shell_abort_format: call.namespace.is_none()
                 && matches!(call.name.as_str(), "shell_command" | "unified_exec"),
@@ -459,6 +478,37 @@ where
             tool: active.name.clone(),
             success: false,
             duration_ns,
+            work_duration_ns: 0,
+            output,
+            structured_result,
+            metadata: None,
+            response_items: vec![response_item],
+        }
+    }
+
+    pub(super) fn unknown_recovered_tool_call(active: &ActiveToolCall) -> CompletedToolCall {
+        let output = ToolOutputBody::Text(format!(
+            "The prior `{}` tool execution stopped after durable authorization and may or may not have been dispatched. Its external outcome is unknown, so Nanocodex did not repeat it. Inspect the current state before deciding whether another tool call is safe.",
+            active.name
+        ));
+        let structured_result = serde_json::json!({
+            "status": "unknown",
+            "recovered": true,
+            "replayed": false,
+            "tool": active.name.as_str(),
+        });
+        let response_item = match active.kind {
+            CodeCallKind::Custom => custom_tool_output(active.call_id.clone(), output.clone()),
+            CodeCallKind::Function => function_tool_output(active.call_id.clone(), output.clone()),
+            CodeCallKind::ToolSearch => {
+                unreachable!("retry-safe tool search cannot recover with an unknown outcome")
+            }
+        };
+        CompletedToolCall {
+            call_id: active.call_id.clone(),
+            tool: active.name.clone(),
+            success: false,
+            duration_ns: 0,
             work_duration_ns: 0,
             output,
             structured_result,
