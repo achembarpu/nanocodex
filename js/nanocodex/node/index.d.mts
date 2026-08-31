@@ -17,6 +17,8 @@ export type {
 export type {
   AgentEvent,
   AgentLifecycle,
+  AgentLifecycleActions,
+  AgentReference,
   AgentSessionContext,
   ChatGptCredential,
   ChatGptCredentialSeed,
@@ -30,6 +32,8 @@ export type {
   EstimatedUsdCost,
   PromptInput,
   PromptItem,
+  AgentTurn,
+  AgentTurnResult,
   LifecycleTurn,
   LifecycleTurnResult,
   ReasoningMode,

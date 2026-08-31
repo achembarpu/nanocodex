@@ -2,7 +2,11 @@ import {
   Actions,
   Agent,
   type AgentLifecycle,
+  type AgentLifecycleActions,
+  type AgentReference,
   type AgentSessionContext,
+  type AgentTurn,
+  type AgentTurnResult,
   ChatGptSubscription,
   type AccountsWallet,
   type CostStatus,
@@ -442,7 +446,14 @@ async function check() {
     tools: toolsCapability,
   });
   const commonManagedLifecycle: AgentLifecycle = managedAgent;
+  const commonManagedActions: AgentLifecycleActions = managedAgent;
+  const commonManagedReference: AgentReference = managedAgent;
   void commonManagedLifecycle;
+  void commonManagedActions;
+  void commonManagedReference;
+  const canonicalManagedTurn: AgentTurn = managedAgent.turn.prompt({ input: "hello" });
+  const canonicalManagedResult: AgentTurnResult = await canonicalManagedTurn.result();
+  await canonicalManagedResult.usage();
   const managedTurn: LifecycleTurn = managedAgent.turn.prompt({ input: "hello" });
   const managedResult: LifecycleTurnResult = await managedTurn.result();
   await managedResult.usage();
