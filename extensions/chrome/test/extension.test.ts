@@ -19,6 +19,7 @@ import {
 import { acquireCleanupHost } from "../lib/host-lock.ts";
 
 const panelSource = await readFile(new URL("../entrypoints/sidepanel/App.tsx", import.meta.url), "utf8");
+const panelStyleSource = await readFile(new URL("../entrypoints/sidepanel/style.css", import.meta.url), "utf8");
 const backgroundSource = await readFile(new URL("../entrypoints/background.ts", import.meta.url), "utf8");
 const connectSource = await readFile(new URL("../lib/connect.ts", import.meta.url), "utf8");
 const configSource = await readFile(new URL("../wxt.config.ts", import.meta.url), "utf8");
@@ -102,6 +103,9 @@ test("keeps cleanup policy out of the visible transcript", () => {
   assert.match(modelInput, /Respond normally to\s+ordinary conversation/);
   assert.match(modelInput, /cleanup tool is optional/);
   assert.match(modelInput, /user does not\s+specify a tab, inspect without tab_ref/);
+  assert.match(modelInput, /my X timeline/);
+  assert.match(modelInput, /Do not ask the user to switch tabs/);
+  assert.match(panelStyleSource, /\.chat \.agent-dom-transcript \{ min-height: 0; overflow: visible; \}/);
 });
 
 test("ordinary chat stays independent from the optional selected-page lease", () => {
