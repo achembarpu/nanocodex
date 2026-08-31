@@ -10,6 +10,13 @@ import type { NamedTool } from "nanocodex/host";
 const CONNECT_API = "https://nanocodex-connect-api.gakonst.workers.dev";
 const CONNECT_DIALOG = "https://nanocodex.gakonst.workers.dev/connect-dialog/";
 const MANAGED_AGENT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const MACHINE_USD = "0x20c0000000000000000000006637932dE5413804" as const;
+const USDC_E = "0x20C000000000000000000000b9537d11c60E8b50" as const;
+
+export const CHROME_ZERO_SPEND_LIMITS = [
+  { token: MACHINE_USD, limit: 0n, period: 0 },
+  { token: USDC_E, limit: 0n, period: 0 },
+] as const;
 
 const client = Client.create({
   appId: "nanocodex-chrome",
@@ -23,8 +30,11 @@ const client = Client.create({
   accessKey: {
     authorize: {
       expiry: Math.floor(Date.now() / 1_000) + 30 * 86_400,
-      reuse: { minExpiry: Math.floor(Date.now() / 1_000) + 7 * 86_400 },
-      limits: [],
+      reuse: {
+        minExpiry: Math.floor(Date.now() / 1_000) + 7 * 86_400,
+        minLimits: CHROME_ZERO_SPEND_LIMITS,
+      },
+      limits: CHROME_ZERO_SPEND_LIMITS,
       scopes: [],
     },
   },

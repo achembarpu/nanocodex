@@ -530,10 +530,7 @@ export default {
         const keyId = address(accessKeyStatus[2]);
         const stored = await store.get<AccessKeyRecord>(accessKeyStorageKey(accountAddress, keyId));
         return cors(Response.json({
-          registered: isAccessKeyRecord(stored)
-            && stored.appId === app.appId
-            && stored.appOrigin === app.origin
-            && stored.accountAddress.toLowerCase() === accountAddress.toLowerCase(),
+          registered: registeredAccessKeyMatchesApp(stored, app, accountAddress),
         }), request);
       }
 
@@ -1593,7 +1590,7 @@ function validateGrantAccessKey(
     throw new ApiFailure(403, "invalid_access_key_policy", "The access key policy is incomplete.");
   }
   if (appId === CHROME_EXTENSION_APP_ID) {
-    if (accessKey.limits.length !== 0 || accessKey.scopes.length !== 0) {
+    if (accessKey.scopes.length !== 0 || !hasZeroSpendPolicy(accessKey.limits)) {
       throw new ApiFailure(403, "invalid_access_key_policy", "The Chrome extension access key cannot spend funds or call contracts.");
     }
     return;
@@ -3130,6 +3127,31 @@ function isAccessKeyRecord(value: unknown): value is AccessKeyRecord {
     && isPublicAppOrigin(value.appOrigin)
     && /^0x[0-9a-fA-F]{40}$/.test(String(value.accountAddress))
     && isRecord(value.accessKey);
+}
+
+function registeredAccessKeyMatchesApp(
+  value: unknown,
+  app: CallerApp,
+  accountAddress: `0x${string}`,
+): boolean {
+  if (!isAccessKeyRecord(value)
+    || value.appId !== app.appId
+    || value.appOrigin !== app.origin
+    || value.accountAddress.toLowerCase() !== accountAddress.toLowerCase()) {
+    return false;
+  }
+  if (app.appId !== CHROME_EXTENSION_APP_ID) return true;
+  try {
+    const accessKey = accessKeyWire(
+      value.accessKey,
+      hex(value.accessKey.authorization, "stored access_key.authorization"),
+      accountAddress,
+    );
+    validateGrantAccessKey(accessKey, app.appId, []);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function accessKeyStorageKey(accountAddress: `0x${string}`, keyId: unknown): string {
@@ -4689,16 +4711,19 @@ function accessKeyWire(
   if (authorization.limits === undefined) {
     throw new ApiFailure(403, "invalid_access_key_policy", "The access key must explicitly constrain spending.");
   }
+  if (authorization.scopes === undefined) {
+    throw new ApiFailure(403, "invalid_access_key_policy", "The access key must explicitly constrain contract calls.");
+  }
   const limits = authorization.limits.map(({ limit, period, token }) => ({
     token: address(token),
     limit: limit.toString(),
     period: Number.isSafeInteger(period) ? period : 0,
   }));
-  const scopes = authorization.scopes?.map(({ address: target, recipients, selector }) => ({
+  const scopes = authorization.scopes.map(({ address: target, recipients, selector }) => ({
     address: address(target),
     ...(selector ? { selector: hex(selector, "key_authorization.scope.selector") } : {}),
     ...(recipients ? { recipients: recipients.map(address) } : {}),
-  })) ?? [];
+  }));
   return {
     address: keyAddress,
     chain_id: authorization.chainId.toString(),

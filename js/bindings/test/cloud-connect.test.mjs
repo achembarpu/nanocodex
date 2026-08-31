@@ -1087,12 +1087,36 @@ test("Connect reselects a reusable access key when the passkey account changes",
   });
 });
 
-test("Connect canonicalizes empty access-key policy before the wallet signs it", async () => {
+test("Connect rejects an empty spending policy before opening the wallet", async () => {
   const expiry = Math.floor(Date.now() / 1_000) + 3_600;
-  let walletRequest;
   const client = Client.create({
     appId: "empty-policy-workspace",
     accessKey: { authorize: { expiry, limits: [], scopes: [] } },
+    dialog: Dialog.memory(),
+    provider: {
+      async request() {
+        assert.fail("the wallet must not receive an ambiguous empty spending policy");
+      },
+    },
+    transport: Transport.mock(),
+  });
+
+  await assert.rejects(
+    client.connection.connect(),
+    /access-key limits must contain at least one explicit spending constraint/,
+  );
+});
+
+test("Connect preserves explicit zero spending and empty call scopes for signing", async () => {
+  const expiry = Math.floor(Date.now() / 1_000) + 3_600;
+  const limits = [
+    { token: "0x20c0000000000000000000006637932dE5413804", limit: 0n, period: 0 },
+    { token: "0x20C000000000000000000000b9537d11c60E8b50", limit: 0n, period: 0 },
+  ];
+  let walletRequest;
+  const client = Client.create({
+    appId: "zero-policy-workspace",
+    accessKey: { authorize: { expiry, limits, scopes: [] } },
     dialog: Dialog.memory(),
     provider: {
       async request(request) {
@@ -1101,13 +1125,15 @@ test("Connect canonicalizes empty access-key policy before the wallet signs it",
           accounts: [{
             address: "0x8ba1f109551bd432803012645ac136ddd64dba72",
             capabilities: {
-              auth: { approval_id: "approval-empty-policy" },
+              auth: { approval_id: "approval-zero-policy" },
               keyAuthorization: {
                 address: "0x1111111111111111111111111111111111111111",
                 keyId: "0x1111111111111111111111111111111111111111",
                 keyType: "p256",
                 chainId: 4217n,
                 expiry,
+                limits,
+                scopes: [],
                 witness: `0x${"22".repeat(32)}`,
               },
               personalSign: { keyAuthorization: "0x1234" },
@@ -1121,7 +1147,14 @@ test("Connect canonicalizes empty access-key policy before the wallet signs it",
 
   await client.connection.connect();
 
-  assert.deepEqual(walletRequest.params[0].capabilities.authorizeAccessKey, { expiry });
+  assert.deepEqual(walletRequest.params[0].capabilities.authorizeAccessKey, {
+    expiry,
+    limits: [
+      { token: limits[0].token, limit: "0x0", period: 0 },
+      { token: limits[1].token, limit: "0x0", period: 0 },
+    ],
+    scopes: [],
+  });
 });
 
 test("Connect persists, validates, and clears an app-scoped grant session", async () => {

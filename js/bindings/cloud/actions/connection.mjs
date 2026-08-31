@@ -322,16 +322,22 @@ function persistedChannelAuthorities(accountAddress) {
 
 function serializeAuthorizeAccessKey(value) {
   const { limits, scopes, ...authorization } = value;
+  if (limits !== undefined && (!Array.isArray(limits) || limits.length === 0)) {
+    throw new TypeError("access-key limits must contain at least one explicit spending constraint");
+  }
+  if (scopes !== undefined && !Array.isArray(scopes)) {
+    throw new TypeError("access-key scopes must be an array when provided");
+  }
   return {
     ...authorization,
     ...(value.chainId === undefined ? {} : { chainId: toHex(value.chainId) }),
-    ...(limits?.length ? {
+    ...(limits === undefined ? {} : {
       limits: limits.map((limit) => ({
         ...limit,
         limit: toHex(limit.limit),
       })),
-    } : {}),
-    ...(scopes?.length ? { scopes } : {}),
+    }),
+    ...(scopes === undefined ? {} : { scopes }),
   };
 }
 

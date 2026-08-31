@@ -1,10 +1,45 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import { Secp256k1 } from "ox";
+import { KeyAuthorization } from "ox/tempo";
 
 import { managedGrantHeaders } from "../src/managedGrant.mjs";
 
 const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
+
+test("signed zero-spend policy retains an explicit empty call-scope list", () => {
+  const policy = {
+    address: "0x1111111111111111111111111111111111111111",
+    chainId: 4217n,
+    expiry: 2_000_000_000,
+    type: "secp256k1",
+    limits: [
+      { token: "0x20c0000000000000000000006637932dE5413804", limit: 0n, period: 0 },
+      { token: "0x20C000000000000000000000b9537d11c60E8b50", limit: 0n, period: 0 },
+    ],
+  };
+  const signature = Secp256k1.sign({
+    payload: "0xdeadbeef",
+    privateKey: "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
+  });
+  const explicit = KeyAuthorization.deserialize(KeyAuthorization.serialize(
+    KeyAuthorization.from({ ...policy, scopes: [] }, { signature }),
+  ));
+  assert.equal(explicit.limits?.length, 2);
+  assert.ok(explicit.limits?.every(({ limit }) => limit === 0n));
+  assert.deepEqual(explicit.scopes, []);
+
+  const omittedScopes = KeyAuthorization.deserialize(KeyAuthorization.serialize(
+    KeyAuthorization.from(policy, { signature }),
+  ));
+  assert.equal(omittedScopes.scopes, undefined);
+
+  const emptyLimits = KeyAuthorization.deserialize(KeyAuthorization.serialize(
+    KeyAuthorization.from({ ...policy, limits: [], scopes: [] }, { signature }),
+  ));
+  assert.equal(emptyLimits.limits, undefined);
+});
 
 test("managed grant headers serialize only the exact delegated slice", () => {
   const headers = managedGrantHeaders({
@@ -79,7 +114,15 @@ test("Chrome grants provision and validate a real managed UUID while retaining z
   assert.match(source, /function isConnectAgentId\(value: unknown\)[\s\S]*?\^\[0-9a-f\]/);
 
   const accessKey = section("function validateGrantAccessKey(", "function hasZeroSpendPolicy(");
-  assert.match(accessKey, /appId === CHROME_EXTENSION_APP_ID[\s\S]*?accessKey\.limits\.length !== 0[\s\S]*?accessKey\.scopes\.length !== 0/);
+  assert.match(accessKey, /appId === CHROME_EXTENSION_APP_ID[\s\S]*?accessKey\.scopes\.length !== 0[\s\S]*?!hasZeroSpendPolicy\(accessKey\.limits\)/);
+
+  const reuse = section("function registeredAccessKeyMatchesApp(", "function accessKeyStorageKey(");
+  assert.match(reuse, /app\.appId !== CHROME_EXTENSION_APP_ID[\s\S]*?accessKeyWire\([\s\S]*?validateGrantAccessKey\(accessKey, app\.appId, \[\]\)/);
+
+  const signedPolicy = section("function accessKeyWire(", "async function tokenBalance(");
+  assert.match(signedPolicy, /authorization\.limits === undefined[\s\S]*?explicitly constrain spending/);
+  assert.match(signedPolicy, /authorization\.scopes === undefined[\s\S]*?explicitly constrain contract calls/);
+  assert.doesNotMatch(signedPolicy, /authorization\.scopes\?\.|\?\? \[\]/);
 });
 
 test("standard tools bind to the authenticated grant origin and no-history state loses its prompt", () => {

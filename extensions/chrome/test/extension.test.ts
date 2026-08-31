@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { isManagedAgentId } from "../lib/connect.ts";
+import { CHROME_ZERO_SPEND_LIMITS, isManagedAgentId } from "../lib/connect.ts";
 import { CLEANUP_PARAMETERS, createCleanupTool, validateCleanupInput } from "../lib/extension.ts";
 import { acquireCleanupHost } from "../lib/host-lock.ts";
 
@@ -33,6 +33,13 @@ test("recognizes only durable managed agent identifiers", () => {
   assert.equal(isManagedAgentId("agent_legacy-account-hash"), false);
   assert.equal(isManagedAgentId("D9428888-122B-4F2E-989A-0874C494BEB7"), false);
   assert.equal(isManagedAgentId("d9428888-122b-4f2e-789a-0874c494beb7-extra"), false);
+});
+
+test("signs an explicit zero-spend access-key policy", () => {
+  assert.deepEqual(CHROME_ZERO_SPEND_LIMITS, [
+    { token: "0x20c0000000000000000000006637932dE5413804", limit: 0n, period: 0 },
+    { token: "0x20C000000000000000000000b9537d11c60E8b50", limit: 0n, period: 0 },
+  ]);
 });
 
 test("allows only one side panel to own the cleanup host", async () => {
