@@ -185,7 +185,9 @@ function connectToolsTransport({ baseUrl, grantSession }, grantId, agentId) {
     }));
     const receipt = await response.json().catch(() => undefined);
     if (!response.ok || typeof receipt?.ticket !== "string" || !receipt.ticket) {
-      throw new Error(receipt?.error?.message ?? "managed tool-host authorization failed");
+      const message = receipt?.error?.message ?? "managed tool-host authorization failed";
+      if (terminalToolHostStatus(response.status)) throw new AttachmentRejectedError(message);
+      throw new Error(message);
     }
     const url = new URL(path, baseUrl);
     url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
@@ -196,6 +198,10 @@ function connectToolsTransport({ baseUrl, grantSession }, grantId, agentId) {
     }
     return new WebSocketImpl(url);
   };
+}
+
+function terminalToolHostStatus(status) {
+  return status >= 400 && status < 500 && status !== 408 && status !== 425 && status !== 429;
 }
 
 function startToolAttachment(managed, tools, signal) {

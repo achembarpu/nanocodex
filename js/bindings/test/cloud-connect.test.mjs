@@ -548,6 +548,28 @@ test("ConnectAgent creation aborts while waiting for initial tool attachment rea
   assert.equal(appToolDisposals, 1);
 });
 
+for (const status of [401, 403, 409]) {
+  test(`ConnectAgent creation rejects terminal tool-host ticket status ${status}`, async () => {
+    const fixture = localToolAttachmentFixture(`terminal-ticket-${status}`, {
+      status,
+      body: { error: { message: `terminal ticket ${status}` } },
+    });
+    try {
+      await assert.rejects(
+        fixture.client.agent.create({
+          connection: fixture.connection,
+          tools: { app_echo: { description: "Echo.", handler: ({ value }) => value } },
+        }),
+        new RegExp(`tool attachment rejected: terminal ticket ${status}`),
+      );
+      assert.equal(fixture.ticketRequests(), 1);
+      assert.equal(fixture.sockets.length, 0);
+    } finally {
+      fixture.restore();
+    }
+  });
+}
+
 test("ConnectAgent with an empty signed MCP list creates no MCP runtime or tool-host socket", async () => {
   const agentId = "019fc927-b280-79a7-8445-1b9996ad2fb0";
   const expiry = Math.floor(Date.now() / 1_000) + 3_600;
@@ -1619,10 +1641,11 @@ function memoryStorage() {
   };
 }
 
-function localToolAttachmentFixture(appId) {
+function localToolAttachmentFixture(appId, ticketFailure) {
   const agentId = "019fc927-b280-79a7-8445-1b9996ad2fb0";
   const expiry = Math.floor(Date.now() / 1_000) + 3_600;
   const sockets = [];
+  let ticketRequestCount = 0;
   const client = Client.create({
     appId,
     dialog: Dialog.memory(),
@@ -1637,6 +1660,10 @@ function localToolAttachmentFixture(appId) {
           async fetch(input, init) {
             const request = new Request(input, init);
             if (new URL(request.url).pathname.endsWith("/tool-host/ticket")) {
+              ticketRequestCount += 1;
+              if (ticketFailure) {
+                return Response.json(ticketFailure.body, { status: ticketFailure.status });
+              }
               return Response.json({ ticket: "local-tool-ticket", expires_in: 30 });
             }
             return Response.json({ error: { message: "unexpected request" } }, { status: 404 });
@@ -1683,6 +1710,7 @@ function localToolAttachmentFixture(appId) {
     client,
     connection,
     sockets,
+    ticketRequests: () => ticketRequestCount,
     restore() { globalThis.WebSocket = OriginalWebSocket; },
   };
 }
