@@ -10,8 +10,14 @@
   --terminal-background: var(--surface);
   --terminal-foreground: var(--text);
   --terminal-muted: color-mix(in srgb, var(--text) 56%, transparent);
+  --terminal-secondary: var(--text-secondary);
+  --terminal-faint: var(--text-faint);
   --terminal-border: var(--border-soft);
   --terminal-hover: var(--surface-hover);
+  --terminal-selected: color-mix(in srgb, var(--text) 4%, transparent);
+  --terminal-negative: var(--negative);
+  --terminal-font-sans: var(--font-sans);
+  --terminal-sidebar-background: transparent;
 }
 
 .agent-session-shell,
@@ -175,6 +181,12 @@
 
 .agent-byok-error {
   color: var(--negative);
+}
+
+@media (max-width: 740px), (pointer: coarse) and (orientation: landscape) and (max-width: 950px) {
+  .nanocodex-demo .conversation-sidebar {
+    --terminal-sidebar-background: var(--surface);
+  }
 }
 
 @media (pointer: coarse), (any-pointer: coarse) {

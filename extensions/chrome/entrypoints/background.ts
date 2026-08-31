@@ -29,6 +29,7 @@ const LEASE_PREFIX = "page-lease:";
 const SELECTED_TAB_KEY = "selected-page-tab";
 
 interface SelectedTab {
+  selection_id: string;
   tab_id: number;
   window_id: number;
 }
@@ -79,11 +80,15 @@ async function handleRuntimeMessage(value: unknown, sender: chrome.runtime.Messa
   const message = asRecord(value);
   if (message.type !== "recipe.for_document") requireSidePanelSender(sender);
   switch (message.type) {
+    case "page.selection": {
+      const selection = await selectedTabSnapshot();
+      return selection ? { selection_id: selection.selection_id } : {};
+    }
     case "page.claim": {
-      if (typeof message.previous_lease_id === "string") await releaseLease(message.previous_lease_id);
-      const claim = await claimSelectedTab();
+      const claim = await claimSelectedTab(requiredString(message, "selection_id"));
       const current: Lease = { id: crypto.randomUUID(), claim };
       await saveLease(current);
+      if (typeof message.previous_lease_id === "string") await releaseLease(message.previous_lease_id);
       return { lease_id: current.id, tab: claim } satisfies PageLease;
     }
     case "page.cleanup": {
@@ -269,18 +274,26 @@ async function keepRecipe(current: Lease, originValue: string): Promise<{ name: 
 
 function selectTab(tab: chrome.tabs.Tab): void {
   if (tab.id === undefined) return;
-  selectedTab = { tab_id: tab.id, window_id: tab.windowId };
+  selectedTab = { selection_id: crypto.randomUUID(), tab_id: tab.id, window_id: tab.windowId };
   selectedTabWrite = chrome.storage.session.set({ [SELECTED_TAB_KEY]: selectedTab });
 }
 
-async function claimSelectedTab(): Promise<TabClaim> {
+async function selectedTabSnapshot(): Promise<SelectedTab | undefined> {
   await selectedTabWrite;
   if (!selectedTab) {
     const stored = await chrome.storage.session.get(SELECTED_TAB_KEY);
     if (isSelectedTab(stored[SELECTED_TAB_KEY])) selectedTab = stored[SELECTED_TAB_KEY];
   }
+  return selectedTab;
+}
+
+async function claimSelectedTab(selectionId: string): Promise<TabClaim> {
+  await selectedTabSnapshot();
   if (!selectedTab) {
     throw new Error("Click the Nanocodex toolbar icon on the HTTP or HTTPS page you want to change.");
+  }
+  if (selectedTab.selection_id !== selectionId) {
+    throw new Error("The selected page changed after this message started. Send it again for the newly selected tab.");
   }
   const target = selectedTab;
   const tab = await chrome.tabs.get(target.tab_id);
@@ -449,6 +462,7 @@ function isLease(value: unknown): value is Lease {
 
 function isSelectedTab(value: unknown): value is SelectedTab {
   return Boolean(value) && typeof value === "object"
+    && typeof (value as SelectedTab).selection_id === "string"
     && typeof (value as SelectedTab).tab_id === "number"
     && typeof (value as SelectedTab).window_id === "number";
 }

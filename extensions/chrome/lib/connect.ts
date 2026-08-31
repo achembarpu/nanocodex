@@ -35,25 +35,52 @@ export const CHROME_CONNECT_REQUEST = {
 } as const;
 
 type ConnectClient = ReturnType<typeof Client.create>;
+export type ExpectedConversation = Readonly<{ agentId: string; accountAddress?: string }>;
 const conversationClients = new Map<string, ConnectClient>();
 const agentClients = new Map<string, ConnectClient>();
 
-export async function connectNanocodex(conversationId = LEGACY_CONVERSATION_ID): Promise<Connection> {
+export async function connectNanocodex(
+  conversationId = LEGACY_CONVERSATION_ID,
+  expected?: ExpectedConversation,
+): Promise<Connection> {
   const client = clientForConversation(conversationId);
-  const connection = await client.connection.connect(connectRequest(conversationId));
-  agentClients.set(connection.agentId, client);
-  return connection;
+  const snapshot = expected ? snapshotConversationStorage(conversationId) : undefined;
+  try {
+    const connection = await client.connection.connect(connectRequest(conversationId));
+    if (!isManagedAgentId(connection.agentId) || (expected && !connectionMatchesIdentity(connection, expected))) {
+      await client.connection.disconnect().catch(() => {});
+      restoreConversationStorage(conversationId, snapshot ?? new Map());
+      conversationClients.delete(conversationId);
+      throw new Error("This conversation belongs to a different Nanocodex account. Start a new conversation instead.");
+    }
+    agentClients.set(connection.agentId, client);
+    return connection;
+  } catch (cause) {
+    if (snapshot) {
+      restoreConversationStorage(conversationId, snapshot);
+      conversationClients.delete(conversationId);
+    }
+    throw cause;
+  }
 }
 
-export async function reconnectNanocodex(conversationId = LEGACY_CONVERSATION_ID): Promise<Connection | undefined> {
+export async function reconnectNanocodex(
+  conversationId = LEGACY_CONVERSATION_ID,
+  expected?: ExpectedConversation,
+): Promise<Connection | undefined> {
   const client = clientForConversation(conversationId);
   const connection = await client.connection.reconnect(connectRequest(conversationId));
-  if (!connection || isManagedAgentId(connection.agentId)) {
-    if (connection) agentClients.set(connection.agentId, client);
-    return connection;
+  if (!connection) return undefined;
+  if (!isManagedAgentId(connection.agentId) || (expected && !connectionMatchesIdentity(connection, expected))) {
+    await client.connection.disconnect();
+    conversationClients.delete(conversationId);
+    if (expected) {
+      throw new Error("The retained authorization no longer matches this conversation.");
+    }
+    return undefined;
   }
-  await client.connection.disconnect();
-  return undefined;
+  agentClients.set(connection.agentId, client);
+  return connection;
 }
 
 export function disconnectNanocodex(conversationId = LEGACY_CONVERSATION_ID): Promise<void> {
@@ -82,6 +109,7 @@ function clientForConversation(conversationId: string): ConnectClient {
   if (!isConversationId(conversationId)) throw new TypeError("Invalid durable conversation identifier.");
   const retained = conversationClients.get(conversationId);
   if (retained) return retained;
+  if (conversationId === LEGACY_CONVERSATION_ID) migrateLegacyConversationSession();
   const now = Math.floor(Date.now() / 1_000);
   const client = Client.create({
     appId: "nanocodex-chrome",
@@ -108,9 +136,7 @@ function clientForConversation(conversationId: string): ConnectClient {
       key: `nanocodex-chrome-${conversationId}`,
       name: "Nanocodex Connect",
     }),
-    session: conversationId === LEGACY_CONVERSATION_ID
-      ? undefined
-      : conversationStorage(conversationId),
+    session: conversationStorage(conversationId),
     transport: Transport.http(CONNECT_API, {
       credentials: "omit",
       key: `nanocodex-chrome-${conversationId}`,
@@ -129,12 +155,53 @@ function connectRequest(conversationId: string) {
 }
 
 function conversationStorage(conversationId: string): Pick<Storage, "getItem" | "setItem" | "removeItem"> {
-  const prefix = `nanocodex:chrome:conversation:${conversationId}:`;
+  const prefix = conversationStoragePrefix(conversationId);
   return {
     getItem: (key) => localStorage.getItem(`${prefix}${key}`),
     setItem: (key, value) => localStorage.setItem(`${prefix}${key}`, value),
     removeItem: (key) => localStorage.removeItem(`${prefix}${key}`),
   };
+}
+
+function snapshotConversationStorage(conversationId: string): Map<string, string> {
+  const prefix = conversationStoragePrefix(conversationId);
+  const snapshot = new Map<string, string>();
+  for (let index = 0; index < localStorage.length; index += 1) {
+    const key = localStorage.key(index);
+    if (key?.startsWith(prefix)) snapshot.set(key, localStorage.getItem(key) ?? "");
+  }
+  return snapshot;
+}
+
+function restoreConversationStorage(conversationId: string, snapshot: ReadonlyMap<string, string>): void {
+  const prefix = conversationStoragePrefix(conversationId);
+  const currentKeys: string[] = [];
+  for (let index = 0; index < localStorage.length; index += 1) {
+    const key = localStorage.key(index);
+    if (key?.startsWith(prefix)) currentKeys.push(key);
+  }
+  for (const key of currentKeys) localStorage.removeItem(key);
+  for (const [key, value] of snapshot) localStorage.setItem(key, value);
+}
+
+function conversationStoragePrefix(conversationId: string): string {
+  return `nanocodex:chrome:conversation:${conversationId}:`;
+}
+
+export function migrateLegacyConversationSession(
+  storage: Pick<Storage, "getItem" | "setItem" | "removeItem"> = localStorage,
+): void {
+  const key = "nanocodex:connect:nanocodex-chrome:session";
+  const migratedKey = `${conversationStoragePrefix(LEGACY_CONVERSATION_ID)}${key}`;
+  const retained = storage.getItem(key);
+  if (storage.getItem(migratedKey) === null && retained !== null) storage.setItem(migratedKey, retained);
+  if (retained !== null) storage.removeItem(key);
+}
+
+function connectionMatchesIdentity(connection: Connection, expected: ExpectedConversation): boolean {
+  return connection.agentId === expected.agentId
+    && (expected.accountAddress === undefined
+      || connection.accountAddress.toLowerCase() === expected.accountAddress.toLowerCase());
 }
 
 export function isManagedAgentId(value: string): boolean {

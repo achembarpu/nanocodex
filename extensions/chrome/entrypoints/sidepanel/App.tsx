@@ -13,6 +13,7 @@ import {
   connectNanocodex,
   createConversationId,
   disconnectNanocodex,
+  isManagedAgentId,
   isConversationId,
   LEGACY_CONVERSATION_ID,
   reconnectNanocodex,
@@ -33,6 +34,7 @@ interface ActiveOperation {
   controller: AbortController;
   lease?: PageLease;
   ready?: Promise<PageLease>;
+  selection: Promise<string | undefined>;
   turn?: AgentTurn;
 }
 
@@ -62,21 +64,31 @@ export function App() {
   const leaseRef = useRef<PageLease | undefined>(undefined);
   const closedRef = useRef(false);
   const closingRef = useRef<Promise<void> | undefined>(undefined);
+  const conversationIdRef = useRef(conversationId);
+  const transitionRef = useRef(true);
+  const transitionVersionRef = useRef(0);
   connectionRef.current = connection;
+  conversationIdRef.current = conversationId;
 
   useEffect(() => {
     let mounted = true;
-    void reconnectNanocodex(conversationId)
+    const restoringId = conversationIdRef.current;
+    const version = ++transitionVersionRef.current;
+    void reconnectNanocodex(restoringId, conversationIdentity(restoringId) ?? undefined)
       .then((restored) => {
-        if (!mounted) return;
-        if (restored) retainConversation(conversationId, restored.agentId);
+        if (!mounted || transitionVersionRef.current !== version
+          || conversationIdRef.current !== restoringId) return;
+        if (restored) retainConversation(restoringId, restored);
         setConnection(restored);
       })
       .catch((cause) => {
         if (mounted) setError(errorMessage(cause));
       })
       .finally(() => {
-        if (mounted) setRestoring(false);
+        if (mounted && transitionVersionRef.current === version) {
+          transitionRef.current = false;
+          setRestoring(false);
+        }
       });
     void refreshSaved().catch((cause) => setError(errorMessage(cause)));
     const listener = (value: unknown) => {
@@ -107,6 +119,7 @@ export function App() {
     window.addEventListener("pagehide", close);
     return () => {
       mounted = false;
+      transitionVersionRef.current += 1;
       chrome.runtime.onMessage.removeListener(listener);
       window.removeEventListener("pagehide", close);
     };
@@ -230,16 +243,31 @@ export function App() {
   }
 
   async function claimSelectedPage(operation: ActiveOperation): Promise<PageLease> {
+    const selectionId = await operation.selection;
+    if (operation.cancelled || operationRef.current !== operation || closedRef.current) {
+      throw new Error("The turn was cancelled before the selected tab was needed.");
+    }
+    if (!selectionId) {
+      throw new Error("Click the Nanocodex toolbar icon on the HTTP or HTTPS page you want to change.");
+    }
+    const previous = leaseRef.current;
     const claimed = await sendMessage<PageLease>({
       type: "page.claim",
+      selection_id: selectionId,
       ...(leaseRef.current ? { previous_lease_id: leaseRef.current.lease_id } : {}),
     });
+    if (previous?.lease_id === leaseRef.current?.lease_id) {
+      leaseRef.current = undefined;
+      setPreview(undefined);
+      setTab(undefined);
+    }
     if (operation.cancelled || operationRef.current !== operation || closedRef.current) {
       await sendMessage({ type: "lease.release", lease_id: claimed.lease_id }).catch(() => {});
       throw new Error("The cleanup was cancelled before the selected tab was ready.");
     }
     operation.lease = claimed;
     leaseRef.current = claimed;
+    setPreview(undefined);
     setTab(claimed.tab);
     return claimed;
   }
@@ -284,19 +312,25 @@ export function App() {
   }
 
   function startPanelTurn(source: Agent, input: string): AgentTurn {
+    if (transitionRef.current) {
+      throw new Error("Wait for the current conversation to finish opening.");
+    }
     if (operationRef.current) {
       throw new Error("The current turn is still finishing. Stop it before starting another.");
     }
     setError("");
     setKept("");
-    setPreview(undefined);
     setActivity("Thinking");
-    recordConversationActivity(input);
-    const operation: ActiveOperation = { cancelled: false, controller: new AbortController() };
+    const operation: ActiveOperation = {
+      cancelled: false,
+      controller: new AbortController(),
+      selection: selectedPageSelection(),
+    };
     operationRef.current = operation;
     let inner: AgentTurn;
     try {
       inner = source.turn.prompt({ input });
+      recordConversationActivity(input);
     } catch (cause) {
       operation.cancelled = true;
       operation.controller.abort(cause);
@@ -372,37 +406,50 @@ export function App() {
   }
 
   async function connect(): Promise<void> {
-    if (connecting) return;
+    if (transitionRef.current || operationRef.current) return;
+    const targetId = conversationIdRef.current;
+    const version = ++transitionVersionRef.current;
+    transitionRef.current = true;
     setConnecting(true);
     setError("");
     try {
-      const connected = await connectNanocodex(conversationId);
-      retainConversation(conversationId, connected.agentId);
+      const connected = await connectNanocodex(targetId, conversationIdentity(targetId) ?? undefined);
+      if (transitionVersionRef.current !== version || conversationIdRef.current !== targetId) return;
+      retainConversation(targetId, connected);
       setConnection(connected);
     } catch (cause) {
       setError(errorMessage(cause));
     } finally {
-      setConnecting(false);
+      if (transitionVersionRef.current === version) {
+        transitionRef.current = false;
+        setConnecting(false);
+      }
     }
   }
 
   async function disconnect(): Promise<void> {
-    if (operationRef.current || sessionOpeningRef.current) {
-      setError("Stop the active cleanup and wait for it to finish before disconnecting.");
+    if (operationRef.current) {
+      setError("Stop the active turn and wait for it to finish before disconnecting.");
       return;
     }
+    if (transitionRef.current) return;
+    const version = ++transitionVersionRef.current;
+    transitionRef.current = true;
     setError("");
-    await closePanelRuntime();
-    closingRef.current = undefined;
-    setConnection(undefined);
-    setAgentError(undefined);
-    setAgentOpening(false);
-    setTab(undefined);
-    setPreview(undefined);
     try {
-      await disconnectNanocodex(conversationId);
+      connectionRef.current = undefined;
+      setConnection(undefined);
+      await closePanelRuntime();
+      closingRef.current = undefined;
+      setAgentError(undefined);
+      setAgentOpening(false);
+      setTab(undefined);
+      setPreview(undefined);
+      await disconnectNanocodex(conversationIdRef.current);
     } catch (cause) {
       setError(`Disconnected locally. ${errorMessage(cause)}`);
+    } finally {
+      if (transitionVersionRef.current === version) transitionRef.current = false;
     }
   }
 
@@ -466,27 +513,31 @@ export function App() {
     )).sort((left, right) => (right.updatedAt ?? 0) - (left.updatedAt ?? 0))));
   }
 
-  function retainConversation(id: string, agentId: string): void {
+  function retainConversation(id: string, connected: NanocodexConnection): void {
     setConversations((current) => {
       const existing = current.find((conversation) => conversation.id === id);
       const next = existing
         ? current
         : [{ id, title: "New conversation", updatedAt: Date.now(), turnCount: 0 }, ...current];
-      persistConversationAgent(id, agentId);
+      persistConversationIdentity(id, connected);
       return persistConversations(next);
     });
   }
 
   async function activateConversation(id: string, connected?: NanocodexConnection): Promise<void> {
-    if (operationRef.current || sessionOpeningRef.current || conversationPending
+    if (operationRef.current || transitionRef.current
       || (id === conversationId && connection)) return;
+    const version = ++transitionVersionRef.current;
+    transitionRef.current = true;
     setConversationPending(true);
     setError("");
     try {
-      const next = connected ?? await reconnectNanocodex(id);
+      const next = connected ?? await reconnectNanocodex(id, conversationIdentity(id) ?? undefined);
+      if (transitionVersionRef.current !== version) return;
       if (!next) throw new Error("Reconnect this conversation to continue.");
-      const expectedAgent = conversationAgent(id);
-      if (expectedAgent && expectedAgent !== next.agentId) {
+      const expected = conversationIdentity(id);
+      if (expected && (expected.agentId !== next.agentId
+        || (expected.accountAddress && expected.accountAddress.toLowerCase() !== next.accountAddress.toLowerCase()))) {
         throw new Error("The retained conversation authorization no longer matches this thread.");
       }
       connectionRef.current = undefined;
@@ -496,31 +547,53 @@ export function App() {
       setAgentError(undefined);
       setTab(undefined);
       setPreview(undefined);
+      conversationIdRef.current = id;
       setConversationId(id);
       persistSelectedConversation(id);
-      persistConversationAgent(id, next.agentId);
+      persistConversationIdentity(id, next);
       setConnection(next);
       setRailOpen(false);
     } catch (cause) {
       setError(errorMessage(cause));
     } finally {
-      setConversationPending(false);
+      if (transitionVersionRef.current === version) {
+        transitionRef.current = false;
+        setConversationPending(false);
+      }
     }
   }
 
   async function createConversation(): Promise<void> {
-    if (operationRef.current || sessionOpeningRef.current || conversationPending || connecting) return;
+    if (operationRef.current || transitionRef.current) return;
     const id = createConversationId();
+    const version = ++transitionVersionRef.current;
+    transitionRef.current = true;
     setConversationPending(true);
     setError("");
     try {
       const connected = await connectNanocodex(id);
-      retainConversation(id, connected.agentId);
-      setConversationPending(false);
-      await activateConversation(id, connected);
+      if (transitionVersionRef.current !== version) return;
+      retainConversation(id, connected);
+      connectionRef.current = undefined;
+      setConnection(undefined);
+      await closePanelRuntime();
+      closingRef.current = undefined;
+      setAgentError(undefined);
+      setTab(undefined);
+      setPreview(undefined);
+      conversationIdRef.current = id;
+      setConversationId(id);
+      persistSelectedConversation(id);
+      persistConversationIdentity(id, connected);
+      setConnection(connected);
+      setRailOpen(false);
     } catch (cause) {
       setError(errorMessage(cause));
-      setConversationPending(false);
+    } finally {
+      if (transitionVersionRef.current === version) {
+        transitionRef.current = false;
+        setConversationPending(false);
+      }
     }
   }
 
@@ -585,7 +658,7 @@ export function App() {
           agentStatus={agentStatus}
           conversations={conversations}
           mobileOpen={railOpen}
-          pending={conversationPending || connecting}
+          pending={conversationPending || connecting || restoring}
           runtime="managed"
           selectedId={conversationId}
           onClose={() => setRailOpen(false)}
@@ -654,6 +727,15 @@ async function sendMessage<Result = unknown>(message: unknown): Promise<Result> 
   const response = await chrome.runtime.sendMessage(message) as Result & { error?: string };
   if (response && typeof response === "object" && typeof response.error === "string") throw new Error(response.error);
   return response;
+}
+
+async function selectedPageSelection(): Promise<string | undefined> {
+  try {
+    const selection = await sendMessage<{ selection_id?: string }>({ type: "page.selection" });
+    return typeof selection.selection_id === "string" ? selection.selection_id : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function observeTerminalEvent(event: AgentControllerEvent, setActivity: (activity: string | undefined) => void): void {
@@ -736,12 +818,34 @@ function persistSelectedConversation(id: string): void {
   try { localStorage.setItem(SELECTED_CONVERSATION_KEY, id); } catch {}
 }
 
-function persistConversationAgent(id: string, agentId: string): void {
-  try { localStorage.setItem(`${CONVERSATIONS_KEY}:agent:${id}`, agentId); } catch {}
+function persistConversationIdentity(id: string, connection: NanocodexConnection): void {
+  try {
+    localStorage.setItem(`${CONVERSATIONS_KEY}:identity:${id}`, JSON.stringify({
+      accountAddress: connection.accountAddress,
+      agentId: connection.agentId,
+    }));
+    localStorage.setItem(`${CONVERSATIONS_KEY}:agent:${id}`, connection.agentId);
+  } catch {}
 }
 
-function conversationAgent(id: string): string | null {
-  try { return localStorage.getItem(`${CONVERSATIONS_KEY}:agent:${id}`); } catch { return null; }
+function conversationIdentity(id: string): Readonly<{ accountAddress?: string; agentId: string }> | null {
+  try {
+    const retained = localStorage.getItem(`${CONVERSATIONS_KEY}:identity:${id}`);
+    if (retained) {
+      const parsed = JSON.parse(retained) as unknown;
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        const value = parsed as { accountAddress?: unknown; agentId?: unknown };
+        if (typeof value.agentId === "string" && isManagedAgentId(value.agentId)
+          && typeof value.accountAddress === "string" && /^0x[0-9a-f]{40}$/i.test(value.accountAddress)) {
+          return { accountAddress: value.accountAddress, agentId: value.agentId };
+        }
+      }
+    }
+    const legacyAgent = localStorage.getItem(`${CONVERSATIONS_KEY}:agent:${id}`);
+    return legacyAgent && isManagedAgentId(legacyAgent) ? { agentId: legacyAgent } : null;
+  } catch {
+    return null;
+  }
 }
 
 function legacyConversation(): ConversationSummary {
