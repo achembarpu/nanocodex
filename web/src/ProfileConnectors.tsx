@@ -7,6 +7,7 @@ import {
 } from "@nanocodex-connect/AccountConnectionSurface";
 import { isRecord, responseFailure } from "./AccountSession";
 import { clientFailureMessage } from "./clientFailure";
+import { announceAccountMcpCatalogChanged } from "./browserMcp";
 import { ConnectionLogo } from "@nanocodex-connect/ConnectionLogo";
 import {
   connectorCompletion,
@@ -165,6 +166,7 @@ export function ProfileConnectors({
         }
         if (!response.ok) throw await responseFailure(response, "Couldn’t load MCP connections.");
         setMcpConnections(decodeMcpConnections(await response.json()));
+        announceAccountMcpCatalogChanged();
         setMcpError(null);
       } catch (cause) {
         setMcpError(failureMessage(cause, "Couldn’t load MCP connections."));
@@ -400,6 +402,7 @@ export function ProfileConnectors({
         connection,
         ...(current ?? []).filter(({ id }) => id !== connection.id),
       ]);
+      if (connection.status === "connected") announceAccountMcpCatalogChanged();
       return true;
     } catch (cause) {
       setMcpError(failureMessage(cause, "Couldn’t add the MCP connection."));
@@ -460,6 +463,7 @@ export function ProfileConnectors({
       const updated = mcpConnectionFromResponse(body, connection.id);
       setMcpConnections((current) => replaceMcpConnection(current ?? [], updated));
       if (updated.status === "connected") {
+        announceAccountMcpCatalogChanged();
         finishMcpAttempt(attempt);
         return;
       }

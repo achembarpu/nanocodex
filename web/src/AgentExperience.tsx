@@ -147,7 +147,7 @@ export const AgentExperience = memo(function AgentExperience({
         {landing
           ? hasCredential && !activeCapabilityError && deploymentCurrent
             ? <AgentTerminal
-              key={`ephemeral:${ephemeralThreadId}`}
+              key={`ephemeral:${account.account?.id ?? "anonymous"}:${ephemeralThreadId}`}
               authStatus={authStatus} beforeLocalTurn={beforeLocalTurn}
               mode={mode} onConversationActivity={NO_CONVERSATION_ACTIVITY}
               onStateChange={setRuntimeState} source={credentialSource} threadId={ephemeralThreadId}

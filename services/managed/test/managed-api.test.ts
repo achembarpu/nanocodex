@@ -839,7 +839,12 @@ describe("managed agents REST and resumable SSE", () => {
     await seedPasskeySession(userId, token);
 
     const originalBroker = testEnv.NANOCODEX;
-    const brokerRequests: Array<{ body: string; method: string; url: string }> = [];
+    const brokerRequests: Array<{
+      body: string;
+      headers: Record<string, string>;
+      method: string;
+      url: string;
+    }> = [];
     let listing: "valid" | "invalid" | "failed" = "valid";
     let createdId: string | undefined;
     testEnv.NANOCODEX = {
@@ -847,9 +852,19 @@ describe("managed agents REST and resumable SSE", () => {
         const request = new Request(input, init);
         brokerRequests.push({
           body: await request.text(),
+          headers: Object.fromEntries(request.headers),
           method: request.method,
           url: request.url,
         });
+        if (request.url.startsWith("https://mcp.internal/")) {
+          return new Response('{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}', {
+            headers: {
+              "content-type": "application/json",
+              "mcp-session-id": "upstream-session",
+              "set-cookie": "provider-secret=must-not-leak",
+            },
+          });
+        }
         if (request.method === "GET") {
           if (listing === "failed") {
             return Response.json({ access_token: "must-not-leak" }, { status: 503 });
@@ -1035,6 +1050,67 @@ describe("managed agents REST and resumable SSE", () => {
       );
       expect(brokerRequests[4]?.method).toBe("DELETE");
       expect(brokerRequests[4]?.body).toBe("");
+
+      const invalidProxyThread = await RAW_SELF.fetch(
+        `https://example.test/v1/connectors/mcp-connections/${connectionId}/proxy?thread_id=invalid`,
+        { method: "POST", headers: { cookie, origin: "https://example.test" } },
+      );
+      expect(invalidProxyThread.status).toBe(400);
+      expect(await invalidProxyThread.json()).toEqual({ error: "invalid_thread_id" });
+
+      const crossOriginProxy = await RAW_SELF.fetch(
+        `https://example.test/v1/connectors/mcp-connections/${connectionId}/proxy?thread_id=11111111-1111-4111-8111-111111111111`,
+        {
+          method: "POST",
+          headers: {
+            cookie,
+            origin: "https://attacker.test",
+            "x-nanocodex-request": "1",
+          },
+        },
+      );
+      expect(crossOriginProxy.status).toBe(403);
+      expect(await crossOriginProxy.json()).toEqual({ error: "forbidden_origin" });
+
+      const unsupportedProxyMethod = await RAW_SELF.fetch(
+        `https://example.test/v1/connectors/mcp-connections/${connectionId}/proxy?thread_id=11111111-1111-4111-8111-111111111111`,
+        { method: "PUT", headers: { cookie, origin: "https://example.test" } },
+      );
+      expect(unsupportedProxyMethod.status).toBe(405);
+      expect(await unsupportedProxyMethod.json()).toEqual({ error: "method_not_allowed" });
+
+      const proxied = await RAW_SELF.fetch(
+        `https://example.test/v1/connectors/mcp-connections/${connectionId}/proxy?thread_id=11111111-1111-4111-8111-111111111111`,
+        {
+          method: "POST",
+          headers: {
+            cookie,
+            origin: "https://example.test",
+            "content-type": "application/json",
+            "mcp-session-id": "browser-session",
+          },
+          body: '{"jsonrpc":"2.0","id":1,"method":"tools/list"}',
+        },
+      );
+      expect(proxied.status).toBe(200);
+      expect(proxied.headers.get("mcp-session-id")).toBe("upstream-session");
+      expect(proxied.headers.has("set-cookie")).toBe(false);
+      expect(await proxied.json()).toEqual({
+        jsonrpc: "2.0",
+        id: 1,
+        result: { tools: [] },
+      });
+      expect(brokerRequests).toHaveLength(7);
+      expect(brokerRequests[6]?.url).toBe(
+        `https://mcp.internal/v1/connections/${connectionId}`,
+      );
+      expect(brokerRequests[6]?.headers["x-nanocodex-subject"]).toMatch(/^[A-Za-z0-9_-]{43}$/);
+      expect(brokerRequests[6]?.headers["mcp-session-id"]).toBe("browser-session");
+      expect(brokerRequests[6]?.headers.authorization).toBeUndefined();
+      expect(brokerRequests[6]?.headers.cookie).toBeUndefined();
+      expect(brokerRequests[6]?.body).toBe(
+        '{"jsonrpc":"2.0","id":1,"method":"tools/list"}',
+      );
 
       listing = "invalid";
       const invalid = await RAW_SELF.fetch("https://example.test/v1/connectors/mcp-connections", {

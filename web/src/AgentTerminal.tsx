@@ -1,7 +1,10 @@
 import {
   memo,
   useCallback,
+  useEffect,
   useMemo,
+  useRef,
+  useState,
 } from "react";
 import {
   createConfig,
@@ -19,7 +22,12 @@ import {
   type CredentialSource,
 } from "./modelSession";
 import { ArtifactDock } from "./ArtifactDock";
-import { browserMcpConfiguration } from "./browserMcp";
+import {
+  ACCOUNT_MCP_CATALOG_CHANGED,
+  browserMcpConfiguration,
+  loadBrowserAccountMcpConnections,
+  type BrowserAccountMcpConnection,
+} from "./browserMcp";
 import { clientFailureMessage } from "./clientFailure";
 import { managedTerminalAgent, openManagedAgent } from "./managedAgentRuntime";
 
@@ -27,17 +35,7 @@ export type { AgentTerminalMode, AgentTerminalState } from "nanocodex-terminal";
 export { AgentTerminalView } from "nanocodex-terminal";
 
 /** Authenticated website policy around the headless Agent SDK and shared transcript view. */
-export const AgentTerminal = memo(function AgentTerminal({
-  authStatus,
-  beforeLocalTurn,
-  mode,
-  onConversationActivity,
-  onStateChange,
-  source,
-  threadId,
-  voiceEnabled,
-  welcome,
-}: {
+type AgentTerminalProps = Readonly<{
   authStatus: ModelSessionStatus | undefined;
   beforeLocalTurn(): Promise<void>;
   mode: AgentTerminalMode;
@@ -47,13 +45,67 @@ export const AgentTerminal = memo(function AgentTerminal({
   threadId: string;
   voiceEnabled: boolean;
   welcome?: string;
+}>;
+
+export const AgentTerminal = memo(function AgentTerminal(props: AgentTerminalProps) {
+  const [accountMcpConnections, setAccountMcpConnections] =
+    useState<readonly BrowserAccountMcpConnection[]>();
+  const [catalogRevision, setCatalogRevision] = useState(0);
+  const hasConversationActivity = useRef(false);
+  const onConversationActivity = useCallback((input: string) => {
+    hasConversationActivity.current = true;
+    props.onConversationActivity(input);
+  }, [props.onConversationActivity]);
+  useEffect(() => {
+    const refreshUnusedAgent = () => {
+      if (!hasConversationActivity.current) setCatalogRevision((current) => current + 1);
+    };
+    window.addEventListener(ACCOUNT_MCP_CATALOG_CHANGED, refreshUnusedAgent);
+    return () => window.removeEventListener(ACCOUNT_MCP_CATALOG_CHANGED, refreshUnusedAgent);
+  }, []);
+  useEffect(() => {
+    const controller = new AbortController();
+    void loadBrowserAccountMcpConnections(controller.signal).then(
+      setAccountMcpConnections,
+      (error) => {
+        if (controller.signal.aborted) return;
+        console.warn("nanocodex:account_mcp_listing_failed", {
+          error: errorMessage(error),
+        });
+        setAccountMcpConnections((current) => current ?? []);
+      },
+    );
+    return () => controller.abort();
+  }, [catalogRevision]);
+  return accountMcpConnections === undefined
+    ? null
+    : <BrowserAgentTerminal
+      {...props}
+      accountMcpConnections={accountMcpConnections}
+      onConversationActivity={onConversationActivity}
+    />;
+});
+
+const BrowserAgentTerminal = memo(function BrowserAgentTerminal({
+  authStatus,
+  accountMcpConnections,
+  beforeLocalTurn,
+  mode,
+  onConversationActivity,
+  onStateChange,
+  source,
+  threadId,
+  voiceEnabled,
+  welcome,
+}: AgentTerminalProps & {
+  accountMcpConnections: readonly BrowserAccountMcpConnection[];
 }) {
   const agentConfig = useMemo(() => createConfig({
     agent: {
-      mcp: browserMcpConfiguration(location.origin, threadId),
+      mcp: browserMcpConfiguration(location.origin, threadId, accountMcpConnections),
       durability: false,
     },
-  }), [threadId]);
+  }), [accountMcpConnections, threadId]);
   const {
     data: agent,
     error,

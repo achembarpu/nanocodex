@@ -3,6 +3,8 @@ import {
   requireSameOriginMutation,
   type AccountAuthEnv,
 } from "./account-auth";
+import { browserEgressSubject } from "./browser-egress";
+import { bindAgentCredential } from "./credentials";
 import {
   localConnectorAuthorization,
   wrapLocalConnectorAuthorizationState,
@@ -38,6 +40,19 @@ const MCP_CONNECTION_STATUSES = new Set<McpConnectionStatus>([
 ]);
 const MAX_MCP_CONNECTIONS = 64;
 const MAX_MCP_CREATE_BODY_BYTES = 4_096;
+const MCP_PROXY_METHODS = new Set(["DELETE", "GET", "POST"]);
+const MCP_PROXY_REQUEST_HEADERS = [
+  "accept",
+  "content-type",
+  "last-event-id",
+  "mcp-protocol-version",
+  "mcp-session-id",
+] as const;
+const MCP_PROXY_RESPONSE_HEADERS = [
+  "content-type",
+  "mcp-session-id",
+  "retry-after",
+] as const;
 const CALLBACK_SUFFIX = "/callback";
 const CONNECTOR_ERROR_CODES = new Set([
   "authorization_code_missing",
@@ -92,12 +107,62 @@ export async function routeConnectorRequest(
   }
 
   const mcpMatch = url.pathname.match(
-    /^\/v1\/connectors\/mcp-connections\/([^/]+)(?:\/(start|callback))?$/,
+    /^\/v1\/connectors\/mcp-connections\/([^/]+)(?:\/(start|callback|proxy))?$/,
   );
   if (mcpMatch) {
     const connectionId = mcpConnectionId(mcpMatch[1]);
     if (!connectionId) return json({ error: "not_found" }, 404);
     const operation = mcpMatch[2];
+    if (operation === "proxy") {
+      if (!MCP_PROXY_METHODS.has(request.method)) {
+        return json({ error: "method_not_allowed" }, 405);
+      }
+      const threadId = url.searchParams.get("thread_id");
+      if ([...url.searchParams].length !== 1 || !threadId || !UUID.test(threadId)) {
+        return json({ error: "invalid_thread_id" }, 400);
+      }
+      const principal = await authenticatePersistentAccount(request, env, url);
+      if (!principal) return json({ error: "unauthorized" }, 401);
+      if (!sameOriginMcpRequest(request, url)) {
+        return json({ error: "forbidden_origin" }, 403);
+      }
+      const subject = await browserEgressSubject(principal.userId, threadId);
+      try {
+        await bindAgentCredential(env.NANOCODEX, subject, principal.userId);
+      } catch {
+        return json({ error: "credential_broker_unavailable" }, 503);
+      }
+      const headers = new Headers();
+      for (const name of MCP_PROXY_REQUEST_HEADERS) {
+        const value = request.headers.get(name);
+        if (value !== null) headers.set(name, value);
+      }
+      headers.set("x-nanocodex-subject", subject);
+      const response = await env.NANOCODEX.fetch(new Request(
+        `https://mcp.internal/v1/connections/${connectionId}`,
+        {
+          method: request.method,
+          headers,
+          ...(request.method === "GET" || request.method === "HEAD" || request.body === null
+            ? {}
+            : { body: request.body }),
+          redirect: "manual",
+          signal: request.signal,
+        },
+      ));
+      const responseHeaders = new Headers();
+      for (const name of MCP_PROXY_RESPONSE_HEADERS) {
+        const value = response.headers.get(name);
+        if (value !== null) responseHeaders.set(name, value);
+      }
+      responseHeaders.set("cache-control", "no-store");
+      responseHeaders.set("x-content-type-options", "nosniff");
+      return new Response(response.body, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: responseHeaders,
+      });
+    }
     if ((!operation && request.method !== "DELETE")
       || (operation === "start" && request.method !== "POST")
       || (operation === "callback" && request.method !== "GET")) {
@@ -427,6 +492,21 @@ function newMcpConnectionId(): string {
   let binary = "";
   for (const byte of bytes) binary += String.fromCharCode(byte);
   return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function sameOriginMcpRequest(request: Request, url: URL): boolean {
+  if (request.headers.get("x-nanocodex-request") === "1"
+    && request.headers.get("sec-fetch-site") === "same-origin") return true;
+  for (const name of ["origin", "referer"] as const) {
+    const value = request.headers.get(name);
+    if (!value) continue;
+    try {
+      if (new URL(value).origin === url.origin) return true;
+    } catch { return false; }
+  }
+  return false;
 }
 
 function publicMcpConnection(value: unknown): McpConnection | undefined {
