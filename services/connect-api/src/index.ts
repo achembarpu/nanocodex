@@ -43,6 +43,12 @@ import {
   managedGrantHeaders,
   type ManagedGrantAssertion,
 } from "./managedGrant.mjs";
+import {
+  CHROME_CLEANUP_APP_TOOL_POLICY,
+  CHROME_EXTENSION_APP_ID,
+  CHROME_EXTENSION_ORIGIN,
+  connectAppToolPolicy,
+} from "./appToolPolicy.mjs";
 
 type WorkerWebSocket = WebSocket & { accept(): void };
 declare const WebSocketPair: {
@@ -77,7 +83,6 @@ export class ConnectNonceStorage extends Kv.NonceStorage {
 }
 
 const PLAYGROUND_ORIGIN = "https://nanocodex-connect-playground.gakonst.workers.dev";
-const CHROME_EXTENSION_ORIGIN = "chrome-extension://jpkimkgbgbpcaldbnhlhbkbadmpeffle";
 const CLI_APP_ID = cliApp.id;
 const CLI_APP_ORIGIN = cliApp.origin;
 const DIALOG_ORIGIN = "https://nanocodex.gakonst.workers.dev";
@@ -132,7 +137,6 @@ const MODEL_PROTOCOL = "nanocodex-connect-v1";
 const MODEL_TICKET_PROTOCOL_PREFIX = "nanocodex-ticket.";
 const ACCOUNT_LINK_TTL = 5 * 60;
 const REGISTERED_APP_ID = "atlas-workspace";
-const CHROME_EXTENSION_APP_ID = "nanocodex-chrome";
 const MAX_BROKER_BODY_BYTES = 16 * 1024;
 const MAX_CONNECTOR_REQUEST_BODY_BYTES = 256 * 1024;
 const MAX_CONNECTOR_RESPONSE_BODY_BYTES = 1024 * 1024;
@@ -282,6 +286,7 @@ type GrantRecord = Readonly<{
   status: "active" | "revoked";
   expiresAt: number;
   capabilities: readonly string[];
+  appToolPolicy?: typeof CHROME_CLEANUP_APP_TOOL_POLICY;
   mcpConnections?: readonly Readonly<{ id: string; name: string }>[];
   accessKey?: Record<string, unknown>;
   balanceAtomics?: string;
@@ -335,7 +340,7 @@ type ToolHostTicket = Readonly<{
   appOrigin: string;
   agentId: string;
   grantId: `0x${string}`;
-  mcpFingerprint: `0x${string}`;
+  toolFingerprint: `0x${string}`;
 }>;
 
 export default {
@@ -1241,6 +1246,7 @@ async function createConnection(
     throw new ApiFailure(403, "approval_unavailable", "The signed Connect approval changed before it was consumed.");
   }
   const appScope = await scopedAppId(app);
+  const appToolPolicy = connectAppToolPolicy(app);
   const grantId = await digestHex(`grant:${randomSubject()}`);
   const grantCapabilities = [
     "nanocodex.agent",
@@ -1257,11 +1263,9 @@ async function createConnection(
     mcpIds: mcpConnections.map(({ id }) => id),
   };
   const [durableAgentId, egressSubject] = await Promise.all([
-    appId === CHROME_EXTENSION_APP_ID
-      ? agentId(accountAddress)
-      : isConnectAgentId(approval.durableAgentId)
-        ? Promise.resolve(approval.durableAgentId)
-        : connectManagedAgent(env, store, appScope, grantAssertion),
+    isConnectAgentId(approval.durableAgentId)
+      ? Promise.resolve(approval.durableAgentId)
+      : connectManagedAgent(env, store, appScope, grantAssertion),
     connectEgressSubject(env, store, identity.userId, appScope),
   ]);
   mark("capabilities");
@@ -1277,6 +1281,7 @@ async function createConnection(
     status: "active",
     expiresAt,
     capabilities: grantCapabilities,
+    ...(appToolPolicy === undefined ? {} : { appToolPolicy }),
     mcpConnections: mcpConnections.map(({ id, name }) => ({ id, name })),
     ...(accessKey ? { accessKey } : {}),
     spentAtomics: "0",
@@ -1801,6 +1806,7 @@ function managedGrantAssertion(grant: GrantRecord): ManagedGrantAssertion {
     connectors: CONNECTOR_IDS.filter((connector) => grant.capabilities.includes(connector)),
     grantId: grant.id,
     mcpIds: (grant.mcpConnections ?? []).map(({ id }) => id),
+    ...(grant.appToolPolicy === undefined ? {} : { appToolPolicy: grant.appToolPolicy }),
   };
 }
 
@@ -1887,7 +1893,7 @@ async function createManagedAgent(env: Env, assertion: ManagedGrantAssertion): P
     headers: managedGrantHeaders(assertion),
   }));
   const body = await response.json().catch(() => undefined) as unknown;
-  if (!response.ok || !isRecord(body) || typeof body.agent_id !== "string") {
+  if (!response.ok || !isRecord(body) || !isConnectAgentId(body.agent_id)) {
     throw new ApiFailure(503, "durable_agent_unavailable", "The durable Nanocodex agent could not be provisioned.");
   }
   return body.agent_id;
@@ -2619,7 +2625,7 @@ async function issueToolHostTicket(
     appOrigin: grant.appOrigin,
     agentId: grant.agentId,
     grantId: grant.id,
-    mcpFingerprint: await grantMcpFingerprint(grant),
+    toolFingerprint: await grantToolHostFingerprint(grant),
   } satisfies ToolHostTicket, { ttl: TOOL_HOST_TICKET_TTL })) {
     throw new ApiFailure(500, "tool_host_ticket_unavailable", "The tool host connection could not be reserved.");
   }
@@ -2658,10 +2664,10 @@ async function openGrantToolHostWebSocket(
   }
   remainingGrantTtl(grant);
   requireGrantAppOrigin(request, grant, ticket);
-  const fingerprint = await grantMcpFingerprint(grant);
+  const fingerprint = await grantToolHostFingerprint(grant);
   if (ticket.grantId.toLowerCase() !== grantId.toLowerCase()
     || ticket.agentId !== agentId
-    || ticket.mcpFingerprint.toLowerCase() !== fingerprint.toLowerCase()) {
+    || ticket.toolFingerprint.toLowerCase() !== fingerprint.toLowerCase()) {
     throw new ApiFailure(403, "invalid_tool_host_ticket", "The one-time tool host ticket does not match this grant.");
   }
 
@@ -2687,13 +2693,18 @@ async function openGrantToolHostWebSocket(
     && current.agentId === agentId
     && current.appId === grant.appId
     && current.appOrigin === grant.appOrigin
-    && (await grantMcpFingerprint(current)).toLowerCase() === fingerprint.toLowerCase()
-  ));
+    && (await grantToolHostFingerprint(current)).toLowerCase() === fingerprint.toLowerCase()
+  ), true);
   return new Response(null, { status: 101, webSocket: downstream } as ResponseInit);
 }
 
-async function grantMcpFingerprint(grant: Pick<GrantRecord, "mcpConnections">): Promise<`0x${string}`> {
-  return digestHex(`connect-mcp:${JSON.stringify(grant.mcpConnections ?? [])}`);
+async function grantToolHostFingerprint(
+  grant: Pick<GrantRecord, "appToolPolicy" | "mcpConnections">,
+): Promise<`0x${string}`> {
+  return digestHex(`connect-tools:${JSON.stringify({
+    appToolPolicy: grant.appToolPolicy ?? null,
+    mcpConnections: grant.mcpConnections ?? [],
+  })}`);
 }
 
 async function openGrantRealtimeWebSocket(
@@ -2852,6 +2863,7 @@ function superviseGrantSocket(
     current.egressSubject === grant.egressSubject
     && current.capabilities.includes("chatgpt")
   ),
+  preserveUpstreamPolicyClose = false,
 ): void {
   let closed = false;
   let authorizationTimer: ReturnType<typeof setTimeout> | undefined;
@@ -2869,7 +2881,13 @@ function superviseGrantSocket(
   downstream.addEventListener("message", forward(upstream));
   upstream.addEventListener("message", forward(downstream));
   downstream.addEventListener("close", () => close(1000, "Connect client closed"));
-  upstream.addEventListener("close", () => close(1000, "ChatGPT upstream closed"));
+  upstream.addEventListener("close", (event) => {
+    if (preserveUpstreamPolicyClose && event.code === 1008) {
+      close(1008, event.reason || "Managed tool host rejected attachment");
+      return;
+    }
+    close(1000, "ChatGPT upstream closed");
+  });
   downstream.addEventListener("error", () => close(1011, "Connect client socket failed"));
   upstream.addEventListener("error", () => close(1011, "ChatGPT upstream failed"));
 
@@ -2926,7 +2944,7 @@ function isRealtimeTicket(value: unknown): value is RealtimeTicket {
 function isToolHostTicket(value: unknown): value is ToolHostTicket {
   return isRecord(value)
     && /^0x[0-9a-fA-F]{64}$/.test(String(value.grantId))
-    && /^0x[0-9a-fA-F]{64}$/.test(String(value.mcpFingerprint))
+    && /^0x[0-9a-fA-F]{64}$/.test(String(value.toolFingerprint))
     && validAppId(value.appId)
     && isPublicAppOrigin(value.appOrigin)
     && isConnectAgentId(value.agentId);
@@ -3095,6 +3113,8 @@ function isGrantRecord(value: unknown): value is GrantRecord {
     && Number.isSafeInteger(value.expiresAt)
     && Array.isArray(value.capabilities)
     && value.capabilities.every((capability) => typeof capability === "string")
+    && (value.appToolPolicy === undefined
+      || value.appToolPolicy === CHROME_CLEANUP_APP_TOOL_POLICY)
     && (value.mcpConnections === undefined
       || (Array.isArray(value.mcpConnections)
         && value.mcpConnections.length <= 16

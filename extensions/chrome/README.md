@@ -1,26 +1,27 @@
 # Nanocodex Chrome extension
 
-Nanocodex for Chrome is a Manifest V3, application-owned consumer of the
-Nanocodex JavaScript/WASM bindings. The React side panel owns one persistent
-Rust/WASM agent session; the background service worker owns only Chrome tab
-leases, bounded page inspection, reversible previews, and saved site recipes.
-There is no native host or extension-to-process protocol.
+Nanocodex for Chrome is a Manifest V3 consumer of the account-owned hosted
+agent contract. The React side panel opens the durable agent authorized by
+Nanocodex Connect and reverse-attaches one explicitly selected Chrome tab as a
+host tool. The background service worker owns only Chrome tab leases, bounded
+page inspection, reversible previews, and saved site recipes. There is no
+parallel extension backend, native host, or extension-to-process protocol.
 
 ## MVP flow
 
 1. Open an HTTP(S) page and click the Nanocodex toolbar action. The action opens
    one React side panel and grants temporary `activeTab` access.
 2. Connect Nanocodex. The hosted Connect popup reuses the canonical Nanocodex
-   passkey account and asks only for ChatGPT model access and X access for
-   browser tools. The app-scoped grant is
-   retained in extension-local storage and validated when the panel is reopened.
-3. For each model socket, the Connect SDK exchanges that grant for a one-time,
-   session-bound ticket carried as a WebSocket subprotocol, never in the URL.
-   The socket reaches the private broker; no OpenAI or ChatGPT credential enters
-   extension storage or browser traffic.
-4. Submit a cleanup prompt. `nanocodex/host` loads the browser WASM module in
-   the panel and exposes one direct-only `cleanup` tool with `inspect`,
-   `preview`, and `revert_preview` actions.
+   passkey account and asks only for final replies and ChatGPT-backed agent
+   access. The app-scoped grant is retained in extension-local storage and
+   validated when the panel is reopened.
+3. The Connect SDK opens the account-owned durable agent and exchanges the
+   grant for a one-time ticket to its private tool-host socket. The extension's
+   `cleanup` catalog is attached to that exact agent and grant. No OpenAI or
+   ChatGPT credential enters extension storage or browser traffic.
+4. Submit a cleanup prompt. The hosted agent calls the attached `cleanup` tool
+   with `inspect`, `preview`, and `revert_preview` actions. Follow-on prompts
+   and browser restarts reuse the account-owned conversation.
 5. Inspection returns at most 500 visible semantic DOM candidates and 60,000
    characters. It omits form values, storage, cookies, other tabs, subframes,
    and URL queries/fragments.
@@ -38,7 +39,19 @@ There is no native host or extension-to-process protocol.
 
 The selected document is represented by an extension-owned opaque lease. Every
 tool call checks that lease; navigation or tab closure invalidates it and
-cancels the active turn. Follow-on prompts reuse the same WASM agent history.
+cancels the active turn. Page requests continue to use Chrome's existing
+logged-in session, but cookie values are never copied into the agent, Connect,
+or extension storage.
+
+Only one side panel in the Chrome profile can own the reverse-attached cleanup
+host at a time. The panel keeps that browser-owned lock for its agent session,
+so a second window cannot redirect an in-flight tool call to a different tab.
+Disconnect performs an ordered shutdown after an active turn settles. On panel
+unload, the page synchronously fences its tool dispatcher and initiates turn
+cancellation, lease release, attachment closure, and lock release before Chrome
+can destroy the document; Chrome also releases the Web Lock with the document.
+Grants created by the earlier local-agent preview are discarded on reconnect
+and require one fresh approval because they do not identify a durable agent.
 
 ## Build and check
 
@@ -69,7 +82,7 @@ complete.
   connectable pages, and remote code.
 - The Connect dialog owns passkey approval. The extension retains only its
   app-scoped grant session in origin-local storage; content scripts cannot read
-  extension-local storage, and one-time model tickets are never retained. No
+  extension-local storage, and one-time tool-host tickets are never retained. No
   OpenAI API key, ChatGPT OAuth token, cookie, or provider credential is stored
   by the extension.
 - Preview and persistence run in Chrome's isolated world. The model sees only

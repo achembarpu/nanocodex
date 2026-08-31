@@ -23,6 +23,7 @@ test("managed grant headers serialize only the exact delegated slice", () => {
     connectors: ["github"],
     grantId: `0x${"a".repeat(64)}`,
     mcpIds: ["mcp-1"],
+    appToolPolicy: "nanocodex-chrome-cleanup-v1",
   });
 
   assert.deepEqual(JSON.parse(headers["x-nanocodex-connect-capabilities"]), [
@@ -34,6 +35,10 @@ test("managed grant headers serialize only the exact delegated slice", () => {
   ]);
   assert.deepEqual(JSON.parse(headers["x-nanocodex-connect-connectors"]), ["github"]);
   assert.deepEqual(JSON.parse(headers["x-nanocodex-connect-mcp-ids"]), ["mcp-1"]);
+  assert.equal(
+    headers["x-nanocodex-connect-app-tool-policy"],
+    "nanocodex-chrome-cleanup-v1",
+  );
   assert.equal(headers["x-nanocodex-connect-user"], "account-1");
   assert.equal(headers["x-nanocodex-connect-grant-id"], `0x${"a".repeat(64)}`);
 });
@@ -82,6 +87,17 @@ test("managed proxy denies durability unless the exact export route has full sig
   assert.ok(proxy.indexOf("agent_portability_not_granted") < proxy.indexOf("env.ACCOUNTS.fetch"));
 });
 
+test("managed grant headers omit app tools unless the stored grant carries a policy", () => {
+  const headers = managedGrantHeaders({
+    brokerUserId: "account-1",
+    capabilities: ["nanocodex.agent"],
+    connectors: [],
+    grantId: `0x${"a".repeat(64)}`,
+    mcpIds: [],
+  });
+  assert.equal(headers["x-nanocodex-connect-app-tool-policy"], undefined);
+});
+
 test("every Connect managed request uses the complete grant assertion", () => {
   assert.doesNotMatch(source, /"x-nanocodex-connect-user"/);
   assert.match(source, /managedGrantHeaders\(managedGrantAssertion\(grant\)\)/);
@@ -97,6 +113,22 @@ test("every Connect managed request uses the complete grant assertion", () => {
   );
 });
 
+test("Chrome grants provision and validate a real managed UUID while retaining zero-spend policy", () => {
+  const creation = section("const [durableAgentId, egressSubject]", "mark(\"capabilities\")");
+  assert.doesNotMatch(creation, /CHROME_EXTENSION_APP_ID[\s\S]*?agentId\(accountAddress\)/);
+  assert.match(creation, /isConnectAgentId\(approval\.durableAgentId\)[\s\S]*?connectManagedAgent\(env, store, appScope, grantAssertion\)/);
+  const storedGrant = section("const grant: GrantRecord", "try {");
+  assert.match(source, /const appToolPolicy = connectAppToolPolicy\(app\)/);
+  assert.match(storedGrant, /appToolPolicy === undefined \? \{\} : \{ appToolPolicy \}/);
+
+  const provision = section("async function createManagedAgent(", "async function deleteManagedAgent(");
+  assert.match(provision, /!isConnectAgentId\(body\.agent_id\)/);
+  assert.match(source, /function isConnectAgentId\(value: unknown\)[\s\S]*?\^\[0-9a-f\]/);
+
+  const accessKey = section("function validateGrantAccessKey(", "function hasZeroSpendPolicy(");
+  assert.match(accessKey, /appId === CHROME_EXTENSION_APP_ID[\s\S]*?accessKey\.limits\.length !== 0[\s\S]*?accessKey\.scopes\.length !== 0/);
+});
+
 test("standard tools bind to the authenticated grant origin and no-history state loses its prompt", () => {
   const tools = section("async function handleAgentToolRoute(", "async function connectAccountInfo(");
   assert.match(tools, /authenticatedGrant\(request, env\.CONNECT_STATE\)[\s\S]*?requireGrantAppOrigin\(request, grant\)/);
@@ -106,22 +138,31 @@ test("standard tools bind to the authenticated grant origin and no-history state
   assert.match(projection, /if \("first_prompt" in projected\) projected\.first_prompt = ""/);
 });
 
-test("tool-host upgrade uses a one-time exact-origin ticket bound to the MCP slice", () => {
+test("tool-host upgrade uses a one-time exact-origin ticket bound to MCP and app tools", () => {
   const issue = section("async function issueToolHostTicket(", "async function openGrantToolHostWebSocket(");
   assert.match(issue, /tool-host-ticket:\$\{ticket\}/);
-  assert.match(issue, /mcpFingerprint: await grantMcpFingerprint\(grant\)/);
+  assert.match(issue, /toolFingerprint: await grantToolHostFingerprint\(grant\)/);
   assert.match(issue, /ttl: TOOL_HOST_TICKET_TTL/);
 
-  const open = section("async function openGrantToolHostWebSocket(", "async function grantMcpFingerprint(");
+  const open = section("async function openGrantToolHostWebSocket(", "async function grantToolHostFingerprint(");
   assert.match(open, /store\.take<ToolHostTicket>/);
   assert.match(open, /requireGrantAppOrigin\(request, grant, ticket\)/);
   assert.match(open, /grant\.id\.toLowerCase\(\) !== grantId\.toLowerCase\(\)/);
   assert.match(open, /ticket\.grantId\.toLowerCase\(\) !== grantId\.toLowerCase\(\)/);
   assert.match(open, /ticket\.agentId !== agentId/);
-  assert.match(open, /ticket\.mcpFingerprint\.toLowerCase\(\) !== fingerprint\.toLowerCase\(\)/);
+  assert.match(open, /ticket\.toolFingerprint\.toLowerCase\(\) !== fingerprint\.toLowerCase\(\)/);
   assert.match(open, /managedGrantHeaders\(managedGrantAssertion\(grant\)\)/);
+  assert.match(open, /superviseGrantSocket\([\s\S]*?\), true\);/);
   assert.doesNotMatch(open, /authenticatedGrant|authorization/);
-  assert.match(open, /current\.id\.toLowerCase\(\) === grantId\.toLowerCase\(\)[\s\S]*?current\.agentId === agentId[\s\S]*?current\.appId === grant\.appId[\s\S]*?grantMcpFingerprint\(current\)/);
+  assert.match(open, /current\.id\.toLowerCase\(\) === grantId\.toLowerCase\(\)[\s\S]*?current\.agentId === agentId[\s\S]*?current\.appId === grant\.appId[\s\S]*?grantToolHostFingerprint\(current\)/);
+
+  const fingerprint = section("async function grantToolHostFingerprint(", "async function openGrantRealtimeWebSocket(");
+  assert.match(fingerprint, /appToolPolicy: grant\.appToolPolicy \?\? null/);
+  assert.match(fingerprint, /mcpConnections: grant\.mcpConnections \?\? \[\]/);
+
+  const supervision = section("function superviseGrantSocket(", "function closeSocket(");
+  assert.match(supervision, /preserveUpstreamPolicyClose = false/);
+  assert.match(supervision, /preserveUpstreamPolicyClose && event\.code === 1008[\s\S]*?close\(1008, event\.reason/);
 });
 
 function section(start, end) {

@@ -269,7 +269,7 @@ test("Connect opens its grant-provisioned durable agent without a redundant stat
   );
 });
 
-test("ConnectAgent installs only signed hosted MCPs through the grant proxy and ticketed tool host", async () => {
+test("ConnectAgent publishes app tools with only signed hosted MCPs over the ticketed tool host", async () => {
   const firstMcpId = "abcdefghijklmnopqrstuvwxyz0123456789_-ABCDE";
   const secondMcpId = "ZYXWVUTSRQPONMLKJIHGFEDCBA9876543210_-abcde";
   const accountWideMcpId = "0123456789abcdefghijklmnopqrstuvwxyz_-ABCDE";
@@ -277,6 +277,8 @@ test("ConnectAgent installs only signed hosted MCPs through the grant proxy and 
   const expiry = Math.floor(Date.now() / 1_000) + 3_600;
   const requests = [];
   const sockets = [];
+  const initialAttachment = new AbortController();
+  let appToolDisposals = 0;
   const client = Client.create({
     appId: "grant-mcp-workspace",
     dialog: Dialog.memory(),
@@ -372,7 +374,6 @@ test("ConnectAgent installs only signed hosted MCPs through the grant proxy and 
     send(encoded) {
       const frame = JSON.parse(encoded);
       this.frames.push(frame);
-      if (frame.type === "catalog") queueMicrotask(() => this.receive({ type: "ready" }));
       if (frame.type === "drain") queueMicrotask(() => this.receive({ type: "draining" }));
     }
 
@@ -391,8 +392,35 @@ test("ConnectAgent installs only signed hosted MCPs through the grant proxy and 
 
   let agent;
   try {
-    agent = await client.agent.create({ connection });
+    let createSettled = false;
+    const creating = client.agent.create({
+      connection,
+      signal: initialAttachment.signal,
+      tools: {
+        app_echo: {
+          description: "Echo an app-owned value.",
+          parameters: {
+            type: "object",
+            properties: { value: { type: "string" } },
+            required: ["value"],
+            additionalProperties: false,
+          },
+          handler: ({ value }) => ({ value: `app:${value}` }),
+          dispose() { appToolDisposals += 1; },
+        },
+      },
+    });
+    void creating.then(
+      () => { createSettled = true; },
+      () => { createSettled = true; },
+    );
     await waitForConnect(() => sockets[0]?.frames.some(({ type }) => type === "catalog"));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(createSettled, false);
+    sockets[0].receive({ type: "ready" });
+    agent = await creating;
+    initialAttachment.abort(new Error("creation signal is detached after readiness"));
+    assert.equal(sockets[0].readyState, 1);
     const socketUrl = new URL(sockets[0].url);
     assert.equal(socketUrl.pathname, `/v1/grants/${connection.grant.id}/agents/${agentId}/tool-host`);
     assert.equal(socketUrl.searchParams.get("ticket"), "one-use-tool-ticket");
@@ -403,11 +431,46 @@ test("ConnectAgent installs only signed hosted MCPs through the grant proxy and 
 
     const catalog = sockets[0].frames.find(({ type }) => type === "catalog").tools;
     assert.deepEqual(catalog.map(({ provider, remote_name }) => [provider, remote_name]), [
+      ["javascript", "app_echo"],
       [`mcp:${firstMcpId}`, "search_issues"],
       [`mcp:${secondMcpId}`, "read_document"],
     ]);
     assert.equal(catalog.some(({ provider }) => provider === `mcp:${accountWideMcpId}`), false);
-    assert.equal(catalog.some(({ provider }) => provider === "javascript"), false);
+
+    sockets[0].receive({
+      type: "call",
+      session_id: "session:app-tool",
+      call_id: "call:app-echo",
+      model: "gpt-5.6-sol",
+      name: "app_echo",
+      input: { value: "hello" },
+      output_token_budget: 10_000,
+      output_byte_budget: 128 * 1024,
+      deadline_at: Date.now() + 30_000,
+    });
+    await waitForConnect(() => sockets[0].frames.some(({ type, call_id: callId }) => (
+      type === "result" && callId === "call:app-echo"
+    )));
+    assert.deepEqual(
+      sockets[0].frames.find(({ type, call_id: callId }) => (
+        type === "result" && callId === "call:app-echo"
+      )),
+      {
+        type: "result",
+        call_id: "call:app-echo",
+        outcome: {
+          status: "completed",
+          output: {
+            output: '{"value":"app:hello"}',
+            success: true,
+            structured_result: { value: "app:hello" },
+            metadata: null,
+            process_trace: null,
+          },
+        },
+      },
+    );
+    sockets[0].receive({ type: "ack", call_id: "call:app-echo" });
 
     const mcpRequests = requests.filter((request) => new URL(request.url).pathname.includes("/mcp/"));
     assert.deepEqual([...new Set(mcpRequests.map((request) => new URL(request.url).pathname))], [
@@ -426,7 +489,86 @@ test("ConnectAgent installs only signed hosted MCPs through the grant proxy and 
     globalThis.WebSocket = OriginalWebSocket;
   }
   assert.equal(sockets[0].closed.code, 1000);
+  assert.equal(appToolDisposals, 1);
 });
+
+test("ConnectAgent creation rejects a terminal tool attachment policy rejection", async () => {
+  const fixture = localToolAttachmentFixture("rejected-tool-host-workspace");
+  let appToolDisposals = 0;
+
+  try {
+    const creating = fixture.client.agent.create({
+      connection: fixture.connection,
+      tools: {
+        app_echo: {
+          description: "Echo.",
+          handler: ({ value }) => value,
+          dispose() { appToolDisposals += 1; },
+        },
+      },
+    });
+    const rejected = assert.rejects(
+      creating,
+      /tool attachment rejected: signed grant rejected catalog/,
+    );
+    await waitForConnect(() => fixture.sockets[0]?.frames.some(({ type }) => type === "catalog"));
+    fixture.sockets[0].close(1008, "signed grant rejected catalog");
+    await rejected;
+  } finally {
+    fixture.restore();
+  }
+  assert.equal(appToolDisposals, 1);
+});
+
+test("ConnectAgent creation aborts while waiting for initial tool attachment readiness", async () => {
+  const fixture = localToolAttachmentFixture("aborted-tool-host-workspace");
+  const controller = new AbortController();
+  const reason = new Error("caller stopped waiting for tool readiness");
+  let appToolDisposals = 0;
+  try {
+    const creating = fixture.client.agent.create({
+      connection: fixture.connection,
+      signal: controller.signal,
+      tools: {
+        app_echo: {
+          description: "Echo.",
+          handler: ({ value }) => value,
+          dispose() { appToolDisposals += 1; },
+        },
+      },
+    });
+    const rejected = assert.rejects(creating, (error) => error === reason);
+    await waitForConnect(() => fixture.sockets[0]?.frames.some(({ type }) => type === "catalog"));
+    controller.abort(reason);
+    await rejected;
+    assert.equal(fixture.sockets[0].closed.code, 1000);
+  } finally {
+    fixture.restore();
+  }
+  assert.equal(appToolDisposals, 1);
+});
+
+for (const status of [401, 403, 409]) {
+  test(`ConnectAgent creation rejects terminal tool-host ticket status ${status}`, async () => {
+    const fixture = localToolAttachmentFixture(`terminal-ticket-${status}`, {
+      status,
+      body: { error: { message: `terminal ticket ${status}` } },
+    });
+    try {
+      await assert.rejects(
+        fixture.client.agent.create({
+          connection: fixture.connection,
+          tools: { app_echo: { description: "Echo.", handler: ({ value }) => value } },
+        }),
+        new RegExp(`tool attachment rejected: terminal ticket ${status}`),
+      );
+      assert.equal(fixture.ticketRequests(), 1);
+      assert.equal(fixture.sockets.length, 0);
+    } finally {
+      fixture.restore();
+    }
+  });
+}
 
 test("ConnectAgent with an empty signed MCP list creates no MCP runtime or tool-host socket", async () => {
   const agentId = "019fc927-b280-79a7-8445-1b9996ad2fb0";
@@ -1496,6 +1638,80 @@ function memoryStorage() {
     getItem(key) { return values.get(key) ?? null; },
     setItem(key, value) { values.set(key, String(value)); },
     removeItem(key) { values.delete(key); },
+  };
+}
+
+function localToolAttachmentFixture(appId, ticketFailure) {
+  const agentId = "019fc927-b280-79a7-8445-1b9996ad2fb0";
+  const expiry = Math.floor(Date.now() / 1_000) + 3_600;
+  const sockets = [];
+  let ticketRequestCount = 0;
+  const client = Client.create({
+    appId,
+    dialog: Dialog.memory(),
+    provider: { request() { throw new Error("wallet should not be used"); } },
+    transport: Transport.from({
+      key: appId,
+      name: appId,
+      type: appId,
+      setup() {
+        return {
+          baseUrl: "https://connect.example",
+          async fetch(input, init) {
+            const request = new Request(input, init);
+            if (new URL(request.url).pathname.endsWith("/tool-host/ticket")) {
+              ticketRequestCount += 1;
+              if (ticketFailure) {
+                return Response.json(ticketFailure.body, { status: ticketFailure.status });
+              }
+              return Response.json({ ticket: "local-tool-ticket", expires_in: 30 });
+            }
+            return Response.json({ error: { message: "unexpected request" } }, { status: 404 });
+          },
+        };
+      },
+    }),
+  });
+  client._setSessionToken("grant-session-test");
+  const connection = connectionFromWire(testConnectionWire({
+    agentId,
+    expiry,
+    keyId: "0x1111111111111111111111111111111111111111",
+    capabilities: ["nanocodex.agent", "agent.output.final", "chatgpt"],
+    mcpConnections: [],
+  }));
+  const OriginalWebSocket = globalThis.WebSocket;
+  globalThis.WebSocket = class {
+    readyState = 1;
+    frames = [];
+    listeners = new Map();
+
+    constructor(url) {
+      this.url = String(url);
+      sockets.push(this);
+    }
+
+    addEventListener(type, listener) {
+      const listeners = this.listeners.get(type) ?? [];
+      listeners.push(listener);
+      this.listeners.set(type, listeners);
+    }
+
+    send(encoded) { this.frames.push(JSON.parse(encoded)); }
+
+    close(code, reason) {
+      if (this.readyState === 3) return;
+      this.readyState = 3;
+      this.closed = { code, reason };
+      for (const listener of this.listeners.get("close") ?? []) listener({ code, reason });
+    }
+  };
+  return {
+    client,
+    connection,
+    sockets,
+    ticketRequests: () => ticketRequestCount,
+    restore() { globalThis.WebSocket = OriginalWebSocket; },
   };
 }
 

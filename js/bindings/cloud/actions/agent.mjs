@@ -1,6 +1,5 @@
 import { Agent as ManagedAgent } from "../../managed/index.mjs";
 import { registerManagedAgentAlias } from "../../managed/internal.mjs";
-import { reportError } from "../../internal.mjs";
 import { createTools } from "../../tools/Tools.mjs";
 import { AttachmentRejectedError } from "../../tools/attachment.mjs";
 
@@ -20,10 +19,13 @@ export async function create(client, options) {
   if (!connection.grant.connectors?.includes("chatgpt")) {
     throw new Error("Connect ChatGPT before opening the durable Nanocodex agent.");
   }
-  const unsupported = Object.keys(options ?? {}).find((key) => key !== "connection");
+  const unsupported = Object.keys(options ?? {}).find((key) => (
+    key !== "connection" && key !== "signal" && key !== "tools"
+  ));
   if (unsupported) {
     throw new TypeError(`Connect durable agents do not accept app-local ${unsupported}`);
   }
+  options.signal?.throwIfAborted();
 
   const grantSession = client._captureSession?.();
   if (!grantSession) throw new Error("The Connect authorization session is unavailable.");
@@ -32,8 +34,13 @@ export async function create(client, options) {
     grantSession,
   };
   let tools;
-  if (connection.grant.mcpConnections.length > 0) {
-    tools = await createGrantMcpTools(transport, connection.grant.id, connection.grant.mcpConnections);
+  if (options.tools !== undefined || connection.grant.mcpConnections.length > 0) {
+    tools = await createAttachedTools(
+      transport,
+      connection.grant.id,
+      options.tools,
+      connection.grant.mcpConnections,
+    );
   }
   const managedOptions = {
     baseUrl: client.transport.baseUrl,
@@ -53,16 +60,22 @@ export async function create(client, options) {
   };
   try {
     const managed = ManagedAgent.open(connection.agentId, managedOptions);
-    return connectAgent(managed, connection, transport, tools);
+    return await connectAgent(managed, connection, transport, tools, options.signal);
   } catch (error) {
     await tools?.close();
     throw error;
   }
 }
 
-function connectAgent(managed, connection, transport, tools) {
+async function connectAgent(managed, connection, transport, tools, signal) {
   const visibility = connection.grant.visibility;
-  const toolState = tools === undefined ? undefined : startToolAttachment(managed, tools);
+  const toolState = tools === undefined ? undefined : startToolAttachment(managed, tools, signal);
+  try {
+    await toolState?.supervisor;
+    signal?.throwIfAborted();
+  } finally {
+    detachInitialToolAbort(toolState);
+  }
   const agent = {
     id: managed.id,
     sessionId: managed.id,
@@ -127,7 +140,7 @@ function connectAgent(managed, connection, transport, tools) {
   return Object.freeze(agent);
 }
 
-async function createGrantMcpTools({ baseUrl, grantSession }, grantId, connections) {
+async function createAttachedTools({ baseUrl, grantSession }, grantId, tools, connections) {
   const mcp = Object.fromEntries(connections.map(({ id, name }) => {
     if (!MCP_CONNECTION_ID.test(id)) {
       throw new TypeError("Connect grant contains an invalid MCP connection ID");
@@ -139,10 +152,13 @@ async function createGrantMcpTools({ baseUrl, grantSession }, grantId, connectio
     }];
   }));
   return createTools({
-    mcp,
-    mcpOptions: {
-      catalogProvider: (connectionId) => `mcp:${connectionId}`,
-    },
+    ...(tools === undefined ? {} : { tools }),
+    ...(connections.length === 0 ? {} : {
+      mcp,
+      mcpOptions: {
+        catalogProvider: (connectionId) => `mcp:${connectionId}`,
+      },
+    }),
   });
 }
 
@@ -169,7 +185,9 @@ function connectToolsTransport({ baseUrl, grantSession }, grantId, agentId) {
     }));
     const receipt = await response.json().catch(() => undefined);
     if (!response.ok || typeof receipt?.ticket !== "string" || !receipt.ticket) {
-      throw new Error(receipt?.error?.message ?? "managed tool-host authorization failed");
+      const message = receipt?.error?.message ?? "managed tool-host authorization failed";
+      if (terminalToolHostStatus(response.status)) throw new AttachmentRejectedError(message);
+      throw new Error(message);
     }
     const url = new URL(path, baseUrl);
     url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
@@ -182,22 +200,45 @@ function connectToolsTransport({ baseUrl, grantSession }, grantId, agentId) {
   };
 }
 
-function startToolAttachment(managed, tools) {
+function terminalToolHostStatus(status) {
+  return status >= 400 && status < 500 && status !== 408 && status !== 425 && status !== 429;
+}
+
+function startToolAttachment(managed, tools, signal) {
+  signal?.throwIfAborted();
   const state = {
     abort: new AbortController(),
     closing: undefined,
     connector: undefined,
+    initialSignal: signal,
+    onInitialAbort: undefined,
     tools,
   };
-  state.supervisor = superviseToolAttachment(state, managed.toolsTarget()).catch((error) => {
-    if (!state.abort.signal.aborted) reportError(error);
-  });
+  if (signal) {
+    state.onInitialAbort = () => {
+      state.abort.abort(signal.reason);
+      state.connector?.close();
+    };
+    signal.addEventListener("abort", state.onInitialAbort, { once: true });
+    if (signal.aborted) state.onInitialAbort();
+  }
+  state.supervisor = superviseToolAttachment(state, managed.toolsTarget());
   return state;
+}
+
+function detachInitialToolAbort(state) {
+  if (!state?.onInitialAbort) return;
+  state.initialSignal.removeEventListener("abort", state.onInitialAbort);
+  state.onInitialAbort = undefined;
+  state.initialSignal = undefined;
 }
 
 async function superviseToolAttachment(state, target) {
   for (let attempt = 0; ; attempt += 1) {
-    if (state.abort.signal.aborted) return;
+    if (state.abort.signal.aborted) {
+      throwInitialToolAbort(state);
+      return;
+    }
     const connector = state.tools.attach(target);
     state.connector = connector;
     try {
@@ -207,13 +248,20 @@ async function superviseToolAttachment(state, target) {
       connector.close();
       if (state.connector === connector) state.connector = undefined;
       if (error instanceof AttachmentRejectedError) throw error;
-      if (state.abort.signal.aborted) return;
+      if (state.abort.signal.aborted) {
+        throwInitialToolAbort(state);
+        return;
+      }
       await attachmentBackoff(
         ATTACHMENT_BACKOFF_MS[Math.min(attempt, ATTACHMENT_BACKOFF_MS.length - 1)],
         state.abort.signal,
       );
     }
   }
+}
+
+function throwInitialToolAbort(state) {
+  if (state.initialSignal?.aborted) throw state.initialSignal.reason;
 }
 
 function attachmentBackoff(milliseconds, signal) {

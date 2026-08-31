@@ -19,6 +19,7 @@ const SECOND_PUBLIC_KEY = "0x05060708";
 const LOCAL_PASSKEY_COOKIE = "nanocodex_local_passkey";
 const CONNECT_GRANT_ID = `0x${"a".repeat(64)}`;
 const CONNECT_MCP_ID = "m".repeat(43);
+const CHROME_APP_TOOL_POLICY = "nanocodex-chrome-cleanup-v1";
 
 describe("Connect grant assertions", () => {
   it("projects the trusted assertion to the exact live capability and tool slice", async () => {
@@ -28,6 +29,7 @@ describe("Connect grant assertions", () => {
         capabilities: ["agents:read", "agents:write", "tools:use", "memory:read"],
         connectors: ["github", "chatgpt"],
         mcpIds: [CONNECT_MCP_ID],
+        appToolPolicy: CHROME_APP_TOOL_POLICY,
       }),
     }), env);
 
@@ -39,6 +41,7 @@ describe("Connect grant assertions", () => {
         grantId: CONNECT_GRANT_ID,
         connectors: ["github", "chatgpt"],
         mcpIds: [CONNECT_MCP_ID],
+        appToolPolicy: CHROME_APP_TOOL_POLICY,
       },
     });
   });
@@ -57,6 +60,11 @@ describe("Connect grant assertions", () => {
       .resolves.toBeUndefined();
     await expect(request(connectHeaders({ mcpIds: ["short"] })))
       .resolves.toBeUndefined();
+    await expect(request(connectHeaders({ appToolPolicy: "unapproved-javascript" })))
+      .resolves.toBeUndefined();
+    const duplicateAppPolicy = connectHeaders({ appToolPolicy: CHROME_APP_TOOL_POLICY });
+    duplicateAppPolicy.append("x-nanocodex-connect-app-tool-policy", CHROME_APP_TOOL_POLICY);
+    await expect(request(duplicateAppPolicy)).resolves.toBeUndefined();
   });
 });
 
@@ -456,6 +464,7 @@ function accountEnv(fetch: (request: Request) => Promise<Response>): AccountAuth
 }
 
 function connectHeaders(overrides: Readonly<{
+  appToolPolicy?: string;
   capabilities?: readonly string[];
   connectors?: readonly string[];
   mcpIds?: readonly string[];
@@ -468,6 +477,9 @@ function connectHeaders(overrides: Readonly<{
     ),
     "x-nanocodex-connect-connectors": JSON.stringify(overrides.connectors ?? []),
     "x-nanocodex-connect-mcp-ids": JSON.stringify(overrides.mcpIds ?? []),
+    ...(overrides.appToolPolicy === undefined
+      ? {}
+      : { "x-nanocodex-connect-app-tool-policy": overrides.appToolPolicy }),
   });
 }
 

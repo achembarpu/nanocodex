@@ -63,7 +63,7 @@ export function inspectPage(): PageSnapshot {
     const rawText = element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement
       ? ""
       : (element.textContent ?? "").replace(/\s+/g, " ").trim();
-    const text = rawText.slice(0, 240);
+    const text = rawText.slice(0, Math.min(240, MAX_TOTAL_TEXT - totalText));
     totalText += text.length;
     const role = element.getAttribute("role") ?? undefined;
     candidates.push({

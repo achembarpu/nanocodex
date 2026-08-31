@@ -6,8 +6,17 @@ import {
   type HostedToolsBrokerContext,
   type HostedToolsBrokerPersistence,
 } from "../src/hosted-tools-broker";
+import {
+  appToolCatalogEntryAllowed,
+  CHROME_CLEANUP_APP_TOOL_POLICY,
+  hostedToolCatalogEntryAllowed,
+  type ConnectAppToolPolicy,
+} from "../src/app-tool-policy";
+import type { HostedToolCatalogEntry } from "../src/hosted-tools-protocol";
 
 const NOW = 1_000_000;
+const GRANT_A = `0x${"a".repeat(64)}`;
+const GRANT_B = `0x${"b".repeat(64)}`;
 const IDS = [
   "11111111-1111-4111-8111-111111111111",
   "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
@@ -123,34 +132,148 @@ describe("HostedToolsBroker socket-owned protocol", () => {
     expect(fixture.broker.provider().resolve("fixture__lookup")).toBeDefined();
   });
 
-  it("accepts only exact MCP provider IDs carried by a Connect tool-host grant", async () => {
+  it("accepts only the exact Chrome cleanup catalog and signed MCP providers", async () => {
     const mcpId = "m".repeat(43);
     const allowed = createFixture();
-    const allowedHost = allowed.socket([mcpId]);
+    const allowedHost = allowed.socket([mcpId], CHROME_CLEANUP_APP_TOOL_POLICY, GRANT_A);
     await allowed.broker.message(allowedHost.webSocket, JSON.stringify({
       type: "catalog",
-      tools: [{ ...entry(), provider: `mcp:${mcpId}` }],
+      tools: [cleanupEntry(), { ...entry(), provider: `mcp:${mcpId}` }],
     }));
+    expect(allowedHost.closed).toBeUndefined();
     expect(allowedHost.sent).toEqual([{ type: "ready" }]);
 
-    for (const provider of ["javascript", `mcp:${"x".repeat(43)}`]) {
+    for (const [candidate, policy] of [
+      [cleanupEntry(), undefined],
+      [cleanupEntry("other"), CHROME_CLEANUP_APP_TOOL_POLICY],
+      [cleanupEntry("cleanup", true), CHROME_CLEANUP_APP_TOOL_POLICY],
+      [{ ...entry(), provider: `mcp:${"x".repeat(43)}` }, CHROME_CLEANUP_APP_TOOL_POLICY],
+    ] as const) {
       const denied = createFixture();
-      const deniedHost = denied.socket([mcpId]);
+      const deniedHost = denied.socket([mcpId], policy, GRANT_A);
       await denied.broker.message(deniedHost.webSocket, JSON.stringify({
         type: "catalog",
-        tools: [{ ...entry(), provider }],
+        tools: [candidate],
       }));
       expect(deniedHost.closed).toMatchObject({
         code: 1008,
-        reason: expect.stringContaining("provider "),
+        reason: expect.stringContaining("catalog_contract_mismatch"),
       });
       expect(denied.broker.provider().definitions()).toEqual([]);
     }
   });
 
+  it("rejects cross-grant replacement and hides the retained host from another grant's turn", async () => {
+    const mcpId = "m".repeat(43);
+    let activeGrantId = GRANT_A;
+    const fixture = createFixture((candidate, hostGrantId) => {
+      if (hostGrantId !== activeGrantId) return false;
+      const match = /^mcp:([A-Za-z0-9_-]{43})$/.exec(candidate.provider);
+      return match === null
+        ? appToolCatalogEntryAllowed(CHROME_CLEANUP_APP_TOOL_POLICY, candidate)
+        : match[1] === mcpId;
+    });
+    const first = fixture.socket([mcpId], CHROME_CLEANUP_APP_TOOL_POLICY, GRANT_A);
+    await fixture.broker.message(first.webSocket, JSON.stringify({
+      type: "catalog",
+      tools: [cleanupEntry(), { ...entry(), provider: `mcp:${mcpId}` }],
+    }));
+    expect(first.sent).toEqual([{ type: "ready" }]);
+    expect(fixture.broker.provider().definitions()).toHaveLength(2);
+    const selected = fixture.broker.provider().resolve("cleanup")!;
+
+    const competing = fixture.socket([mcpId], CHROME_CLEANUP_APP_TOOL_POLICY, GRANT_B);
+    await fixture.broker.message(competing.webSocket, JSON.stringify({
+      type: "catalog",
+      tools: [cleanupEntry(), { ...entry(), provider: `mcp:${mcpId}` }],
+    }));
+    expect(competing.closed).toMatchObject({
+      code: 1008,
+      reason: expect.stringContaining("grant_conflict"),
+    });
+    expect(first.closed).toBeUndefined();
+
+    activeGrantId = GRANT_B;
+    expect(fixture.broker.provider().definitions()).toEqual([]);
+    await expect(selected.handler({}, { sessionId: "session:1", callId: "source:1" }))
+      .resolves.toMatchObject({
+        success: false,
+        structuredResult: { status: "unavailable" },
+      });
+    expect(first.sent.some((frame) => frame.type === "call")).toBe(false);
+    expect(competing.sent.some((frame) => frame.type === "call")).toBe(false);
+  });
+
+  it("rejects replacement across Connect and account host boundaries in both directions", async () => {
+    for (const connectFirst of [true, false]) {
+      const fixture = createFixture();
+      const first = connectFirst
+        ? fixture.socket([], CHROME_CLEANUP_APP_TOOL_POLICY, GRANT_A)
+        : fixture.socket();
+      await fixture.broker.message(first.webSocket, JSON.stringify({
+        type: "catalog",
+        tools: [connectFirst ? cleanupEntry() : entry()],
+      }));
+      expect(first.sent).toEqual([{ type: "ready" }]);
+
+      const competing = connectFirst
+        ? fixture.socket()
+        : fixture.socket([], CHROME_CLEANUP_APP_TOOL_POLICY, GRANT_A);
+      await fixture.broker.message(competing.webSocket, JSON.stringify({
+        type: "catalog",
+        tools: [connectFirst ? entry() : cleanupEntry()],
+      }));
+      expect(competing.closed).toMatchObject({
+        code: 1008,
+        reason: expect.stringContaining("grant_conflict"),
+      });
+      expect(first.closed).toBeUndefined();
+    }
+  });
+
+  it("does not project a Connect host to an account turn or an account host to a Connect turn", () => {
+    const mcpId = "m".repeat(43);
+    const connectGrant = {
+      grantId: GRANT_A,
+      mcpIds: [mcpId],
+      appToolPolicy: CHROME_CLEANUP_APP_TOOL_POLICY,
+    } as const;
+    expect(hostedToolCatalogEntryAllowed(undefined, GRANT_A, cleanupEntry())).toBe(false);
+    expect(hostedToolCatalogEntryAllowed(connectGrant, undefined, cleanupEntry())).toBe(false);
+    expect(hostedToolCatalogEntryAllowed(undefined, undefined, entry())).toBe(true);
+    expect(hostedToolCatalogEntryAllowed(connectGrant, GRANT_A, cleanupEntry())).toBe(true);
+    expect(hostedToolCatalogEntryAllowed(
+      connectGrant,
+      GRANT_A,
+      { ...entry(), provider: `mcp:${mcpId}` },
+    )).toBe(true);
+  });
+
+  it("blocks a previously selected cleanup tool when the active app policy changes", async () => {
+    let policy: ConnectAppToolPolicy | undefined = CHROME_CLEANUP_APP_TOOL_POLICY;
+    const fixture = createFixture((candidate) => appToolCatalogEntryAllowed(policy, candidate));
+    const host = fixture.socket();
+    await fixture.broker.message(host.webSocket, JSON.stringify({
+      type: "catalog",
+      tools: [cleanupEntry()],
+    }));
+    expect(host.closed).toBeUndefined();
+    const selected = fixture.broker.provider().resolve("cleanup")!;
+    expect(selected).toBeDefined();
+
+    policy = undefined;
+    expect(fixture.broker.provider().resolve("cleanup")).toBeUndefined();
+    await expect(selected.handler({}, { sessionId: "session:1", callId: "source:1" }))
+      .resolves.toMatchObject({
+        success: false,
+        structuredResult: { status: "unavailable" },
+      });
+    expect(host.sent.some((frame) => frame.type === "call")).toBe(false);
+  });
+
   it("projects a retained catalog and blocks a stale tool when the active grant changes", async () => {
     let allowed = true;
-    const fixture = createFixture((provider) => allowed && provider === "fixture");
+    const fixture = createFixture((candidate) => allowed && candidate.provider === "fixture");
     const host = fixture.socket();
     await catalog(fixture.broker, host);
     const selected = fixture.broker.provider().resolve("fixture__lookup")!;
@@ -226,7 +349,9 @@ describe("HostedToolsBroker socket-owned protocol", () => {
   });
 });
 
-function createFixture(providerAllowed?: (provider: string) => boolean) {
+function createFixture(
+  entryAllowed?: (entry: HostedToolCatalogEntry, connectGrantId?: string) => boolean,
+) {
   const persistence = new MemoryPersistence();
   const sockets: FakeSocket[] = [];
   const ids = [...IDS];
@@ -238,18 +363,24 @@ function createFixture(providerAllowed?: (provider: string) => boolean) {
   const broker = new HostedToolsBroker(context, {
     persistence,
     now: () => NOW,
-    ...(providerAllowed === undefined ? {} : { providerAllowed }),
+    ...(entryAllowed === undefined ? {} : { entryAllowed }),
     randomUUID: () => ids.shift() ?? crypto.randomUUID(),
   });
   return {
     broker,
     persistence,
-    socket(allowedMcpIds?: readonly string[]) {
+    socket(
+      allowedMcpIds?: readonly string[],
+      appToolPolicy?: typeof CHROME_CLEANUP_APP_TOOL_POLICY,
+      connectGrantId?: string,
+    ) {
       const socket = new FakeSocket();
       socket.serializeAttachment({
         kind: "hosted-tools",
         sessionId: "session:route",
         ...(allowedMcpIds === undefined ? {} : { allowedMcpIds }),
+        ...(appToolPolicy === undefined ? {} : { appToolPolicy }),
+        ...(connectGrantId === undefined ? {} : { connectGrantId }),
       });
       sockets.push(socket);
       return socket;
@@ -385,6 +516,64 @@ function entry() {
     parallel_safe: true,
     summary: "Fixture lookup",
     timeout_ms: 30_000,
+  };
+}
+
+function cleanupEntry(remoteName = "cleanup", strict = false): HostedToolCatalogEntry {
+  return {
+    provider: "javascript",
+    remote_name: remoteName,
+    definition: {
+      type: "function",
+      name: "cleanup",
+      description: "Inspect the selected page and preview or revert one declarative CSS cleanup recipe.",
+      strict,
+      parameters: {
+        oneOf: [
+          {
+            type: "object",
+            properties: { action: { const: "inspect" } },
+            required: ["action"],
+            additionalProperties: false,
+          },
+          {
+            type: "object",
+            properties: {
+              action: { const: "preview" },
+              document_revision: { type: "string" },
+              recipe: {
+                type: "object",
+                properties: {
+                  schema_version: { const: 1 },
+                  name: { type: "string", minLength: 1, maxLength: 80 },
+                  css: { type: "string", maxLength: 32768 },
+                  hide_selectors: {
+                    type: "array",
+                    maxItems: 64,
+                    items: { type: "string", minLength: 1, maxLength: 512 },
+                  },
+                },
+                required: ["name", "css", "hide_selectors"],
+                additionalProperties: false,
+              },
+            },
+            required: ["action", "document_revision", "recipe"],
+            additionalProperties: false,
+          },
+          {
+            type: "object",
+            properties: {
+              action: { const: "revert_preview" },
+              preview_id: { type: "string" },
+            },
+            required: ["action", "preview_id"],
+            additionalProperties: false,
+          },
+        ],
+      },
+    },
+    parallel_safe: false,
+    timeout_ms: 120_000,
   };
 }
 

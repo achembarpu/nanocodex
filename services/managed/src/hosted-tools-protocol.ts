@@ -336,7 +336,7 @@ function toolDefinition(value: unknown, index: number): HostedToolDefinition {
       );
     }
     const parameters = objectValue(definition.parameters, `tools[${index}].definition.parameters`);
-    if (parameters.type !== "object") {
+    if (!isObjectInputSchema(parameters)) {
       throw new HostedToolsProtocolError(
         "invalid_schema",
         `tools[${index}].definition.parameters must be an object JSON Schema`,
@@ -393,6 +393,19 @@ function toolDefinition(value: unknown, index: number): HostedToolDefinition {
     "invalid_catalog",
     `tools[${index}].definition.type must be function or custom`,
   );
+}
+
+function isObjectInputSchema(schema: Record<string, unknown>): boolean {
+  if (schema.type === "object") return true;
+  return Array.isArray(schema.oneOf)
+    && schema.oneOf.length > 0
+    && schema.oneOf.every((branch) => {
+      const candidate = branch as Record<string, unknown> | null;
+      return candidate !== null
+        && typeof candidate === "object"
+        && !Array.isArray(candidate)
+        && candidate.type === "object";
+    });
 }
 
 function callOutcome(value: unknown): HostedToolCallOutcome {
