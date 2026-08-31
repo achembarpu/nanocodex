@@ -1,6 +1,5 @@
 import { Agent as ManagedAgent } from "../../managed/index.mjs";
 import { registerManagedAgentAlias } from "../../managed/internal.mjs";
-import { reportError } from "../../internal.mjs";
 import { createTools } from "../../tools/Tools.mjs";
 import { AttachmentRejectedError } from "../../tools/attachment.mjs";
 
@@ -60,16 +59,17 @@ export async function create(client, options) {
   };
   try {
     const managed = ManagedAgent.open(connection.agentId, managedOptions);
-    return connectAgent(managed, connection, transport, tools);
+    return await connectAgent(managed, connection, transport, tools);
   } catch (error) {
     await tools?.close();
     throw error;
   }
 }
 
-function connectAgent(managed, connection, transport, tools) {
+async function connectAgent(managed, connection, transport, tools) {
   const visibility = connection.grant.visibility;
   const toolState = tools === undefined ? undefined : startToolAttachment(managed, tools);
+  await toolState?.supervisor;
   const agent = {
     id: managed.id,
     sessionId: managed.id,
@@ -199,9 +199,7 @@ function startToolAttachment(managed, tools) {
     connector: undefined,
     tools,
   };
-  state.supervisor = superviseToolAttachment(state, managed.toolsTarget()).catch((error) => {
-    if (!state.abort.signal.aborted) reportError(error);
-  });
+  state.supervisor = superviseToolAttachment(state, managed.toolsTarget());
   return state;
 }
 

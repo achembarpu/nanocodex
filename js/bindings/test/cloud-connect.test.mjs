@@ -373,7 +373,6 @@ test("ConnectAgent publishes app tools with only signed hosted MCPs over the tic
     send(encoded) {
       const frame = JSON.parse(encoded);
       this.frames.push(frame);
-      if (frame.type === "catalog") queueMicrotask(() => this.receive({ type: "ready" }));
       if (frame.type === "drain") queueMicrotask(() => this.receive({ type: "draining" }));
     }
 
@@ -392,7 +391,8 @@ test("ConnectAgent publishes app tools with only signed hosted MCPs over the tic
 
   let agent;
   try {
-    agent = await client.agent.create({
+    let createSettled = false;
+    const creating = client.agent.create({
       connection,
       tools: {
         app_echo: {
@@ -408,7 +408,15 @@ test("ConnectAgent publishes app tools with only signed hosted MCPs over the tic
         },
       },
     });
+    void creating.then(
+      () => { createSettled = true; },
+      () => { createSettled = true; },
+    );
     await waitForConnect(() => sockets[0]?.frames.some(({ type }) => type === "catalog"));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(createSettled, false);
+    sockets[0].receive({ type: "ready" });
+    agent = await creating;
     const socketUrl = new URL(sockets[0].url);
     assert.equal(socketUrl.pathname, `/v1/grants/${connection.grant.id}/agents/${agentId}/tool-host`);
     assert.equal(socketUrl.searchParams.get("ticket"), "one-use-tool-ticket");
@@ -477,6 +485,92 @@ test("ConnectAgent publishes app tools with only signed hosted MCPs over the tic
     globalThis.WebSocket = OriginalWebSocket;
   }
   assert.equal(sockets[0].closed.code, 1000);
+  assert.equal(appToolDisposals, 1);
+});
+
+test("ConnectAgent creation rejects a terminal tool attachment policy rejection", async () => {
+  const agentId = "019fc927-b280-79a7-8445-1b9996ad2fb0";
+  const expiry = Math.floor(Date.now() / 1_000) + 3_600;
+  const sockets = [];
+  let appToolDisposals = 0;
+  const client = Client.create({
+    appId: "rejected-tool-host-workspace",
+    dialog: Dialog.memory(),
+    provider: { request() { throw new Error("wallet should not be used"); } },
+    transport: Transport.from({
+      key: "rejected-tool-host",
+      name: "rejected-tool-host",
+      type: "rejected-tool-host",
+      setup() {
+        return {
+          baseUrl: "https://connect.example",
+          async fetch(input, init) {
+            const request = new Request(input, init);
+            if (new URL(request.url).pathname.endsWith("/tool-host/ticket")) {
+              return Response.json({ ticket: "rejected-tool-ticket", expires_in: 30 });
+            }
+            return Response.json({ error: { message: "unexpected request" } }, { status: 404 });
+          },
+        };
+      },
+    }),
+  });
+  client._setSessionToken("grant-session-test");
+  const connection = connectionFromWire(testConnectionWire({
+    agentId,
+    expiry,
+    keyId: "0x1111111111111111111111111111111111111111",
+    capabilities: ["nanocodex.agent", "agent.output.final", "chatgpt"],
+    mcpConnections: [],
+  }));
+  const OriginalWebSocket = globalThis.WebSocket;
+  globalThis.WebSocket = class {
+    readyState = 1;
+    frames = [];
+    listeners = new Map();
+
+    constructor(url) {
+      this.url = String(url);
+      sockets.push(this);
+    }
+
+    addEventListener(type, listener) {
+      const listeners = this.listeners.get(type) ?? [];
+      listeners.push(listener);
+      this.listeners.set(type, listeners);
+    }
+
+    send(encoded) { this.frames.push(JSON.parse(encoded)); }
+
+    close(code, reason) {
+      if (this.readyState === 3) return;
+      this.readyState = 3;
+      this.closed = { code, reason };
+      for (const listener of this.listeners.get("close") ?? []) listener({ code, reason });
+    }
+  };
+
+  try {
+    const creating = client.agent.create({
+      connection,
+      tools: {
+        app_echo: {
+          description: "Echo.",
+          handler: ({ value }) => value,
+          dispose() { appToolDisposals += 1; },
+        },
+      },
+    });
+    const rejected = assert.rejects(
+      creating,
+      /tool attachment rejected: signed grant rejected catalog/,
+    );
+    await waitForConnect(() => sockets[0]?.frames.some(({ type }) => type === "catalog"));
+    sockets[0].close(1008, "signed grant rejected catalog");
+    await rejected;
+  } finally {
+    globalThis.WebSocket = OriginalWebSocket;
+  }
   assert.equal(appToolDisposals, 1);
 });
 
