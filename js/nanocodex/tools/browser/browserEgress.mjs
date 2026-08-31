@@ -1,5 +1,3 @@
-import { captureBrowserAuthority, sameBrowserAuthority } from "./browserAuthority.mjs";
-
 const THREAD_ID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
 const PRIVATE_HEADER = /(?:^|[-_])(?:auth(?:orization)?|cookie|credential|password|proxy|secret|token|api[-_]?key)(?:$|[-_])/i;
 const FORBIDDEN_HEADERS = new Set([
@@ -11,19 +9,15 @@ let installed;
 /** Installs one thread-owned external fetch route for the current browser Worker isolate. */
 export function installBrowserEgressFetch(options) {
   const origin = new URL(options?.origin).origin;
-  const authority = captureBrowserAuthority(options);
   if (installed) {
     if (installed.origin !== origin || installed.threadId !== options.threadId) {
       throw new Error("browser egress is already bound to a different thread");
     }
-    if (!sameBrowserAuthority(installed.authority, authority)) {
-      throw new Error("browser egress is already bound to a different credential authority");
-    }
     return installed.fetch;
   }
-  const routedFetch = createBrowserRuntimeFetch({ ...options, headers: authority.headers });
+  const routedFetch = createBrowserRuntimeFetch(options);
   globalThis.fetch = routedFetch;
-  installed = Object.freeze({ authority, fetch: routedFetch, origin, threadId: options.threadId });
+  installed = Object.freeze({ fetch: routedFetch, origin, threadId: options.threadId });
   return routedFetch;
 }
 
@@ -31,10 +25,9 @@ export function installBrowserEgressFetch(options) {
 export function createBrowserRuntimeFetch(options) {
   const origin = new URL(options?.origin).origin;
   const nativeFetch = (options.fetch ?? globalThis.fetch).bind(globalThis);
-  const gatewayHeaders = new Headers(options.headers);
   const externalFetch = standardFetchFromEgress(createBrowserEgressFetch({
     fetch: nativeFetch,
-    headers: gatewayHeaders,
+    headers: options.headers,
     origin,
     threadId: options.threadId,
   }));
@@ -60,7 +53,6 @@ export function createBrowserEgressFetch(options) {
     throw new TypeError("browser egress requires a valid thread id");
   }
   const endpoint = new URL("/v1/egress", options.origin);
-  const gatewayHeaders = new Headers(options.headers);
   return async (target, request = {}) => {
     const url = new URL(target);
     if (!["http:", "https:"].includes(url.protocol) || url.username || url.password) {
@@ -76,11 +68,11 @@ export function createBrowserEgressFetch(options) {
       }
     }
     try {
-      const gatewayRequestHeaders = new Headers(gatewayHeaders);
-      gatewayRequestHeaders.set("content-type", "application/json");
+      const gatewayHeaders = new Headers(options.headers);
+      gatewayHeaders.set("content-type", "application/json");
       const response = await options.fetch(endpoint, {
         method: "POST",
-        headers: gatewayRequestHeaders,
+        headers: gatewayHeaders,
         body: JSON.stringify({
           thread_id: options.threadId,
           url: url.href,

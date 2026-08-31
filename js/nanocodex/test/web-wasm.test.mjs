@@ -6,7 +6,6 @@ import WebSocket, { WebSocketServer } from "ws";
 import { Agent, Transport } from "../host/index.mjs";
 import { artifact } from "../tools/artifact.mjs";
 import { bindBrowser } from "../tools/browser/index.mjs";
-import { createPreparedBrowser } from "../tools/browser/preparedBrowser.mjs";
 import * as datasets from "../tools/dataset.mjs";
 import * as standard from "../tools/standard.mjs";
 
@@ -669,7 +668,7 @@ test("web-target WASM executes the complete browser harness tool contract", asyn
     rememberedImages: [],
     web: [],
   };
-  const runtime = bindBrowser(createPreparedBrowser({
+  const runtime = bindBrowser({
     datasets,
     origin: "https://demo.test",
     standard,
@@ -718,7 +717,7 @@ test("web-target WASM executes the complete browser harness tool contract", asyn
       projectInstructions: "deterministic browser project",
       workspace,
     },
-  }), {
+  }, {
     dataset: {
       fetch: objectFetch(
         new Map([["https://data.example/browser-tools.jsonl", datasetBytes]]),
