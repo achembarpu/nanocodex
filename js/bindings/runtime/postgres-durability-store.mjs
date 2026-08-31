@@ -82,8 +82,9 @@ export function createPostgresDurabilityStore(pool) {
       const expectedRevision = options?.expectedRevision === undefined
         ? undefined
         : durabilityRevision(options.expectedRevision);
+      const expectedPayload = expectedImportPayload(options, expectedRevision);
       await ready();
-      return restoreState(pool, stateId, state, expectedRevision);
+      return restoreState(pool, stateId, state, expectedRevision, expectedPayload);
     },
   });
 }
@@ -336,20 +337,40 @@ async function replaceStateOnce(pool, stateId, request) {
   }
 }
 
-async function restoreState(pool, stateId, state, expectedRevision) {
+async function restoreState(pool, stateId, state, expectedRevision, expectedPayload) {
   return verifyCommit(
     stateId,
-    (attempt) => restoreStateOnce(pool, stateId, state, expectedRevision, attempt > 0),
+    (attempt) => restoreStateOnce(
+      pool,
+      stateId,
+      state,
+      expectedRevision,
+      expectedPayload,
+      attempt > 0,
+    ),
   );
 }
 
-async function restoreStateOnce(pool, stateId, state, expectedRevision, reconciling) {
+async function restoreStateOnce(
+  pool,
+  stateId,
+  state,
+  expectedRevision,
+  expectedPayload,
+  reconciling,
+) {
   const client = await pool.connect();
   let begun = false;
   let discard = false;
   try {
     await client.query("BEGIN");
     begun = true;
+    await client.query(
+      `SELECT pg_advisory_xact_lock(hashtextextended(
+         current_schema() || ':nanocodex-durability-v2:state:' || $1, 0
+       ))`,
+      [stateId],
+    );
     const retainedOwner = await client.query(
       `SELECT owner_id, fence::text FROM nanocodex_durable_owners
        WHERE state_id = $1 FOR UPDATE`,
@@ -367,7 +388,8 @@ async function restoreStateOnce(pool, stateId, state, expectedRevision, reconcil
     }
     if (expectedRevision === undefined
       ? owner !== undefined || retainedState.revision !== "0"
-      : retainedState.revision !== expectedRevision) {
+      : retainedState.revision !== expectedRevision
+        || expectedPayload.present && retainedState.payload !== expectedPayload.value) {
       throw new DurabilityImportConflictError(stateId, expectedRevision, retainedState.revision);
     }
     const claimed = await client.query(
@@ -467,6 +489,16 @@ function importedState(value) {
     throw new TypeError("imported durability payload must be a string");
   }
   return Object.freeze({ revision, payload });
+}
+
+function expectedImportPayload(options, expectedRevision) {
+  const present = options?.expectedPayload !== undefined;
+  if (!present) return { present: false, value: undefined };
+  if (expectedRevision === undefined) {
+    throw new TypeError("durability import expected payload requires an expected revision");
+  }
+  const expected = importedState({ revision: expectedRevision, payload: options.expectedPayload });
+  return { present: true, value: expected.payload };
 }
 
 async function loadStateForUpdate(client, stateId) {

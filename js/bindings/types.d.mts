@@ -65,6 +65,8 @@ export type DurabilityPortableStatePage = Readonly<{
   format: "nanocodex-durability-state-page-v1";
   stateId: string;
   from: DurabilityRevision;
+  /** SHA-256 over the UTF-8 JSON tuple `[from, fromPayload]`. */
+  fromDigest: string;
   to: DurabilityRevision;
   cursor: DurabilityExportCursor;
   nextCursor: DurabilityExportCursor | null;
@@ -75,6 +77,8 @@ export type DurabilityPortableStatePage = Readonly<{
 
 export type DurabilityExportPageRequest = Readonly<{
   from: DurabilityRevision;
+  /** Digest of the exact state at `from`; omit only when `from` is revision zero. */
+  fromDigest?: string | undefined;
   /** Omit on the first request to select the current source revision; repeat the returned `to`. */
   to?: DurabilityRevision | undefined;
   cursor?: DurabilityExportCursor | undefined;
@@ -122,7 +126,11 @@ export type DurabilityPortableStore = DurabilityStore & Readonly<{
   importState(
     stateId: string,
     state: DurabilityStoredState,
-    options?: Readonly<{ expectedRevision?: DurabilityRevision | undefined }> | undefined,
+    options?: Readonly<{
+      expectedRevision?: DurabilityRevision | undefined;
+      /** When supplied, compare the complete expected state atomically before importing. */
+      expectedPayload?: string | null | undefined;
+    }> | undefined,
   ): DurabilityStoredState | Promise<DurabilityStoredState>;
 }>;
 

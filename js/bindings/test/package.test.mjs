@@ -79,6 +79,7 @@ test("the packed package ships and resolves every public entry point", async () 
         createMemoryDurabilityStore,
         DurabilityImportConflictError,
         durabilityRevision,
+        durabilityStateDigest,
         exportDurabilityState,
         exportDurabilityStatePage,
         importDurabilityState,
@@ -111,6 +112,7 @@ test("the packed package ships and resolves every public entry point", async () 
         "createSqliteDurabilityStore",
         "DurabilityImportConflictError",
         "durabilityRevision",
+        "durabilityStateDigest",
         "exportDurabilityState",
         "exportDurabilityStatePage",
         "importDurabilityState",
@@ -134,6 +136,7 @@ test("the packed package ships and resolves every public entry point", async () 
         );
       }
       assert.equal(durabilityRevision(1n), "1");
+      assert.match(await durabilityStateDigest({ revision: "0", payload: null }), /^sha256:/);
       assert.equal(createMemoryDurabilityStore("package-state").stateId, "package-state");
       assert.equal(new DurabilityImportConflictError("package-state").name, "DurabilityImportConflictError");
       const packageSource = createMemoryDurabilityStore("portable-package-state");

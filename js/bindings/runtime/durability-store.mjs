@@ -24,11 +24,27 @@ export function durabilityRevision(value) {
   return durabilityUint64(value, "revision");
 }
 
+/** Returns SHA-256 over the UTF-8 JSON tuple `[revision, payload]`. */
+export async function durabilityStateDigest(state) {
+  const exact = copyState(state);
+  const encoded = new TextEncoder().encode(JSON.stringify([exact.revision, exact.payload]));
+  const digest = await globalThis.crypto?.subtle?.digest("SHA-256", encoded);
+  if (digest === undefined) {
+    throw new Error("durability range portability requires Web Crypto SHA-256 support");
+  }
+  return `sha256:${[...new Uint8Array(digest)]
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("")}`;
+}
+
 export class DurabilityImportConflictError extends Error {
   constructor(stateId, expectedRevision, actualRevision) {
+    const id = JSON.stringify(stateId);
     super(expectedRevision === undefined
-      ? `durability state ${JSON.stringify(stateId)} already exists at the import destination`
-      : `durability import expected destination revision ${expectedRevision} for state ${JSON.stringify(stateId)}, but found ${actualRevision}`);
+      ? `durability state ${id} already exists at the import destination`
+      : expectedRevision === actualRevision
+        ? `durability import expected the exact destination state at revision ${expectedRevision} for ${id}, but found a different payload lineage`
+        : `durability import expected destination revision ${expectedRevision} for state ${id}, but found ${actualRevision}`);
     this.name = "DurabilityImportConflictError";
     this.expectedRevision = expectedRevision;
     this.actualRevision = actualRevision;
@@ -42,6 +58,16 @@ export async function exportDurabilityStatePage(store, stateId, request) {
     throw new TypeError("durability export requires a state store");
   }
   const from = durabilityRevision(request?.from);
+  let fromDigest;
+  if (request?.fromDigest === undefined) {
+    if (from !== "0") {
+      throw new TypeError("nonzero durability export ranges require a from-state digest");
+    }
+    fromDigest = await durabilityStateDigest({ revision: "0", payload: null });
+  }
+  else {
+    fromDigest = durabilityStateDigestText(request.fromDigest);
+  }
   const requestedTo = request?.to === undefined ? undefined : durabilityRevision(request.to);
   const offset = decodeExportCursor(request?.cursor);
   const limit = exportPageSize(request?.limit);
@@ -68,6 +94,7 @@ export async function exportDurabilityStatePage(store, stateId, request) {
     format: PORTABLE_PAGE_FORMAT,
     stateId,
     from,
+    fromDigest,
     to,
     cursor: encodeExportCursor(offset),
     nextCursor,
@@ -91,7 +118,10 @@ export async function importDurabilityStatePages(store, pages) {
   for (const page of pages) {
     exactObject(
       page,
-      ["format", "stateId", "from", "to", "cursor", "nextCursor", "payloadLength", "payload"],
+      [
+        "format", "stateId", "from", "fromDigest", "to", "cursor", "nextCursor",
+        "payloadLength", "payload",
+      ],
       "durability export page",
     );
     if (page.format !== PORTABLE_PAGE_FORMAT || typeof page.payload !== "string") {
@@ -103,11 +133,13 @@ export async function importDurabilityStatePages(store, pages) {
     const identity = {
       stateId: requireId(page.stateId, "exported state"),
       from: durabilityRevision(page.from),
+      fromDigest: durabilityStateDigestText(page.fromDigest),
       to: durabilityRevision(page.to),
       payloadLength: page.payloadLength,
     };
     first ??= identity;
     if (identity.stateId !== first.stateId || identity.from !== first.from
+      || identity.fromDigest !== first.fromDigest
       || identity.to !== first.to || identity.payloadLength !== first.payloadLength) {
       throw new TypeError("durability export pages describe different revision ranges");
     }
@@ -137,7 +169,15 @@ export async function importDurabilityStatePages(store, pages) {
     throw new RangeError("durability import from revision must be less than to revision");
   }
   const state = copyState({ revision: first.to, payload: first.to === "0" ? null : payload });
-  const imported = await store.importState(first.stateId, state, { expectedRevision: first.from });
+  const current = copyState(await store.load(first.stateId));
+  const currentDigest = await durabilityStateDigest(current);
+  if (current.revision !== first.from || currentDigest !== first.fromDigest) {
+    throw new DurabilityImportConflictError(first.stateId, first.from, current.revision);
+  }
+  const imported = await store.importState(first.stateId, state, {
+    expectedRevision: first.from,
+    expectedPayload: current.payload,
+  });
   return copyState(imported);
 }
 
@@ -257,7 +297,11 @@ export function createMemoryDurabilityStore(stateId, initial) {
       const expectedRevision = options?.expectedRevision === undefined
         ? undefined
         : durabilityRevision(options.expectedRevision);
-      if (expectedRevision === undefined ? owner !== undefined || state.revision !== "0" : state.revision !== expectedRevision) {
+      const expectedPayload = expectedImportPayload(options, expectedRevision);
+      if (expectedRevision === undefined
+        ? owner !== undefined || state.revision !== "0"
+        : state.revision !== expectedRevision
+          || expectedPayload.present && state.payload !== expectedPayload.value) {
         throw new DurabilityImportConflictError(selected, expectedRevision, state.revision);
       }
       owner = Object.freeze({
@@ -372,6 +416,7 @@ export function createSqliteDurabilityStore(options) {
       const expectedRevision = importOptions?.expectedRevision === undefined
         ? undefined
         : durabilityRevision(importOptions.expectedRevision);
+      const expectedPayload = expectedImportPayload(importOptions, expectedRevision);
       return options.transaction((query) => mapMaybePromise(
         query(
           "SELECT owner_id, fence FROM nanocodex_durable_owners WHERE state_id = ?",
@@ -394,7 +439,8 @@ export function createSqliteDurabilityStore(options) {
                 : copyState({ revision: states[0].revision, payload: states[0].payload });
               if (expectedRevision === undefined
                 ? owners.length !== 0 || states.length !== 0
-                : current.revision !== expectedRevision) {
+                : current.revision !== expectedRevision
+                  || expectedPayload.present && current.payload !== expectedPayload.value) {
                 throw new DurabilityImportConflictError(stateId, expectedRevision, current.revision);
               }
               const previousFence = durabilityFence(owners[0]?.fence ?? "0");
@@ -455,6 +501,23 @@ function decodeExportCursor(value) {
 
 function isHighSurrogate(value) {
   return value >= 0xd800 && value <= 0xdbff;
+}
+
+function durabilityStateDigestText(value) {
+  if (typeof value !== "string" || !/^sha256:[0-9a-f]{64}$/.test(value)) {
+    throw new TypeError("durability export page from-state digest is invalid");
+  }
+  return value;
+}
+
+function expectedImportPayload(options, expectedRevision) {
+  const present = options?.expectedPayload !== undefined;
+  if (!present) return { present: false, value: undefined };
+  if (expectedRevision === undefined) {
+    throw new TypeError("durability import expected payload requires an expected revision");
+  }
+  const expected = copyState({ revision: expectedRevision, payload: options.expectedPayload });
+  return { present: true, value: expected.payload };
 }
 
 function loadSqliteState(query, stateId) {

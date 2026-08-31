@@ -9,7 +9,13 @@ import {
   exportDurabilityState,
   importDurabilityState,
 } from "nanocodex/durability";
-import { createPostgresDurabilityStore } from "nanocodex/durability/postgres";
+import {
+  createPostgresDurabilityStore,
+  type PostgresDurabilityClient,
+  type PostgresDurabilityPool,
+  type PostgresDurabilityQueryResult,
+  type PostgresDurabilityRow,
+} from "nanocodex/durability/postgres";
 
 const live = process.env.NANOCODEX_LIVE_POSTGRES === "1";
 const connectionString = process.env.DATABASE_URL;
@@ -79,4 +85,135 @@ describe.runIf(live)("live PostgreSQL durability", () => {
       payload: "stale-source-resurrection",
     })).resolves.toEqual({ status: "fenced" });
   });
+
+  it("serializes two empty-target imports before expected-state validation", async () => {
+    if (!connectionString) throw new Error("DATABASE_URL is required for live PostgreSQL tests");
+    const stateId = `live-import-race-${randomUUID()}`;
+    const firstApplication = `nanocodex-import-first-${randomUUID()}`;
+    const secondApplication = `nanocodex-import-second-${randomUUID()}`;
+    const firstPool = new Pool({
+      application_name: firstApplication,
+      connectionString,
+      max: 1,
+      options: `-c search_path=${schemaB}`,
+    });
+    const secondPool = new Pool({
+      application_name: secondApplication,
+      connectionString,
+      max: 1,
+      options: `-c search_path=${schemaB}`,
+    });
+    const firstLocked = deferred();
+    const releaseFirst = deferred();
+    let firstAttempt: Promise<unknown> | undefined;
+    let secondAttempt: Promise<unknown> | undefined;
+
+    try {
+      const first = createPostgresDurabilityStore(
+        pauseAfterStateLock(firstPool, stateId, firstLocked.resolve, releaseFirst.promise),
+      );
+      const second = createPostgresDurabilityStore(secondPool);
+      await Promise.all([first.load("initialize-first"), second.load("initialize-second")]);
+
+      firstAttempt = Promise.resolve(first.importState(stateId, {
+        revision: durabilityRevision("8"),
+        payload: "first-import",
+      }, {
+        expectedRevision: durabilityRevision("0"),
+        expectedPayload: null,
+      }));
+      await firstLocked.promise;
+      secondAttempt = Promise.resolve(second.importState(stateId, {
+        revision: durabilityRevision("9"),
+        payload: "second-import",
+      }, {
+        expectedRevision: durabilityRevision("0"),
+        expectedPayload: null,
+      }));
+      await waitForAdvisoryLock(secondApplication);
+      releaseFirst.resolve();
+
+      const attempts = await Promise.allSettled([firstAttempt, secondAttempt]);
+      expect(attempts[0]).toEqual({
+        status: "fulfilled",
+        value: { revision: durabilityRevision("8"), payload: "first-import" },
+      });
+      expect(attempts[1]).toMatchObject({ status: "rejected" });
+      if (attempts[1]?.status === "rejected") {
+        expect(attempts[1].reason).toBeInstanceOf(DurabilityImportConflictError);
+        expect(attempts[1].reason).toMatchObject({
+          expectedRevision: durabilityRevision("0"),
+          actualRevision: durabilityRevision("8"),
+        });
+      }
+      await expect(first.load(stateId)).resolves.toEqual({
+        revision: durabilityRevision("8"),
+        payload: "first-import",
+      });
+    } finally {
+      releaseFirst.resolve();
+      await Promise.allSettled([firstAttempt, secondAttempt].filter((attempt) => attempt !== undefined));
+      await Promise.allSettled([firstPool.end(), secondPool.end()]);
+    }
+  });
 });
+
+function pauseAfterStateLock(
+  pool: Pool,
+  stateId: string,
+  locked: () => void,
+  release: Promise<void>,
+): PostgresDurabilityPool {
+  return {
+    async connect(): Promise<PostgresDurabilityClient> {
+      const client = await pool.connect();
+      return {
+        async query<Row extends PostgresDurabilityRow = PostgresDurabilityRow>(
+          text: string,
+          values: unknown[] = [],
+        ): Promise<PostgresDurabilityQueryResult<Row>> {
+          const result = await client.query(text, values);
+          if (text.includes(":nanocodex-durability-v2:state:") && values[0] === stateId) {
+            locked();
+            await release;
+          }
+          return { rows: result.rows as unknown as readonly Row[] };
+        },
+        release(discard?: Error | boolean): void {
+          client.release(discard);
+        },
+      };
+    },
+    async query<Row extends PostgresDurabilityRow = PostgresDurabilityRow>(
+      text: string,
+      values: unknown[] = [],
+    ): Promise<PostgresDurabilityQueryResult<Row>> {
+      const result = await pool.query(text, values);
+      return { rows: result.rows as unknown as readonly Row[] };
+    },
+  };
+}
+
+async function waitForAdvisoryLock(applicationName: string): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    const result = await admin.query<{ waiting: boolean }>(
+      `SELECT EXISTS (
+         SELECT 1 FROM pg_stat_activity
+         WHERE application_name = $1
+           AND wait_event_type = 'Lock'
+           AND wait_event = 'advisory'
+       ) AS waiting`,
+      [applicationName],
+    );
+    if (result.rows[0]?.waiting) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`PostgreSQL client ${JSON.stringify(applicationName)} did not wait for the state lock`);
+}
+
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve!: () => void;
+  const promise = new Promise<void>((accept) => { resolve = accept; });
+  return { promise, resolve };
+}

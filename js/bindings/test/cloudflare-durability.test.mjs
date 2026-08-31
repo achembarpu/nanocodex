@@ -136,6 +136,22 @@ test("Cloudflare durability stores one state and chunks only oversized payloads"
     DurabilityImportConflictError,
   );
 
+  assert.deepEqual(store.importState("agent-range", {
+    revision: "4",
+    payload: "expected-lineage",
+  }), { revision: "4", payload: "expected-lineage" });
+  assert.throws(
+    () => store.importState("agent-range", { revision: "9", payload: "replacement" }, {
+      expectedRevision: "4",
+      expectedPayload: "divergent-lineage",
+    }),
+    DurabilityImportConflictError,
+  );
+  assert.deepEqual(store.load("agent-range"), {
+    revision: "4",
+    payload: "expected-lineage",
+  });
+
   const firstChunk = chunks.find((chunk) => chunk.stateId === "agent-large");
   firstChunk.revision = "2";
   assert.throws(() => store.load("agent-large"), /invalid Cloudflare durability chunks/);

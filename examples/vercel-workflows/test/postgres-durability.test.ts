@@ -7,6 +7,7 @@ import { WebSocketServer, type RawData, type WebSocket } from "ws";
 import {
   DurabilityImportConflictError,
   durabilityRevision,
+  durabilityStateDigest,
   exportDurabilityStatePage,
   importDurabilityStatePages,
   type DurabilityPortableStatePage,
@@ -324,10 +325,15 @@ describe("Vercel PostgreSQL durability store", () => {
 
       const cloudflarePages = await exportPages(source, stateId, durabilityRevision("0"));
       const cloudflareTo = cloudflarePages[0]!.to;
-      await expect(importDurabilityStatePages(postgres, jsonRoundTrip(cloudflarePages))).resolves.toEqual({
+      const importedPostgresState = await importDurabilityStatePages(
+        postgres,
+        jsonRoundTrip(cloudflarePages),
+      );
+      expect(importedPostgresState).toEqual({
         revision: cloudflareTo,
         payload: cloudflarePages.map((page) => page.payload).join(""),
       });
+      const cloudflareDigest = await durabilityStateDigest(importedPostgresState);
 
       agent = await Agent.create({
         module,
@@ -369,7 +375,7 @@ describe("Vercel PostgreSQL durability store", () => {
       await shutdownAgent(agent);
       agent = undefined;
 
-      const postgresPages = await exportPages(postgres, stateId, cloudflareTo);
+      const postgresPages = await exportPages(postgres, stateId, cloudflareTo, cloudflareDigest);
       const postgresTo = postgresPages[0]!.to;
       expect(BigInt(postgresTo)).toBeGreaterThan(BigInt(cloudflareTo));
       expect(postgresPages.map((page) => page.payload).join(""))
@@ -440,6 +446,7 @@ async function exportPages(
   store: Parameters<typeof exportDurabilityStatePage>[0],
   stateId: string,
   from: ReturnType<typeof durabilityRevision>,
+  fromDigest?: string,
 ): Promise<DurabilityPortableStatePage[]> {
   const pages: DurabilityPortableStatePage[] = [];
   let cursor: string | undefined;
@@ -447,6 +454,7 @@ async function exportPages(
   do {
     const page = await exportDurabilityStatePage(store, stateId, {
       from,
+      ...(fromDigest === undefined ? {} : { fromDigest }),
       to,
       cursor,
       limit: 97,

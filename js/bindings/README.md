@@ -898,8 +898,12 @@ const vercelAgent = await Agent.create({
 });
 ```
 
-`from` is exclusive and `to` is inclusive. Each cursor retry returns the same
-page; import atomically succeeds only if the destination is still at `from`.
+`from` is exclusive and `to` is inclusive. For a nonzero `from`, load the
+destination once, hash that exact state with `durabilityStateDigest`, and repeat
+the short `fromDigest` on every page request; revision zero's null-state digest
+is implied. Each page carries that SHA-256 lineage digest, so import atomically
+succeeds only if the destination still has the exact revision and payload
+selected at `from`.
 Because `to` is one complete Rust state, no intermediate revision log is
 needed. Export fences the old source owner, and PostgreSQL reconciles lost
 COMMIT responses internally by retrying the identical idempotent request, so
@@ -914,10 +918,12 @@ on each destination.
 
 The managed Cloudflare service exposes the same offline cutover at `POST
 /v1/agents/<agent-id>/durability`; the call permanently closes source admission.
-Create a destination with `POST /v1/agents` and `{ "durability": <archive> }`.
+Create a destination with `POST /v1/agents`, an `Idempotency-Key` header, and
+`{ "durability": <archive> }`. The stable key owns resumable receipt adoption.
 The Vercel example accepts that same body at `POST /api/sessions` and exports a
 stopped PostgreSQL state through `POST /api/durability/export` with
-`{ "state_id": <durability-id>, "from": <revision>, "to": <optional-revision>,
+`{ "state_id": <durability-id>, "from": <revision>,
+"fromDigest": <required-for-nonzero-from>, "to": <optional-revision>,
 "cursor": <optional-cursor> }`.
 
 Node embedders whose bundler relocates package assets may compile and pass the

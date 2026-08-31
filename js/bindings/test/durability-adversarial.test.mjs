@@ -5,6 +5,7 @@ import {
   DurabilityImportConflictError,
   createMemoryDurabilityStore,
   durabilityRevision,
+  durabilityStateDigest,
   exportDurabilityState,
   exportDurabilityStatePage,
   importDurabilityState,
@@ -159,17 +160,25 @@ test("portable export fences the source and exact import refuses overwrite", asy
   );
 });
 
-test("cursor export resumes an exact from-exclusive to-inclusive total-state replacement", async () => {
+test("cursor export resumes only from the exact from-state lineage", async () => {
   const payload = "first-page:🧪:middle:second-page:tail";
+  const fromPayload = "older-total-state";
+  const fromDigest = await durabilityStateDigest({ revision: "4", payload: fromPayload });
   const source = createMemoryDurabilityStore("range", { revision: "9", payload });
-  const first = await exportDurabilityStatePage(source, "range", { from: "4", limit: 12 });
+  const first = await exportDurabilityStatePage(source, "range", {
+    from: "4",
+    fromDigest,
+    limit: 12,
+  });
   assert.equal(first.from, "4");
+  assert.match(first.fromDigest, /^sha256:[0-9a-f]{64}$/);
   assert.equal(first.to, "9");
   assert.equal(first.cursor, "v1:0");
   assert.notEqual(first.nextCursor, null);
 
   const repeated = await exportDurabilityStatePage(source, "range", {
     from: "4",
+    fromDigest,
     to: first.to,
     cursor: first.cursor,
     limit: 12,
@@ -180,6 +189,7 @@ test("cursor export resumes an exact from-exclusive to-inclusive total-state rep
   while (pages.at(-1).nextCursor !== null) {
     pages.push(await exportDurabilityStatePage(source, "range", {
       from: "4",
+      fromDigest,
       to: first.to,
       cursor: pages.at(-1).nextCursor,
       limit: 12,
@@ -189,13 +199,41 @@ test("cursor export resumes an exact from-exclusive to-inclusive total-state rep
 
   const destination = createMemoryDurabilityStore("range", {
     revision: "4",
-    payload: "older-total-state",
+    payload: fromPayload,
   });
   assert.deepEqual(await importDurabilityStatePages(destination, pages), {
     revision: "9",
     payload,
   });
   assert.deepEqual(destination.snapshot(), { revision: "9", payload });
+
+  const sameRevisionDivergence = createMemoryDurabilityStore("range", {
+    revision: "4",
+    payload: "unrelated-lineage-at-the-same-revision",
+  });
+  await assert.rejects(
+    importDurabilityStatePages(sameRevisionDivergence, pages),
+    (error) => error instanceof DurabilityImportConflictError
+      && error.expectedRevision === "4"
+      && error.actualRevision === "4",
+  );
+  assert.deepEqual(sameRevisionDivergence.snapshot(), {
+    revision: "4",
+    payload: "unrelated-lineage-at-the-same-revision",
+  });
+
+  const directGuard = createMemoryDurabilityStore("range", {
+    revision: "4",
+    payload: fromPayload,
+  });
+  assert.throws(
+    () => directGuard.importState("range", { revision: "9", payload }, {
+      expectedRevision: "4",
+      expectedPayload: "unrelated-lineage-at-the-same-revision",
+    }),
+    /different payload lineage/,
+  );
+  assert.deepEqual(directGuard.snapshot(), { revision: "4", payload: fromPayload });
 
   const divergent = createMemoryDurabilityStore("range", {
     revision: "5",
@@ -210,6 +248,31 @@ test("cursor export resumes an exact from-exclusive to-inclusive total-state rep
   await assert.rejects(
     importDurabilityStatePages(createMemoryDurabilityStore("range"), pages.slice(1)),
     /missing, duplicated, or out of order/,
+  );
+  await assert.rejects(
+    exportDurabilityStatePage(source, "range", { from: "4", limit: 12 }),
+    /require a from-state digest/,
+  );
+  const mixedLineage = pages.map((page, index) => index === 1
+    ? { ...page, fromDigest: `sha256:${"0".repeat(64)}` }
+    : page);
+  await assert.rejects(
+    importDurabilityStatePages(createMemoryDurabilityStore("range", {
+      revision: "4",
+      payload: fromPayload,
+    }), mixedLineage),
+    /different revision ranges/,
+  );
+  const uniformlyTamperedLineage = pages.map((page) => ({
+    ...page,
+    fromDigest: `sha256:${"0".repeat(64)}`,
+  }));
+  await assert.rejects(
+    importDurabilityStatePages(createMemoryDurabilityStore("range", {
+      revision: "4",
+      payload: fromPayload,
+    }), uniformlyTamperedLineage),
+    /different payload lineage/,
   );
 });
 

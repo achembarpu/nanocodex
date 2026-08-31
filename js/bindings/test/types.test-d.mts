@@ -74,6 +74,7 @@ import {
   createMemoryDurabilityStore,
   DurabilityImportConflictError,
   durabilityRevision,
+  durabilityStateDigest,
   exportDurabilityState,
   exportDurabilityStatePage,
   importDurabilityState,
@@ -193,6 +194,7 @@ async function check() {
     "typed-memory",
     { from: durabilityRevision("0"), limit: 1024 },
   );
+  const stateDigest: string = await durabilityStateDigest(storedState);
   await importDurabilityStatePages(createMemoryDurabilityStore("typed-memory"), [portablePage]);
   const importConflict: Error = new DurabilityImportConflictError("typed-memory");
   const sqliteValue: DurabilitySqliteValue = revision;
@@ -202,6 +204,7 @@ async function check() {
   const sqliteOptions: SqliteDurabilityStoreOptions = { transaction: sqliteTransaction };
   void memoryStore;
   void importConflict;
+  void stateDigest;
   void sqliteOptions;
   const durabilityStore: DurabilityStore = {
     load: () => storedState,

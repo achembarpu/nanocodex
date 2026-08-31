@@ -134,6 +134,52 @@ test("PostgreSQL imports one exact portable revision and fences an empty destina
     store.importState("already-owned", { revision: "47", payload: "must-not-fence-live-owner" }),
     DurabilityImportConflictError,
   );
+
+  await store.importState("range", { revision: "4", payload: "expected-lineage" });
+  await assert.rejects(
+    store.importState("range", { revision: "9", payload: "replacement" }, {
+      expectedRevision: "4",
+      expectedPayload: "divergent-lineage",
+    }),
+    DurabilityImportConflictError,
+  );
+  assert.deepEqual(await store.load("range"), {
+    revision: "4",
+    payload: "expected-lineage",
+  });
+  assert.deepEqual(await store.importState("range", {
+    revision: "9",
+    payload: "replacement",
+  }, {
+    expectedRevision: "4",
+    expectedPayload: "expected-lineage",
+  }), {
+    revision: "9",
+    payload: "replacement",
+  });
+});
+
+test("PostgreSQL serializes an import before validating its expected state", async () => {
+  const pool = new MockPool();
+  const store = createPostgresDurabilityStore(pool);
+  await store.load("initialize");
+  const beforeImport = pool.clientQueries.length;
+
+  await store.importState("serialized-import", {
+    revision: "6",
+    payload: "replacement",
+  }, {
+    expectedRevision: "0",
+    expectedPayload: null,
+  });
+
+  const queries = pool.clientQueries.slice(beforeImport);
+  assert.equal(queries[0].sql, "BEGIN");
+  assert.match(queries[1].sql, /^SELECT pg_advisory_xact_lock\(hashtextextended\(/);
+  assert.match(queries[1].sql, /nanocodex-durability-v2:state/);
+  assert.deepEqual(queries[1].values, ["serialized-import"]);
+  assert.match(queries[2].sql, /^SELECT owner_id, fence::text/);
+  assert.match(queries[3].sql, /^SELECT revision::text, payload/);
 });
 
 test("PostgreSQL initialization rejects tables without the exact state primary keys", async () => {
@@ -167,6 +213,7 @@ class MockPool {
     this.states = new Map();
     this.failNextCommit = false;
     this.failNextUpsert = false;
+    this.clientQueries = [];
     this.releases = [];
     this.primaryKeys = schemaPrimaryKeys();
   }
@@ -188,6 +235,7 @@ class MockClient {
 
   async query(text, values = []) {
     const sql = text.replace(/\s+/g, " ").trim();
+    this.pool.clientQueries.push({ sql, values: [...values] });
     if (sql === "BEGIN" || sql === "ROLLBACK" || sql.startsWith("CREATE TABLE")) {
       return { rows: [] };
     }

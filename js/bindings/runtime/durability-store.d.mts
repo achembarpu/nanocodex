@@ -38,6 +38,11 @@ export declare function durabilityRevision(
   value: string | bigint | number,
 ): import("../types.mjs").DurabilityRevision;
 
+/** Returns SHA-256 over the UTF-8 JSON tuple `[revision, payload]`. */
+export declare function durabilityStateDigest(
+  state: import("../types.mjs").DurabilityStoredState,
+): Promise<string>;
+
 /**
  * Atomically fences the source owner and exports one coherent JSON-safe state.
  * Do not resume the source provider after beginning a cutover.
@@ -56,6 +61,7 @@ export declare function importDurabilityState(
 /**
  * Fences the source once and returns a deterministic page of its exact `to` revision.
  * `from` is exclusive, `to` is inclusive, and `cursor` resumes the same payload export.
+ * Nonzero ranges must supply `fromDigest` so every page carries the exact lineage proof.
  */
 export declare function exportDurabilityStatePage(
   store: import("../types.mjs").DurabilityStore,
@@ -63,7 +69,7 @@ export declare function exportDurabilityStatePage(
   request: import("../types.mjs").DurabilityExportPageRequest,
 ): Promise<import("../types.mjs").DurabilityPortableStatePage>;
 
-/** Imports a complete contiguous page set iff the destination is still at `from`. */
+/** Imports a complete contiguous page set iff the destination still has the exact state at `from`. */
 export declare function importDurabilityStatePages(
   store: import("../types.mjs").DurabilityPortableStore,
   pages: Iterable<import("../types.mjs").DurabilityPortableStatePage>,
