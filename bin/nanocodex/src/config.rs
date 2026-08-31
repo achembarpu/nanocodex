@@ -964,7 +964,7 @@ mod tests {
     }
 
     #[test]
-    fn standard_mcp_servers_are_enabled_and_codex_config_is_opt_in() {
+    fn standard_mcp_servers_and_codex_config_are_enabled_by_default() {
         let command = crate::Cli::command();
         let mcp_defaults = command
             .get_arguments()
@@ -977,7 +977,7 @@ mod tests {
             .get_arguments()
             .find(|argument| argument.get_id() == "mcp_codex_config")
             .expect("the CLI should expose the Codex MCP config argument");
-        assert_eq!(codex_config.get_default_values(), ["false"]);
+        assert_eq!(codex_config.get_default_values(), ["true"]);
     }
 
     #[test]

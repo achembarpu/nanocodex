@@ -74,11 +74,11 @@ pub(crate) struct McpArgs {
     )]
     mcp_defaults: bool,
 
-    /// Also load enabled MCP servers from `$CODEX_HOME/config.toml`.
+    /// Load enabled MCP servers from `$CODEX_HOME/config.toml`.
     #[arg(
         long,
         env = "NANOCODEX_MCP_CODEX_CONFIG",
-        default_value_t = false,
+        default_value_t = true,
         action = ArgAction::Set
     )]
     mcp_codex_config: bool,
@@ -937,7 +937,7 @@ mod tests {
         McpArgs {
             disabled: false,
             mcp_defaults: true,
-            mcp_codex_config: false,
+            mcp_codex_config: true,
             http: Vec::new(),
             stdio: Vec::new(),
             arguments: Vec::new(),
