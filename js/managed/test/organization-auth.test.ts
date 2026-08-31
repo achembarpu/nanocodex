@@ -338,12 +338,6 @@ function connectRequest(
     headers: {
       "x-nanocodex-connect-user": userId,
       "x-nanocodex-connect-grant-id": `0x${"a".repeat(64)}`,
-      "x-nanocodex-connect-app-id": "atlas-workspace",
-      "x-nanocodex-connect-app-origin": "https://app.example",
-      "x-nanocodex-connect-account": `0x${"1".repeat(40)}`,
-      "x-nanocodex-connect-agent-id": "11111111-1111-4111-8111-111111111111",
-      "x-nanocodex-connect-expires-at": String(Math.floor(Date.now() / 1_000) + 60),
-      "x-nanocodex-connect-resources": JSON.stringify(["urn:nanocodex:agent:run"]),
       "x-nanocodex-connect-capabilities": JSON.stringify(capabilities),
       "x-nanocodex-connect-connectors": "[]",
       "x-nanocodex-connect-mcp-ids": "[]",
