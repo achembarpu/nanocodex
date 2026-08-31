@@ -18,12 +18,15 @@ structural `Agent` from `nanocodex-react/agent` but never creates one or chooses
 its runtime, transport, credentials, or persistence policy. It forwards
 `maxEntries` to the canonical controller and supports `showToolCalls` without
 changing retained state. Set `voice` to render and own the standard microphone
-control; normalized managed and Connect sources retain their canonical voice
-handle, while a normal browser Agent works directly. `voiceOptions` is available
-for application policy such as a pre-turn authorization fence.
+control when a canonical SDK resource is supplied through the `voiceSource`
+prop or the attached structural Agent has been normalized with its own
+`voiceSource`. Structural controller adapters without either source remain
+text-only. `voiceOptions` is available for application policy such as a pre-turn
+authorization fence. Package-owned performance marks and diagnostic logs are
+disabled by default; set `telemetry` to opt in.
 
 ```tsx
-<AgentTerminalView agent={agent} voice {...terminalProps} />
+<AgentTerminalView agent={agent} voice voiceSource={agent} {...terminalProps} />
 ```
 
 `TerminalTranscriptSurface` and `TerminalComposer` are lower-level controlled

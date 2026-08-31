@@ -7,7 +7,7 @@ import { X } from "lucide-react";
 import { TerminalComposer } from "./TerminalComposer.js";
 import { TerminalTranscriptSurface } from "./TerminalTranscriptSurface.js";
 /** Shared website terminal presentation. Runtime and authorization policy stay with its consumer. */
-export function AgentTerminalView({ accessory, agent, agentError, controls, inactiveMessage, maxEntries, mode, onConversationActivity, onTerminalEvent, onStateChange, promptIntent, retryAgent, showToolCalls = true, voice = false, voiceOptions, welcome, }) {
+export function AgentTerminalView({ accessory, agent, agentError, controls, inactiveMessage, maxEntries, mode, onConversationActivity, onTerminalEvent, onStateChange, promptIntent, retryAgent, showToolCalls = true, telemetry = false, voice = false, voiceSource, voiceOptions, welcome, }) {
     const [touchDraft, setTouchDraft] = useState("");
     const [pendingTouchSubmission, setPendingTouchSubmission] = useState();
     const [followTailRequest, setFollowTailRequest] = useState(0);
@@ -32,8 +32,10 @@ export function AgentTerminalView({ accessory, agent, agentError, controls, inac
                     promptId: firstOutput.id,
                     sessionId: firstOutput.sessionId,
                 };
-                markAgentTiming("prompt.submit_to_first_token", Math.max(0, firstOutput.timestamp - firstOutput.submittedAt), timingContext);
-                markAgentTiming("prompt.run_started_to_first_token", Math.max(0, firstOutput.timestamp - firstOutput.runStartedAt), timingContext);
+                if (telemetry) {
+                    markAgentTiming("prompt.submit_to_first_token", Math.max(0, firstOutput.timestamp - firstOutput.submittedAt), timingContext);
+                    markAgentTiming("prompt.run_started_to_first_token", Math.max(0, firstOutput.timestamp - firstOutput.runStartedAt), timingContext);
+                }
             },
         });
         onTerminalEvent?.(observedEvent);
@@ -43,7 +45,8 @@ export function AgentTerminalView({ accessory, agent, agentError, controls, inac
             pendingRootPrompts.current.length = 0;
             currentRootPrompt.current = undefined;
             setReadySessionId(observedEvent.sessionId);
-            markAgentTiming("terminal.ready");
+            if (telemetry)
+                markAgentTiming("terminal.ready");
         }
         else if (observedEvent.type === "controller.detached"
             && typeof observedEvent.sessionId === "string") {
@@ -52,15 +55,20 @@ export function AgentTerminalView({ accessory, agent, agentError, controls, inac
         else if (observedEvent.type === "prompt.accepted"
             && typeof observedEvent.input === "string") {
             onConversationActivity(observedEvent.input);
-            markAgentTiming("prompt.accepted");
+            if (telemetry)
+                markAgentTiming("prompt.accepted");
         }
-    }, [agent?.sessionId, onConversationActivity, onTerminalEvent]);
+    }, [agent?.sessionId, onConversationActivity, onTerminalEvent, telemetry]);
     const controller = useAgentController(agent, {
         maxEntries,
         visible: mode !== "hidden",
         onEvent: handleControllerEvent,
     });
-    const voiceState = useVoice(agent?.voiceSource ?? agent, { ...voiceOptions, enabled: voice && mode !== "hidden" });
+    const resolvedVoiceSource = voiceSource ?? agent?.voiceSource;
+    const voiceState = useVoice(resolvedVoiceSource, {
+        ...voiceOptions,
+        enabled: voice && resolvedVoiceSource !== undefined && mode !== "hidden",
+    });
     const maxVoiceEntries = Number.isSafeInteger(maxEntries) && (maxEntries ?? 0) > 0
         ? maxEntries
         : 200;
@@ -133,7 +141,9 @@ export function AgentTerminalView({ accessory, agent, agentError, controls, inac
         retainSubmittedPrompt(submittedPrompts.current, input, submittedAt);
         void controller.submit(input, { intent: "queue" });
     }, [agentStatus, controller]);
-    const terminal = (_jsx(TerminalTranscriptSurface, { composer: (_jsx(TerminalComposer, { controls: (voice || controls) ? _jsxs(_Fragment, { children: [voice ? _jsx(VoiceControl, { agentReady: agentStatus === "ready", voice: voiceState }) : null, controls?.({ agentReady: agentStatus === "ready" })] }) : undefined, draft: touchDraft, pending: pendingTouchSubmission !== undefined, running: terminalRunning, status: agentStatus, onCancel: cancelTouchTurn, onChange: (value) => {
+    const terminal = (_jsx(TerminalTranscriptSurface, { composer: (_jsx(TerminalComposer, { controls: ((voice && resolvedVoiceSource) || controls) ? _jsxs(_Fragment, { children: [voice && resolvedVoiceSource
+                        ? _jsx(VoiceControl, { agentReady: agentStatus === "ready", voice: voiceState })
+                        : null, controls?.({ agentReady: agentStatus === "ready" })] }) : undefined, draft: touchDraft, pending: pendingTouchSubmission !== undefined, running: terminalRunning, status: agentStatus, onCancel: cancelTouchTurn, onChange: (value) => {
                 setPendingTouchSubmission(undefined);
                 setTouchDraft(value);
             }, onSubmit: submitTouchPrompt })), canLoadOlder: controller.canLoadOlder, entries: controller.entries, followTailRequest: followTailRequest, inactiveMessage: unavailableMessage ?? "", isLoadingOlder: controller.isLoadingOlder, mode: mode, showToolCalls: showToolCalls, status: agentStatus, voiceEntries: voiceEntries, welcome: welcome, onLoadOlder: controller.loadOlder }));

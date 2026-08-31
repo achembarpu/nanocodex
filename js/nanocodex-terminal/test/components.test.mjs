@@ -91,9 +91,118 @@ test("controller-backed terminal remains caller-owned when no Agent is attached"
     retryAgent() {},
     voice: true,
   })));
-  assert.equal(renderer.root.findByProps({ "aria-label": "Start voice" }).props.disabled, true);
+  assert.equal(renderer.root.findAllByProps({ "aria-label": "Start voice" }).length, 0);
   await act(async () => renderer.unmount());
 });
+
+test("voice controls require an explicit or normalized voice source", async () => {
+  const structuralAgent = mockAgent("structural");
+  const canonicalAgent = Object.freeze({
+    ...mockAgent("canonical"),
+  });
+  let renderer;
+  await act(async () => {
+    renderer = TestRenderer.create(React.createElement(AgentTerminalView, {
+      agent: structuralAgent,
+      agentError: undefined,
+      mode: "preview",
+      onConversationActivity() {},
+      onStateChange() {},
+      retryAgent() {},
+      voice: true,
+    }));
+  });
+  assert.equal(renderer.root.findAllByProps({ "aria-label": "Start voice" }).length, 0);
+
+  await act(async () => renderer.update(React.createElement(AgentTerminalView, {
+    agent: canonicalAgent,
+    agentError: undefined,
+    mode: "preview",
+    onConversationActivity() {},
+    onStateChange() {},
+    retryAgent() {},
+    voice: true,
+    voiceSource: canonicalAgent,
+  })));
+  assert.equal(renderer.root.findByProps({ "aria-label": "Start voice" }).props.disabled, false);
+
+  await act(async () => renderer.update(React.createElement(AgentTerminalView, {
+    agent: Object.freeze({
+      ...mockAgent("normalized"),
+      voiceSource: canonicalAgent,
+    }),
+    agentError: undefined,
+    mode: "preview",
+    onConversationActivity() {},
+    onStateChange() {},
+    retryAgent() {},
+    voice: true,
+  })));
+  assert.equal(renderer.root.findByProps({ "aria-label": "Start voice" }).props.disabled, false);
+  await act(async () => renderer.unmount());
+});
+
+test("terminal telemetry is opt-in", async () => {
+  performance.clearMarks("nanocodex:terminal.ready");
+  const quietAgent = mockAgent("quiet");
+  let renderer;
+  await act(async () => {
+    renderer = TestRenderer.create(React.createElement(AgentTerminalView, {
+      agent: quietAgent,
+      agentError: undefined,
+      mode: "preview",
+      onConversationActivity() {},
+      onStateChange() {},
+      retryAgent() {},
+    }));
+  });
+  assert.equal(performance.getEntriesByName("nanocodex:terminal.ready").length, 0);
+  await act(async () => renderer.unmount());
+
+  const originalInfo = console.info;
+  const logged = [];
+  console.info = (...args) => logged.push(args);
+  try {
+    await act(async () => {
+      renderer = TestRenderer.create(React.createElement(AgentTerminalView, {
+        agent: mockAgent("observed"),
+        agentError: undefined,
+        mode: "preview",
+        onConversationActivity() {},
+        onStateChange() {},
+        retryAgent() {},
+        telemetry: true,
+      }));
+    });
+    assert.equal(performance.getEntriesByName("nanocodex:terminal.ready").length, 1);
+    assert.equal(logged.some(([name]) => name === "nanocodex:terminal.ready"), true);
+  } finally {
+    console.info = originalInfo;
+    performance.clearMarks("nanocodex:terminal.ready");
+    await act(async () => renderer.unmount());
+  }
+});
+
+function mockAgent(sessionId) {
+  const listeners = new Set();
+  return Object.freeze({
+    sessionId,
+    events: Object.freeze({
+      watch() {
+        return {
+          onEvent(listener) {
+            listeners.add(listener);
+            return () => listeners.delete(listener);
+          },
+          off() { listeners.clear(); },
+        };
+      },
+    }),
+    turn: Object.freeze({
+      prompt() { throw new Error("unexpected prompt"); },
+    }),
+  });
+}
 
 function voiceSnapshot(overrides = {}) {
   return {
