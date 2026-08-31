@@ -24,9 +24,10 @@ export function create(parameters) {
   });
   if (!parameters.provider) void provider.prepare().catch(() => undefined);
   const uid = `${transport.key}:${parameters.appId}:${++sequence}`;
-  const sessionStorage = parameters.session === false ? undefined : parameters.session;
+  const sessionStorage = parameters.session === false
+    ? undefined
+    : parameters.session ?? browserSessionStorage();
   const sessionStorageKey = `nanocodex:connect:${parameters.appId}:session`;
-  let activeSession;
   let sessionToken;
 
   function fetchControlPlane(input, init, token = sessionToken) {
@@ -86,7 +87,6 @@ export function create(parameters) {
   Object.defineProperty(base, "_setSession", {
     enumerable: false,
     value(session) {
-      activeSession = session;
       sessionToken = session.token;
       writeSession(sessionStorage, sessionStorageKey, session);
     },
@@ -94,20 +94,19 @@ export function create(parameters) {
   Object.defineProperty(base, "_getSession", {
     enumerable: false,
     value() {
-      return activeSession ?? readSession(sessionStorage, sessionStorageKey);
+      return readSession(sessionStorage, sessionStorageKey);
     },
   });
   Object.defineProperty(base, "_hasSession", {
     enumerable: false,
     value() {
-      return activeSession !== undefined
-        || readSession(sessionStorage, sessionStorageKey) !== undefined;
+      return readSession(sessionStorage, sessionStorageKey) !== undefined;
     },
   });
   Object.defineProperty(base, "_resumeConnection", {
     enumerable: false,
     value(options) {
-      const session = activeSession ?? readSession(sessionStorage, sessionStorageKey);
+      const session = readSession(sessionStorage, sessionStorageKey);
       if (!session?.connection) return undefined;
       try {
         const connection = connectionFromWire(session.connection);
@@ -117,7 +116,6 @@ export function create(parameters) {
           || !connectionMatchesRequest(connection, options)) {
           return undefined;
         }
-        activeSession = session;
         sessionToken = session.token;
         return connection;
       } catch {
@@ -128,7 +126,6 @@ export function create(parameters) {
   Object.defineProperty(base, "_clearSession", {
     enumerable: false,
     value() {
-      activeSession = undefined;
       sessionToken = undefined;
       removeSession(sessionStorage, sessionStorageKey);
     },
@@ -165,6 +162,14 @@ function browserOrigin() {
   try {
     const origin = globalThis.location?.origin;
     return typeof origin === "string" && origin !== "null" ? origin : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function browserSessionStorage() {
+  try {
+    return globalThis.localStorage;
   } catch {
     return undefined;
   }

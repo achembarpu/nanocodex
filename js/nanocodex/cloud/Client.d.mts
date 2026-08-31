@@ -58,12 +58,7 @@ export type Parameters = Readonly<{
   name?: string | undefined;
   /** Advanced override for the remote wallet provider that owns the access key. */
   provider?: Provider | undefined;
-  /**
-   * Optional app-scoped grant-session persistence. Sessions are memory-only by
-   * default so bearer authority is not written to browser storage implicitly.
-   * Pass `sessionStorage` for tab persistence or an application-owned store
-   * only after accepting that store's script-access boundary.
-   */
+  /** App-scoped grant session persistence. Defaults to browser localStorage. */
   session?: Pick<Storage, "getItem" | "setItem" | "removeItem"> | false | undefined;
   transport?: Transport | undefined;
 }>;
