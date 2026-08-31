@@ -337,6 +337,7 @@ test("browser tools join every web operation and workspace image edits to the Wo
     };
     const context = Object.freeze({
       callId: "tool-call-1",
+      model: "gpt-5.6-sol",
       parentCallId: "",
       sessionId: "browser-session-1",
       signal: new AbortController().signal,
