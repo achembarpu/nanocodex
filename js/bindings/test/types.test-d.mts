@@ -172,11 +172,14 @@ async function check() {
     url: "https://mcp.example.com",
     supportsParallelToolCalls: false,
     parallelTools: ["lookup"],
+    isAvailable: () => true,
   };
   // @ts-expect-error per-tool parallel safety is boolean.
   parallelTool.supportsParallelToolCalls = "yes";
   // @ts-expect-error MCP parallel allowlists contain remote tool names.
   parallelMcp.parallelTools = [1];
+  // @ts-expect-error MCP availability guards are synchronous boolean functions.
+  parallelMcp.isAvailable = async () => true;
   const storedState: DurabilityStoredState = {
     revision: durabilityRevision(0n),
     payload: null,

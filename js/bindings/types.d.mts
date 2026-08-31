@@ -545,6 +545,8 @@ export type McpServer = {
   supportsParallelToolCalls?: boolean | undefined;
   /** Declares specific remote tool names safe for concurrent nested calls. */
   parallelTools?: readonly string[] | undefined;
+  /** Synchronously reports whether this server may currently be discovered or called. */
+  isAvailable?: (() => boolean) | undefined;
   startupTimeoutMs?: number | undefined;
   timeoutMs?: number | undefined;
 };

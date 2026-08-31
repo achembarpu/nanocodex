@@ -220,6 +220,89 @@ test("remote MCP stays deferred behind tool_search and executes through Code Mod
   assert.match(JSON.stringify(execution.output), /called call/);
 });
 
+test("MCP server availability dynamically gates metadata, discovery, resolution, and calls", async () => {
+  let available = false;
+  const calls = [];
+  const mcp = await createMcpRuntime({
+    account: {
+      description: "Connected account tools.",
+      isAvailable: () => available,
+      client: {
+        async listTools() {
+          return {
+            tools: [{
+              name: "lookup",
+              description: "Look up account records.",
+              inputSchema: { type: "object" },
+            }],
+          };
+        },
+        async callTool(input) {
+          calls.push(input);
+          return { content: [{ type: "text", text: "found" }] };
+        },
+      },
+    },
+  });
+  await mcp.settled();
+  const name = "mcp__account__lookup";
+
+  assert.deepEqual(
+    mcp.definitions().map((definition) => definition.type === "tool_search"
+      ? "tool_search"
+      : definition.name),
+    ["tool_search"],
+  );
+  assert.doesNotMatch(mcp.definitions()[0].description, /account|Connected/);
+  assert.equal(mcp.resolve(name), undefined);
+  const hidden = mcp.search({ query: "account records" });
+  assert.deepEqual(hidden.output.tools, []);
+  assert.deepEqual(hidden.structuredResult, []);
+
+  available = true;
+  assert.deepEqual(
+    mcp.definitions().map((definition) => definition.type === "tool_search"
+      ? "tool_search"
+      : definition.name),
+    ["tool_search", name],
+  );
+  assert.match(mcp.definitions()[0].description, /account: Connected account tools/);
+  const visible = mcp.search({ query: "account records" });
+  assert.equal(visible.output.tools[0].name, name);
+  assert.equal(visible.structuredResult[0].name, "mcp__account__");
+  const resolved = mcp.resolve(name);
+  await resolved.handler({ id: "record-1" });
+  assert.deepEqual(calls, [{ name: "lookup", arguments: { id: "record-1" } }]);
+
+  available = false;
+  assert.equal(mcp.resolve(name), undefined);
+  await assert.rejects(
+    resolved.handler({ id: "record-2" }),
+    /MCP server account is unavailable/,
+  );
+  assert.equal(calls.length, 1);
+});
+
+test("MCP server availability requires a synchronous boolean guard", async () => {
+  const client = {
+    async listTools() { return { tools: [] }; },
+    async callTool() { return { content: [] }; },
+  };
+  await assert.rejects(
+    createMcpRuntime({ invalid: { client, isAvailable: true } }),
+    /MCP server invalid isAvailable must be a function/,
+  );
+
+  const asynchronous = await createMcpRuntime({
+    invalid: { client, isAvailable: async () => true },
+  });
+  await asynchronous.settled();
+  assert.throws(
+    () => asynchronous.definitions(),
+    /MCP server invalid isAvailable must return boolean/,
+  );
+});
+
 test("remote MCP failures are reported by tool_search without breaking agent creation", async () => {
   const mcp = await createMcpRuntime({
     unavailable: {

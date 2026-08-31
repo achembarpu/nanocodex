@@ -83,11 +83,14 @@ export async function createMcpRuntime(configuration, options = {}) {
     if (!Number.isInteger(limit) || limit < 1) {
       throw new TypeError("tool_search limit must be a positive integer");
     }
+    const availableServers = new Set(servers
+      .filter((server) => isServerAvailable(server))
+      .map((server) => server.name));
     const selected = search
       .search(query, { combineWith: "OR", prefix: true })
-      .slice(0, Math.min(limit, MAX_SEARCH_LIMIT))
       .map(({ id }) => byName.get(id))
-      .filter(Boolean);
+      .filter((entry) => entry && availableServers.has(entry.server.name))
+      .slice(0, Math.min(limit, MAX_SEARCH_LIMIT));
     const result = {
       tools: selected.map((entry) => ({
         name: entry.canonicalName,
@@ -97,8 +100,10 @@ export async function createMcpRuntime(configuration, options = {}) {
         supports_parallel_tool_calls: entry.parallelSafe,
         input_schema: entry.inputSchema,
       })),
-      pending_servers: pendingServers.size,
-      failed_servers: { ...failures },
+      pending_servers: [...pendingServers]
+        .filter((name) => availableServers.has(name)).length,
+      failed_servers: Object.fromEntries(Object.entries(failures)
+        .filter(([name]) => availableServers.has(name))),
     };
     return toolResult(result, loadableNamespaces(selected));
   }
@@ -106,15 +111,20 @@ export async function createMcpRuntime(configuration, options = {}) {
   return Object.freeze({
     search: ({ query, limit }) => searchTools(query, limit),
     definitions() {
+      const availableServers = new Set(servers
+        .filter((server) => isServerAvailable(server))
+        .map((server) => server.name));
       return [
-        toolSearchDefinition(servers),
-        ...entries.map((entry) => entry.definition),
+        toolSearchDefinition(servers.filter((server) => availableServers.has(server.name))),
+        ...entries
+          .filter((entry) => availableServers.has(entry.server.name))
+          .map((entry) => entry.definition),
       ];
     },
     resolve(name) {
       if (name === "tool_search") return toolSearch;
       const entry = byName.get(name);
-      if (!entry) return undefined;
+      if (!entry || !isServerAvailable(entry.server)) return undefined;
       return {
         name,
         parallelSafe: entry.parallelSafe,
@@ -265,6 +275,9 @@ function normalizeServers(configuration) {
       && typeof server.supportsParallelToolCalls !== "boolean") {
       throw new TypeError(`MCP server ${name} supportsParallelToolCalls must be boolean`);
     }
+    if (server.isAvailable !== undefined && typeof server.isAvailable !== "function") {
+      throw new TypeError(`MCP server ${name} isAvailable must be a function`);
+    }
     if (server.timeoutMs !== undefined
       && (!Number.isFinite(server.timeoutMs) || server.timeoutMs <= 0)) {
       throw new TypeError(`MCP server ${name} timeoutMs must be a positive number`);
@@ -340,6 +353,9 @@ function createSearchIndex(entries) {
 
 async function callRemoteTool(entry, input, context) {
   const result = await withMcpRequest(entry.server, context?.signal, async (requestOptions) => {
+    if (!isServerAvailable(entry.server)) {
+      throw new Error(`MCP server ${entry.server.name} is unavailable`);
+    }
     const options = {
       ...requestOptions,
       ...(entry.server.payment?.context !== undefined
@@ -359,6 +375,15 @@ async function callRemoteTool(entry, input, context) {
       mcp_tool: entry.remoteName,
     },
   });
+}
+
+function isServerAvailable(server) {
+  if (server.isAvailable === undefined) return true;
+  const available = server.isAvailable();
+  if (typeof available !== "boolean") {
+    throw new TypeError(`MCP server ${server.name} isAvailable must return boolean`);
+  }
+  return available;
 }
 
 async function withMcpRequest(server, outerSignal, operation) {
