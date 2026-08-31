@@ -14,12 +14,14 @@ export interface PageAgentSession {
 export interface CreatePageAgentOptions {
   connection: NanocodexConnection;
   dispatch(input: CleanupInput, context: ToolContext): unknown | Promise<unknown>;
+  signal?: AbortSignal;
 }
 
 export async function createPageAgent(options: CreatePageAgentOptions): Promise<PageAgentSession> {
   const agent = await createConnectedAgent(
     options.connection,
     [createCleanupTool(options.dispatch)],
+    options.signal,
   );
   return {
     agent,

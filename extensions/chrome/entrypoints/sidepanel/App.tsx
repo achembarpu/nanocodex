@@ -15,7 +15,15 @@ import type {
   PreviewInfo,
   TabClaim,
 } from "../../lib/extension";
+import { acquireCleanupHost, type CleanupHostLock } from "../../lib/host-lock";
 import type { StoredSiteRecipe } from "../../lib/recipe";
+
+interface ActiveOperation {
+  cancelled: boolean;
+  controller: AbortController;
+  lease?: PageLease;
+  turn?: AgentTurn;
+}
 
 export function App() {
   const [connection, setConnection] = useState<NanocodexConnection>();
@@ -30,9 +38,13 @@ export function App() {
   const [kept, setKept] = useState("");
   const [saved, setSaved] = useState<StoredSiteRecipe[]>([]);
   const sessionRef = useRef<PageAgentSession | undefined>(undefined);
-  const turnRef = useRef<AgentTurn | undefined>(undefined);
+  const sessionOpeningRef = useRef<Promise<PageAgentSession> | undefined>(undefined);
+  const hostLockRef = useRef<CleanupHostLock | undefined>(undefined);
+  const operationRef = useRef<ActiveOperation | undefined>(undefined);
   const leaseRef = useRef<PageLease | undefined>(undefined);
   const cancelRequestedRef = useRef(false);
+  const closedRef = useRef(false);
+  const closingRef = useRef<Promise<void> | undefined>(undefined);
 
   useEffect(() => {
     let mounted = true;
@@ -54,16 +66,21 @@ export function App() {
         || typeof message.lease_id !== "string"
         || message.lease_id !== leaseRef.current?.lease_id
       ) return;
-      void turnRef.current?.cancel().catch(() => {});
+      const operation = operationRef.current;
+      if (operation?.lease?.lease_id === message.lease_id) {
+        operation.cancelled = true;
+        operation.controller.abort(new Error("The selected page changed."));
+        delete operation.lease;
+        cancelRequestedRef.current = true;
+        void operation.turn?.cancel().catch(() => {});
+      }
       leaseRef.current = undefined;
-      setPending(false);
       setPreview(undefined);
       setError(typeof message.reason === "string" ? message.reason : "The selected page changed.");
     };
     const close = () => {
-      const current = leaseRef.current;
-      if (current) void chrome.runtime.sendMessage({ type: "lease.release", lease_id: current.lease_id });
-      void sessionRef.current?.close();
+      closedRef.current = true;
+      void closePanelRuntime();
     };
     chrome.runtime.onMessage.addListener(listener);
     window.addEventListener("pagehide", close);
@@ -74,13 +91,87 @@ export function App() {
     };
   }, []);
 
+  async function ensurePageAgent(
+    operation: ActiveOperation,
+    activeConnection: NanocodexConnection,
+  ): Promise<PageAgentSession> {
+    if (sessionRef.current) return sessionRef.current;
+    if (sessionOpeningRef.current) return sessionOpeningRef.current;
+    const opening = (async () => {
+      const hostLock = await acquireCleanupHost();
+      if (!hostLock) {
+        throw new Error("Another Nanocodex panel is using the cleanup agent. Close that panel before running here.");
+      }
+      if (closedRef.current || operation.cancelled || operationRef.current !== operation) {
+        await hostLock.release();
+        throw new Error("The cleanup was cancelled before the page agent opened.");
+      }
+      hostLockRef.current = hostLock;
+      try {
+        const session = await createPageAgent({
+          connection: activeConnection,
+          dispatch: dispatchCleanup,
+          signal: operation.controller.signal,
+        });
+        if (closedRef.current || operation.cancelled || operationRef.current !== operation) {
+          await session.close();
+          throw new Error("The cleanup was cancelled before the page agent opened.");
+        }
+        sessionRef.current = session;
+        return session;
+      } catch (cause) {
+        if (hostLockRef.current === hostLock) hostLockRef.current = undefined;
+        await hostLock.release();
+        throw cause;
+      }
+    })();
+    sessionOpeningRef.current = opening;
+    try {
+      return await opening;
+    } finally {
+      if (sessionOpeningRef.current === opening) sessionOpeningRef.current = undefined;
+    }
+  }
+
+  async function closePanelRuntime(): Promise<void> {
+    if (closingRef.current) return closingRef.current;
+    const closing = (async () => {
+      const operation = operationRef.current;
+      if (operation) {
+        operation.cancelled = true;
+        operation.controller.abort(new Error("The side panel closed."));
+        cancelRequestedRef.current = true;
+        if (operation.turn) {
+          await operation.turn.cancel().catch(() => {});
+          await operation.turn.result().catch(() => {});
+        }
+      }
+      await sessionOpeningRef.current?.catch(() => {});
+      const current = leaseRef.current;
+      leaseRef.current = undefined;
+      if (current) {
+        await sendMessage({ type: "lease.release", lease_id: current.lease_id }).catch(() => {});
+      }
+      const session = sessionRef.current;
+      sessionRef.current = undefined;
+      await session?.close().catch(() => {});
+      const hostLock = hostLockRef.current;
+      hostLockRef.current = undefined;
+      await hostLock?.release().catch(() => {});
+    })();
+    closingRef.current = closing;
+    return closing;
+  }
+
   async function refreshSaved(): Promise<void> {
     setSaved(await sendMessage<StoredSiteRecipe[]>({ type: "recipe.list" }));
   }
 
   async function dispatchCleanup(input: CleanupInput, context: ToolContext): Promise<unknown> {
     if (context.signal.aborted) throw context.signal.reason;
-    const current = leaseRef.current;
+    const operation = operationRef.current;
+    const current = operation?.lease;
+    if (operation?.cancelled) throw new Error("The cleanup turn is cancelling.");
     if (!current) throw new Error("The selected-page lease expired.");
     const requestId = crypto.randomUUID();
     const cancel = () => {
@@ -120,22 +211,23 @@ export function App() {
     setKept("");
     setPreview(undefined);
     cancelRequestedRef.current = false;
-    let turn: AgentTurn | undefined;
+    const operation: ActiveOperation = { cancelled: false, controller: new AbortController() };
+    operationRef.current = operation;
     try {
+      const session = await ensurePageAgent(operation, connection);
+      assertOperationActive(operation);
       const claimed = await sendMessage<PageLease>({
         type: "page.claim",
         ...(leaseRef.current ? { previous_lease_id: leaseRef.current.lease_id } : {}),
       });
+      operation.lease = claimed;
       leaseRef.current = claimed;
       setTab(claimed.tab);
-      if (!sessionRef.current) {
-        sessionRef.current = await createPageAgent({ connection, dispatch: dispatchCleanup });
-      }
-      turn = sessionRef.current.prompt(input);
-      turnRef.current = turn;
-      const result = await turn.result();
+      assertOperationActive(operation);
+      operation.turn = session.prompt(input);
+      const result = await operation.turn.result();
       setAnswer(result.finalMessage);
-      const active = leaseRef.current;
+      const active = operation.lease;
       if (active) {
         const info = await sendMessage<PreviewInfo | undefined>({ type: "preview.info", lease_id: active.lease_id });
         setPreview(info);
@@ -143,14 +235,26 @@ export function App() {
     } catch (cause) {
       if (!cancelRequestedRef.current) setError(errorMessage(cause));
     } finally {
-      if (turnRef.current === turn) turnRef.current = undefined;
-      setPending(false);
+      if (operation.cancelled && !operation.turn && operation.lease) {
+        const cancelledLease = operation.lease;
+        delete operation.lease;
+        if (leaseRef.current?.lease_id === cancelledLease.lease_id) leaseRef.current = undefined;
+        await sendMessage({ type: "lease.release", lease_id: cancelledLease.lease_id }).catch(() => {});
+      }
+      if (operationRef.current === operation) {
+        operationRef.current = undefined;
+        setPending(false);
+      }
     }
   }
 
   async function cancel(): Promise<void> {
     cancelRequestedRef.current = true;
-    await turnRef.current?.cancel();
+    const operation = operationRef.current;
+    if (!operation) return;
+    operation.cancelled = true;
+    operation.controller.abort(new Error("The cleanup was cancelled."));
+    await operation.turn?.cancel();
   }
 
   async function connect(): Promise<void> {
@@ -167,19 +271,14 @@ export function App() {
   }
 
   async function disconnect(): Promise<void> {
-    setError("");
-    cancelRequestedRef.current = true;
-    await turnRef.current?.cancel().catch(() => {});
-    const current = leaseRef.current;
-    if (current) {
-      await sendMessage({ type: "lease.release", lease_id: current.lease_id }).catch(() => {});
-      leaseRef.current = undefined;
+    if (operationRef.current || sessionOpeningRef.current) {
+      setError("Cancel the active cleanup and wait for it to finish before disconnecting.");
+      return;
     }
-    const session = sessionRef.current;
-    sessionRef.current = undefined;
-    if (session) await session.close();
+    setError("");
+    await closePanelRuntime();
+    closingRef.current = undefined;
     setConnection(undefined);
-    setPending(false);
     try {
       await disconnectNanocodex();
     } catch (cause) {
@@ -250,7 +349,7 @@ export function App() {
             <p>Sign in with your passkey. Provider credentials stay behind Nanocodex.</p>
           </div>
           {connection
-            ? <button type="button" onClick={() => void disconnect()}>Disconnect</button>
+            ? <button type="button" disabled={pending || connecting} onClick={() => void disconnect()}>Disconnect</button>
             : <button className="primary" type="button" disabled={connecting || restoring} onClick={() => void connect()}>Connect Nanocodex</button>}
         </div>
         {connection && <code title={connection.accountAddress}>{shortAddress(connection.accountAddress)}</code>}
@@ -327,6 +426,10 @@ async function sendMessage<Result = unknown>(message: unknown): Promise<Result> 
     throw new Error(response.error);
   }
   return response;
+}
+
+function assertOperationActive(operation: ActiveOperation): void {
+  if (operation.cancelled) throw new Error("The cleanup was cancelled.");
 }
 
 function errorMessage(error: unknown): string {
