@@ -526,13 +526,25 @@ function cleanupEntry(remoteName = "cleanup", strict = false): HostedToolCatalog
     definition: {
       type: "function",
       name: "cleanup",
-      description: "Inspect the selected page and preview or revert one declarative CSS cleanup recipe.",
+      description: "List open web tabs, inspect one exact tab, and preview or revert one declarative CSS cleanup recipe.",
       strict,
       parameters: {
         oneOf: [
           {
             type: "object",
-            properties: { action: { const: "inspect" } },
+            properties: {
+              action: { const: "list_tabs" },
+              cursor: { type: "string", minLength: 1, maxLength: 80 },
+            },
+            required: ["action"],
+            additionalProperties: false,
+          },
+          {
+            type: "object",
+            properties: {
+              action: { const: "inspect" },
+              tab_ref: { type: "string", minLength: 1, maxLength: 80 },
+            },
             required: ["action"],
             additionalProperties: false,
           },

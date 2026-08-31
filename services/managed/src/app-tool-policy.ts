@@ -14,7 +14,19 @@ const CHROME_CLEANUP_PARAMETERS = Object.freeze({
   oneOf: [
     {
       type: "object",
-      properties: { action: { const: "inspect" } },
+      properties: {
+        action: { const: "list_tabs" },
+        cursor: { type: "string", minLength: 1, maxLength: 80 },
+      },
+      required: ["action"],
+      additionalProperties: false,
+    },
+    {
+      type: "object",
+      properties: {
+        action: { const: "inspect" },
+        tab_ref: { type: "string", minLength: 1, maxLength: 80 },
+      },
       required: ["action"],
       additionalProperties: false,
     },
@@ -55,7 +67,7 @@ const CHROME_CLEANUP_PARAMETERS = Object.freeze({
 });
 
 const CHROME_CLEANUP_DESCRIPTION =
-  "Inspect the selected page and preview or revert one declarative CSS cleanup recipe.";
+  "List open web tabs, inspect one exact tab, and preview or revert one declarative CSS cleanup recipe.";
 
 export function isConnectAppToolPolicy(value: unknown): value is ConnectAppToolPolicy {
   return value === CHROME_CLEANUP_APP_TOOL_POLICY;

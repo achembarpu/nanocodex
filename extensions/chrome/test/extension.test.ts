@@ -17,6 +17,10 @@ import {
   visibleCleanupPrompt,
 } from "../lib/extension.ts";
 import { acquireCleanupHost } from "../lib/host-lock.ts";
+import {
+  appToolCatalogEntryAllowed,
+  CHROME_CLEANUP_APP_TOOL_POLICY,
+} from "../../../services/managed/src/app-tool-policy.ts";
 
 const panelSource = await readFile(new URL("../entrypoints/sidepanel/App.tsx", import.meta.url), "utf8");
 const panelStyleSource = await readFile(new URL("../entrypoints/sidepanel/style.css", import.meta.url), "utf8");
@@ -40,6 +44,25 @@ test("exposes one narrow direct cleanup tool", async () => {
     signal: new AbortController().signal,
   }), { ok: true });
   assert.deepEqual(calls, [{ action: "inspect" }]);
+});
+
+test("publishes the exact cleanup catalog accepted by the managed route", () => {
+  const tool = createCleanupTool(() => undefined);
+  assert.equal(typeof tool.description, "string");
+  assert.ok(tool.parameters);
+  assert.equal(appToolCatalogEntryAllowed(CHROME_CLEANUP_APP_TOOL_POLICY, {
+    provider: "javascript",
+    remote_name: tool.name,
+    definition: {
+      type: "function",
+      name: tool.name,
+      description: tool.description!,
+      strict: false,
+      parameters: tool.parameters!,
+    },
+    parallel_safe: false,
+    timeout_ms: 120_000,
+  }), true);
 });
 
 test("rejects unsupported cleanup actions before dispatch", () => {
