@@ -1,13 +1,21 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { createManagedComputerRuntime } from "../src/computer-runtime";
+import {
+  createManagedComputerRuntime,
+  isVirtualRetrySafeCommand,
+  isVirtualSafeCommand,
+} from "../src/computer-runtime";
 import { createSandboxComputerProvider } from "../src/computer-provider";
 
 describe("managed Computer escalation", () => {
-  it("keeps ordinary shell work virtual and requests native-process only for cargo", async () => {
+  it("starts virtual, promotes before unknown compute, then stays native", async () => {
     const computer = memoryComputer();
     const sandboxExec = vi.fn(async (command: string) => ({
-      stdout: command.includes("cargo") ? "running 1 test\ntest result: ok\n" : "",
+      stdout: command === "cargo test"
+        ? "running 1 test\ntest result: ok\n"
+        : command === "cat marker"
+          ? "native marker\n"
+          : "",
       stderr: "",
       exitCode: 0,
     }));
@@ -19,11 +27,11 @@ describe("managed Computer escalation", () => {
     const providerExec = vi.fn(baseProvider.exec);
     const runtime = await createManagedComputerRuntime({
       computer: computer.client,
-      computerProvider: { exec: providerExec },
+      computerProvider: { exec: providerExec, dispose: baseProvider.dispose },
       egress: { fetch: vi.fn() } as unknown as Fetcher,
     });
     const context = {
-      callId: "cargo-escalation",
+      callId: "sticky-escalation",
       parentCallId: "",
       sessionId: "test",
       model: "gpt-5.6-sol",
@@ -45,17 +53,57 @@ describe("managed Computer escalation", () => {
       output: "running 1 test\ntest result: ok\n",
     });
     expect(sandbox).toHaveBeenCalledTimes(1);
-    expect(providerExec).toHaveBeenCalledWith(expect.objectContaining({
-      command: "'cargo' 'test'",
+    expect(providerExec).toHaveBeenLastCalledWith({
+      command: "cargo test",
       cwd: "/workspace",
       requirements: { capabilities: ["native-process"] },
-    }));
-    expect(runtime.commandNames).toEqual(["cargo", "gh", "git", "ssh"]);
+    });
+
+    // cat is normally a Just Bash command, but promotion is sticky for the runtime.
+    expect(await runtime.tool.handler({ cmd: "cat marker" }, context)).toMatchObject({
+      exit_code: 0,
+      output: "native marker\n",
+    });
+    expect(providerExec).toHaveBeenLastCalledWith({
+      command: "cat marker",
+      cwd: "/workspace",
+      requirements: { capabilities: ["native-process"] },
+    });
+    expect(providerExec).toHaveBeenCalledTimes(2);
+    expect(runtime.commandNames).toEqual(["gh", "git", "ssh"]);
+    expect(runtime.instructions).not.toContain("sandbox escalation");
 
     runtime.dispose();
   });
 
-  it("reprojects exact durable workspace state before every retained native execution", async () => {
+  it("preflight checks the complete shell expression before allowing virtual execution", () => {
+    const safe = new Set(["cat", "echo", "find", "grep", "printf"]);
+
+    expect(isVirtualSafeCommand("printf cheap > marker && cat marker", safe)).toBe(true);
+    expect(isVirtualSafeCommand("cat marker | grep cheap", safe)).toBe(true);
+    expect(isVirtualSafeCommand("find . -type f", safe)).toBe(true);
+    expect(isVirtualSafeCommand("VALUE=cheap printf $VALUE", safe)).toBe(true);
+
+    expect(isVirtualSafeCommand("cargo test", safe)).toBe(false);
+    expect(isVirtualSafeCommand("cat marker | cargo test", safe)).toBe(false);
+    expect(isVirtualSafeCommand("echo $(cargo metadata)", safe)).toBe(false);
+    expect(isVirtualSafeCommand("find . -exec cargo test \\;", safe)).toBe(false);
+    expect(isVirtualSafeCommand("env cargo test", safe)).toBe(false);
+    expect(isVirtualSafeCommand("./script.sh", safe)).toBe(false);
+    const shims = new Set([...safe, "git", "gh"]);
+    expect(isVirtualSafeCommand("git status --short", shims)).toBe(true);
+    expect(isVirtualSafeCommand("git checkout main", shims)).toBe(false);
+    expect(isVirtualSafeCommand("gh api /user", shims)).toBe(true);
+    expect(isVirtualSafeCommand("gh issue list", shims)).toBe(false);
+    expect(isVirtualRetrySafeCommand("cat marker | grep cheap")).toBe(true);
+    expect(isVirtualRetrySafeCommand("find . -type f")).toBe(true);
+    expect(isVirtualRetrySafeCommand("cat marker > copy")).toBe(false);
+    expect(isVirtualRetrySafeCommand("printf cheap > marker")).toBe(false);
+    expect(isVirtualRetrySafeCommand("find . -delete")).toBe(false);
+    expect(isVirtualRetrySafeCommand("rm -rf generated")).toBe(false);
+  });
+
+  it("projects exact durable state once and preserves the retained native workspace", async () => {
     const files = new Map([
       ["/workspace/Cargo.toml", new TextEncoder().encode("[package]\nname='smoke'\nversion='0.1.0'\n")],
       ["/workspace/src/lib.rs", new TextEncoder().encode("pub fn answer() -> u8 { 42 }\n")],
@@ -75,7 +123,7 @@ describe("managed Computer escalation", () => {
       remove: vi.fn(),
     };
     const exec = vi.fn(async (command: string) => ({
-      stdout: command.startsWith("'cargo'") ? "ok\n" : "",
+      stdout: command === "cargo test" ? "ok\n" : "",
       stderr: "",
       exitCode: 0,
     }));
@@ -83,23 +131,23 @@ describe("managed Computer escalation", () => {
     const provider = createSandboxComputerProvider({ sandbox: create, workspace });
 
     await provider.exec({
-      command: "'cargo' 'test'",
+      command: "cargo test",
       cwd: "/workspace",
       requirements: { capabilities: ["native-process"] },
     });
     await provider.exec({
-      command: "'cargo' 'test' '-q'",
+      command: "printf generated > generated.txt",
       cwd: "/workspace",
       requirements: { capabilities: ["native-process"] },
     });
 
     expect(create).toHaveBeenCalledTimes(1);
-    expect(exec.mock.calls.filter(([command]) => command.includes("find '/workspace'")).length).toBe(2);
+    expect(exec.mock.calls.filter(([command]) => command.includes("find '/workspace'")).length).toBe(1);
     expect(exec).toHaveBeenCalledWith(
       "printf %s 'AP+AAQ==' | base64 -d >> '/workspace/blob.bin'",
       { cwd: "/", timeout: 120_000 },
     );
-    expect(exec).toHaveBeenCalledWith("'cargo' 'test' '-q'", {
+    expect(exec).toHaveBeenCalledWith("printf generated > generated.txt", {
       cwd: "/workspace",
       timeout: 120_000,
     });

@@ -136,7 +136,7 @@ describe("managed computer providers", () => {
       exitCode: 0,
     });
     expect(commands[0]).toBe("new --name=nanocodex-test --image=exeuntu");
-    expect(commands.some((command) => command.includes("base64 -d >> '/workspace/Cargo.toml'")))
+    expect(commands.some((command) => command.includes("base64 -d") && command.includes("Cargo.toml")))
       .toBe(true);
     expect(commands.some((command) => command.includes("exec '\\''cargo'\\'' '\\''test'\\''")))
       .toBe(true);
