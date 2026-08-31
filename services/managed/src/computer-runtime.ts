@@ -20,7 +20,7 @@ const MANAGED_SHELL_MAX_ENTRIES = 20_000;
 const MANAGED_SHELL_MAX_OUTPUT_TOKENS = 10_000;
 const OUTPUT_TRUNCATION_NOTICE = "\n[output truncated by exec_command]";
 const ROOT = "/workspace";
-const COMMAND_SEPARATORS = new Set([";", "&&", "||", "|", "&"]);
+const COMMAND_SEPARATORS = new Set([";", "&&", "||", "|"]);
 const META_COMMANDS = new Set([
   ".",
   "bash",
@@ -32,6 +32,15 @@ const META_COMMANDS = new Set([
   "sh",
   "source",
   "xargs",
+]);
+const READ_ONLY_RETRY_COMMANDS = new Set([
+  "[", "basename", "cat", "cmp", "cut", "diff", "dirname", "echo",
+  "false", "file", "find", "grep", "head", "ls", "printenv", "printf",
+  "pwd", "readlink", "realpath", "stat", "tail", "test", "tr", "true",
+  "uniq", "wc",
+]);
+const FIND_MUTATING_ACTIONS = new Set([
+  "-delete", "-exec", "-execdir", "-fprint", "-fprint0", "-fprintf", "-ok", "-okdir",
 ]);
 
 type DisposableComputerWorkspace = ComputerWorkspaceClient & Readonly<{
@@ -164,16 +173,20 @@ function createStickyExecutionTool(
       return executeNativeCommand(parsed, context, provider);
     }
 
-    try {
-      const result = await virtualTool.handler(input, context);
-      if (!isVirtualLimitationResult(result)) return result;
-      promoted = true;
-      return executeNativeCommand(parsed, context, provider);
-    } catch (error) {
-      if (!isVirtualLimitationError(error)) throw error;
-      promoted = true;
-      return executeNativeCommand(parsed, context, provider);
-    }
+    const retrySafe = isVirtualRetrySafeCommand(parsed.cmd);
+  try {
+    const result = await virtualTool.handler(input, context);
+    if (!isVirtualLimitationResult(result)) return result;
+    promoted = true;
+    return retrySafe
+      ? executeNativeCommand(parsed, context, provider)
+      : result;
+  } catch (error) {
+    if (!isVirtualLimitationError(error)) throw error;
+    promoted = true;
+    if (!retrySafe) throw error;
+    return executeNativeCommand(parsed, context, provider);
+  }
   };
 
   return Object.freeze({
@@ -237,24 +250,26 @@ export function isVirtualSafeCommand(command: string, safeCommands: ReadonlySet<
   let expectingCommand = true;
   let skipRedirectionTarget = false;
   let currentCommand: string | undefined;
+  let currentArguments: string[] = [];
+  const finishInvocation = () => currentCommand === undefined
+    || isManagedShimInvocationSafe(currentCommand, currentArguments);
 
   for (const token of tokens) {
     if (token.kind === "operator") {
-      if (token.value === "(" || token.value === ")" || token.value === "<<" || token.value === "<<<") {
-        return false;
-      }
+      if (token.value === "(" || token.value === ")" || token.value === "<<" || token.value === "<<<") return false;
       if (token.value === ">" || token.value === ">>" || token.value === "<") {
         skipRedirectionTarget = true;
         continue;
       }
       if (COMMAND_SEPARATORS.has(token.value)) {
+        if (!finishInvocation()) return false;
         expectingCommand = true;
         currentCommand = undefined;
+        currentArguments = [];
         continue;
       }
       return false;
     }
-
     if (skipRedirectionTarget) {
       skipRedirectionTarget = false;
       continue;
@@ -264,12 +279,72 @@ export function isVirtualSafeCommand(command: string, safeCommands: ReadonlySet<
       if (token.value.includes("$") || token.value.includes("*")) return false;
       if (META_COMMANDS.has(token.value) || !safeCommands.has(token.value)) return false;
       currentCommand = token.value;
+      currentArguments = [];
       expectingCommand = false;
       continue;
     }
-    if (currentCommand === "find" && (token.value === "-exec" || token.value === "-execdir")) {
+    if (currentCommand === "find" && (token.value === "-exec" || token.value === "-execdir")) return false;
+    currentArguments.push(token.value);
+  }
+  return !skipRedirectionTarget && finishInvocation();
+}
+
+function isManagedShimInvocationSafe(command: string, args: readonly string[]): boolean {
+  if (command === "git") {
+    switch (args[0]) {
+      case "clone": return args.length >= 2;
+      case "status": return args.slice(1).every((arg) => ["--short", "-s", "--porcelain"].includes(arg));
+      case "log": return args.slice(1).every((arg, index, values) =>
+        arg === "--oneline"
+        || /^-\d+$/u.test(arg)
+        || arg === "-n" && /^\d+$/u.test(values[index + 1] ?? "")
+        || index > 0 && values[index - 1] === "-n" && /^\d+$/u.test(arg)
+        || arg === "--max-count"
+        || index > 0 && values[index - 1] === "--max-count" && /^\d+$/u.test(arg)
+        || /^--max-count=\d+$/u.test(arg));
+      case "rev-parse": return args.length === 2 && args[1] === "HEAD";
+      case "branch": return args.length === 1 || args.length === 2 && args[1] === "--show-current";
+      case "remote": return args.length === 1 || args.length === 2 && args[1] === "-v";
+      case "ls-files": return args.length === 1;
+      default: return false;
+    }
+  }
+  if (command === "gh") {
+    if (args[0] === "auth") return args.length === 2 && args[1] === "status";
+    if (args[0] === "api") return args.length >= 2;
+    if (args[0] === "repo") return args[1] === "view" || args[1] === "clone" || args[1] === "list";
+    return args[0] === "pr" && args[1] === "list";
+  }
+  return true;
+}
+
+/** Retry an emulator-only failure only when replay cannot duplicate mutations. */
+export function isVirtualRetrySafeCommand(command: string): boolean {
+  const tokens = lexShell(command);
+  if (!tokens) return false;
+  let expectingCommand = true;
+  let skipRedirectionTarget = false;
+  let currentCommand: string | undefined;
+  for (const token of tokens) {
+    if (token.kind === "operator") {
+      if (token.value === ">" || token.value === ">>") return false;
+      if (token.value === "<") { skipRedirectionTarget = true; continue; }
+      if (COMMAND_SEPARATORS.has(token.value)) {
+        expectingCommand = true;
+        currentCommand = undefined;
+        continue;
+      }
       return false;
     }
+    if (skipRedirectionTarget) { skipRedirectionTarget = false; continue; }
+    if (expectingCommand) {
+      if (isAssignment(token.value)) continue;
+      if (!READ_ONLY_RETRY_COMMANDS.has(token.value)) return false;
+      currentCommand = token.value;
+      expectingCommand = false;
+      continue;
+    }
+    if (currentCommand === "find" && FIND_MUTATING_ACTIONS.has(token.value)) return false;
   }
   return !skipRedirectionTarget;
 }

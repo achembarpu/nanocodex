@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   createManagedComputerRuntime,
+  isVirtualRetrySafeCommand,
   isVirtualSafeCommand,
 } from "../src/computer-runtime";
 import { createSandboxComputerProvider } from "../src/computer-provider";
@@ -88,6 +89,17 @@ describe("managed Computer escalation", () => {
     expect(isVirtualSafeCommand("find . -exec cargo test \\;", safe)).toBe(false);
     expect(isVirtualSafeCommand("env cargo test", safe)).toBe(false);
     expect(isVirtualSafeCommand("./script.sh", safe)).toBe(false);
+    const shims = new Set([...safe, "git", "gh"]);
+    expect(isVirtualSafeCommand("git status --short", shims)).toBe(true);
+    expect(isVirtualSafeCommand("git checkout main", shims)).toBe(false);
+    expect(isVirtualSafeCommand("gh api /user", shims)).toBe(true);
+    expect(isVirtualSafeCommand("gh issue list", shims)).toBe(false);
+    expect(isVirtualRetrySafeCommand("cat marker | grep cheap")).toBe(true);
+    expect(isVirtualRetrySafeCommand("find . -type f")).toBe(true);
+    expect(isVirtualRetrySafeCommand("cat marker > copy")).toBe(false);
+    expect(isVirtualRetrySafeCommand("printf cheap > marker")).toBe(false);
+    expect(isVirtualRetrySafeCommand("find . -delete")).toBe(false);
+    expect(isVirtualRetrySafeCommand("rm -rf generated")).toBe(false);
   });
 
   it("projects exact durable state once and preserves the retained native workspace", async () => {
