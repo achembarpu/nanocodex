@@ -80,9 +80,10 @@ async fn missing_stored_checkpoint_replays_local_history_once() -> Result<()> {
             &mut branch,
             json!({
                 "type": "error",
+                "status": 400,
                 "error": {
-                    "code": "previous_response_not_found",
-                    "message": "checkpoint expired"
+                    "type": "invalid_request_error",
+                    "message": "Invalid `previous_response_id`."
                 }
             }),
         )

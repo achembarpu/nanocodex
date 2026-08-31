@@ -435,6 +435,11 @@ pub(crate) fn prepare_resumed_checkpoint(
     session_id: &str,
     context_source: ContextSource,
 ) -> Result<PreparedCheckpoint> {
+    // Unstored response IDs are scoped to the live transport connection. A fork
+    // owns a fresh client, so it must replay client-owned history instead.
+    if !config.store_responses {
+        checkpoint.conversation.reset_for_full_request();
+    }
     checkpoint.global_instructions = context_source
         .global_instructions()
         .or(checkpoint.global_instructions);
