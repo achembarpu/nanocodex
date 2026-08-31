@@ -21,8 +21,6 @@ const bindingsRoot = resolve(repositoryRoot, "js/bindings");
 const reactRoot = resolve(repositoryRoot, "js/react");
 const terminalRoot = resolve(repositoryRoot, "js/terminal");
 const managedRoot = resolve(repositoryRoot, "services/managed");
-const localWranglerConfigPath = resolve(webRoot, "wrangler.jsonc");
-const localEvalMigrationPath = resolve(webRoot, "migrations", "0001_eval_coordinator.sql");
 const connectDialogRoot = resolve(webRoot, "connect-dialog");
 const connectPlaygroundRoot = resolve(webRoot, "connect-playground");
 const connectApiRoot = resolve(repositoryRoot, "services/connect-api");
@@ -94,13 +92,6 @@ const managedEnvironmentNames = [
   "NANOCODEX_ROOM_ALLOCATOR_TOKEN",
   "NANOCODEX_WORKER_PORT",
   "OPENAI_API_KEY",
-];
-const publisherEnvironmentNames = [
-  "NANOCODEX_COMMIT_LIMIT",
-  "NANOCODEX_FORCE_SYNC",
-  "NANOCODEX_GIT_UPLOAD_TIMEOUT_MS",
-  "NANOCODEX_REPAIR_INVALID_PUBLICATION",
-  "NANOCODEX_REPO",
 ];
 let rootEnvironmentLoaded = false;
 
@@ -397,39 +388,6 @@ async function main() {
       { cwd: repositoryRoot, env: toolEnvironment },
       "terminal package build",
     );
-    await Promise.all([
-      lifecycle.run(
-        "npm",
-        ["run", "build", "--prefix", connectDialogRoot],
-        { cwd: repositoryRoot, env: toolEnvironment },
-        "Connect dialog build",
-      ),
-      lifecycle.run(
-        "npm",
-        ["run", "build", "--prefix", connectPlaygroundRoot],
-        {
-          cwd: repositoryRoot,
-          env: {
-            ...toolEnvironment,
-            VITE_CONNECT_API_HOST: publicOrigin.origin,
-            VITE_CONNECT_DIALOG_HOST: new URL("/connect-dialog/", publicOrigin).href,
-          },
-        },
-        "Connect playground build",
-      ),
-      lifecycle.run(
-        "npm",
-        ["run", "build", "--prefix", connectApiRoot],
-        { cwd: repositoryRoot, env: toolEnvironment },
-        "Connect API build",
-      ),
-    ]);
-
-    await ensureLocalEvalSchema(statePath, {
-      environment,
-      execute: (...arguments_) => lifecycle.run(...arguments_),
-    });
-
     const relayLaunch = localChatGptRelayChildLaunch(toolEnvironment);
     const relay = lifecycle.spawn(
       relayLaunch.command,
@@ -456,7 +414,6 @@ async function main() {
       NANOCODEX_LOCAL_STATE_PATH: statePath,
       ...localConnectorEnvironment(environment),
     });
-    const webEnvironment = websiteLaunch.options.env;
     const website = lifecycle.spawn(
       websiteLaunch.command,
       websiteLaunch.arguments,
@@ -464,11 +421,6 @@ async function main() {
       "web multi-Worker stack",
     );
 
-    await waitForHttp(
-      new URL("/api/health", origin),
-      [relayChild, website.child],
-      (response) => verifyLocalHealthResponse(response),
-    );
     await waitForHttp(
       new URL("/api/health", publicOrigin),
       [relayChild, website.child],
@@ -479,48 +431,9 @@ async function main() {
       [relayChild, website.child],
       verifyLocalConnectHealthResponse,
     );
-    await Promise.all([
-      [new URL("/connect", publicOrigin), "Account", ["nanocodex-theme"]],
-      [new URL("/agent", publicOrigin), "managed agent", ["nanocodex-theme"]],
-      [
-        new URL("/connect-dialog", publicOrigin),
-        "Connect dialog",
-        ['src="/connect-dialog/src/main.tsx"'],
-      ],
-      [
-        new URL("/", playgroundOrigin),
-        "Connect playground",
-        ["Private playground for the Nanocodex Connect API"],
-      ],
-    ].map(([url, label, markers]) => waitForHttp(
-      url,
-      [relayChild, website.child],
-      (response) => verifyLocalDocumentResponse(response, label, markers),
-    )));
-
-    await lifecycle.run(process.execPath, [resolve(webRoot, "scripts/publish-repository.mjs")], {
-      cwd: webRoot,
-      env: {
-        ...webEnvironment,
-        ...selectedEnvironment(environment, publisherEnvironmentNames),
-        NANOCODEX_GIT_ORIGIN: origin.origin,
-        NANOCODEX_GIT_TOKEN: mirrorToken,
-        NANOCODEX_REPO: environment.NANOCODEX_REPO ?? repositoryRoot,
-      },
-    }, "local repository publisher");
-    await verifyLocalState(origin, head, {
-      environment: toolEnvironment,
-      verifyGit: (verifyOrigin, verifyHead, verifyEnvironment) =>
-        verifyLocalGitAdvertisement(
-          verifyOrigin,
-          verifyHead,
-          verifyEnvironment,
-          (...arguments_) => lifecycle.run(...arguments_, "local Git readiness inspection"),
-        ),
-    });
     process.stderr.write(
       `Nanocodex local Workers are ready at ${publicOrigin.origin} (${instance.id}; ${head.slice(0, 7)}; `
-      + "repository published; evals migrated; managed agents ready).\n"
+      + "managed agents ready).\n"
       + `Account: ${new URL("/connect", publicOrigin).href}\n`
       + `Connect playground: ${playgroundOrigin.origin}\n`
       + `OAuth callback relay: ${LOCAL_OAUTH_RELAY_ORIGIN}\n`
@@ -980,29 +893,6 @@ export async function verifyLocalConnectHealthResponse(response) {
     && Object.keys(health).length === 2;
 }
 
-export async function verifyLocalDocumentResponse(response, label, markers) {
-  if (response.status !== 200) {
-    throw new Error(`local ${label} document returned HTTP ${response.status}`);
-  }
-  if (!/^text\/html\b/i.test(response.headers.get("content-type") ?? "")) {
-    throw new Error(`local ${label} document did not return HTML`);
-  }
-  if (!Array.isArray(markers) || markers.length === 0
-    || markers.some((marker) => typeof marker !== "string" || marker.length === 0)) {
-    throw new Error(`local ${label} document markers are invalid`);
-  }
-  const document = await response.text();
-  if (Buffer.byteLength(document) > 512 * 1024) {
-    throw new Error(`local ${label} document exceeded 512 KiB`);
-  }
-  for (const marker of markers) {
-    if (!document.includes(marker)) {
-      throw new Error(`local ${label} document omitted its application marker`);
-    }
-  }
-  return true;
-}
-
 export async function verifyLocalModelPreconnect(
   origin,
   WebSocketImplementation,
@@ -1103,64 +993,6 @@ export async function ensureLocalDependencies(
     cwd: repositoryRoot,
     env: environment,
   })));
-}
-
-/**
- * Apply the local eval migration and repair a stale persisted D1 file.
- *
- * Wrangler records applied migrations separately from the SQLite file used by
- * a Vite Worker. A persisted checkout can therefore retain the migration
- * receipt while the Worker opens a newly keyed, empty file after a config
- * revision. This repair is deliberately owned by local bootstrap; production
- * uses the deploy orchestrator's remote migration step instead.
- */
-export async function ensureLocalEvalSchema(
-  statePath,
-  { environment = process.env, execute = run } = {},
-) {
-  if (typeof statePath !== "string" || !statePath) {
-    throw new Error("local eval schema requires a state path");
-  }
-  if (typeof execute !== "function") throw new Error("local eval schema runner is required");
-  const wrangler = resolve(webRoot, "node_modules/wrangler/bin/wrangler.js");
-  const options = {
-    cwd: webRoot,
-    env: { ...buildChildEnvironment(environment), CI: "true" },
-  };
-  await execute(process.execPath, [
-    wrangler,
-    "d1",
-    "migrations",
-    "apply",
-    "EVALS_DB",
-    "--local",
-    "--env",
-    "development",
-    "--persist-to",
-    statePath,
-    "--config",
-    localWranglerConfigPath,
-  ], options, "local D1 migration");
-
-  const migration = await readFile(localEvalMigrationPath, "utf8");
-  const idempotentSchema = migration
-    .replace(/\bCREATE TABLE\b/g, "CREATE TABLE IF NOT EXISTS")
-    .replace(/\bCREATE INDEX\b/g, "CREATE INDEX IF NOT EXISTS");
-  await execute(process.execPath, [
-    wrangler,
-    "d1",
-    "execute",
-    "EVALS_DB",
-    "--local",
-    "--env",
-    "development",
-    "--persist-to",
-    statePath,
-    "--command",
-    idempotentSchema,
-    "--config",
-    localWranglerConfigPath,
-  ], options, "local D1 schema check");
 }
 
 function deduplicateLocalDependencyRequirements(requirements) {
@@ -1319,253 +1151,6 @@ async function readLocalChatGptBootstrap(environment) {
     });
   } catch {
     return undefined;
-  }
-}
-
-export async function verifyLocalState(
-  origin,
-  head,
-  {
-    environment = buildChildEnvironment(process.env),
-    request = localFetch,
-    verifyGit = verifyLocalGitAdvertisement,
-  } = {},
-) {
-  const snapshotUrl = new URL("/api/repository/snapshot", origin);
-  snapshotUrl.searchParams.set("generation", head);
-  const indexUrl = new URL("/api/repository/commit-index", origin);
-  indexUrl.searchParams.set("generation", head);
-  const [snapshotResponse, indexResponse, evalsResponse] = await Promise.all([
-    request(snapshotUrl, AbortSignal.timeout(10_000)),
-    request(indexUrl, AbortSignal.timeout(10_000)),
-    request(new URL("/api/evals", origin), AbortSignal.timeout(10_000)),
-  ]);
-  for (const [name, response] of [
-    ["repository snapshot", snapshotResponse],
-    ["commit index", indexResponse],
-    ["eval overview", evalsResponse],
-  ]) {
-    if (!response.ok) throw new Error(`${name} verification returned HTTP ${response.status}`);
-  }
-  const [snapshot, index, evals] = await Promise.all([
-    snapshotResponse.json(),
-    indexResponse.json(),
-    evalsResponse.json(),
-  ]);
-  if (
-    !isRepositoryMetadata(snapshot, head)
-    || !isRepositoryMetadata(index, head)
-    || snapshotResponse.headers.get("x-repository-generation") !== head
-    || indexResponse.headers.get("x-repository-generation") !== head
-  ) {
-    throw new Error("local repository publication did not resolve the current Git revision");
-  }
-  if (
-    index.version !== 1
-    || !Array.isArray(index?.hashes)
-    || index.hashes.length !== index.repository.indexedCommits
-    || index.hashes[0] !== head
-    || !index.hashes.every((hash) => typeof hash === "string" && /^[a-f0-9]{40}$/.test(hash))
-    || new Set(index.hashes).size !== index.hashes.length
-    || !isCommitScopeCounts(index.scopeCounts, index.hashes.length)
-  ) {
-    throw new Error("local commit metadata did not begin at the current Git revision");
-  }
-  if (evals?.schemaVersion !== 5 || !Array.isArray(evals.worksets)) {
-    throw new Error("local evaluation database did not resolve the current empty-capable schema");
-  }
-
-  const source = Array.isArray(snapshot?.tree)
-    ? snapshot.tree.find((entry) =>
-        entry?.path === "README.md"
-        && typeof entry?.contentUrl === "string"
-        && /^[a-f0-9]{40}$/.test(entry?.objectId)
-      ) ?? snapshot.tree.find((entry) =>
-        typeof entry?.contentUrl === "string"
-        && /^[a-f0-9]{40}$/.test(entry?.objectId)
-      )
-    : undefined;
-  if (!source) throw new Error("local Source metadata contained no readable blob");
-  const blobUrl = new URL(source.contentUrl, origin);
-  if (
-    blobUrl.origin !== origin.origin
-    || blobUrl.pathname !== `/api/repository/blob/${source.objectId}`
-    || blobUrl.search
-    || blobUrl.hash
-  ) {
-    throw new Error("local Source metadata returned an invalid blob URL");
-  }
-  const commitPageUrl = new URL("/api/repository/commits", origin);
-  commitPageUrl.searchParams.set("generation", head);
-  commitPageUrl.searchParams.set("page", "0");
-  const patchUrl = new URL(`/api/repository/commits/${head}/0000.diff`, origin);
-  const [blobResponse, commitPageResponse, patchResponse] = await Promise.all([
-    request(blobUrl, AbortSignal.timeout(10_000)),
-    request(commitPageUrl, AbortSignal.timeout(10_000)),
-    request(patchUrl, AbortSignal.timeout(10_000)),
-  ]);
-  for (const [name, response] of [
-    ["Source blob", blobResponse],
-    ["commit page", commitPageResponse],
-    ["commit patch", patchResponse],
-  ]) {
-    if (!response.ok) throw new Error(`${name} verification returned HTTP ${response.status}`);
-  }
-  const commitPage = await commitPageResponse.json();
-  const expectedPageHashes = index.hashes.slice(0, index.repository.commitPageSize);
-  if (
-    commitPageResponse.headers.get("x-repository-generation") !== head
-    || !isCommitPage(commitPage, expectedPageHashes)
-  ) {
-    throw new Error("local commit page did not begin at the current Git revision");
-  }
-  if (patchResponse.headers.get("x-repository-generation") !== head) {
-    throw new Error("local commit patch did not resolve the current Git revision");
-  }
-  const [, patchPrefix] = await Promise.all([
-    requireResponseContent(blobResponse, "Source blob"),
-    readResponsePrefix(patchResponse, "commit patch"),
-    verifyGit(origin, head, environment),
-  ]);
-  if (!patchPrefix.startsWith(`From ${head} `)) {
-    throw new Error("local commit patch did not begin at the current Git revision");
-  }
-}
-
-function isRepositoryMetadata(value, head) {
-  return value != null
-    && typeof value === "object"
-    && value.repository != null
-    && typeof value.repository === "object"
-    && value.repository.head === head
-    && typeof value.repository.branch === "string"
-    && Number.isSafeInteger(value.repository.indexedCommits)
-    && value.repository.indexedCommits > 0
-    && Number.isSafeInteger(value.repository.commitPageSize)
-    && value.repository.commitPageSize > 0
-    && value.repository.commitPageSize <= 32
-    && typeof value.generatedAt === "string";
-}
-
-function isCommitScopeCounts(value, total) {
-  return value != null
-    && typeof value === "object"
-    && value.all === total
-    && ["eval", "fix", "docs", "perf"].every((scope) =>
-      Number.isSafeInteger(value[scope])
-      && value[scope] >= 0
-      && value[scope] <= total
-    );
-}
-
-function isCommitPage(value, expectedHashes) {
-  return Array.isArray(value)
-    && value.length === expectedHashes.length
-    && value.every((commit, index) =>
-      commit != null
-      && typeof commit === "object"
-      && commit.hash === expectedHashes[index]
-      && typeof commit.shortHash === "string"
-      && typeof commit.author === "string"
-      && typeof commit.authoredAt === "string"
-      && typeof commit.subject === "string"
-      && typeof commit.body === "string"
-      && isStringArray(commit.parents)
-      && isStringArray(commit.refs)
-      && Array.isArray(commit.files)
-      && isCommitStats(commit.stats)
-    );
-}
-
-function isStringArray(value) {
-  return Array.isArray(value) && value.every((item) => typeof item === "string");
-}
-
-function isCommitStats(value) {
-  return value != null
-    && typeof value === "object"
-    && ["files", "additions", "deletions"].every((field) =>
-      Number.isSafeInteger(value[field]) && value[field] >= 0
-    );
-}
-
-async function requireResponseContent(response, name) {
-  const reader = response.body?.getReader();
-  if (!reader) throw new Error(`${name} verification returned no body`);
-  try {
-    while (true) {
-      const next = await reader.read();
-      if (next.done) throw new Error(`${name} verification returned an empty body`);
-      if (next.value.byteLength > 0) return;
-    }
-  } finally {
-    await reader.cancel().catch(() => {});
-  }
-}
-
-async function readResponsePrefix(response, name, limit = 256) {
-  const reader = response.body?.getReader();
-  if (!reader) throw new Error(`${name} verification returned no body`);
-  const chunks = [];
-  let total = 0;
-  try {
-    while (total < limit) {
-      const next = await reader.read();
-      if (next.done) break;
-      if (next.value.byteLength === 0) continue;
-      const chunk = next.value.slice(0, limit - total);
-      chunks.push(chunk);
-      total += chunk.byteLength;
-      if (chunk.includes(0x0a)) break;
-    }
-  } finally {
-    await reader.cancel().catch(() => {});
-  }
-  if (total === 0) throw new Error(`${name} verification returned an empty body`);
-  const prefix = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    prefix.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return new TextDecoder().decode(prefix);
-}
-
-export async function verifyLocalGitAdvertisement(
-  origin,
-  head,
-  environment = buildChildEnvironment(process.env),
-  execute = run,
-) {
-  const output = await execute("git", [
-    "-c",
-    "credential.helper=",
-    "-c",
-    "protocol.version=2",
-    "ls-remote",
-    "--symref",
-    "--exit-code",
-    new URL("/git", origin).href,
-    "HEAD",
-    "refs/heads/master",
-  ], {
-    capture: true,
-    cwd: webRoot,
-    env: {
-      ...environment,
-      GIT_CONFIG_GLOBAL: process.platform === "win32" ? "NUL" : "/dev/null",
-      GIT_CONFIG_NOSYSTEM: "1",
-      GIT_TERMINAL_PROMPT: "0",
-    },
-  });
-  const lines = new Set(output.trimEnd().split(/\r?\n/));
-  if (
-    lines.size !== 3
-    || !lines.has("ref: refs/heads/master\tHEAD")
-    || !lines.has(`${head}\tHEAD`)
-    || !lines.has(`${head}\trefs/heads/master`)
-  ) {
-    throw new Error("local read-only Git advertisement did not resolve the current HEAD");
   }
 }
 

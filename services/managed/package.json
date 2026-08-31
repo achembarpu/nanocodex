@@ -8,12 +8,11 @@
   },
   "scripts": {
     "build": "wrangler deploy --dry-run --outdir dist",
-    "check": "npm run typecheck && npm test && npm run build",
+    "check": "npm run typecheck && npm test && wrangler deploy --dry-run --outdir dist",
     "dev": "node scripts/dev-brokered.mjs",
     "dev:api-key": "node scripts/dev-brokered.mjs --auth-mode=api_key",
     "dev:subscription": "node scripts/dev-brokered.mjs --auth-mode=chatgpt",
     "e2e:local": "npm run prepare:code-evaluator && node scripts/local-e2e.mjs",
-    "deploy": "npm run prepare:code-evaluator && wrangler deploy --strict",
     "load:durability": "node scripts/durability-load.mjs",
     "fanout": "node scripts/fanout.mjs",
     "mock:openai": "node scripts/mock-openai.mjs",

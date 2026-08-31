@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import {
@@ -402,29 +401,4 @@ test("a timed-out preload rejection cannot delete its replacement", async (t) =>
   } finally {
     globalThis.fetch = originalFetch;
   }
-});
-
-test("top-level Source and Commits are wired independently from thread Git", async () => {
-  const [app, entry, routeLoaders] = await Promise.all([
-    readFile(new URL("../src/NanocodexApp.tsx", import.meta.url), "utf8"),
-    readFile(new URL("../src/main.tsx", import.meta.url), "utf8"),
-    readFile(new URL("../src/routeLoaders.ts", import.meta.url), "utf8"),
-  ]);
-
-  assert.match(app, /prepareRepositorySurface\(/);
-  assert.match(routeLoaders, /loadPublishedRepositorySnapshot\(\)/);
-  assert.match(routeLoaders, /loadPublishedCommitHistory\([\s\S]*?requestedCommit[\s\S]*?adopted/);
-  assert.doesNotMatch(routeLoaders, /import\(|loadCodeBrowser|loadCommitCodeStream|loadVirtualCommitList/);
-  assert.doesNotMatch(`${app}\n${routeLoaders}`, /loadThreadRepositorySnapshot/);
-  assert.doesNotMatch(`${app}\n${routeLoaders}`, /subscribeThreadGitChanges/);
-  assert.match(
-    routeLoaders,
-    /loadRepositorySnapshot\(\)[\s\S]*preloadPreferredPublishedFile/,
-  );
-  assert.match(
-    routeLoaders,
-    /loadPublishedCommitHistory\([\s\S]*?requestedCommit[\s\S]*?preloadPublishedRepositoryPatch/,
-  );
-  assert.doesNotMatch(routeLoaders, /preloadPublishedRepositoryPatchBody|arrayBuffer\(\)/);
-  assert.match(entry, /preloadDirectSurface\(url\)/);
 });

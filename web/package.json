@@ -19,7 +19,8 @@
     "dev:web": "npm run dev",
     "dev:api-key": "npm run dev",
     "dev:subscription": "npm run dev",
-    "test": "npm --prefix ../js/artifacts test && node --experimental-strip-types --test worker/*.test.ts test/*.test.ts scripts/*.test.mjs",
+    "test": "npm --prefix ../js/artifacts test && npm run test:web",
+    "test:web": "node --experimental-strip-types --test worker/*.test.ts test/*.test.ts scripts/*.test.mjs",
     "typecheck": "tsc --noEmit",
     "check:docs": "node scripts/check-docs.mjs",
     "gen:types": "wrangler types",
@@ -28,9 +29,7 @@
     "build:from-wasm": "tsc --noEmit && vite build && npm run check:docs",
     "smoke:mcp": "node --experimental-strip-types scripts/smoke-mcp.mjs",
     "smoke:safari": "node scripts/safari-browser-smoke.mjs",
-    "preview": "vite preview",
-    "deploy": "npm run build && npm run deploy:built",
-    "deploy:built": "wrangler deploy --config dist/nanocodex/wrangler.json --strict --containers-rollout=none"
+    "preview": "vite preview"
   },
   "dependencies": {
     "@cloudflare/containers": "0.3.7",

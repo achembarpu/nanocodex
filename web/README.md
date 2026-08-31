@@ -92,16 +92,13 @@ npm install
 npm run dev
 ```
 
-That one command owns the complete production-shaped local stack. It asks the
-canonical incremental Rust/WASM builder to validate its exact source/tool
-fingerprint and repairs missing, malformed, or stale bindings. On the first run
-it also prepares missing Worker dependencies, applies the local D1 migrations,
-starts the website, managed, egress, and Connect API Workers in one local
-Cloudflare session, and publishes the current committed Git `HEAD`
-through the real repository publisher into local R2 and the repository Durable
-Object. It reports ready only after a generation-pinned Source blob, commit
-metadata and page, patch, Evals, and the read-only `/git` advertisement all
-resolve that `HEAD`. The primary checkout retains Cloudflare state under
+That command validates the incremental Rust/WASM package, prepares missing
+dependencies, builds the terminal package, and starts the website, managed,
+egress, and Connect Workers in one local Cloudflare session. It reports ready
+after the canonical site and Connect health boundaries respond. D1 migrations,
+repository publication, and deeper browser journeys are explicit operations;
+run only the ones owned by the feature being exercised. The primary checkout
+retains Cloudflare state under
 `~/.nanocodex/web-development`; worktrees use instance-scoped children of that
 directory. Their Vite ports, application hosts, Durable Objects, R2, and D1
 state are isolated, so multiple versions can run concurrently.
@@ -210,8 +207,8 @@ Development deliberately has no Vite-only Git shortcut. Source and Commits use
 the same generation-qualified `/api/repository` objects and `/git` protocol as
 production, backed by local R2 and the same publication Durable Object. Dirty
 and untracked working-tree files therefore never leak into those surfaces.
-Restart after committing to publish the new `HEAD`; set `NANOCODEX_REPO` before
-startup to exercise a different committed checkout.
+Run `npm run publish:repository` after committing when those surfaces need the
+new `HEAD`; set `NANOCODEX_REPO` to publish a different committed checkout.
 
 `npm run build` does not inspect Git or generate repository assets. Production
 repository data is published separately to R2 by `npm run
@@ -263,11 +260,7 @@ cannot overwrite a valid generation or bypass its compare-and-swap head.
 Production serves the website indexes, immutable file and patch objects, and a
 read-only Git protocol-v2 endpoint from that publication. Clone the mirror with
 `git clone https://nanocodex.gakonst.workers.dev/git`. GitHub remains the write
-remote. After each current `master` commit passes CI, the website job deploys
-the exact tested Worker with that SHA, waits for `/api/health` to return it as
-`deployment_sha`, publishes the repository generation, and verifies both the
-snapshot and Git protocol advertise the same SHA. An obsolete queued CI run is
-not allowed to deploy or publish.
+remote. Deploy, publication, and verification are separate operator actions.
 
 Each browser thread owns an OPFS working tree and an `origin` Cloudflare Git
 remote on branch `nanocodex`. The Files and Commits surfaces read that thread's
@@ -412,16 +405,9 @@ npm run build
 npm run preview
 ```
 
-Deploy the built root Worker directly with Wrangler. This updates Worker code
-without rebuilding or rolling the existing container image:
-
-```bash
-npm run deploy:built
-```
-
-Pass the exact commit as `DEPLOYMENT_SHA`. Deploy backend and Connect Workers
-first, then root. Deployment verification and repository publication are
-separate explicit operations; follow the behavior matrix in `../AGENTS.md`.
+Deploy the built root Worker with the direct Wrangler command in `../AGENTS.md`.
+Backend and Connect Workers go first; verification and repository publication
+remain separate explicit operations.
 
 Do not publish repository data until the hosted `/api/health` reports that
 exact `deployment_sha`. The publisher enforces this ordering independently. An

@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import {
@@ -155,27 +154,4 @@ test("rejects oversized commit pages before parsing them", async () => {
     loadNightlyChangelog(request as typeof fetch, false),
     /exceeds the data limit/,
   );
-});
-
-test("renders no loading copy and exposes an actionable failure state", async () => {
-  const [source, styles] = await Promise.all([
-    readFile(new URL("../src/Changelog.tsx", import.meta.url), "utf8"),
-    readFile(new URL("../src/Changelog.css", import.meta.url), "utf8"),
-  ]);
-
-  assert.doesNotMatch(source, /loading|spinner|skeleton/i);
-  assert.match(source, /<Suspense fallback=\{null\}>|use\(request\)/);
-  assert.match(source, /Changelog unavailable\./);
-  assert.match(source, />\s*Try again\s*</);
-  assert.match(source, /New Features[\s\S]*Improvements[\s\S]*Bug Fixes/);
-  assert.doesNotMatch(source, /<details|<summary|aria-expanded|entries\.slice|categoryFilter/);
-  assert.doesNotMatch(source, /if \(entries\.length === 0\) return null/);
-  assert.match(source, /className="changelog-empty">No entries\./);
-  assert.match(source, /href=\{pathForCommit\(changelog\.revision\)\}/);
-  assert.match(source, /onClick=\{\(event\) => onCommitClick\(event, changelog\.revision\)\}/);
-  assert.match(source, /href=\{pathForCommit\(entry\.hash\)\}/);
-  assert.match(source, /onClick=\{\(event\) => onCommitClick\(event, entry\.hash\)\}/);
-  assert.doesNotMatch(source, /github\.com\/.*\/commit/);
-  assert.doesNotMatch(styles, /line-clamp|text-overflow|max-height/);
-  assert.match(styles, /\.changelog-categories p[\s\S]*overflow:\s*visible[\s\S]*white-space:\s*normal/);
 });

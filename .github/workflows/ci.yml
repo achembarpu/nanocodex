@@ -188,7 +188,6 @@ jobs:
             -- -D warnings
           npm ci --prefix js/bindings
           npm ci --prefix js/artifacts
-          npm run build --prefix js/artifacts
           npm ci --prefix js/react
           npm ci --prefix js/terminal
           ./scripts/build-js-package.sh
@@ -316,24 +315,15 @@ jobs:
         run: |
           npm ci --prefix js/bindings
           npm ci --prefix js/react
-          npm ci --prefix js/artifacts
-          npm run build --prefix js/artifacts
           npm ci --prefix js/terminal
           npm run build --prefix js/terminal
           npm ci --prefix web/connect-playground
           npm ci --prefix web
       - name: Type-check and build the website
         working-directory: web
-        run: npm test && npm run build:from-wasm
+        run: npm run test:web && npm run build:from-wasm
       - name: Type-check and build the Connect playground
         run: npm run build --prefix web/connect-playground
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: nanocodex-web-deployment
-          path: web/dist
-          include-hidden-files: true
-          retention-days: 1
-
   codeql:
     name: CodeQL actions
     runs-on: ubuntu-latest

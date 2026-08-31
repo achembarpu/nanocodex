@@ -442,115 +442,12 @@ the tool runtime. Their conversational instructions remain profile-specific.
 
 ## Validate and deploy
 
-```sh
-npm run check --prefix services/egress
-npm run check --prefix services/managed
+- Run `npm run check --prefix services/managed` for this boundary.
+- Follow `../../AGENTS.md` for direct Wrangler commands, deploy order, secrets,
+  and the production behavior matrix.
 
-cd services/egress
-npm run deploy:broker
-# Choose the secret required by the fixed mode:
-npx wrangler secret put CODEX_OAUTH_BOOTSTRAP -c wrangler.broker.jsonc
-# or: npx wrangler secret put OPENAI_API_KEY -c wrangler.broker.jsonc
-
-cd services/managed
-npx wrangler secret put NANOCODEX_ADMIN_TOKEN
-npx wrangler secret put NANOCODEX_ROOM_ALLOCATOR_TOKEN
-npx wrangler deploy
-
-cd ../../web
-# Use the NANOCODEX_ROOM_ALLOCATOR_TOKEN value, never the administrator value.
-npx wrangler secret put MULTIPLAYER_ALLOCATOR_TOKEN
-npx wrangler deploy
-```
-
-Generate both backend values from at least 32 random bytes. They must be
-different: `NANOCODEX_ADMIN_TOKEN` is retained for internal room/operator
-administration, while `NANOCODEX_ROOM_ALLOCATOR_TOKEN` can only create a bounded
-room. Raw managed-agent ownership is account-authenticated and does not derive
-credentials from either value. Only the allocator value is copied to the
-website Worker.
-
-### Production deployment
-
-Prepare the evaluator and deploy this Worker directly with `npm run deploy`.
-Deploy egress first and the root Worker after this one. Resource provisioning,
-secret rotation, container rollouts, and behavior verification are separate
-operations; follow `../../AGENTS.md`.
-
-The disposable Cloudflare smoke performs that whole deployment with unique
-names, runs three real room clients plus one real managed-agent turn, and then
-deletes all three ordinary Workers. It sends browser-shaped traffic through the
-public proxy and private `MULTIPLAYER_BACKEND` binding, including a forged
-browser bearer that must be stripped, while the managed Worker has no public
-route. The parent gives the client only lengths and SHA-256 digests of the exact
-provider/admin/allocator/relay values; the client scans every public receipt, cookie, and
-retained frame and fails if any exact secret appears. In subscription mode it uploads only the current
-access token and account metadata, never the local refresh token. It can start a
-local bounded relay through `cloudflared` automatically, or use a fixed
-`NANOCODEX_CODEX_RELAY_URL`:
-
-```sh
-npx wrangler login
-npm run smoke:cloudflare:multiplayer -- --auth-mode=chatgpt
-
-OPENAI_API_KEY='<key>' \
-  npm run smoke:cloudflare:multiplayer -- --auth-mode=api_key
-```
-
-The mode-`0600` broker secrets file and the separate managed-Worker secrets file
-are deleted in `finally`; provider variables are also removed from the
-three-player smoke subprocess. The output reports only the selected non-secret
-mode, replay/model evidence, credential boundary, and cleanup result.
-
-Set `NANOCODEX_AUTH_MODE` in `wrangler.jsonc` to the credential stored in the
-broker. The broker has no public route (`workers_dev = false`); the managed
-Worker's `EGRESS` Service Binding is its only caller. Never configure
-`OPENAI_API_KEY`, a Codex token, an account ID, or an OAuth bootstrap on the
-managed Worker.
-
-At the time this example was validated, the ChatGPT edge rejected direct
-Cloudflare Worker egress with HTTP 403. That is an upstream egress-policy
-boundary, not a WASM or Durable Object failure. A deployed subscription demo
-therefore needs a non-Cloudflare WebSocket relay. Run the included bounded,
-capability-gated relay on such a host:
-
-```sh
-NANOCODEX_EGRESS_PORT=8791 \
-NANOCODEX_EGRESS_CAPABILITY="$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')" \
-  npm run relay:subscription --prefix services/managed
-```
-
-Expose port 8791 with TLS, preserve the printed `/v1/<capability>` path, and set
-the complete public `https://` capability URL as the broker's
-`CODEX_RELAY_URL` secret.
-For a disposable personal demo, a Cloudflare Quick Tunnel can expose the local
-port; use a stable relay under your control for anything long-lived. The relay
-still requires the broker-injected bearer credential in addition to the
-unguessable path, never reads `auth.json`, bounds queued data, and forwards only
-the allowlisted handshake headers to the fixed
-`wss://chatgpt.com/backend-api/codex/responses` destination; no environment
-variable can redirect credentials to another upstream. Set
-`NANOCODEX_EGRESS_CAPABILITY` from a
-protected service environment file to keep the route stable across supervised
-restarts; omit it to generate a new route.
-
-An access-only OAuth bootstrap naturally stops authenticating when it expires.
-For a long-lived deployment, the broker's singleton OAuth Durable Object stores
-a dedicated credential, refreshes it before expiry, and performs one
-revision-guarded refresh and retry when an upstream upgrade returns 401. This
-avoids a refresh-token race when many managed sessions reconnect together.
-Use a dedicated Codex subscription login for the deployment: refresh tokens
-rotate, so sharing one between a local Codex installation and a Worker can
-invalidate either copy. Do not commit, log, or paste `auth.json` wholesale;
-restrict Worker and Durable Object access and follow the account's applicable
-terms.
-
-API-key mode uses the same path: the broker alone stores `OPENAI_API_KEY`, and
-the managed runtime can present only the exact fixed placeholder.
-
-`npm run check` type-checks, runs the Worker-native Durable Object suite
-(including forced eviction with a live hibernatable client socket), and asks
-Wrangler to build the complete WASM deployment without uploading it.
+`npm run check` type-checks, runs the retained Worker and Durable Object
+boundaries, and asks Wrangler to build the deployment without uploading it.
 
 `POST /v1/agents` and every `/v1/agents/<agent-id>` owner route require the same
 account session or account-issued API key. The receipt contains only

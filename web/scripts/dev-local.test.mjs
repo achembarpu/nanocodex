@@ -14,7 +14,6 @@ import {
   acquireLocalDevelopmentLease,
   assertLocalDevelopmentPortAvailable,
   ensureLocalDependencies,
-  ensureLocalEvalSchema,
   ensureLocalOAuthRelay,
   localDevelopmentInstance,
   localDevelopmentOrigin,
@@ -36,12 +35,9 @@ import {
   resolveLocalAuthMode,
   stopLocalStackChildren,
   terminateLocalStackChild,
-  verifyLocalGitAdvertisement,
   verifyLocalHealthResponse,
   verifyLocalConnectHealthResponse,
-  verifyLocalDocumentResponse,
   verifyLocalModelPreconnect,
-  verifyLocalState,
   verifyLocalMultiplayer,
   viteChildConfiguration,
   waitForManagedStack,
@@ -214,33 +210,6 @@ test("local development installs every package required to start the web stack",
   ]);
   assert.deepEqual(connectApi.exactVersionPackages, ["accounts"]);
   assert.equal(requirements.length, 9);
-});
-
-test("local eval bootstrap applies and repairs the canonical D1 schema", async () => {
-  const calls = [];
-  await ensureLocalEvalSchema("/tmp/nanocodex-eval-schema-test", {
-    environment: { PATH: "/usr/bin", OPENAI_API_KEY: "must-not-be-forwarded" },
-    execute: async (...arguments_) => calls.push(arguments_),
-  });
-
-  assert.equal(calls.length, 2);
-  const [migration, repair] = calls;
-  assert.deepEqual(migration[1].slice(-2), [
-    "--config",
-    resolve(fileURLToPath(new URL("..", import.meta.url)), "wrangler.jsonc"),
-  ]);
-  assert.deepEqual(repair[1].slice(-2), [
-    "--config",
-    resolve(fileURLToPath(new URL("..", import.meta.url)), "wrangler.jsonc"),
-  ]);
-  assert.equal(repair[1][repair[1].indexOf("--command") + 1].includes(
-    "CREATE TABLE IF NOT EXISTS worksets",
-  ), true);
-  assert.equal(repair[1][repair[1].indexOf("--command") + 1].includes(
-    "CREATE TABLE IF NOT EXISTS cluster_nodes",
-  ), true);
-  assert.equal(repair[2].env.OPENAI_API_KEY, undefined);
-  assert.equal(repair[2].env.CI, "true");
 });
 
 async function writeDependencyFixture(root, declaredVersion, installedVersion) {
@@ -782,20 +751,20 @@ test("a repeated signal terminates an in-flight detached setup process group", {
   }
 });
 
-test("shutdown terminates publisher and already-running website process groups", {
+test("shutdown terminates setup and already-running website process groups", {
   skip: process.platform === "win32",
 }, async () => {
-  const harness = spawnJsonLineHarness(lifecycleHarnessSource(["website", "publisher"]));
+  const harness = spawnJsonLineHarness(lifecycleHarnessSource(["website", "setup"]));
   try {
     const exited = processExit(harness.child);
     const records = await waitForFixtureRecords(harness, 2);
-    assert.deepEqual(new Set(records.map(({ role }) => role)), new Set(["website", "publisher"]));
+    assert.deepEqual(new Set(records.map(({ role }) => role)), new Set(["website", "setup"]));
 
     assert.equal(harness.child.kill("SIGINT"), true);
     await Promise.race([
       exited,
       new Promise((_, rejectTimeout) => setTimeout(
-        () => rejectTimeout(new Error("publisher orchestrator did not exit after shutdown")),
+        () => rejectTimeout(new Error("setup orchestrator did not exit after shutdown")),
         2_000,
       )),
     ]);
@@ -1192,157 +1161,6 @@ test("managed localhost requires exact non-interactive health and WebSocket atte
   await assert.rejects(
     verifyLocalModelPreconnect(origin, InvalidWebSocket, 1_000),
     /invalid attestation/,
-  );
-});
-
-test("local readiness verifies every advertised application document", async () => {
-  assert.equal(await verifyLocalDocumentResponse(new Response(
-    '<!doctype html><meta name="nanocodex-theme" content="ready">',
-    { headers: { "content-type": "text/html; charset=utf-8" } },
-  ), "Account", ["nanocodex-theme"]), true);
-
-  await assert.rejects(
-    verifyLocalDocumentResponse(Response.json({ error: "not_found" }, { status: 404 }),
-      "Account", ["nanocodex-theme"]),
-    /Account document returned HTTP 404/,
-  );
-  await assert.rejects(
-    verifyLocalDocumentResponse(new Response("plain", {
-      headers: { "content-type": "text/plain" },
-    }), "Connect dialog", ["connect-dialog/src/main.tsx"]),
-    /Connect dialog document did not return HTML/,
-  );
-  await assert.rejects(
-    verifyLocalDocumentResponse(new Response("<!doctype html>", {
-      headers: { "content-type": "text/html" },
-    }), "Connect playground", ["Private playground"]),
-    /Connect playground document omitted its application marker/,
-  );
-});
-
-test("local readiness proves pinned Source, commit, patch, eval, and Git state", async () => {
-  const origin = localDevelopmentOrigin("http://127.0.0.1:55173");
-  const head = "a".repeat(40);
-  const blob = "b".repeat(40);
-  const calls = [];
-  const gitCalls = [];
-  const repository = {
-    branch: "master",
-    commitPageSize: 32,
-    head,
-    indexedCommits: 1,
-  };
-  const generatedAt = "2026-08-23T00:00:00.000Z";
-  const responses = new Map([
-    [`/api/repository/snapshot?generation=${head}`, Response.json({
-      generatedAt,
-      repository,
-      tree: [{
-        path: "README.md",
-        objectId: blob,
-        contentUrl: `/api/repository/blob/${blob}`,
-      }],
-    }, { headers: { "x-repository-generation": head } })],
-    [`/api/repository/commit-index?generation=${head}`, Response.json({
-      generatedAt,
-      hashes: [head],
-      repository,
-      scopeCounts: { all: 1, docs: 0, eval: 0, fix: 0, perf: 0 },
-      version: 1,
-    }, { headers: { "x-repository-generation": head } })],
-    ["/api/evals", Response.json({ schemaVersion: 5, worksets: [] })],
-    [`/api/repository/blob/${blob}`, new Response("# Nanocodex\n")],
-    [`/api/repository/commits?generation=${head}&page=0`, Response.json(
-      [{
-        author: "Nanocodex",
-        authoredAt: generatedAt,
-        body: "",
-        files: [],
-        hash: head,
-        parents: [],
-        refs: ["HEAD -> master"],
-        shortHash: head.slice(0, 7),
-        stats: { additions: 0, deletions: 0, files: 0 },
-        subject: "test commit",
-      }],
-      { headers: { "x-repository-generation": head } },
-    )],
-    [`/api/repository/commits/${head}/0000.diff`, new Response(
-      `From ${head} Mon Sep 17 00:00:00 2001\n`,
-      { headers: { "x-repository-generation": head } },
-    )],
-  ]);
-
-  await verifyLocalState(origin, head, {
-    environment: { PATH: "/bin" },
-    request: async (url) => {
-      const key = `${url.pathname}${url.search}`;
-      calls.push(key);
-      const response = responses.get(key);
-      assert.ok(response, `unexpected readiness request ${key}`);
-      return response;
-    },
-    verifyGit: async (...arguments_) => { gitCalls.push(arguments_); },
-  });
-
-  assert.deepEqual(calls, [
-    `/api/repository/snapshot?generation=${head}`,
-    `/api/repository/commit-index?generation=${head}`,
-    "/api/evals",
-    `/api/repository/blob/${blob}`,
-    `/api/repository/commits?generation=${head}&page=0`,
-    `/api/repository/commits/${head}/0000.diff`,
-  ]);
-  assert.deepEqual(gitCalls, [[
-    origin,
-    head,
-    { PATH: "/bin" },
-  ]]);
-});
-
-test("local Git readiness uses only the provider-free HTTP read advertisement", async () => {
-  const origin = localDevelopmentOrigin("http://127.0.0.1:55173");
-  const head = "a".repeat(40);
-  const executions = [];
-  const advertisement = [
-    "ref: refs/heads/master\tHEAD",
-    `${head}\tHEAD`,
-    `${head}\trefs/heads/master`,
-    "",
-  ].join("\n");
-  await verifyLocalGitAdvertisement(
-    origin,
-    head,
-    { PATH: "/bin" },
-    async (...arguments_) => {
-      executions.push(arguments_);
-      return advertisement;
-    },
-  );
-
-  assert.equal(executions[0][0], "git");
-  assert.deepEqual(executions[0][1].slice(-6), [
-    "ls-remote",
-    "--symref",
-    "--exit-code",
-    "http://127.0.0.1:55173/git",
-    "HEAD",
-    "refs/heads/master",
-  ]);
-  assert.ok(executions[0][1].includes("protocol.version=2"));
-  assert.ok(executions[0][1].includes("credential.helper="));
-  assert.equal(executions[0][1].some((argument) => argument.startsWith("http.sslCAInfo=")), false);
-  assert.equal(executions[0][2].env.GIT_TERMINAL_PROMPT, "0");
-  assert.equal(executions[0][2].env.OPENAI_API_KEY, undefined);
-
-  await assert.rejects(
-    verifyLocalGitAdvertisement(
-      origin,
-      head,
-      { PATH: "/bin" },
-      async () => advertisement.replaceAll(head, "b".repeat(40)),
-    ),
-    /did not resolve the current HEAD/,
   );
 });
 

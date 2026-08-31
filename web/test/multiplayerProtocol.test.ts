@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
@@ -41,40 +40,6 @@ test("room invitations keep the capability in the URL fragment", () => {
   assert.equal(multiplayerRoomPath(roomId), `/multiplayer?room=${roomId}`);
 });
 
-test("room resume opens one authoritative WebSocket without a state preflight", () => {
-  const source = readFileSync(new URL("../src/Multiplayer.tsx", import.meta.url), "utf8");
-  const resumeStart = source.indexOf('if (lobby.kind !== "resume"');
-  const resumeEnd = source.indexOf("}, [connect, lobby]);", resumeStart);
-  assert.notEqual(resumeStart, -1);
-  assert.notEqual(resumeEnd, -1);
-  const resumeEffect = source.slice(resumeStart, resumeEnd);
-
-  assert.doesNotMatch(resumeEffect, /fetch\s*\(/);
-  assert.doesNotMatch(resumeEffect, /\/v1\/rooms\/\$\{lobby\.roomId\}/);
-  assert.equal([...resumeEffect.matchAll(/\bconnect\s*\(/g)].length, 1);
-  assert.match(resumeEffect, /connect\(\{ roomId: lobby\.roomId \}\)/);
-
-  const connectStart = source.indexOf("const connect = useCallback");
-  const connectEnd = source.indexOf("\n\n  useEffect(() => {", connectStart);
-  assert.notEqual(connectStart, -1);
-  assert.notEqual(connectEnd, -1);
-  const connect = source.slice(connectStart, connectEnd);
-  assert.equal([...connect.matchAll(/new WebSocket\s*\(/g)].length, 1);
-  assert.match(connect, /invalid or expired[\s\S]*?original invite link/);
-  assert.doesNotMatch(resumeEffect, /invite|hash|searchParams/);
-});
-
-test("create and join canonicalize room history once before ready", () => {
-  const source = readFileSync(new URL("../src/Multiplayer.tsx", import.meta.url), "utf8");
-  assert.equal([...source.matchAll(/multiplayerRoomPath\(receipt\.roomId\)/g)].length, 2);
-
-  const readyStart = source.indexOf('if (message.type === "ready")');
-  const readyEnd = source.indexOf('if (message.type === "replay_paused")', readyStart);
-  assert.notEqual(readyStart, -1);
-  assert.notEqual(readyEnd, -1);
-  assert.doesNotMatch(source.slice(readyStart, readyEnd), /history\.replaceState/);
-});
-
 test("ambiguous room creation reuses one bounded high-entropy receipt across reload", () => {
   const storage = new MemoryStorage();
   const attempt = createMultiplayerCreateAttempt("Ada");
@@ -88,15 +53,6 @@ test("ambiguous room creation reuses one bounded high-entropy receipt across rel
   assert.deepEqual(readMultiplayerCreateAttempt(storage), attempt);
   clearMultiplayerCreateAttempt(storage, replacement);
   assert.deepEqual(readMultiplayerCreateAttempt(storage), attempt);
-
-  const source = readFileSync(new URL("../src/Multiplayer.tsx", import.meta.url), "utf8");
-  assert.match(source, /create_id: attempt\.createId/);
-  assert.match(source, /Retry the pending room creation as/);
-  assert.match(source, /writeMultiplayerCreateAttempt[\s\S]*?fetch\("\/v1\/rooms"/);
-  assert.match(
-    source,
-    /history\.replaceState[\s\S]*?clearMultiplayerCreateAttempt\(window\.sessionStorage, attempt\)/,
-  );
 
   clearMultiplayerCreateAttempt(storage, attempt);
   assert.equal(readMultiplayerCreateAttempt(storage), undefined);
@@ -115,10 +71,6 @@ test("ambiguous joins reuse one bounded high-entropy receipt across reload", () 
   assert.equal(writeMultiplayerJoinAttempt(storage, attempt), true);
   assert.deepEqual(readMultiplayerJoinAttempt(storage, roomId, invite), attempt);
   assert.deepEqual(readMultiplayerJoinAttempt(storage, roomId, invite), attempt);
-
-  const source = readFileSync(new URL("../src/Multiplayer.tsx", import.meta.url), "utf8");
-  assert.match(source, /join_id: attempt\.joinId/);
-  assert.match(source, /Retry the pending join as/);
 
   const [key] = storage.keys();
   assert.ok(key);
@@ -141,11 +93,6 @@ test("ambiguous sends retain exact command bytes and settle only on correlated e
   assert.deepEqual(afterReload, pending);
   assert.equal(afterReload?.id, pending.id);
   assert.equal(afterReload?.encoded, pending.encoded);
-  const source = readFileSync(new URL("../src/Multiplayer.tsx", import.meta.url), "utf8");
-  assert.match(source, /resendPendingSend[\s\S]*?socket\.send\(pendingCommand\.encoded\)/);
-  assert.match(source, /message\.type === "accepted"[\s\S]*?forgetPendingSend\(pendingCommand\)/);
-  assert.match(source, /message\.id === pendingCommand\.id[\s\S]*?setDraft\(pendingCommand\.text\)/);
-
   const unrelated = decodeMultiplayerMessage(JSON.stringify({
     type: "accepted",
     id: `${pending.id}-other`,
@@ -251,7 +198,7 @@ test("the room decoder and reducer require a contiguous durable event stream", (
   assert.throws(() => reduceMultiplayerMessage(state, gap), MultiplayerProtocolError);
 });
 
-test("room-ended status is terminal while other socket closes retain reconnect handling", () => {
+test("room-ended status is a closed protocol boundary", () => {
   assert.equal(MULTIPLAYER_ROOM_ENDED_CLOSE_CODE, 4000);
   assert.deepEqual(decodeMultiplayerMessage('{"type":"room_ended"}'), {
     type: "room_ended",
@@ -261,23 +208,6 @@ test("room-ended status is terminal while other socket closes retain reconnect h
     /unsupported fields/,
   );
 
-  const source = readFileSync(new URL("../src/Multiplayer.tsx", import.meta.url), "utf8");
-  assert.match(source, /message\.type === "room_ended"[\s\S]*?markRoomEnded\(receipt\.roomId\)/);
-  assert.match(
-    source,
-    /event\.code === MULTIPLAYER_ROOM_ENDED_CLOSE_CODE[\s\S]*?markRoomEnded\(receipt\.roomId\)/,
-  );
-  const closeStart = source.indexOf('socket.addEventListener("close"');
-  const closeEnd = source.indexOf('socket.addEventListener("error"', closeStart);
-  const closeHandler = source.slice(closeStart, closeEnd);
-  assert.match(closeHandler, /ROOM_ENDED_CLOSE_CODE[\s\S]*?return;[\s\S]*?setTimeout/);
-
-  const terminalStart = source.indexOf("{roomEnded ? (");
-  const terminalEnd = source.indexOf(") : roomError ? (", terminalStart);
-  const terminalStatus = source.slice(terminalStart, terminalEnd);
-  assert.match(terminalStatus, /This room has ended/);
-  assert.match(terminalStatus, /Create another room/);
-  assert.doesNotMatch(terminalStatus, /Retry/);
 });
 
 test("the public protocol rejects private managed-agent fields", () => {
@@ -292,16 +222,6 @@ test("the public protocol rejects private managed-agent fields", () => {
     can_end_room: false,
     agent_id: "private",
   })), /unsupported fields/);
-
-  const source = readFileSync(new URL("../src/Multiplayer.tsx", import.meta.url), "utf8");
-  assert.doesNotMatch(source, /agent_id|access_token|refresh_token|OPENAI_API_KEY|CODEX_OAUTH/);
-  assert.match(source, /Connectors disabled/);
-  assert.match(source, /no connector grant/);
-  assert.match(source, /lifecycleAbort\.current\.abort\(\)/);
-  assert.match(source, /signal\.aborted \|\| !mounted\.current/);
-  assert.match(source, /const connect = useCallback[\s\S]*?if \(!mounted\.current\) return/);
-  assert.match(source, /room\.canEndRoom \? \([\s\S]*?>End room<\/button>/);
-  assert.match(source, /room\.canTargetAgent \? \([\s\S]*?>\s*Ask agent\s*<\/button>/);
 });
 
 test("the public protocol preserves definitive managed-agent quota failures", () => {

@@ -7,8 +7,7 @@
     "dev": "vite --host 127.0.0.1",
     "build": "tsc --noEmit && vite build",
     "test": "node --test test/*.test.mjs && vitest run test/*.test.tsx",
-    "preview": "vite preview --host 127.0.0.1",
-    "deploy": "npm run build && wrangler deploy --autoconfig=false --config ./wrangler.jsonc"
+    "preview": "vite preview --host 127.0.0.1"
   },
   "dependencies": {
     "@stripe/stripe-js": "7.9.0",

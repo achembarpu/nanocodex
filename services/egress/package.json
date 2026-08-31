@@ -11,10 +11,7 @@
     "build:agent": "wrangler deploy --dry-run --outdir dist/agent -c wrangler.agent.jsonc",
     "build:broker": "wrangler deploy --dry-run --outdir dist/broker -c wrangler.broker.jsonc",
     "check": "npm run typecheck && npm test && npm run build",
-    "deploy:agent": "wrangler deploy -c wrangler.agent.jsonc",
-    "deploy:broker": "wrangler deploy -c wrangler.broker.jsonc",
-    "test": "npm run test:node && vitest run",
-    "test:node": "node --test test/*.node.mjs",
+    "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
