@@ -47,9 +47,7 @@ export function AgentTerminalView({
   promptIntent,
   retryAgent,
   showToolCalls = true,
-  telemetry = false,
   voice = false,
-  voiceSource,
   voiceOptions,
   welcome,
 }: {
@@ -69,12 +67,8 @@ export function AgentTerminalView({
   promptIntent?: "queue" | "steer";
   retryAgent(): void;
   showToolCalls?: boolean;
-  /** Emits package-owned performance marks and diagnostic logs. Disabled by default. */
-  telemetry?: boolean;
   /** Enables the package-owned microphone control. */
   voice?: boolean;
-  /** Canonical SDK resource used by voice controls when the structural Agent is not normalized. */
-  voiceSource?: Exclude<Parameters<typeof useVoice>[0], undefined>;
   voiceOptions?: Omit<UseVoiceParameters, "enabled">;
   welcome?: string;
 }) {
@@ -105,18 +99,16 @@ export function AgentTerminalView({
           promptId: firstOutput.id,
           sessionId: firstOutput.sessionId,
         };
-        if (telemetry) {
-          markAgentTiming(
-            "prompt.submit_to_first_token",
-            Math.max(0, firstOutput.timestamp - firstOutput.submittedAt),
-            timingContext,
-          );
-          markAgentTiming(
-            "prompt.run_started_to_first_token",
-            Math.max(0, firstOutput.timestamp - firstOutput.runStartedAt),
-            timingContext,
-          );
-        }
+        markAgentTiming(
+          "prompt.submit_to_first_token",
+          Math.max(0, firstOutput.timestamp - firstOutput.submittedAt),
+          timingContext,
+        );
+        markAgentTiming(
+          "prompt.run_started_to_first_token",
+          Math.max(0, firstOutput.timestamp - firstOutput.runStartedAt),
+          timingContext,
+        );
       },
     });
     onTerminalEvent?.(observedEvent);
@@ -126,26 +118,25 @@ export function AgentTerminalView({
       pendingRootPrompts.current.length = 0;
       currentRootPrompt.current = undefined;
       setReadySessionId(observedEvent.sessionId);
-      if (telemetry) markAgentTiming("terminal.ready");
+      markAgentTiming("terminal.ready");
     } else if (observedEvent.type === "controller.detached"
       && typeof observedEvent.sessionId === "string") {
       setReadySessionId((current) => current === observedEvent.sessionId ? undefined : current);
     } else if (observedEvent.type === "prompt.accepted"
       && typeof observedEvent.input === "string") {
       onConversationActivity(observedEvent.input);
-      if (telemetry) markAgentTiming("prompt.accepted");
+      markAgentTiming("prompt.accepted");
     }
-  }, [agent?.sessionId, onConversationActivity, onTerminalEvent, telemetry]);
+  }, [agent?.sessionId, onConversationActivity, onTerminalEvent]);
   const controller = useAgentController(agent, {
     maxEntries,
     visible: mode !== "hidden",
     onEvent: handleControllerEvent,
   });
-  const resolvedVoiceSource = voiceSource ?? agent?.voiceSource;
-  const voiceState = useVoice(resolvedVoiceSource, {
-    ...voiceOptions,
-    enabled: voice && resolvedVoiceSource !== undefined && mode !== "hidden",
-  });
+  const voiceState = useVoice(
+    agent?.voiceSource ?? (agent as Parameters<typeof useVoice>[0]),
+    { ...voiceOptions, enabled: voice && mode !== "hidden" },
+  );
   const maxVoiceEntries = Number.isSafeInteger(maxEntries) && (maxEntries ?? 0) > 0
     ? maxEntries!
     : 200;
@@ -232,10 +223,8 @@ export function AgentTerminalView({
     <TerminalTranscriptSurface
       composer={(
         <TerminalComposer
-          controls={((voice && resolvedVoiceSource) || controls) ? <>
-            {voice && resolvedVoiceSource
-              ? <VoiceControl agentReady={agentStatus === "ready"} voice={voiceState} />
-              : null}
+          controls={(voice || controls) ? <>
+            {voice ? <VoiceControl agentReady={agentStatus === "ready"} voice={voiceState} /> : null}
             {controls?.({ agentReady: agentStatus === "ready" })}
           </> : undefined}
           draft={touchDraft}
