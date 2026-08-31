@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import type { ToolContext, Turn } from "nanocodex/host";
+import type { AgentTurn } from "nanocodex/connect";
+import type { ToolContext } from "nanocodex/host";
 import { createPageAgent, type PageAgentSession } from "../../lib/agent";
 import {
   connectNanocodex,
@@ -29,7 +30,7 @@ export function App() {
   const [kept, setKept] = useState("");
   const [saved, setSaved] = useState<StoredSiteRecipe[]>([]);
   const sessionRef = useRef<PageAgentSession | undefined>(undefined);
-  const turnRef = useRef<Turn | undefined>(undefined);
+  const turnRef = useRef<AgentTurn | undefined>(undefined);
   const leaseRef = useRef<PageLease | undefined>(undefined);
   const cancelRequestedRef = useRef(false);
 
@@ -119,7 +120,7 @@ export function App() {
     setKept("");
     setPreview(undefined);
     cancelRequestedRef.current = false;
-    let turn: Turn | undefined;
+    let turn: AgentTurn | undefined;
     try {
       const claimed = await sendMessage<PageLease>({
         type: "page.claim",
@@ -130,14 +131,10 @@ export function App() {
       if (!sessionRef.current) {
         sessionRef.current = await createPageAgent({ connection, dispatch: dispatchCleanup });
       }
-      turn = sessionRef.current.agent.turn.prompt({ input });
+      turn = sessionRef.current.prompt(input);
       turnRef.current = turn;
       const result = await turn.result();
-      try {
-        setAnswer(result.finalMessage);
-      } finally {
-        result.dispose();
-      }
+      setAnswer(result.finalMessage);
       const active = leaseRef.current;
       if (active) {
         const info = await sendMessage<PreviewInfo | undefined>({ type: "preview.info", lease_id: active.lease_id });
@@ -147,7 +144,6 @@ export function App() {
       if (!cancelRequestedRef.current) setError(errorMessage(cause));
     } finally {
       if (turnRef.current === turn) turnRef.current = undefined;
-      turn?.dispose();
       setPending(false);
     }
   }
@@ -316,10 +312,10 @@ export function App() {
       {error && <p className="error" role="alert">{error}</p>}
 
       <footer>
-        Nanocodex runs as Rust/WASM in this panel. Inspection includes bounded visible page text,
-        but excludes form values, cookies, and storage. Connect grants one-time model tickets; only
-        declarative CSS recipes can reach the page. Login and grant state persist across browser
-        restarts until you disconnect.
+        Your durable Nanocodex agent runs through your account. This panel attaches only the tab you
+        selected; the page keeps using Chrome's logged-in session, while inspection excludes form
+        values, cookies, and storage. Only declarative CSS recipes can reach the page. Login, agent
+        history, and grant state persist across browser restarts until you disconnect.
       </footer>
     </main>
   );

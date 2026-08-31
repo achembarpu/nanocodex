@@ -1,4 +1,11 @@
-import { Client, Dialog, Transport, type Connection } from "nanocodex/connect";
+import {
+  Client,
+  Dialog,
+  Transport,
+  type ConnectAgent,
+  type Connection,
+} from "nanocodex/connect";
+import type { NamedTool } from "nanocodex/host";
 
 const CONNECT_API = "https://nanocodex-connect-api.gakonst.workers.dev";
 const CONNECT_DIALOG = "https://nanocodex.gakonst.workers.dev/connect-dialog/";
@@ -36,12 +43,12 @@ export function connectNanocodex(): Promise<Connection> {
   return client.connection.connect({
     capabilities: {
       agent: {
-        finalMessages: false,
+        finalMessages: true,
         actionSummaries: false,
         conversationHistory: false,
         rawTraces: false,
       },
-      cloudAccounts: { x: true, chatgpt: true },
+      cloudAccounts: { chatgpt: true },
     },
     permission: "agent.run",
   });
@@ -55,8 +62,11 @@ export function disconnectNanocodex(): Promise<void> {
   return client.connection.disconnect();
 }
 
-export function connectModelTransport(connection: Connection) {
-  return client.model.transport({ connection });
+export function createConnectedAgent(
+  connection: Connection,
+  tools: readonly NamedTool[],
+): Promise<ConnectAgent> {
+  return client.agent.create({ connection, tools });
 }
 
 export type { Connection as NanocodexConnection };
