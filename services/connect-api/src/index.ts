@@ -41,6 +41,12 @@ import {
   managedGrantHeaders,
   type ManagedGrantAssertion,
 } from "./managedGrant.mjs";
+import {
+  CHROME_CLEANUP_APP_TOOL_POLICY,
+  CHROME_EXTENSION_APP_ID,
+  CHROME_EXTENSION_ORIGIN,
+  connectAppToolPolicy,
+} from "./appToolPolicy.mjs";
 
 type WorkerWebSocket = WebSocket & { accept(): void };
 declare const WebSocketPair: {
@@ -75,7 +81,6 @@ export class ConnectNonceStorage extends Kv.NonceStorage {
 }
 
 const PLAYGROUND_ORIGIN = "https://nanocodex-connect-playground.gakonst.workers.dev";
-const CHROME_EXTENSION_ORIGIN = "chrome-extension://jpkimkgbgbpcaldbnhlhbkbadmpeffle";
 const CLI_APP_ID = cliApp.id;
 const CLI_APP_ORIGIN = cliApp.origin;
 const DIALOG_ORIGIN = "https://nanocodex.gakonst.workers.dev";
@@ -130,8 +135,6 @@ const MODEL_PROTOCOL = "nanocodex-connect-v1";
 const MODEL_TICKET_PROTOCOL_PREFIX = "nanocodex-ticket.";
 const ACCOUNT_LINK_TTL = 5 * 60;
 const REGISTERED_APP_ID = "atlas-workspace";
-const CHROME_EXTENSION_APP_ID = "nanocodex-chrome";
-const CHROME_CLEANUP_APP_TOOL_POLICY = "nanocodex-chrome-cleanup-v1";
 const MAX_BROKER_BODY_BYTES = 16 * 1024;
 const MAX_CONNECTOR_REQUEST_BODY_BYTES = 256 * 1024;
 const MAX_CONNECTOR_RESPONSE_BODY_BYTES = 1024 * 1024;
@@ -1241,6 +1244,7 @@ async function createConnection(
     throw new ApiFailure(403, "approval_unavailable", "The signed Connect approval changed before it was consumed.");
   }
   const appScope = await scopedAppId(app);
+  const appToolPolicy = connectAppToolPolicy(app);
   const grantId = await digestHex(`grant:${randomSubject()}`);
   const grantCapabilities = [
     "nanocodex.agent",
@@ -1275,9 +1279,7 @@ async function createConnection(
     status: "active",
     expiresAt,
     capabilities: grantCapabilities,
-    ...(appId === CHROME_EXTENSION_APP_ID
-      ? { appToolPolicy: CHROME_CLEANUP_APP_TOOL_POLICY }
-      : {}),
+    ...(appToolPolicy === undefined ? {} : { appToolPolicy }),
     mcpConnections: mcpConnections.map(({ id, name }) => ({ id, name })),
     ...(accessKey ? { accessKey } : {}),
     spentAtomics: "0",

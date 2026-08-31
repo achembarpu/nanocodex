@@ -71,7 +71,8 @@ test("Chrome grants provision and validate a real managed UUID while retaining z
   assert.doesNotMatch(creation, /CHROME_EXTENSION_APP_ID[\s\S]*?agentId\(accountAddress\)/);
   assert.match(creation, /isConnectAgentId\(approval\.durableAgentId\)[\s\S]*?connectManagedAgent\(env, store, appScope, grantAssertion\)/);
   const storedGrant = section("const grant: GrantRecord", "try {");
-  assert.match(storedGrant, /appId === CHROME_EXTENSION_APP_ID[\s\S]*?CHROME_CLEANUP_APP_TOOL_POLICY/);
+  assert.match(source, /const appToolPolicy = connectAppToolPolicy\(app\)/);
+  assert.match(storedGrant, /appToolPolicy === undefined \? \{\} : \{ appToolPolicy \}/);
 
   const provision = section("async function createManagedAgent(", "async function deleteManagedAgent(");
   assert.match(provision, /!isConnectAgentId\(body\.agent_id\)/);
