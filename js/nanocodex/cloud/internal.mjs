@@ -32,7 +32,6 @@ export function connectionFromWire(value) {
   return Object.freeze({
     accountAddress: hex(wire.account_address, "connection.account_address"),
     agentId: string(wire.agent_id, "connection.agent_id"),
-    sessionId: string(wire.session_id, "connection.session_id"),
     grant: Object.freeze({
       id: hex(grant.id, "connection.grant.id"),
       permission: string(grant.permission, "connection.grant.permission"),
