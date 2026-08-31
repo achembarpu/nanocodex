@@ -277,6 +277,7 @@ test("ConnectAgent publishes app tools with only signed hosted MCPs over the tic
   const expiry = Math.floor(Date.now() / 1_000) + 3_600;
   const requests = [];
   const sockets = [];
+  const initialAttachment = new AbortController();
   let appToolDisposals = 0;
   const client = Client.create({
     appId: "grant-mcp-workspace",
@@ -394,6 +395,7 @@ test("ConnectAgent publishes app tools with only signed hosted MCPs over the tic
     let createSettled = false;
     const creating = client.agent.create({
       connection,
+      signal: initialAttachment.signal,
       tools: {
         app_echo: {
           description: "Echo an app-owned value.",
@@ -417,6 +419,8 @@ test("ConnectAgent publishes app tools with only signed hosted MCPs over the tic
     assert.equal(createSettled, false);
     sockets[0].receive({ type: "ready" });
     agent = await creating;
+    initialAttachment.abort(new Error("creation signal is detached after readiness"));
+    assert.equal(sockets[0].readyState, 1);
     const socketUrl = new URL(sockets[0].url);
     assert.equal(socketUrl.pathname, `/v1/grants/${connection.grant.id}/agents/${agentId}/tool-host`);
     assert.equal(socketUrl.searchParams.get("ticket"), "one-use-tool-ticket");
@@ -489,70 +493,12 @@ test("ConnectAgent publishes app tools with only signed hosted MCPs over the tic
 });
 
 test("ConnectAgent creation rejects a terminal tool attachment policy rejection", async () => {
-  const agentId = "019fc927-b280-79a7-8445-1b9996ad2fb0";
-  const expiry = Math.floor(Date.now() / 1_000) + 3_600;
-  const sockets = [];
+  const fixture = localToolAttachmentFixture("rejected-tool-host-workspace");
   let appToolDisposals = 0;
-  const client = Client.create({
-    appId: "rejected-tool-host-workspace",
-    dialog: Dialog.memory(),
-    provider: { request() { throw new Error("wallet should not be used"); } },
-    transport: Transport.from({
-      key: "rejected-tool-host",
-      name: "rejected-tool-host",
-      type: "rejected-tool-host",
-      setup() {
-        return {
-          baseUrl: "https://connect.example",
-          async fetch(input, init) {
-            const request = new Request(input, init);
-            if (new URL(request.url).pathname.endsWith("/tool-host/ticket")) {
-              return Response.json({ ticket: "rejected-tool-ticket", expires_in: 30 });
-            }
-            return Response.json({ error: { message: "unexpected request" } }, { status: 404 });
-          },
-        };
-      },
-    }),
-  });
-  client._setSessionToken("grant-session-test");
-  const connection = connectionFromWire(testConnectionWire({
-    agentId,
-    expiry,
-    keyId: "0x1111111111111111111111111111111111111111",
-    capabilities: ["nanocodex.agent", "agent.output.final", "chatgpt"],
-    mcpConnections: [],
-  }));
-  const OriginalWebSocket = globalThis.WebSocket;
-  globalThis.WebSocket = class {
-    readyState = 1;
-    frames = [];
-    listeners = new Map();
-
-    constructor(url) {
-      this.url = String(url);
-      sockets.push(this);
-    }
-
-    addEventListener(type, listener) {
-      const listeners = this.listeners.get(type) ?? [];
-      listeners.push(listener);
-      this.listeners.set(type, listeners);
-    }
-
-    send(encoded) { this.frames.push(JSON.parse(encoded)); }
-
-    close(code, reason) {
-      if (this.readyState === 3) return;
-      this.readyState = 3;
-      this.closed = { code, reason };
-      for (const listener of this.listeners.get("close") ?? []) listener({ code, reason });
-    }
-  };
 
   try {
-    const creating = client.agent.create({
-      connection,
+    const creating = fixture.client.agent.create({
+      connection: fixture.connection,
       tools: {
         app_echo: {
           description: "Echo.",
@@ -565,11 +511,39 @@ test("ConnectAgent creation rejects a terminal tool attachment policy rejection"
       creating,
       /tool attachment rejected: signed grant rejected catalog/,
     );
-    await waitForConnect(() => sockets[0]?.frames.some(({ type }) => type === "catalog"));
-    sockets[0].close(1008, "signed grant rejected catalog");
+    await waitForConnect(() => fixture.sockets[0]?.frames.some(({ type }) => type === "catalog"));
+    fixture.sockets[0].close(1008, "signed grant rejected catalog");
     await rejected;
   } finally {
-    globalThis.WebSocket = OriginalWebSocket;
+    fixture.restore();
+  }
+  assert.equal(appToolDisposals, 1);
+});
+
+test("ConnectAgent creation aborts while waiting for initial tool attachment readiness", async () => {
+  const fixture = localToolAttachmentFixture("aborted-tool-host-workspace");
+  const controller = new AbortController();
+  const reason = new Error("caller stopped waiting for tool readiness");
+  let appToolDisposals = 0;
+  try {
+    const creating = fixture.client.agent.create({
+      connection: fixture.connection,
+      signal: controller.signal,
+      tools: {
+        app_echo: {
+          description: "Echo.",
+          handler: ({ value }) => value,
+          dispose() { appToolDisposals += 1; },
+        },
+      },
+    });
+    const rejected = assert.rejects(creating, (error) => error === reason);
+    await waitForConnect(() => fixture.sockets[0]?.frames.some(({ type }) => type === "catalog"));
+    controller.abort(reason);
+    await rejected;
+    assert.equal(fixture.sockets[0].closed.code, 1000);
+  } finally {
+    fixture.restore();
   }
   assert.equal(appToolDisposals, 1);
 });
@@ -1642,6 +1616,74 @@ function memoryStorage() {
     getItem(key) { return values.get(key) ?? null; },
     setItem(key, value) { values.set(key, String(value)); },
     removeItem(key) { values.delete(key); },
+  };
+}
+
+function localToolAttachmentFixture(appId) {
+  const agentId = "019fc927-b280-79a7-8445-1b9996ad2fb0";
+  const expiry = Math.floor(Date.now() / 1_000) + 3_600;
+  const sockets = [];
+  const client = Client.create({
+    appId,
+    dialog: Dialog.memory(),
+    provider: { request() { throw new Error("wallet should not be used"); } },
+    transport: Transport.from({
+      key: appId,
+      name: appId,
+      type: appId,
+      setup() {
+        return {
+          baseUrl: "https://connect.example",
+          async fetch(input, init) {
+            const request = new Request(input, init);
+            if (new URL(request.url).pathname.endsWith("/tool-host/ticket")) {
+              return Response.json({ ticket: "local-tool-ticket", expires_in: 30 });
+            }
+            return Response.json({ error: { message: "unexpected request" } }, { status: 404 });
+          },
+        };
+      },
+    }),
+  });
+  client._setSessionToken("grant-session-test");
+  const connection = connectionFromWire(testConnectionWire({
+    agentId,
+    expiry,
+    keyId: "0x1111111111111111111111111111111111111111",
+    capabilities: ["nanocodex.agent", "agent.output.final", "chatgpt"],
+    mcpConnections: [],
+  }));
+  const OriginalWebSocket = globalThis.WebSocket;
+  globalThis.WebSocket = class {
+    readyState = 1;
+    frames = [];
+    listeners = new Map();
+
+    constructor(url) {
+      this.url = String(url);
+      sockets.push(this);
+    }
+
+    addEventListener(type, listener) {
+      const listeners = this.listeners.get(type) ?? [];
+      listeners.push(listener);
+      this.listeners.set(type, listeners);
+    }
+
+    send(encoded) { this.frames.push(JSON.parse(encoded)); }
+
+    close(code, reason) {
+      if (this.readyState === 3) return;
+      this.readyState = 3;
+      this.closed = { code, reason };
+      for (const listener of this.listeners.get("close") ?? []) listener({ code, reason });
+    }
+  };
+  return {
+    client,
+    connection,
+    sockets,
+    restore() { globalThis.WebSocket = OriginalWebSocket; },
   };
 }
 

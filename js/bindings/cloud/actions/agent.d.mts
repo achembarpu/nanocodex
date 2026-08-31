@@ -10,6 +10,7 @@ export function create(
 export declare namespace create {
   type Options = Readonly<{
     connection: Connection;
+    signal?: AbortSignal | undefined;
     tools?: ToolMap | readonly NamedTool[] | undefined;
   }>;
   type ReturnType = ConnectAgent;
