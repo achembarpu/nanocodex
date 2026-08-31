@@ -16,6 +16,7 @@ const SAFE_QUERY = ["code", "error", "error_description"];
 export const LOCAL_OAUTH_RELAY_HOST = "127.0.0.1";
 export const LOCAL_OAUTH_RELAY_PORT = 47_891;
 export const LOCAL_OAUTH_RELAY_ORIGIN = `http://${LOCAL_OAUTH_RELAY_HOST}:${LOCAL_OAUTH_RELAY_PORT}`;
+export const LOCAL_OAUTH_RELAY_HMAC_KEY = "nanocodex-local-oauth-relay-hmac-v1-only";
 
 export function localOAuthRelayCallbackUrl(provider) {
   if (!PROVIDERS.has(provider)) return undefined;

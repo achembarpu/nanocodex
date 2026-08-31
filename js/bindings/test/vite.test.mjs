@@ -23,7 +23,7 @@ test("one Vite plugin gives Cloudflare only exact development Worker bindings", 
   }, (options) => {
     cloudflareOptions = options;
     return [{ name: "vite-plugin-cloudflare" }];
-  });
+  }, { buildJsPackage: async () => {} });
   const plugin = plugins[0];
   try {
     const config = await plugin.config({
@@ -55,7 +55,7 @@ test("production builds neither read local auth nor start development egress", a
   }, (options) => {
     cloudflareOptions = options;
     return [];
-  });
+  }, { buildJsPackage: async () => {} });
   const config = await plugin.config({ plugins: [] }, { command: "build" });
   assert.equal(cloudflareOptions.config({ vars: { PRODUCTION: "yes" } }), undefined);
   assert.equal(typeof config.worker.plugins, "function");

@@ -47,6 +47,10 @@
       "types": "./vite/cloudflare.d.mts",
       "import": "./vite/cloudflare.mjs"
     },
+    "./vite/oauth-relay": {
+      "types": "./vite/oauth-relay.d.mts",
+      "import": "./vite/oauth-relay.mjs"
+    },
     "./workspace": {
       "types": "./runtime/workspace.d.mts",
       "import": "./runtime/workspace.mjs"

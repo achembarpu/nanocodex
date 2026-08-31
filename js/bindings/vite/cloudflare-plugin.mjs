@@ -1,11 +1,12 @@
 import { createNanocodexVitePlugin } from "./plugin.mjs";
 
 /** Internal dependency seam used by provider-free tests. Not package-exported. */
-export function createNanocodexCloudflarePlugins(options, cloudflare) {
+export function createNanocodexCloudflarePlugins(options, cloudflare, integration = {}) {
   let devBindings;
   const core = createNanocodexVitePlugin(
-    { chatGpt: options.chatGpt },
+    { chatGpt: options.chatGpt, oauthRelay: options.oauthRelay },
     {
+      ...integration,
       target: "cloudflare",
       setDevBindings(value) {
         devBindings = value;

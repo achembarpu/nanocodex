@@ -1,6 +1,6 @@
 import { cloudflare } from "@cloudflare/vite-plugin";
 import react from "@vitejs/plugin-react";
-import { nanocodexTools } from "nanocodex/tools/vite";
+import { nanocodex } from "nanocodex/vite";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readFile, writeFile } from "node:fs/promises";
@@ -235,7 +235,7 @@ export default defineConfig({
     applicationRouteFallback(),
     linkPreviewMetadata(),
     deploymentBuildAttestation(),
-    nanocodexTools(),
+    nanocodex({ chatGpt: false, oauthRelay: true }),
     react(),
     cloudflare({
       inspectorPort: 0,
@@ -279,10 +279,6 @@ export default defineConfig({
   },
   worker: {
     format: "es",
-    // Vite creates a separate plugin graph for nested browser Workers. The
-    // Nanocodex browser-tool adapter must therefore be installed in both the
-    // page build above and this Worker build.
-    plugins: () => [nanocodexTools()],
   },
   server: {
     strictPort: true,

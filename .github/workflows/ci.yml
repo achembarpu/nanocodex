@@ -321,7 +321,7 @@ jobs:
           npm ci --prefix web
       - name: Type-check and build the website
         working-directory: web
-        run: npm run test:web && npm run build:from-wasm
+        run: npm run test:web && npm run build
       - name: Type-check and build the Connect playground
         run: npm run build --prefix web/connect-playground
   codeql:

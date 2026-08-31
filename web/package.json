@@ -9,15 +9,12 @@
   "scripts": {
     "sync": "node scripts/sync-nanocodex.mjs",
     "publish:repository": "node scripts/publish-repository.mjs",
-    "wasm": "cd .. && ./scripts/build-js-package.sh",
     "test": "npm --prefix ../js/artifacts test && npm run test:web",
     "test:web": "node --experimental-strip-types --test worker/*.test.ts test/*.test.ts scripts/*.test.mjs",
     "typecheck": "tsc --noEmit",
     "check:docs": "node scripts/check-docs.mjs",
     "gen:types": "wrangler types",
-    "prebuild": "npm run wasm",
     "build": "tsc --noEmit && vite build && npm run check:docs",
-    "build:from-wasm": "tsc --noEmit && vite build && npm run check:docs",
     "preview": "vite preview"
   },
   "dependencies": {

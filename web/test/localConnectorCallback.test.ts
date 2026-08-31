@@ -12,7 +12,7 @@ import {
   LOCAL_OAUTH_RELAY_ORIGIN,
   isLocalNanocodexOrigin,
   localOAuthRelayCallbackRedirect,
-} from "../localOAuthRelayEnvelope.mjs";
+} from "nanocodex/vite/oauth-relay";
 
 const RELAY_KEY = "test-local-oauth-relay-key-that-is-distinct";
 const NOW = 1_800_000_000_000;

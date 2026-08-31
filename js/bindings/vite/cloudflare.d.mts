@@ -8,6 +8,8 @@ export type NanocodexCloudflareViteOptions = Readonly<{
   cloudflare?: PluginConfig | undefined;
   /** Local ChatGPT subscription support is on by default; pass false to disable it. */
   chatGpt?: Pick<NanocodexChatGptViteOptions, "authFile"> | false | undefined;
+  /** Start the fixed local OAuth callback relay while serving. */
+  oauthRelay?: boolean | undefined;
 }>;
 
 /** One call installs browser shims, local subscription brokering, and the Cloudflare Worker plugin. */

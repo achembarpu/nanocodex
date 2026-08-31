@@ -24,6 +24,7 @@ export type LocalMcpOAuthRelayEnvelope = Readonly<{
 export const LOCAL_OAUTH_RELAY_HOST: "127.0.0.1";
 export const LOCAL_OAUTH_RELAY_PORT: 47891;
 export const LOCAL_OAUTH_RELAY_ORIGIN: "http://127.0.0.1:47891";
+export const LOCAL_OAUTH_RELAY_HMAC_KEY: "nanocodex-local-oauth-relay-hmac-v1-only";
 
 export function localOAuthRelayCallbackUrl(provider: string): string | undefined;
 export function localMcpOAuthRelayCallbackUrl(connectionId: string): string | undefined;

@@ -5,28 +5,22 @@
 - Keep operator process here, not in launcher, bootstrap, cleanup, probe, or
   verification scripts. Package scripts may call standard tools or build real
   artifacts; they must not hide multi-step development or release ceremony.
-- Install only the package whose lockfile changed. Generate the WASM package
-  with `./scripts/build-js-package.sh` when Rust or binding inputs change.
+- Install only the package whose lockfile changed. The Nanocodex Vite plugin
+  generates WASM; invoke its builder directly only for package CI or publication.
 - For local web work, apply a changed D1 migration directly with Wrangler, then
   from `web/` start with
   `CLOUDFLARE_ENV=development npx vite --host 127.0.0.1 --port 5173`.
-- Use `http://nanocodex.localhost:5173`; stop Vite with Ctrl-C. For OAuth tests,
-  start `scripts/local-oauth-relay.mjs` directly with the same explicit
-  `NANOCODEX_LOCAL_OAUTH_RELAY_HMAC_KEY` passed to Vite.
+- Use `http://nanocodex.localhost:5173`; stop Vite with Ctrl-C. The Nanocodex
+  Vite plugin owns the local OAuth relay.
 - Production deploys are direct `wrangler deploy` calls. Do not add deploy,
   preflight, rollout, probe, reconciliation, retry, or test wrappers.
 - Build only changed artifacts. Installs, resource creation, D1 migrations,
   secrets, container rollouts, repository publication, and verification are
   separate explicit operations.
-- Set `DEPLOYMENT_SHA=$(git rev-parse HEAD)` and pass
-  `--var DEPLOYMENT_SHA:$DEPLOYMENT_SHA --strict` to every deploy.
 - Deploy only the changed checked-in Wrangler configs in binding dependency
   order; deploy the public root last.
-- A new Cloudflare account needs one explicit cycle-breaking root bootstrap plus
-  declared resources, Durable Object migrations, and secrets.
-  Never put bootstrap in an ordinary release.
 - Wrangler success means uploaded, not healthy. Verify affected customer
-  behavior on the canonical production URL and exact SHA.
+  behavior on the canonical production URL.
 
 ## Behavior matrix
 
@@ -51,6 +45,8 @@
 ## Test policy
 
 - Prefer customer browser E2E and real protocol/service-boundary tests.
+- Do not add one-off test files, smoke scripts, harnesses, or command wrappers;
+  use the owning boundary or direct standard-tool evidence.
 - Keep narrow tests for pure policy/parsing, signed grants, durable commits,
   retries, routing, fencing, isolation, and secret redaction.
 - Delete tests of source text, command strings, deploy implementation, fake
@@ -65,6 +61,8 @@
 - Vite/Cloudflare and the managed platform consume that generated WASM. Keep JS
   to unavoidable host callbacks and platform bindings; do not reimplement
   history, tools, retries, durability, orchestration, or policy in adapters.
+- During JS or managed-product iteration, do not edit Rust unless the user asks
+  for Rust changes. Treat generated WASM as the Rust boundary.
 - The managed platform owns only accounts, grants, durable hosted agents,
   memory/history, secret routing, connectors/MCP, and hosted tools.
 - One passkey account owns agents, memory, connectors, MCPs, and tools.

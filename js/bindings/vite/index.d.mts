@@ -8,6 +8,8 @@ export type NanocodexChatGptViteOptions = Readonly<{
 export type NanocodexViteOptions = Readonly<{
   /** Local ChatGPT subscription support is on by default; pass false to disable it. */
   chatGpt?: NanocodexChatGptViteOptions | false | undefined;
+  /** Start the fixed local OAuth callback relay while serving. */
+  oauthRelay?: boolean | undefined;
 }>;
 
 export type NanocodexVitePlugin = Readonly<{

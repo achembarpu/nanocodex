@@ -3,7 +3,7 @@ import {
   localMcpOAuthRelayCallbackUrl,
   localOAuthRelayCallbackUrl,
   signLocalOAuthRelayState,
-} from "./localOAuthRelayEnvelope.mjs";
+} from "nanocodex/vite/oauth-relay";
 
 export type LocalConnectorFlow = "connect" | "managed";
 

@@ -439,7 +439,8 @@ const agent = await Agent.create({
 
 `browser(...)` runs in a browser Worker because OPFS is a browser capability;
 use the individual factories in server-side Cloudflare Workers. An ordinary
-Vite browser app needs one plugin. `vite dev` reads the current ChatGPT
+Vite browser app needs one plugin. It generates the current Rust/WASM package
+from a source checkout before Vite starts. `vite dev` reads the current ChatGPT
 subscription from the developer's Codex auth file on the server, owns the
 same-origin `/api/responses` socket, and installs compatibility in both page
 and nested Worker graphs:
@@ -475,6 +476,9 @@ so the application's production authentication and agent ownership remain
 unchanged. The refresh token, ID token, full auth document, and credentials
 never enter browser code or responses. `nanocodex()` already includes the
 legacy `nanocodexTools()` compatibility plugin; do not install both.
+
+Managed local applications can pass `oauthRelay: true`; the same plugin then
+owns the fixed provider callback relay for the lifetime of the Vite server.
 
 The browser composition includes `render_artifact` as a normal typed tool. For
 other hosts, compose the same factory with any workspace implementing the

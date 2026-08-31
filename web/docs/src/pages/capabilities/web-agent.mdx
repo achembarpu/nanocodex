@@ -45,8 +45,8 @@ const agent = await Agent.create({
 });
 ```
 
-Vite applications install `nanocodexTools()` in both page and Worker plugin
-graphs. See the [binding browser-tool guide](https://github.com/gakonst/nanocodex/blob/master/js/bindings/README.md#standard-web-and-browser-tools)
+Vite applications install `nanocodex()` once; it generates WASM and owns both
+plugin graphs. See the [binding browser-tool guide](https://github.com/gakonst/nanocodex/blob/master/js/bindings/README.md#standard-web-and-browser-tools)
 and [web architecture](https://github.com/gakonst/nanocodex/blob/master/web/README.md).
 
 ## Current web application
