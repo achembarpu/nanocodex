@@ -12,16 +12,19 @@ parallel extension backend, native host, or extension-to-process protocol.
 1. Open an HTTP(S) page and click the Nanocodex toolbar action. The action opens
    one React side panel and grants temporary `activeTab` access.
 2. Connect Nanocodex. The hosted Connect popup reuses the canonical Nanocodex
-   passkey account and asks only for final replies and ChatGPT-backed agent
-   access. The app-scoped grant is retained in extension-local storage and
-   validated when the panel is reopened.
+   passkey account and asks only for final replies, conversation history, and
+   ChatGPT-backed agent access. Action summaries and raw traces stay hidden.
+   The app-scoped grant is retained in extension-local storage and validated
+   when the panel is reopened.
 3. The Connect SDK opens the account-owned durable agent and exchanges the
    grant for a one-time ticket to its private tool-host socket. The extension's
    `cleanup` catalog is attached to that exact agent and grant. No OpenAI or
    ChatGPT credential enters extension storage or browser traffic.
-4. Submit a cleanup prompt. The hosted agent calls the attached `cleanup` tool
-   with `inspect`, `preview`, and `revert_preview` actions. Follow-on prompts
-   and browser restarts reuse the account-owned conversation.
+4. Chat with the cleanup agent. The panel immediately records each user turn,
+   labels its local inspect/preview activity, streams the reply, and exposes a
+   stop control. The hosted agent calls the attached `cleanup` tool with
+   `inspect`, `preview`, and `revert_preview` actions. Follow-on prompts and
+   browser restarts restore the account-owned conversation.
 5. Inspection returns at most 500 visible semantic DOM candidates and 60,000
    characters. It omits form values, storage, cookies, other tabs, subframes,
    and URL queries/fragments.

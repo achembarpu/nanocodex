@@ -1690,6 +1690,9 @@ async function handleGrantRoute(
   if (action === undefined && request.method === "GET") {
     return Response.json(connectionWire(grant, token));
   }
+  if (action === "reconnect" && request.method === "POST") {
+    return Response.json(connectionWire(grant, token));
+  }
   const mcpAction = action?.match(/^mcp\/([A-Za-z0-9_-]{43})$/);
   if (mcpAction) {
     return grantMcpRequest(request, env, grant, mcpAction[1]!);

@@ -5,6 +5,9 @@ export default defineConfig({
   modules: ["@wxt-dev/module-react"],
   vite: () => ({
     plugins: [nanocodex({ chatGpt: false })],
+    resolve: {
+      dedupe: ["react", "react-dom"],
+    },
   }),
   manifest: {
     name: "Nanocodex for Chrome",

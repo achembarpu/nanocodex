@@ -18,6 +18,19 @@ export const CHROME_ZERO_SPEND_LIMITS = [
   { token: USDC_E, limit: 0n, period: 0 },
 ] as const;
 
+export const CHROME_CONNECT_REQUEST = {
+  capabilities: {
+    agent: {
+      finalMessages: true,
+      actionSummaries: false,
+      conversationHistory: true,
+      rawTraces: false,
+    },
+    cloudAccounts: { chatgpt: true },
+  },
+  permission: "agent.run",
+} as const;
+
 const client = Client.create({
   appId: "nanocodex-chrome",
   auth: {
@@ -51,22 +64,11 @@ const client = Client.create({
 });
 
 export function connectNanocodex(): Promise<Connection> {
-  return client.connection.connect({
-    capabilities: {
-      agent: {
-        finalMessages: true,
-        actionSummaries: false,
-        conversationHistory: false,
-        rawTraces: false,
-      },
-      cloudAccounts: { chatgpt: true },
-    },
-    permission: "agent.run",
-  });
+  return client.connection.connect(CHROME_CONNECT_REQUEST);
 }
 
 export async function reconnectNanocodex(): Promise<Connection | undefined> {
-  const connection = await client.connection.reconnect();
+  const connection = await client.connection.reconnect(CHROME_CONNECT_REQUEST);
   if (!connection || isManagedAgentId(connection.agentId)) return connection;
   await client.connection.disconnect();
   return undefined;

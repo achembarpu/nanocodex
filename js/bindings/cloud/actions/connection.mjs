@@ -377,8 +377,10 @@ export async function reconnect(client, options = {}) {
   client._setSessionToken(session.token);
   try {
     const wire = await client.request({
-      method: "GET",
-      path: `/v1/grants/${session.grantId}`,
+      // POST makes browsers attach their caller Origin. A simple cross-origin
+      // GET from an extension can omit Origin even when the app ID header is set.
+      method: "POST",
+      path: `/v1/grants/${session.grantId}/reconnect`,
       signal: options.signal,
     });
     const connection = connectionFromWire(wire);

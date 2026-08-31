@@ -42,6 +42,20 @@ never scripts, remote resources, invented selectors, or destructive actions. Pre
 reversible changes that directly satisfy the request. A preview is not permanent: tell the user
 what changed and that they can keep or revert it in the panel.`;
 
+const CLEANUP_PROMPT_PREFIX = `${CLEANUP_INSTRUCTIONS}\n\nUser request:\n`;
+
+/** Adds the page-editing policy sent to the model. */
+export function cleanupPrompt(input: string): string {
+  return `${CLEANUP_PROMPT_PREFIX}${input}`;
+}
+
+/** Removes only the exact extension-owned prefix from a displayed transcript. */
+export function visibleCleanupPrompt(input: string): string {
+  return input.startsWith(CLEANUP_PROMPT_PREFIX)
+    ? input.slice(CLEANUP_PROMPT_PREFIX.length)
+    : input;
+}
+
 export const CLEANUP_PARAMETERS = {
   oneOf: [
     {

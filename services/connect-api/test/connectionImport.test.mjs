@@ -68,8 +68,13 @@ test("Connect realtime admission follows the exact grant app origin", () => {
   assert.match(websocket, /requireGrantAppOrigin\(request, grant, ticket\)/);
 
   const grantRoute = section("async function handleGrantRoute(", "async function connectManagedAgent(");
+  const grantAuthentication = grantRoute.indexOf("await authenticatedGrant(request, env.CONNECT_STATE, grantId)");
+  const reconnect = grantRoute.indexOf('action === "reconnect" && request.method === "POST"');
+  assert.ok(grantAuthentication > 0);
+  assert.ok(reconnect > grantAuthentication);
   assert.match(grantRoute, /requireGrantAppOrigin\(request, grant\)/g);
   assert.doesNotMatch(grantRoute, /requirePlaygroundOrigin\(request\)/);
+  assert.match(grantRoute, /action === "reconnect" && request\.method === "POST"/);
 
   const originGuard = section("function requireGrantAppOrigin(", "function requireCallerApp(");
   assert.match(originGuard, /origin !== grant\.appOrigin/);

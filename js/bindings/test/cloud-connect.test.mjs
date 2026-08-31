@@ -1180,7 +1180,7 @@ test("Connect persists, validates, and clears an app-scoped grant session", asyn
         async request(request) {
           requests.push(request);
           if (request.method === "POST" && request.path === "/v1/connections") return wire;
-          if (request.method === "GET" && request.path === `/v1/grants/${wire.grant.id}`) return refreshedWire;
+          if (request.method === "POST" && request.path === `/v1/grants/${wire.grant.id}/reconnect`) return refreshedWire;
           if (request.method === "POST" && request.path === "/v1/connections/disconnect") return undefined;
           throw new Error(`unexpected request ${request.method} ${request.path}`);
         },
@@ -1244,6 +1244,8 @@ test("Connect persists, validates, and clears an app-scoped grant session", asyn
   const restored = await restoredClient.connection.reconnect();
   assert.equal(restored.grant.id, connected.grant.id);
   assert.deepEqual(restored.grant.mcpConnections, [{ id: mcpId, name: "Linear workspace" }]);
+  assert.equal(requests.at(-1).method, "POST");
+  assert.equal(requests.at(-1).path, `/v1/grants/${wire.grant.id}/reconnect`);
   assert.equal(requests.at(-1).headers.authorization, `Bearer ${wire.grant_token}`);
 
   const substitutedStorage = memoryStorage();
