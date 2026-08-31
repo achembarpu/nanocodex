@@ -26,6 +26,7 @@ export function createCloudflareSshCommand(options: Readonly<{
   egress?: Fetcher;
   filesystem(): Workspace;
   resolvePassword?(reference: string): Promise<string>;
+  sshIdentityAllowed?(reference: string): boolean;
   subject?: string;
 }>) {
   const open = options.connect ?? cloudflareConnect as Connect;
@@ -48,7 +49,13 @@ export function createCloudflareSshCommand(options: Readonly<{
           executeWithIdentityReference: (
             request: SshIdentityReferenceRequest,
             context: Readonly<{ signal?: AbortSignal }>,
-          ) => executeBrokeredSsh(options.egress!, options.subject!, request, context.signal),
+          ) => {
+            if (options.sshIdentityAllowed !== undefined
+              && !options.sshIdentityAllowed(request.identityReference)) {
+              throw new Error("SSH identity is not granted for this turn");
+            }
+            return executeBrokeredSsh(options.egress!, options.subject!, request, context.signal);
+          },
         }),
     async openStream(endpoint, signal) {
       if (endpoint instanceof URL) throw new Error("TCP SSH requires a host and port");

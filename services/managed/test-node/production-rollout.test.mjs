@@ -223,6 +223,7 @@ test("managed production config retains the exact private nine-DO topology", asy
     tag: "v6",
     new_sqlite_classes: ["Sandbox"],
   });
+  assert.equal(config.vars.NANOCODEX_COMPUTE_PROVIDER, "cloudflare");
   assert.doesNotMatch(JSON.stringify(config), /NANOCODEX_AUTH_MODE|OPENAI_API_KEY|CODEX_OAUTH_BOOTSTRAP|CODEX_RELAY_URL/);
   assert.deepEqual(managedSecretPayload(adminToken), { NANOCODEX_ADMIN_TOKEN: adminToken });
   assert.deepEqual(webSecretPayload("g".repeat(43)), {

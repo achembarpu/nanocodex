@@ -88,6 +88,7 @@ export async function createManagedComputerRuntime(options: Readonly<{
   computerProvider?: ComputerProviderOption;
   connectorAllowed?: (connector: ManagedEgressConnectorId) => boolean;
   egress: Fetcher;
+  sshIdentityAllowed?: (reference: string) => boolean;
   subject?: string;
   sshPassword?: (reference: string) => Promise<string>;
 }>): Promise<ManagedComputerRuntime> {
@@ -133,6 +134,9 @@ export async function createManagedComputerRuntime(options: Readonly<{
             return mountedFilesystem;
           },
           ...(options.sshPassword === undefined ? {} : { resolvePassword: options.sshPassword }),
+          ...(options.sshIdentityAllowed === undefined
+            ? {}
+            : { sshIdentityAllowed: options.sshIdentityAllowed }),
           ...(options.subject === undefined ? {} : { subject: options.subject }),
         }),
       },
@@ -182,6 +186,16 @@ function createStickyExecutionTool(
   let executionTail = Promise.resolve();
   const execute = async (input: unknown, context: ToolContext) => {
     const parsed = execCommandInput(input);
+    const brokeredSsh = brokeredSshRouting(parsed.cmd);
+    if (brokeredSsh === "protected") {
+      if (inputRequiresNative(parsed)) {
+        return protectedSshError("brokered SSH cannot request native shell execution");
+      }
+      return virtualTool.handler(input, context);
+    }
+    if (brokeredSsh === "invalid") {
+      return protectedSshError("brokered SSH must be one standalone literal ssh command");
+    }
     if (promoted || inputRequiresNative(parsed) || !isVirtualSafeCommand(parsed.cmd, safeCommands)) {
       promoted = true;
       return executeNativeCommand(parsed, context, provider);
@@ -212,6 +226,22 @@ function createStickyExecutionTool(
       return result;
     },
   });
+}
+
+function brokeredSshRouting(command: string): "none" | "protected" | "invalid" {
+  if (!command.includes("IdentityRef")) return "none";
+  const tokens = lexShell(command);
+  if (!tokens || tokens.some(({ kind }) => kind === "operator")) return "invalid";
+  const words = tokens.map(({ value }) => value);
+  if (words[0] !== "ssh") return "invalid";
+  const references = words.filter((value, index) => (
+    index > 0 && words[index - 1] === "-o" && value.startsWith("IdentityRef=")
+  ));
+  return references.length === 1 ? "protected" : "invalid";
+}
+
+function protectedSshError(message: string) {
+  return { output: `${message}\n`, wall_time_seconds: 0, exit_code: 2 };
 }
 
 async function executeNativeCommand(

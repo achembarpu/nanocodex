@@ -4514,6 +4514,7 @@ export class DurableAgentSession extends DurableComputerSession {
       egress: this.env.NANOCODEX,
       ...(multiplayer ? {} : { subject: this.ctx.id.toString() }),
       connectorAllowed: (connector) => this.#activeTurnConnectorAllowed(connector),
+      sshIdentityAllowed: (reference) => this.#activeTurnSshIdentityAllowed(reference),
     });
     const currentAccountInfo = () => {
       const authorization = this.#activeTurnAuthorization();
@@ -4892,6 +4893,13 @@ export class DurableAgentSession extends DurableComputerSession {
     return authorization !== undefined
       && (authorization.connectGrant === undefined
         || authorization.connectGrant.mcpIds.includes(connectionId));
+  }
+
+  #activeTurnSshIdentityAllowed(_reference: string): boolean {
+    const authorization = this.#activeTurnAuthorization();
+    // Account-owned turns may use account identities. Connect grants fail closed
+    // until signed resources can enumerate exact SSH identity references.
+    return authorization !== undefined && authorization.connectGrant === undefined;
   }
 
   #activeTurnHostedToolAllowed(

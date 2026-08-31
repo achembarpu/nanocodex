@@ -107,6 +107,11 @@ durable workspace, shell environment, tool output, or audit log. Direct `-i`
 SSH remains a separate host-owned mode; `IdentityRef` never falls back to a
 workspace file or disables host checking.
 
+Account-owned managed turns may use stored SSH identities. Capability-bound
+Connect turns fail closed for `IdentityRef` until the signed Connect resource
+protocol can enumerate the exact approved SSH identity references; account
+entitlement alone never broadens an existing app grant.
+
 ## Model egress
 
 The managed runtime sends the exact hidden `x-nanocodex-subject` header and the

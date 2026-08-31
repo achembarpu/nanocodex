@@ -66,10 +66,12 @@ describe("Cloudflare Just Bash SSH", () => {
         return Response.json({ stdout: "hello world", stderr: "", exit_code: 0 });
       }),
     } as unknown as Fetcher;
+    const sshIdentityAllowed = vi.fn(() => true);
     const command = createCloudflareSshCommand({
       connect,
       egress,
       filesystem: () => ({ ...emptyWorkspace(), readFile }),
+      sshIdentityAllowed,
       subject: "S".repeat(43),
     });
 
@@ -79,7 +81,28 @@ describe("Cloudflare Just Bash SSH", () => {
     ], context())).resolves.toEqual({ stdout: "hello world", stderr: "", exitCode: 0 });
     expect(readFile).not.toHaveBeenCalled();
     expect(connect).not.toHaveBeenCalled();
+    expect(sshIdentityAllowed).toHaveBeenCalledWith("production");
     expect(egress.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("denies an ungranted brokered identity before private egress", async () => {
+    const egress = { fetch: vi.fn() } as unknown as Fetcher;
+    const command = createCloudflareSshCommand({
+      egress,
+      filesystem: () => emptyWorkspace(),
+      sshIdentityAllowed: () => false,
+      subject: "S".repeat(43),
+    });
+
+    await expect(command.execute([
+      "-o", "IdentityRef=production",
+      "deploy@ssh.example.com", "--", "true",
+    ], context())).resolves.toEqual({
+      stdout: "",
+      stderr: "ssh: SSH identity is not granted for this turn\n",
+      exitCode: 255,
+    });
+    expect(egress.fetch).not.toHaveBeenCalled();
   });
 
   it("reads direct identity files only from workspace paths", async () => {

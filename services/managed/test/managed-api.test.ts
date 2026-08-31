@@ -1136,11 +1136,14 @@ describe("managed agents REST and resumable SSE", () => {
     expect(anonymousCookie).toMatch(/^nanocodex_account=a_[A-Za-z0-9_-]{43}$/);
 
     const originalBroker = testEnv.NANOCODEX;
-    const brokerRequests: Request[] = [];
+    const brokerRequests: Array<{ body: string | null; url: string }> = [];
     testEnv.NANOCODEX = {
       async fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
         const request = new Request(input, init);
-        brokerRequests.push(request);
+        brokerRequests.push({
+          body: request.body === null ? null : await request.text(),
+          url: request.url,
+        });
         return new Response(null, { status: 204 });
       },
     } as Fetcher;
@@ -1245,7 +1248,7 @@ describe("managed agents REST and resumable SSE", () => {
       expect(new URL(brokerRequests[1]!.url).pathname).toBe(
         `/users/${userId}/credentials/ssh/production`,
       );
-      expect(await brokerRequests[1]!.json()).toEqual(sshBody);
+      expect(JSON.parse(brokerRequests[1]!.body!)).toEqual(sshBody);
       expect(brokerRequests[2]?.body).toBeNull();
       expect(brokerRequests[3]?.body).toBeNull();
     } finally {

@@ -25,10 +25,17 @@ describe("managed Computer escalation", () => {
       workspace: computer.workspace,
     });
     const providerExec = vi.fn(baseProvider.exec);
+    const egressFetch = vi.fn(async () => Response.json({
+      stdout: "brokered ssh ok\n",
+      stderr: "",
+      exit_code: 0,
+    }));
     const runtime = await createManagedComputerRuntime({
       computer: computer.client,
       computerProvider: { exec: providerExec, dispose: baseProvider.dispose },
-      egress: { fetch: vi.fn() } as unknown as Fetcher,
+      egress: { fetch: egressFetch } as unknown as Fetcher,
+      sshIdentityAllowed: (reference) => reference === "production",
+      subject: "S".repeat(43),
     });
     const context = {
       callId: "sticky-escalation",
@@ -70,6 +77,22 @@ describe("managed Computer escalation", () => {
       requirements: { capabilities: ["native-process"] },
     });
     expect(providerExec).toHaveBeenCalledTimes(2);
+
+    // IdentityRef remains on the protected host-owned egress path after native promotion.
+    expect(await runtime.tool.handler({
+      cmd: "ssh -p 2222 -o IdentityRef=production deploy@ssh.example.com -- true",
+    }, context)).toMatchObject({ exit_code: 0, output: "brokered ssh ok\n" });
+    expect(providerExec).toHaveBeenCalledTimes(2);
+    expect(egressFetch).toHaveBeenCalledTimes(1);
+
+    expect(await runtime.tool.handler({
+      cmd: "echo unsafe && ssh -o IdentityRef=production deploy@ssh.example.com -- true",
+    }, context)).toMatchObject({
+      exit_code: 2,
+      output: "brokered SSH must be one standalone literal ssh command\n",
+    });
+    expect(providerExec).toHaveBeenCalledTimes(2);
+    expect(egressFetch).toHaveBeenCalledTimes(1);
     expect(runtime.commandNames).toEqual(["gh", "git", "ssh"]);
     expect(runtime.instructions).not.toContain("sandbox escalation");
 

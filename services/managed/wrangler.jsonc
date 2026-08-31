@@ -125,7 +125,8 @@
     }
   ],
   "vars": {
-    "AGENT_IDLE_TIMEOUT_MS": "30000"
+    "AGENT_IDLE_TIMEOUT_MS": "30000",
+    "NANOCODEX_COMPUTE_PROVIDER": "cloudflare"
   },
   "containers": [
     {
