@@ -222,6 +222,7 @@ test("remote MCP stays deferred behind tool_search and executes through Code Mod
 
 test("MCP server availability dynamically gates metadata, discovery, resolution, and calls", async () => {
   let available = false;
+  let listCalls = 0;
   const calls = [];
   const mcp = await createMcpRuntime({
     account: {
@@ -229,6 +230,7 @@ test("MCP server availability dynamically gates metadata, discovery, resolution,
       isAvailable: () => available,
       client: {
         async listTools() {
+          listCalls += 1;
           return {
             tools: [{
               name: "lookup",
@@ -245,6 +247,7 @@ test("MCP server availability dynamically gates metadata, discovery, resolution,
     },
   });
   await mcp.settled();
+  assert.equal(listCalls, 0);
   const name = "mcp__account__lookup";
 
   assert.deepEqual(
@@ -260,6 +263,14 @@ test("MCP server availability dynamically gates metadata, discovery, resolution,
   assert.deepEqual(hidden.structuredResult, []);
 
   available = true;
+  assert.deepEqual(
+    mcp.definitions().map((definition) => definition.type === "tool_search"
+      ? "tool_search"
+      : definition.name),
+    ["tool_search"],
+  );
+  await mcp.settled();
+  assert.equal(listCalls, 1);
   assert.deepEqual(
     mcp.definitions().map((definition) => definition.type === "tool_search"
       ? "tool_search"
@@ -283,6 +294,68 @@ test("MCP server availability dynamically gates metadata, discovery, resolution,
   assert.equal(calls.length, 1);
 });
 
+test("MCP initialization retries after authorization ends during discovery", async () => {
+  let available = true;
+  let attempts = 0;
+  let releaseFirst;
+  let markStarted;
+  const firstStarted = new Promise((resolve) => { markStarted = resolve; });
+  const firstBlocked = new Promise((resolve) => { releaseFirst = resolve; });
+  const mcp = await createMcpRuntime({
+    account: {
+      isAvailable: () => available,
+      client: {
+        async listTools() {
+          attempts += 1;
+          if (attempts === 1) {
+            markStarted();
+            await firstBlocked;
+            if (!available) throw new Error("authorization ended during discovery");
+          }
+          return { tools: [{ name: "lookup", inputSchema: { type: "object" } }] };
+        },
+        async callTool() { return { content: [] }; },
+      },
+    },
+  });
+
+  await firstStarted;
+  available = false;
+  releaseFirst();
+  await mcp.settled();
+  assert.equal(attempts, 1);
+
+  available = true;
+  mcp.definitions();
+  await mcp.settled();
+  assert.equal(attempts, 2);
+  assert.ok(mcp.resolve("mcp__account__lookup"));
+});
+
+test("dynamically authorized MCP initialization retries a transient failure", async () => {
+  let attempts = 0;
+  const mcp = await createMcpRuntime({
+    account: {
+      isAvailable: () => true,
+      client: {
+        async listTools() {
+          attempts += 1;
+          if (attempts === 1) throw new Error("temporary broker outage");
+          return { tools: [{ name: "lookup", inputSchema: { type: "object" } }] };
+        },
+        async callTool() { return { content: [] }; },
+      },
+    },
+  });
+
+  await mcp.settled();
+  assert.equal(attempts, 1);
+  mcp.definitions();
+  await mcp.settled();
+  assert.equal(attempts, 2);
+  assert.ok(mcp.resolve("mcp__account__lookup"));
+});
+
 test("MCP server availability requires a synchronous boolean guard", async () => {
   const client = {
     async listTools() { return { tools: [] }; },
@@ -293,12 +366,8 @@ test("MCP server availability requires a synchronous boolean guard", async () =>
     /MCP server invalid isAvailable must be a function/,
   );
 
-  const asynchronous = await createMcpRuntime({
-    invalid: { client, isAvailable: async () => true },
-  });
-  await asynchronous.settled();
-  assert.throws(
-    () => asynchronous.definitions(),
+  await assert.rejects(
+    createMcpRuntime({ invalid: { client, isAvailable: async () => true } }),
     /MCP server invalid isAvailable must return boolean/,
   );
 });

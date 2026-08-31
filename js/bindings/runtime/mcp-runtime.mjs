@@ -21,55 +21,84 @@ export async function createMcpRuntime(configuration, options = {}) {
   const entries = [];
   const failures = Object.create(null);
   const ownedClients = [];
-  const pendingServers = new Set(servers.map((server) => server.name));
+  const pendingServers = new Set();
   const initializationControllers = new Map();
+  const initializationTasks = new Map();
   const byName = new Map();
   const search = createSearchIndex(entries);
   let closed = false;
 
-  const initialization = Promise.allSettled(servers.map(async (server) => {
+  function startServer(server) {
+    const current = initializationTasks.get(server.name);
+    if (current) return current;
+    delete failures[server.name];
+    pendingServers.add(server.name);
     const controller = new AbortController();
     initializationControllers.set(server.name, controller);
-    try {
-      const { connection, tools } = await initializeServer(
-        server,
-        { ...options, jsonSchemaValidator },
-        controller.signal,
-      );
-      if (closed) {
-        if (connection.owned) await connection.client.close().catch(() => {});
-        return;
-      }
-      const nextEntries = tools
-        .filter((tool) => includesTool(server, tool.name))
-        .map((tool) => createEntry(
+    let retryWhenAvailable = false;
+    const task = (async () => {
+      try {
+        const { connection, tools } = await initializeServer(
           server,
-          connection.client,
-          tool,
-          options.catalogProvider?.(server.name),
-        ));
-      for (const entry of nextEntries) {
-        const existing = byName.get(entry.canonicalName);
-        if (existing) {
-          throw new Error(
-            `MCP tool name collision: ${existing.server.name}/${existing.remoteName} and ${entry.server.name}/${entry.remoteName} both normalize to ${entry.canonicalName}`,
-          );
+          { ...options, jsonSchemaValidator },
+          controller.signal,
+        );
+        if (closed) {
+          if (connection.owned) await connection.client.close().catch(() => {});
+          return;
+        }
+        const nextEntries = tools
+          .filter((tool) => includesTool(server, tool.name))
+          .map((tool) => createEntry(
+            server,
+            connection.client,
+            tool,
+            options.catalogProvider?.(server.name),
+          ));
+        for (const entry of nextEntries) {
+          const existing = byName.get(entry.canonicalName);
+          if (existing) {
+            throw new Error(
+              `MCP tool name collision: ${existing.server.name}/${existing.remoteName} and ${entry.server.name}/${entry.remoteName} both normalize to ${entry.canonicalName}`,
+            );
+          }
+        }
+        if (connection.owned) ownedClients.push(connection.client);
+        for (const entry of nextEntries) {
+          entries.push(entry);
+          byName.set(entry.canonicalName, entry);
+          search.add({ id: entry.canonicalName, searchText: entry.searchText });
+        }
+        entries.sort((left, right) => left.canonicalName.localeCompare(right.canonicalName));
+      } catch (error) {
+        if (!closed) {
+          failures[server.name] = errorMessage(error);
+          // Dynamically authorized servers can lose access or hit a transient
+          // broker failure during lazy discovery. Let a later authorized turn
+          // start a fresh client; fixed public servers keep their established
+          // one-attempt failure behavior.
+          retryWhenAvailable = server.isAvailable !== undefined;
+        }
+      } finally {
+        pendingServers.delete(server.name);
+        initializationControllers.delete(server.name);
+        if (retryWhenAvailable && initializationTasks.get(server.name) === task) {
+          initializationTasks.delete(server.name);
         }
       }
-      if (connection.owned) ownedClients.push(connection.client);
-      for (const entry of nextEntries) {
-        entries.push(entry);
-        byName.set(entry.canonicalName, entry);
-        search.add({ id: entry.canonicalName, searchText: entry.searchText });
-      }
-      entries.sort((left, right) => left.canonicalName.localeCompare(right.canonicalName));
-    } catch (error) {
-      if (!closed) failures[server.name] = errorMessage(error);
-    } finally {
-      pendingServers.delete(server.name);
-      initializationControllers.delete(server.name);
-    }
-  }));
+    })();
+    initializationTasks.set(server.name, task);
+    return task;
+  }
+
+  function startAvailableServers() {
+    if (closed) return [];
+    return servers
+      .filter((server) => isServerAvailable(server))
+      .map((server) => startServer(server));
+  }
+
+  const initialization = Promise.allSettled(startAvailableServers());
   const toolSearch = {
     name: "tool_search",
     parallelSafe: true,
@@ -83,6 +112,7 @@ export async function createMcpRuntime(configuration, options = {}) {
     if (!Number.isInteger(limit) || limit < 1) {
       throw new TypeError("tool_search limit must be a positive integer");
     }
+    startAvailableServers();
     const availableServers = new Set(servers
       .filter((server) => isServerAvailable(server))
       .map((server) => server.name));
@@ -111,6 +141,7 @@ export async function createMcpRuntime(configuration, options = {}) {
   return Object.freeze({
     search: ({ query, limit }) => searchTools(query, limit),
     definitions() {
+      startAvailableServers();
       const availableServers = new Set(servers
         .filter((server) => isServerAvailable(server))
         .map((server) => server.name));
@@ -122,6 +153,7 @@ export async function createMcpRuntime(configuration, options = {}) {
       ];
     },
     resolve(name) {
+      startAvailableServers();
       if (name === "tool_search") return toolSearch;
       const entry = byName.get(name);
       if (!entry || !isServerAvailable(entry.server)) return undefined;
@@ -136,7 +168,8 @@ export async function createMcpRuntime(configuration, options = {}) {
       };
     },
     settled() {
-      return initialization.then(() => undefined);
+      return Promise.all([initialization, Promise.allSettled(startAvailableServers())])
+        .then(() => undefined);
     },
     async close() {
       closed = true;

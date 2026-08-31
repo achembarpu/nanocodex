@@ -17,7 +17,14 @@ import type {
 import { Agent as CloudflareAgent } from "nanocodex/cloudflare";
 import { imageGeneration, updatePlan, viewImage, web } from "nanocodex/tools";
 import { managedCodeEvaluator } from "./code-evaluator";
-import { createDefaultManagedTools } from "./default-mcp";
+import {
+  connectedManagedAccountMcps,
+  createDefaultManagedTools,
+  defaultManagedMcpServers,
+  managedAccountMcpServerName,
+  managedAccountMcpServers,
+  type ManagedAccountMcpConnection,
+} from "./default-mcp";
 import { HostedToolsBroker } from "./hosted-tools-broker";
 import {
   hostedToolCatalogEntryAllowed,
@@ -1262,6 +1269,8 @@ export class DurableAgentSession extends DurableComputerSession {
   readonly #turnInputs = new Map<string, PromptInput>();
   readonly #admissionTasks = new Map<string, Promise<ManagedTurnRow>>();
   #initialAccountContextTask?: Promise<InitialAccountContext | undefined>;
+  #accountMcpConnections?: readonly ManagedAccountMcpConnection[];
+  #accountMcpRefreshTask?: Promise<void>;
   readonly #cancellationTasks = new Map<string, Promise<void>>();
   readonly #hostedTools: HostedToolsBroker;
   readonly #pendingDeviceToolCalls = new Map<string, PendingDeviceToolCall>();
@@ -4179,6 +4188,10 @@ export class DurableAgentSession extends DurableComputerSession {
   async #ensureAgent(): Promise<CloudflareAgent.Agent> {
     if (this.#durabilityExported) throw new Error("durability state was exported");
     if (this.#deleting) throw retryableError("agent is being deleted");
+    const session = this.#session();
+    if (session?.runtime_profile === "managed") {
+      await this.#refreshAccountMcpConnections(session);
+    }
     if (this.#agentShutdownPromise) {
       try {
         await this.#agentShutdownPromise;
@@ -4437,6 +4450,49 @@ export class DurableAgentSession extends DurableComputerSession {
   }
 
 
+  async #refreshAccountMcpConnections(session: SessionRow): Promise<void> {
+    const current = this.#accountMcpRefreshTask;
+    if (current) return current;
+    const refreshing = (async () => {
+      let connected: readonly ManagedAccountMcpConnection[];
+      try {
+        connected = [...await connectedManagedAccountMcps(
+          this.env.NANOCODEX,
+          session.owner_id,
+        )].sort((left, right) => left.id.localeCompare(right.id));
+      } catch (error) {
+        console.warn("managed account MCP listing failed", {
+          error: errorMessage(error),
+          session_id: session.session_id,
+        });
+        if (this.#accountMcpConnections === undefined) {
+          this.#accountMcpConnections = Object.freeze([]);
+        }
+        return;
+      }
+      if (sameAccountMcpConnections(this.#accountMcpConnections, connected)) return;
+      // A construction has already captured the current catalog. Keep the
+      // prior fingerprint so the next safe ensure observes the change and
+      // retires that published runtime instead of permanently accepting a
+      // stale construction.
+      if (this.#agentPromise || this.#agentConstructions.size > 0) return;
+      if (this.#agent
+        && (this.#turns.size > 0 || this.#managedRealtimeSession() !== undefined)) {
+        return;
+      }
+      this.#accountMcpConnections = Object.freeze(connected);
+      if (this.#agent) await this.#shutdownAgent();
+    })();
+    this.#accountMcpRefreshTask = refreshing;
+    try {
+      await refreshing;
+    } finally {
+      if (this.#accountMcpRefreshTask === refreshing) {
+        this.#accountMcpRefreshTask = undefined;
+      }
+    }
+  }
+
   async #createAgent(): Promise<CloudflareAgent.Agent> {
     const constructionStartedAt = performance.now();
     const session = this.#session();
@@ -4469,6 +4525,22 @@ export class DurableAgentSession extends DurableComputerSession {
       toolMode: "code" as const,
       toolProviders: [hostedProvider],
     };
+    const accountMcpConnections = this.#accountMcpConnections ?? [];
+    const accountMcpProviders = new Map(accountMcpConnections.map((connection) => [
+      managedAccountMcpServerName(connection),
+      `mcp:${connection.id}`,
+    ]));
+    const managedMcp = multiplayer
+      ? {}
+      : {
+          ...defaultManagedMcpServers(),
+          ...managedAccountMcpServers(
+            accountMcpConnections,
+            this.env.NANOCODEX,
+            this.ctx.id.toString(),
+            (connectionId) => this.#activeTurnMcpAllowed(connectionId),
+          ),
+        };
     const cloudTools: NamedTool[] = [
       computer.tool,
       ...(multiplayer ? [] : [{
@@ -4604,7 +4676,11 @@ export class DurableAgentSession extends DurableComputerSession {
     try {
       preparedTools = multiplayer
         ? undefined
-        : await createDefaultManagedTools(cloudTools);
+        : await createDefaultManagedTools(
+            cloudTools,
+            managedMcp,
+            (serverName) => accountMcpProviders.get(serverName),
+          );
       let durabilityId = session.session_id;
       try {
         durabilityId = this.ctx.storage.sql.exec<{ state_id: string }>(
@@ -4789,7 +4865,10 @@ export class DurableAgentSession extends DurableComputerSession {
   }
 
   #activeTurnAuthorization(): TurnAuthorization | undefined {
-    const turnId = this.#eventTurnId;
+    // The driver requests tool definitions before emitting run.started. The
+    // head of the owned admission queue is therefore the exact authorization
+    // for discovery/initialization until event attribution becomes active.
+    const turnId = this.#eventTurnId ?? this.#eventTurnQueue[0];
     const row = turnId === undefined ? undefined : this.#managedTurn(turnId);
     try { return row ? parseTurnAuthorization(row.authorization_json) : undefined; }
     catch { return undefined; }
@@ -4800,6 +4879,13 @@ export class DurableAgentSession extends DurableComputerSession {
     return authorization !== undefined
       && (authorization.connectGrant === undefined
         || authorization.connectGrant.connectors.includes(connector));
+  }
+
+  #activeTurnMcpAllowed(connectionId: string): boolean {
+    const authorization = this.#activeTurnAuthorization();
+    return authorization !== undefined
+      && (authorization.connectGrant === undefined
+        || authorization.connectGrant.mcpIds.includes(connectionId));
   }
 
   #activeTurnHostedToolAllowed(
@@ -7176,6 +7262,17 @@ function closeSocket(socket: WebSocket, code: number, reason: string): void {
   const standard = code >= 1000 && code <= 1014 && ![1004, 1005, 1006].includes(code);
   const safeCode = standard || (code >= 3000 && code <= 4999) ? code : 1011;
   socket.close(safeCode, reason.slice(0, 120));
+}
+
+function sameAccountMcpConnections(
+  left: readonly ManagedAccountMcpConnection[] | undefined,
+  right: readonly ManagedAccountMcpConnection[],
+): boolean {
+  return left !== undefined
+    && left.length === right.length
+    && left.every((connection, index) => (
+      connection.id === right[index]?.id && connection.name === right[index]?.name
+    ));
 }
 
 async function readBoundedText(response: Response, limit: number): Promise<string> {
