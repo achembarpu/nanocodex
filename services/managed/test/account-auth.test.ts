@@ -19,7 +19,7 @@ const SECOND_PUBLIC_KEY = "0x05060708";
 const LOCAL_PASSKEY_COOKIE = "nanocodex_local_passkey";
 const CONNECT_GRANT_ID = `0x${"a".repeat(64)}`;
 const CONNECT_MCP_ID = "m".repeat(43);
-const CHROME_APP_TOOL_POLICY = "nanocodex-chrome-cleanup-v1";
+const APP_TOOL_CATALOG_DIGEST = `0x${"c".repeat(64)}`;
 
 describe("Connect grant assertions", () => {
   it("projects the trusted assertion to the exact live capability and tool slice", async () => {
@@ -29,7 +29,7 @@ describe("Connect grant assertions", () => {
         capabilities: ["agents:read", "agents:write", "tools:use", "memory:read"],
         connectors: ["github", "chatgpt"],
         mcpIds: [CONNECT_MCP_ID],
-        appToolPolicy: CHROME_APP_TOOL_POLICY,
+        appToolCatalogDigest: APP_TOOL_CATALOG_DIGEST,
       }),
     }), env);
 
@@ -41,7 +41,7 @@ describe("Connect grant assertions", () => {
         grantId: CONNECT_GRANT_ID,
         connectors: ["github", "chatgpt"],
         mcpIds: [CONNECT_MCP_ID],
-        appToolPolicy: CHROME_APP_TOOL_POLICY,
+        appToolCatalogDigest: APP_TOOL_CATALOG_DIGEST,
       },
     });
   });
@@ -60,11 +60,14 @@ describe("Connect grant assertions", () => {
       .resolves.toBeUndefined();
     await expect(request(connectHeaders({ mcpIds: ["short"] })))
       .resolves.toBeUndefined();
-    await expect(request(connectHeaders({ appToolPolicy: "unapproved-javascript" })))
+    await expect(request(connectHeaders({ appToolCatalogDigest: "not-a-digest" })))
       .resolves.toBeUndefined();
-    const duplicateAppPolicy = connectHeaders({ appToolPolicy: CHROME_APP_TOOL_POLICY });
-    duplicateAppPolicy.append("x-nanocodex-connect-app-tool-policy", CHROME_APP_TOOL_POLICY);
-    await expect(request(duplicateAppPolicy)).resolves.toBeUndefined();
+    const duplicateCatalogDigest = connectHeaders({ appToolCatalogDigest: APP_TOOL_CATALOG_DIGEST });
+    duplicateCatalogDigest.append(
+      "x-nanocodex-connect-app-tool-catalog-digest",
+      APP_TOOL_CATALOG_DIGEST,
+    );
+    await expect(request(duplicateCatalogDigest)).resolves.toBeUndefined();
   });
 });
 
@@ -464,7 +467,7 @@ function accountEnv(fetch: (request: Request) => Promise<Response>): AccountAuth
 }
 
 function connectHeaders(overrides: Readonly<{
-  appToolPolicy?: string;
+  appToolCatalogDigest?: string;
   capabilities?: readonly string[];
   connectors?: readonly string[];
   mcpIds?: readonly string[];
@@ -477,9 +480,11 @@ function connectHeaders(overrides: Readonly<{
     ),
     "x-nanocodex-connect-connectors": JSON.stringify(overrides.connectors ?? []),
     "x-nanocodex-connect-mcp-ids": JSON.stringify(overrides.mcpIds ?? []),
-    ...(overrides.appToolPolicy === undefined
+    ...(overrides.appToolCatalogDigest === undefined
       ? {}
-      : { "x-nanocodex-connect-app-tool-policy": overrides.appToolPolicy }),
+      : {
+        "x-nanocodex-connect-app-tool-catalog-digest": overrides.appToolCatalogDigest,
+      }),
   });
 }
 

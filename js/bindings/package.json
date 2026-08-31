@@ -95,6 +95,10 @@
       "types": "./tools/index.d.mts",
       "import": "./tools/index.mjs"
     },
+    "./tools/hosted-catalog": {
+      "types": "./tools/hostedCatalog.d.mts",
+      "import": "./tools/hostedCatalog.mjs"
+    },
     "./tools/dataset": {
       "types": "./tools/dataset.d.mts",
       "import": "./tools/dataset.mjs"

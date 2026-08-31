@@ -72,6 +72,7 @@ export function App() {
   const mercatorReady = Boolean(
     connect.agent
     && connection
+    && connection.authorization === "access_key"
     && connection.mpp.balanceStatus === "ready"
     && connection.mpp.balance > 0n,
   );
@@ -294,7 +295,8 @@ export function App() {
                     connection={connection}
                     error={error}
                     isMutating={isMutating}
-                    mppReady={connection.mpp.balanceStatus === "ready"}
+                    mppReady={connection.authorization === "access_key"
+                      && connection.mpp.balanceStatus === "ready"}
                     mercatorReady={mercatorReady}
                     onDismissError={() => setError(undefined)}
                     onFund={addMachineUsd}
@@ -508,6 +510,7 @@ function ConnectionWorkspace({
   onLogout(): void;
   onRevoke(): void;
 }>) {
+  const paidConnection = connection.authorization === "access_key" ? connection : undefined;
   return (
     <>
       <div className="panel-body">
@@ -518,7 +521,7 @@ function ConnectionWorkspace({
           </div>
         ) : null}
 
-        {mppReady ? <div className="balance-card">
+        {paidConnection && mppReady ? <div className="balance-card">
           <div className="mercator-balance-heading">
             <span className="balance-label">MPP available balance</span>
             <span className={mercatorReady ? "mercator-connected" : "mercator-locked"}>
@@ -526,10 +529,10 @@ function ConnectionWorkspace({
             </span>
           </div>
           <div className="balance-value" data-testid="mpp-balance">
-            {formatMachineUsd(connection.mpp.balance)} <span>MACHUSD</span>
+            {formatMachineUsd(paidConnection.mpp.balance)} <span>MACHUSD</span>
           </div>
           <div className="balance-meta">
-            {formatMachineUsd(connection.mpp.spent)} spent of {formatMachineUsd(connection.mpp.limit)} daily limit
+            {formatMachineUsd(paidConnection.mpp.spent)} spent of {formatMachineUsd(paidConnection.mpp.limit)} daily limit
           </div>
         </div> : null}
 
@@ -564,20 +567,24 @@ function ConnectionWorkspace({
           <Detail label="Account" testId="account-address" value={connection.accountAddress} />
           <Detail label="Grant" testId="grant-id" value={connection.grant.id} />
           <Detail label="Capabilities" value={presentGrantCapabilities(connection.grant.capabilities).join(" · ")} />
-          {mppReady ? <Detail
+          {paidConnection && mppReady ? <Detail
             label="Model settlement"
-            value={`${formatMachineUsd(connection.mpp.settlementBalance)} ${connection.mpp.settlementSymbol}`}
+            value={`${formatMachineUsd(paidConnection.mpp.settlementBalance)} ${paidConnection.mpp.settlementSymbol}`}
           /> : null}
-          <Detail label="Access key" testId="access-key" value={connection.accessKey.keyId} />
-          <Detail label="Witness" testId="witness" value={connection.accessKey.witness} />
-          <Detail
-            label="Key expiry"
-            value={new Date(connection.accessKey.expiry * 1_000).toLocaleDateString()}
-          />
-          <Detail
-            label="MPP permission"
-            value={`${formatMachineUsd(connection.mpp.maxPerRequest)} / request · ${formatMachineUsd(connection.mpp.limit)} / day`}
-          />
+          {paidConnection ? (
+            <>
+              <Detail label="Access key" testId="access-key" value={paidConnection.accessKey.keyId} />
+              <Detail label="Witness" testId="witness" value={paidConnection.accessKey.witness} />
+              <Detail
+                label="Key expiry"
+                value={new Date(paidConnection.accessKey.expiry * 1_000).toLocaleDateString()}
+              />
+              <Detail
+                label="MPP permission"
+                value={`${formatMachineUsd(paidConnection.mpp.maxPerRequest)} / request · ${formatMachineUsd(paidConnection.mpp.limit)} / day`}
+              />
+            </>
+          ) : <Detail label="Authorization" value="Hosted — no spending or contract authority" />}
         </dl>
       </details>
 

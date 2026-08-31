@@ -28,8 +28,8 @@ import {
 import { HostedToolsBroker } from "./hosted-tools-broker";
 import {
   hostedToolCatalogEntryAllowed,
-  isConnectAppToolPolicy,
-} from "./app-tool-policy";
+  isAppToolCatalogDigest,
+} from "./app-tool-catalog";
 import type { HostedToolCatalogEntry } from "./hosted-tools-protocol";
 import {
   managedCapacitySnapshot,
@@ -223,7 +223,7 @@ const SESSION_CAPABILITIES_ASSERTION = "x-nanocodex-capabilities";
 const CONNECT_GRANT_ID_ASSERTION = "x-nanocodex-connect-grant-id";
 const CONNECT_CONNECTORS_ASSERTION = "x-nanocodex-connect-connectors";
 const CONNECT_MCP_IDS_ASSERTION = "x-nanocodex-connect-mcp-ids";
-const CONNECT_APP_TOOL_POLICY_ASSERTION = "x-nanocodex-connect-app-tool-policy";
+const CONNECT_APP_TOOL_CATALOG_DIGEST_ASSERTION = "x-nanocodex-connect-app-tool-catalog-digest";
 const MEMORY_ORGANIZATION_ASSERTION = "x-nanocodex-organization-id";
 const MEMORY_TEAM_ASSERTION = "x-nanocodex-team-id";
 const MEMORY_SUBJECT_ASSERTION = "x-nanocodex-subject-id";
@@ -561,11 +561,11 @@ function forwardedPrincipal(headers: Headers): Readonly<{
     const grantId = headers.get(CONNECT_GRANT_ID_ASSERTION);
     const encodedConnectors = headers.get(CONNECT_CONNECTORS_ASSERTION);
     const encodedMcpIds = headers.get(CONNECT_MCP_IDS_ASSERTION);
-    const appToolPolicy = headers.get(CONNECT_APP_TOOL_POLICY_ASSERTION);
+    const appToolCatalogDigest = headers.get(CONNECT_APP_TOOL_CATALOG_DIGEST_ASSERTION);
     const connectAssertions = [grantId, encodedConnectors, encodedMcpIds];
     if (connectAssertions.some((value) => value !== null)
       && connectAssertions.some((value) => value === null)) return undefined;
-    if (appToolPolicy !== null && grantId === null) return undefined;
+    if (appToolCatalogDigest !== null && grantId === null) return undefined;
     authorization = parseTurnAuthorization(JSON.stringify({
       capabilities: JSON.parse(encodedCapabilities),
       ...(grantId === null ? {} : {
@@ -573,7 +573,7 @@ function forwardedPrincipal(headers: Headers): Readonly<{
           grantId,
           connectors: JSON.parse(encodedConnectors!),
           mcpIds: JSON.parse(encodedMcpIds!),
-          ...(appToolPolicy === null ? {} : { appToolPolicy }),
+          ...(appToolCatalogDigest === null ? {} : { appToolCatalogDigest }),
         },
       }),
     }));
@@ -603,7 +603,7 @@ function isConnectGrantSlice(value: unknown): value is ConnectGrantSlice {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const grant = value as Partial<ConnectGrantSlice>;
   return Object.keys(value).every((key) => (
-    key === "grantId" || key === "connectors" || key === "mcpIds" || key === "appToolPolicy"
+    key === "grantId" || key === "connectors" || key === "mcpIds" || key === "appToolCatalogDigest"
   ))
     && typeof grant.grantId === "string" && /^0x[0-9a-f]{64}$/.test(grant.grantId)
     && isUniqueStringArray(grant.connectors)
@@ -613,7 +613,8 @@ function isConnectGrantSlice(value: unknown): value is ConnectGrantSlice {
     ))
     && isUniqueStringArray(grant.mcpIds) && grant.mcpIds.length <= 16
     && grant.mcpIds.every((id) => /^[A-Za-z0-9_-]{43}$/.test(id))
-    && (grant.appToolPolicy === undefined || isConnectAppToolPolicy(grant.appToolPolicy));
+    && (grant.appToolCatalogDigest === undefined
+      || isAppToolCatalogDigest(grant.appToolCatalogDigest));
 }
 
 function isUniqueStringArray(value: unknown): value is string[] {
@@ -1430,8 +1431,8 @@ export class DurableAgentSession extends DurableComputerSession {
       Date.now(),
     );
     this.#hostedTools = new HostedToolsBroker(this.ctx, {
-      entryAllowed: (entry, connectGrantId) => (
-        this.#activeTurnHostedToolAllowed(entry, connectGrantId)
+      entryAllowed: (entry, connectGrantId, appToolCatalogDigest) => (
+        this.#activeTurnHostedToolAllowed(entry, connectGrantId, appToolCatalogDigest)
       ),
     });
     this.#eventLog = new DurableEventLog<StreamMessage>(this.ctx.storage);
@@ -1910,7 +1911,7 @@ export class DurableAgentSession extends DurableComputerSession {
       return this.#hostedTools.upgrade(
         session.session_id,
         turnAuthorization.connectGrant?.mcpIds,
-        turnAuthorization.connectGrant?.appToolPolicy,
+        turnAuthorization.connectGrant?.appToolCatalogDigest,
         turnAuthorization.connectGrant?.grantId,
       );
     }
@@ -4908,12 +4909,14 @@ export class DurableAgentSession extends DurableComputerSession {
   #activeTurnHostedToolAllowed(
     entry: HostedToolCatalogEntry,
     hostConnectGrantId?: string,
+    hostAppToolCatalogDigest?: string,
   ): boolean {
     const authorization = this.#activeTurnAuthorization();
     if (!authorization) return false;
     return hostedToolCatalogEntryAllowed(
       authorization.connectGrant,
       hostConnectGrantId,
+      hostAppToolCatalogDigest,
       entry,
     );
   }

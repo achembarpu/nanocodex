@@ -1,7 +1,7 @@
 import { toolRouterRuntime } from "../runtime/tool-router.mjs";
 import { utf8ByteLength } from "../runtime/utf8.mjs";
+import { hostedCatalog } from "./hostedCatalog.mjs";
 
-const DEFAULT_TIMEOUT_MS = 120_000;
 const DEFAULT_HEARTBEAT_MS = 30_000;
 const DEFAULT_HANDSHAKE_TIMEOUT_MS = 10_000;
 const DEFAULT_DRAIN_TIMEOUT_MS = 10_000;
@@ -431,32 +431,6 @@ function createClient(endpoint, transport, options, admission) {
     state.admissionReleased = true;
     admission.release();
   }
-}
-
-function hostedCatalog(catalog) {
-  if (catalog.length > 256) throw new RangeError("tool attachment catalogs contain at most 256 tools");
-  return catalog.map((entry) => Object.freeze({
-    provider: entry.provider,
-    remote_name: entry.remote_name,
-    definition: hostedDefinition(entry.definition),
-    parallel_safe: entry.parallel_safe === true,
-    ...(entry.summary === undefined ? {} : { summary: entry.summary }),
-    timeout_ms: entry.timeout_ms ?? DEFAULT_TIMEOUT_MS,
-  }));
-}
-
-function hostedDefinition(definition) {
-  if (definition.type === "custom") return Object.freeze({
-    type: "custom", name: definition.name, description: definition.description, format: definition.format,
-  });
-  return Object.freeze({
-    type: "function",
-    name: definition.name,
-    description: definition.description ?? "Application-defined tool.",
-    strict: definition.strict ?? false,
-    parameters: definition.parameters ?? { type: "object", additionalProperties: true },
-    ...(definition.output_schema === undefined ? {} : { output_schema: definition.output_schema }),
-  });
 }
 
 function wireOutput(value) {

@@ -5,12 +5,18 @@ import {
   reconnectRequestFromConnection,
 } from "../internal.mjs";
 import { InvalidResponseError } from "../Errors.mjs";
+import {
+  hostedAppToolCatalog,
+  hostedToolCatalogDigest,
+} from "../../tools/hostedCatalog.mjs";
 
 const CLOUD_ACCOUNT_PROVIDERS = Object.freeze(["github", "gmail", "gdrive", "x", "chatgpt"]);
 const CONNECTOR_RESOURCE_PREFIX = "urn:nanocodex:connector:";
 const CONNECTORS_RESOURCE_PREFIX = "urn:nanocodex:connectors:";
 const APP_RESOURCE_PREFIX = "urn:nanocodex:app:";
 const APP_ORIGIN_RESOURCE_PREFIX = "urn:nanocodex:origin:";
+const APP_TOOL_CATALOG_RESOURCE_PREFIX = "urn:nanocodex:app-tool-catalog:sha256:";
+const HOSTED_AUTHORIZATION_RESOURCE = "urn:nanocodex:authorization:hosted";
 const MCP_CONNECTION_ID = /^[A-Za-z0-9_-]{43}$/;
 const MCP_CONNECTION_RESOURCE_PREFIX = "urn:nanocodex:mcp:";
 const MCP_FOCUS_RESOURCE_PREFIX = "urn:nanocodex:mcp-focus:";
@@ -36,6 +42,14 @@ export async function connect(client, options) {
   if (typeof permission !== "string" || permission.length === 0) throw new TypeError("connect permission must be a non-empty string");
   const requestedConnectors = normalizeCloudAccounts(options.capabilities?.cloudAccounts);
   const agentVisibility = normalizeAgentVisibility(options.capabilities?.agent);
+  const authorization = options.authorization ?? "access_key";
+  if (authorization !== "access_key" && authorization !== "hosted") {
+    throw new TypeError("connect authorization must be access_key or hosted");
+  }
+  const appToolCatalog = hostedAppToolCatalog(options.tools ?? []);
+  const appToolCatalogDigest = appToolCatalog.length === 0
+    ? undefined
+    : await hostedToolCatalogDigest(appToolCatalog);
   const conversationId = normalizeAgentConversationId(options.conversationId);
   const mcpConnections = normalizeMcpConnections(options.mcpConnections ?? []);
   const focusMcpConnectionId = normalizeMcpFocus(options.focusMcpConnectionId, mcpConnections);
@@ -44,6 +58,8 @@ export async function connect(client, options) {
     mcpConnections,
     permission,
     visibility: agentVisibility,
+    authorization,
+    ...(appToolCatalogDigest ? { appToolCatalogDigest } : {}),
     ...(conversationId ? { conversationId } : {}),
   });
   const auth = withConnectionResources(
@@ -55,20 +71,26 @@ export async function connect(client, options) {
     mcpConnections,
     focusMcpConnectionId,
     conversationId,
+    authorization,
+    appToolCatalogDigest,
   );
   const walletAuth = delegateAuthVerification(auth);
   client.dialog.showWallet?.();
   let connected = false;
   try {
     await client.dialog.waitForWallet?.();
-    const activeAccount = activeAccountAddress(client.provider);
+    const activeAccount = authorization === "access_key"
+      ? activeAccountAddress(client.provider)
+      : undefined;
     const reusable = activeAccount
       ? await registeredAccessKey(client, activeAccount, options.signal)
       : undefined;
     // Reuse only keys already registered with the Connect control plane. Older
     // browser-only keys are replaced in this same passkey ceremony, after which
     // both the private signer and public grant record remain durable.
-    const authorizeAccessKey = options.capabilities?.authorizeAccessKey
+    const authorizeAccessKey = authorization === "hosted"
+      ? undefined
+      : options.capabilities?.authorizeAccessKey
       ?? (reusable
         ? undefined
         : freshAccessKeyAuthorization(client.accessKey?.authorize));
@@ -102,12 +124,14 @@ export async function connect(client, options) {
     const preflightKeyMatchesAccount = reusable
       && typeof activeAccount === "string"
       && activeAccount.toLowerCase() === account.address.toLowerCase();
-    const reusedAccessKey = keyAuthorization
+    const reusedAccessKey = authorization === "hosted"
+      ? undefined
+      : keyAuthorization
       ? undefined
       : preflightKeyMatchesAccount
         ? reusable
         : await registeredAccessKey(client, account.address, options.signal);
-    if (!keyAuthorization && !reusedAccessKey) {
+    if (authorization === "access_key" && !keyAuthorization && !reusedAccessKey) {
       throw new Error("Nanocodex Connect returned no new or reusable access key");
     }
     const wire = await client.request({
@@ -117,7 +141,8 @@ export async function connect(client, options) {
         app_id: client.appId,
         account_address: account.address,
         approval_id: approvalId,
-        ...(keyAuthorization ? {
+        authorization_mode: authorization,
+        ...(authorization === "hosted" ? {} : keyAuthorization ? {
           key_authorization: keyAuthorization,
           signed_key_authorization: account.capabilities?.personalSign?.keyAuthorization,
         } : {
@@ -128,6 +153,7 @@ export async function connect(client, options) {
         ...(mcpConnections.length === 0
           ? {}
           : { requested_mcp_connections: mcpConnections.map(({ id }) => id) }),
+        ...(appToolCatalogDigest ? { requested_app_tool_catalog_digest: appToolCatalogDigest } : {}),
       },
       signal: options.signal,
     });
@@ -225,6 +251,8 @@ function withConnectionResources(
   mcpConnections,
   focusMcpConnectionId,
   conversationId,
+  authorization,
+  appToolCatalogDigest,
 ) {
   const configured = typeof auth === "object" && auth !== null
     ? (auth.resources ?? []).filter((resource) =>
@@ -236,7 +264,9 @@ function withConnectionResources(
       && !resource.startsWith(MCP_CONNECTION_RESOURCE_PREFIX)
       && !resource.startsWith(MCP_FOCUS_RESOURCE_PREFIX)
       && !resource.startsWith(APP_RESOURCE_PREFIX)
-      && !resource.startsWith(APP_ORIGIN_RESOURCE_PREFIX))
+      && !resource.startsWith(APP_ORIGIN_RESOURCE_PREFIX)
+      && !resource.startsWith(APP_TOOL_CATALOG_RESOURCE_PREFIX)
+      && resource !== HOSTED_AUTHORIZATION_RESOURCE)
     : [];
   const visibility = Object.entries(AGENT_VISIBILITY_NAMES)
     .filter(([name]) => agentVisibility[name])
@@ -252,6 +282,10 @@ function withConnectionResources(
       ? []
       : [`${AGENT_VISIBILITY_RESOURCE_PREFIX}${visibility.join(",")}`]),
     ...(conversationId ? [`${AGENT_CONVERSATION_RESOURCE_PREFIX}${conversationId}`] : []),
+    ...(authorization === "hosted" ? [HOSTED_AUTHORIZATION_RESOURCE] : []),
+    ...(appToolCatalogDigest
+      ? [`${APP_TOOL_CATALOG_RESOURCE_PREFIX}${appToolCatalogDigest.slice(2)}`]
+      : []),
     ...mcpConnections.map(({ id }) => `${MCP_CONNECTION_RESOURCE_PREFIX}${id}`),
     ...(focusMcpConnectionId ? [`${MCP_FOCUS_RESOURCE_PREFIX}${focusMcpConnectionId}`] : []),
   ])];
@@ -375,12 +409,20 @@ export async function disconnect(client, options = {}) {
 export async function reconnect(client, options = {}) {
   const session = client._getSession();
   if (!session) return undefined;
+  const appToolCatalog = hostedAppToolCatalog(options.tools ?? []);
+  const requestOptions = {
+    ...options,
+    authorization: options.authorization ?? "access_key",
+    appToolCatalogDigest: appToolCatalog.length === 0
+      ? undefined
+      : await hostedToolCatalogDigest(appToolCatalog),
+  };
   let retainedRequest;
   if (session.connection) {
     try {
       const retained = connectionFromWire(session.connection);
       if (retained.grant.id.toLowerCase() !== session.grantId.toLowerCase()
-        || !connectionMatchesRequest(retained, options)) {
+        || !connectionMatchesRequest(retained, requestOptions)) {
         client._clearSession();
         return undefined;
       }
@@ -405,7 +447,7 @@ export async function reconnect(client, options = {}) {
       client._clearSession();
       return undefined;
     }
-    if (!connectionMatchesRequest(connection, options)
+    if (!connectionMatchesRequest(connection, requestOptions)
       || (retainedRequest && !connectionMatchesRequest(connection, retainedRequest))) {
       client._clearSession();
       return undefined;

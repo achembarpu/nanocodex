@@ -1424,6 +1424,7 @@ function RequestedConnectionContext({ appVisibility, request, requester }: Reado
   request: ConnectionView;
   requester: string;
 }>) {
+  const hostedAuthorization = request.auth.resources.includes(hostedAuthorizationResource);
   return (
     <>
       {request.permission.connectors.length ? <AccountConnectionSection
@@ -1453,7 +1454,9 @@ function RequestedConnectionContext({ appVisibility, request, requester }: Reado
       </AccountConnectionSection> : null}
       <AccountConnectionSection
         eyebrow="Requested access"
-        meta={request.accessKey ? "New delegated key" : "Active delegated key"}
+        meta={hostedAuthorization
+          ? "No delegated key"
+          : request.accessKey ? "New delegated key" : "Active delegated key"}
         title={`${requester} permissions`}
         titleId="requested-access-heading"
       >
@@ -1540,6 +1543,7 @@ function WizardRequestSummary({ appVisibility, request }: Readonly<{
   appVisibility: ReturnType<typeof appVisibilityPermissions>;
   request: ConnectionView;
 }>) {
+  const hostedAuthorization = request.auth.resources.includes(hostedAuthorizationResource);
   return (
     <section className="wizard-request-summary" aria-labelledby="wizard-request-heading">
       <h2 className="sr-only" id="wizard-request-heading">Installation capabilities</h2>
@@ -1565,7 +1569,9 @@ function WizardRequestSummary({ appVisibility, request }: Readonly<{
         <dl className="key-details">
           <Detail label="App" value={request.app.origin} />
           {request.mpp ? <Detail label="Spend" value={`${formatToken(request.mpp.maxPerRequest, request.mpp.symbol)} / request · ${formatToken(request.mpp.limit, request.mpp.symbol)} / day`} /> : null}
-          {request.accessKey ? (
+          {hostedAuthorization ? (
+            <Detail label="Key" value="None — no spending or contract authority" />
+          ) : request.accessKey ? (
             <>
               <Detail label="Key" value={request.accessKey.keyId} />
               <Detail label="Expires" value={formatExpiry(request.accessKey.expiry)} />

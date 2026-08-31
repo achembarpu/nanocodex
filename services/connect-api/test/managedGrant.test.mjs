@@ -60,7 +60,7 @@ test("managed grant headers serialize only the exact delegated slice", () => {
     connectors: ["github"],
     grantId: `0x${"a".repeat(64)}`,
     mcpIds: ["mcp-1"],
-    appToolPolicy: "nanocodex-chrome-cleanup-v1",
+    appToolCatalogDigest: `0x${"c".repeat(64)}`,
   });
 
   assert.deepEqual(JSON.parse(headers["x-nanocodex-connect-capabilities"]), [
@@ -73,8 +73,8 @@ test("managed grant headers serialize only the exact delegated slice", () => {
   assert.deepEqual(JSON.parse(headers["x-nanocodex-connect-connectors"]), ["github"]);
   assert.deepEqual(JSON.parse(headers["x-nanocodex-connect-mcp-ids"]), ["mcp-1"]);
   assert.equal(
-    headers["x-nanocodex-connect-app-tool-policy"],
-    "nanocodex-chrome-cleanup-v1",
+    headers["x-nanocodex-connect-app-tool-catalog-digest"],
+    `0x${"c".repeat(64)}`,
   );
   assert.equal(headers["x-nanocodex-connect-user"], "account-1");
   assert.equal(headers["x-nanocodex-connect-grant-id"], `0x${"a".repeat(64)}`);
@@ -149,7 +149,7 @@ test("managed proxy denies durability unless the exact export route has full sig
   assert.match(proxy, /upstreamMethod === "GET" \|\| upstreamMethod === "HEAD" \? undefined : request\.body/);
 });
 
-test("managed grant headers omit app tools unless the stored grant carries a policy", () => {
+test("managed grant headers omit app tools unless the stored grant carries an exact catalog digest", () => {
   const headers = managedGrantHeaders({
     brokerUserId: "account-1",
     capabilities: ["nanocodex.agent"],
@@ -157,7 +157,7 @@ test("managed grant headers omit app tools unless the stored grant carries a pol
     grantId: `0x${"a".repeat(64)}`,
     mcpIds: [],
   });
-  assert.equal(headers["x-nanocodex-connect-app-tool-policy"], undefined);
+  assert.equal(headers["x-nanocodex-connect-app-tool-catalog-digest"], undefined);
 });
 
 test("every Connect managed request uses the complete grant assertion", () => {
@@ -175,13 +175,13 @@ test("every Connect managed request uses the complete grant assertion", () => {
   );
 });
 
-test("Chrome grants provision and validate a real managed UUID while retaining zero-spend policy", () => {
+test("Chrome grants provision a real managed UUID with hosted no-key authorization", () => {
   const creation = section("const [durableAgent, egressSubject]", "mark(\"capabilities\")");
   assert.doesNotMatch(creation, /CHROME_EXTENSION_APP_ID[\s\S]*?agentId\(accountAddress\)/);
   assert.match(creation, /isConnectAgentId\(approval\.durableAgentId\)[\s\S]*?resolveManagedAgentIdentity[\s\S]*?connectManagedAgent\(env, store, appScope, grantAssertion, conversationId\)/);
   const storedGrant = section("const grant: GrantRecord", "try {");
-  assert.match(source, /const appToolPolicy = connectAppToolPolicy\(app\)/);
-  assert.match(storedGrant, /appToolPolicy === undefined \? \{\} : \{ appToolPolicy \}/);
+  assert.match(source, /approvedAppToolCatalogDigest = appToolCatalogDigestFromResources\(approval\.resources\)/);
+  assert.match(storedGrant, /approvedAppToolCatalogDigest \? \{ appToolCatalogDigest: approvedAppToolCatalogDigest \} : \{\}/);
   assert.match(storedGrant, /agentId: durableAgent\.agentId[\s\S]*?sessionId: durableAgent\.sessionId/);
 
   const provision = section("async function createManagedAgent(", "async function deleteManagedAgent(");
@@ -190,11 +190,9 @@ test("Chrome grants provision and validate a real managed UUID while retaining z
   assert.match(provision, /agentId: body\.agent_id, sessionId: body\.session_id/);
   assert.match(source, /function isConnectAgentId\(value: unknown\)[\s\S]*?\^\[0-9a-f\]/);
 
-  const accessKey = section("function validateGrantAccessKey(", "function hasZeroSpendPolicy(");
-  assert.match(accessKey, /appId === CHROME_EXTENSION_APP_ID[\s\S]*?accessKey\.scopes\.length !== 0[\s\S]*?!hasZeroSpendPolicy\(accessKey\.limits\)/);
-
-  const reuse = section("function registeredAccessKeyMatchesApp(", "function accessKeyStorageKey(");
-  assert.match(reuse, /app\.appId !== CHROME_EXTENSION_APP_ID[\s\S]*?accessKeyWire\([\s\S]*?validateGrantAccessKey\(accessKey, app\.appId, \[\]\)/);
+  const hosted = section("async function connectionCredential(", "function serverTiming(");
+  assert.match(hosted, /approval\.authorization === "hosted"[\s\S]*?cannot carry an access key or MPP authority/);
+  assert.match(source, /hostedAuthorization \? "hosted" : "signed"/);
 
   const signedPolicy = section("function accessKeyWire(", "async function tokenBalance(");
   assert.match(signedPolicy, /authorization\.limits === undefined[\s\S]*?explicitly constrain spending/);
@@ -246,7 +244,7 @@ test("tool-host upgrade uses a one-time exact-origin ticket bound to MCP and app
   assert.match(open, /current\.id\.toLowerCase\(\) === grantId\.toLowerCase\(\)[\s\S]*?current\.agentId === agentId[\s\S]*?current\.appId === grant\.appId[\s\S]*?grantToolHostFingerprint\(current\)/);
 
   const fingerprint = section("async function grantToolHostFingerprint(", "async function openGrantRealtimeWebSocket(");
-  assert.match(fingerprint, /appToolPolicy: grant\.appToolPolicy \?\? null/);
+  assert.match(fingerprint, /appToolCatalogDigest: grant\.appToolCatalogDigest \?\? null/);
   assert.match(fingerprint, /mcpConnections: grant\.mcpConnections \?\? \[\]/);
 
   const supervision = section("function superviseGrantSocket(", "function closeSocket(");

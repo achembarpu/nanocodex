@@ -173,6 +173,18 @@ test("hosted history and memory remain separate signed permissions", () => {
   ]).map(({ label }) => label), ["Hosted history", "Memory read", "Memory write"]);
 });
 
+test("an exact signed browser tool catalog is visible without implying broad tool access", () => {
+  const resource = `urn:nanocodex:app-tool-catalog:sha256:${"c".repeat(64)}`;
+  assert.deepEqual(appVisibilityPermissions([resource]), [{
+    resource,
+    label: "Browser tab tool",
+    detail: "Use only the exact local browser tool catalog approved here",
+  }]);
+  assert.deepEqual(appVisibilityPermissions([
+    "urn:nanocodex:app-tool-catalog:sha256:not-a-digest",
+  ]), []);
+});
+
 test("production Connect policy pins the API and registered embedding app", () => {
   assert.equal(connectApiOrigin({
     challenge: `${productionConnectApiOrigin}/v1/connect/auth/challenge`,

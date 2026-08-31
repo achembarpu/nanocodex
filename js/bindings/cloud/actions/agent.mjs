@@ -2,6 +2,10 @@ import { Agent as ManagedAgent } from "../../managed/index.mjs";
 import { registerManagedAgentAlias } from "../../managed/internal.mjs";
 import { createTools } from "../../tools/Tools.mjs";
 import { AttachmentRejectedError } from "../../tools/attachment.mjs";
+import {
+  hostedAppToolCatalog,
+  hostedToolCatalogDigest,
+} from "../../tools/hostedCatalog.mjs";
 
 const PROVIDER_NAME = "ChatGPT · Nanocodex Connect";
 const MCP_CONNECTION_ID = /^[A-Za-z0-9_-]{43}$/;
@@ -26,6 +30,14 @@ export async function create(client, options) {
     throw new TypeError(`Connect durable agents do not accept app-local ${unsupported}`);
   }
   options.signal?.throwIfAborted();
+
+  const appCatalog = hostedAppToolCatalog(options.tools ?? []);
+  const appCatalogDigest = appCatalog.length === 0
+    ? undefined
+    : await hostedToolCatalogDigest(appCatalog);
+  if (appCatalogDigest !== connection.grant.appToolCatalogDigest) {
+    throw new Error("The app-local tools do not match the exact signed Connect grant.");
+  }
 
   const grantSession = client._captureSession?.();
   if (!grantSession) throw new Error("The Connect authorization session is unavailable.");

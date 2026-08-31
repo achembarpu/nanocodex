@@ -3,9 +3,8 @@ import { fetchResponseWithDeadline } from "./deadline";
 import { Handler, Kv } from "accounts/server";
 import { Address, PublicKey } from "ox";
 import {
-  isConnectAppToolPolicy,
-  type ConnectAppToolPolicy,
-} from "./app-tool-policy";
+  isAppToolCatalogDigest,
+} from "./app-tool-catalog";
 
 const ACCOUNT_COOKIE = "nanocodex_account";
 const LOCAL_PORTABLE_CREDENTIAL_COOKIE = "nanocodex_local_passkey";
@@ -29,7 +28,7 @@ const CONNECT_GRANT_ID_HEADER = "x-nanocodex-connect-grant-id";
 const CONNECT_CAPABILITIES_HEADER = "x-nanocodex-connect-capabilities";
 const CONNECT_CONNECTORS_HEADER = "x-nanocodex-connect-connectors";
 const CONNECT_MCP_IDS_HEADER = "x-nanocodex-connect-mcp-ids";
-const CONNECT_APP_TOOL_POLICY_HEADER = "x-nanocodex-connect-app-tool-policy";
+const CONNECT_APP_TOOL_CATALOG_DIGEST_HEADER = "x-nanocodex-connect-app-tool-catalog-digest";
 const SESSION_OWNER_ASSERTION = "x-nanocodex-owner-id";
 const SESSION_ORGANIZATION_ASSERTION = "x-nanocodex-session-organization-id";
 const SESSION_TEAM_ASSERTION = "x-nanocodex-session-team-id";
@@ -72,7 +71,7 @@ export type ConnectGrantSlice = Readonly<{
   grantId: string;
   connectors: readonly ConnectConnectorId[];
   mcpIds: readonly string[];
-  appToolPolicy?: ConnectAppToolPolicy;
+  appToolCatalogDigest?: `0x${string}`;
 }>;
 
 const OWNER_CAPABILITIES = [
@@ -114,7 +113,7 @@ export function forwardPrincipalAssertions(headers: Headers, principal: Principa
     CONNECT_CAPABILITIES_HEADER,
     CONNECT_CONNECTORS_HEADER,
     CONNECT_MCP_IDS_HEADER,
-    CONNECT_APP_TOOL_POLICY_HEADER,
+    CONNECT_APP_TOOL_CATALOG_DIGEST_HEADER,
   ]) {
     headers.delete(name);
   }
@@ -122,8 +121,8 @@ export function forwardPrincipalAssertions(headers: Headers, principal: Principa
     headers.set(CONNECT_GRANT_ID_HEADER, principal.connectGrant.grantId);
     headers.set(CONNECT_CONNECTORS_HEADER, JSON.stringify(principal.connectGrant.connectors));
     headers.set(CONNECT_MCP_IDS_HEADER, JSON.stringify(principal.connectGrant.mcpIds));
-    if (principal.connectGrant.appToolPolicy !== undefined) {
-      headers.set(CONNECT_APP_TOOL_POLICY_HEADER, principal.connectGrant.appToolPolicy);
+    if (principal.connectGrant.appToolCatalogDigest !== undefined) {
+      headers.set(CONNECT_APP_TOOL_CATALOG_DIGEST_HEADER, principal.connectGrant.appToolCatalogDigest);
     }
   }
 }
@@ -1715,7 +1714,7 @@ function parseConnectGrantAssertions(headers: Headers): Readonly<{
   const capabilities = parseUniqueJsonArray(headers.get(CONNECT_CAPABILITIES_HEADER));
   const connectors = parseUniqueJsonArray(headers.get(CONNECT_CONNECTORS_HEADER));
   const mcpIds = parseUniqueJsonArray(headers.get(CONNECT_MCP_IDS_HEADER));
-  const appToolPolicy = headers.get(CONNECT_APP_TOOL_POLICY_HEADER);
+  const appToolCatalogDigest = headers.get(CONNECT_APP_TOOL_CATALOG_DIGEST_HEADER);
   if (!grantId || !CONNECT_GRANT_ID.test(grantId)
     || !capabilities || !capabilities.every((value): value is OrganizationCapability => (
       CONNECT_CAPABILITIES.has(value as OrganizationCapability)
@@ -1724,7 +1723,7 @@ function parseConnectGrantAssertions(headers: Headers): Readonly<{
       CONNECT_CONNECTORS.has(value as ConnectConnectorId)
     ))
     || !mcpIds || mcpIds.length > 16 || !mcpIds.every((value) => CONNECT_MCP_ID.test(value))
-    || (appToolPolicy !== null && !isConnectAppToolPolicy(appToolPolicy))) {
+    || (appToolCatalogDigest !== null && !isAppToolCatalogDigest(appToolCatalogDigest))) {
     return undefined;
   }
   return {
@@ -1733,7 +1732,7 @@ function parseConnectGrantAssertions(headers: Headers): Readonly<{
       grantId: grantId.toLowerCase(),
       connectors,
       mcpIds,
-      ...(appToolPolicy === null ? {} : { appToolPolicy }),
+      ...(appToolCatalogDigest === null ? {} : { appToolCatalogDigest }),
     },
   };
 }

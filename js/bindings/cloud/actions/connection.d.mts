@@ -1,5 +1,6 @@
 import type { Client } from "../Client.mjs";
 import type { CloudAccount, Connection, McpConnection } from "../types.mjs";
+import type { NamedTool } from "../../host/index.mjs";
 
 export type Auth = string | Readonly<{
   url?: string | undefined;
@@ -65,6 +66,8 @@ export type AgentVisibility = Readonly<{
 export declare namespace connect {
   type Options = Readonly<{
     capabilities?: Capabilities | undefined;
+    /** Use account-hosted authorization with no access key, spending, or contract authority. */
+    authorization?: "access_key" | "hosted" | undefined;
     /** Let an owning UI close the dialog after its connected state commits. @default "auto" */
     dialog?: Readonly<{ close?: "auto" | "manual" | undefined }> | undefined;
     /** Nanocodex permission preset selected by the app. @default "agent.run" */
@@ -78,6 +81,8 @@ export declare namespace connect {
     focusMcpConnectionId?: string | undefined;
     /** Select one newly approved durable conversation by an app-generated UUIDv4. */
     conversationId?: string | undefined;
+    /** Exact app-local tool catalog bound into the signed grant. */
+    tools?: readonly NamedTool[] | undefined;
     signal?: AbortSignal | undefined;
   }>;
   type ReturnType = Promise<Connection>;
@@ -98,6 +103,8 @@ export declare namespace reconnect {
   type Options = Readonly<{
     /** Reject a retained grant outside these app capability boundaries. */
     capabilities?: Pick<Capabilities, "agent" | "cloudAccounts"> | undefined;
+    authorization?: "access_key" | "hosted" | undefined;
+    tools?: readonly NamedTool[] | undefined;
     /** Reject a retained grant issued for another permission preset. */
     permission?: string | undefined;
     /** Reject a retained grant with a different exact hosted MCP slice. */

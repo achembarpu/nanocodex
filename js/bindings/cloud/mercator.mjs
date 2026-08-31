@@ -10,6 +10,9 @@ export function mercatorRestTool({ connection, fetch, calls, relay }) {
   if (typeof fetch !== "function") {
     throw new TypeError("Mercator REST execution requires an MPP-aware fetch function");
   }
+  if (!connection.mpp) {
+    throw new TypeError("Mercator requires a Connect grant with explicit payment authority");
+  }
   const relayUrl = new URL(relay);
   return {
     description: "Execute Mercator's run_rest_request handoff through MPP. Use only the exact rest and maxSpend fields returned by Mercator create_job, then poll the returned job with Mercator get_job.",

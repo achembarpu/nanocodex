@@ -10,10 +10,7 @@ import {
   type HostedToolsHostFrame,
   type HostedToolsManagedFrame,
 } from "./hosted-tools-protocol";
-import {
-  appToolCatalogEntryAllowed,
-  type ConnectAppToolPolicy,
-} from "./app-tool-policy";
+import { hostedToolCatalogDigest } from "nanocodex/tools/hosted-catalog";
 
 const SOCKET_TAG = "hosted-tools";
 const INVALID_CONNECT_GRANT_ID = "invalid-connect-grant";
@@ -73,7 +70,7 @@ type HostedToolsSocketAttachment = {
   kind: typeof SOCKET_TAG;
   sessionId: string;
   allowedMcpIds?: readonly string[];
-  appToolPolicy?: ConnectAppToolPolicy;
+  appToolCatalogDigest?: `0x${string}`;
   connectGrantId?: string;
   leaseId?: string;
   generation?: number;
@@ -111,12 +108,14 @@ export type HostedToolsInvokeRequest = Readonly<{
 
 export type HostedToolsPreparedTool = Readonly<{
   connectGrantId?: string;
+  appToolCatalogDigest?: string;
   entry: HostedToolCatalogEntry;
   invoke(request: HostedToolsInvokeRequest): Promise<HostedToolsInvocationOutcome>;
 }>;
 
 type HostedToolsCatalogBinding = Readonly<{
   connectGrantId?: string;
+  appToolCatalogDigest?: string;
   hostId: string;
   leaseId: string;
   generation: number;
@@ -184,7 +183,11 @@ export type HostedToolsBrokerOptions = Readonly<{
   maxCallsPerGeneration?: number;
   persistence?: HostedToolsBrokerPersistence;
   onCatalogChanged?: (definitions: readonly HostedToolsProviderDefinition[]) => void;
-  entryAllowed?: (entry: HostedToolCatalogEntry, connectGrantId?: string) => boolean;
+  entryAllowed?: (
+    entry: HostedToolCatalogEntry,
+    connectGrantId?: string,
+    appToolCatalogDigest?: string,
+  ) => boolean;
 }>;
 
 /** Owns the reverse tool attachment for one agent Durable Object. */
@@ -197,7 +200,11 @@ export class HostedToolsBroker {
   readonly #maxCallsPerGeneration: number;
   readonly #persistence: HostedToolsBrokerPersistence;
   readonly #onCatalogChanged?: (definitions: readonly HostedToolsProviderDefinition[]) => void;
-  readonly #entryAllowed: (entry: HostedToolCatalogEntry, connectGrantId?: string) => boolean;
+  readonly #entryAllowed: (
+    entry: HostedToolCatalogEntry,
+    connectGrantId?: string,
+    appToolCatalogDigest?: string,
+  ) => boolean;
   #catalogValidator?: HostedToolsCatalogValidator;
   #nextCandidateGeneration: number;
 
@@ -240,8 +247,9 @@ export class HostedToolsBroker {
       // overlaid onto exact cloud contracts by that router.
       definitions: () => {
         const connectGrantId = this.#activeConnectGrantId();
+        const appToolCatalogDigest = this.#activeAppToolCatalogDigest();
         return this.#definitions()
-          .filter((binding) => this.#entryAllowed(binding, connectGrantId))
+          .filter((binding) => this.#entryAllowed(binding, connectGrantId, appToolCatalogDigest))
           .map((binding) => Object.freeze({
             ...binding.definition,
             defer_loading: true as const,
@@ -249,7 +257,11 @@ export class HostedToolsBroker {
       },
       resolve: (name: string) => {
         const prepared = this.#resolve(name);
-        if (!prepared || !this.#entryAllowed(prepared.entry, prepared.connectGrantId)) return undefined;
+        if (!prepared || !this.#entryAllowed(
+          prepared.entry,
+          prepared.connectGrantId,
+          prepared.appToolCatalogDigest,
+        )) return undefined;
         return Object.freeze({
           name,
           parallelSafe: prepared.entry.parallel_safe,
@@ -261,7 +273,11 @@ export class HostedToolsBroker {
             input: unknown,
             context: { sessionId: string; callId: string; model?: string; signal?: AbortSignal },
           ) => {
-            if (!this.#entryAllowed(prepared.entry, prepared.connectGrantId)) {
+            if (!this.#entryAllowed(
+              prepared.entry,
+              prepared.connectGrantId,
+              prepared.appToolCatalogDigest,
+            )) {
               return toolResult("Hosted tool is outside the active grant", {
                 status: "unavailable",
                 message: "Hosted tool is outside the active grant",
@@ -317,7 +333,7 @@ export class HostedToolsBroker {
   upgrade(
     sessionId: string,
     allowedMcpIds?: readonly string[],
-    appToolPolicy?: ConnectAppToolPolicy,
+    appToolCatalogDigest?: `0x${string}`,
     connectGrantId?: string,
   ): Response {
     if (allowedMcpIds !== undefined && !isConnectGrantId(connectGrantId)) {
@@ -329,7 +345,7 @@ export class HostedToolsBroker {
       kind: SOCKET_TAG,
       sessionId,
       ...(allowedMcpIds === undefined ? {} : { allowedMcpIds: [...allowedMcpIds] }),
-      ...(appToolPolicy === undefined ? {} : { appToolPolicy }),
+      ...(appToolCatalogDigest === undefined ? {} : { appToolCatalogDigest }),
       ...(connectGrantId === undefined ? {} : { connectGrantId }),
     } satisfies HostedToolsSocketAttachment);
     this.context.acceptWebSocket(server, [SOCKET_TAG]);
@@ -487,16 +503,22 @@ export class HostedToolsBroker {
           throw new Error("Connect tool host is missing its exact grant binding");
         }
         const allowed = new Set(initial.allowedMcpIds);
-        const forbidden = frame.tools.find((entry) => {
+        const forbiddenMcp = frame.tools.find((entry) => {
           const match = /^mcp:([A-Za-z0-9_-]{43})$/.exec(entry.provider);
-          return match === null
-            ? !appToolCatalogEntryAllowed(initial.appToolPolicy, entry)
-            : !allowed.has(match[1]!);
+          return entry.provider.startsWith("mcp:")
+            && (match === null || !allowed.has(match[1]!));
         });
-        if (forbidden) {
+        if (forbiddenMcp) {
           throw new Error(
-            `tool ${forbidden.provider}:${forbidden.remote_name} is not authorized by the Connect grant`,
+            `tool ${forbiddenMcp.provider}:${forbiddenMcp.remote_name} is not authorized by the Connect grant`,
           );
+        }
+        const appTools = frame.tools.filter((entry) => !entry.provider.startsWith("mcp:"));
+        const candidateDigest = appTools.length === 0
+          ? undefined
+          : await hostedToolCatalogDigest(appTools);
+        if (candidateDigest !== initial.appToolCatalogDigest) {
+          throw new Error("the app-local tool catalog does not match the signed Connect grant");
         }
       }
       const validator = this.#catalogValidator;
@@ -646,6 +668,7 @@ export class HostedToolsBroker {
   #resolve(name: string): HostedToolsPreparedTool | undefined {
     const state = this.#persistence.state();
     const connectGrantId = this.#activeConnectGrantId(state);
+    const appToolCatalogDigest = this.#activeAppToolCatalogDigest(state);
     const definition = this.#definitions().find((candidate) => candidate.definition.name === name);
     if (!definition) return undefined;
     const binding: HostedToolsCatalogBinding = Object.freeze({
@@ -654,9 +677,11 @@ export class HostedToolsBroker {
       generation: state.generation,
       entry: definition,
       ...(connectGrantId === undefined ? {} : { connectGrantId }),
+      ...(appToolCatalogDigest === undefined ? {} : { appToolCatalogDigest }),
     });
     return Object.freeze({
       ...(connectGrantId === undefined ? {} : { connectGrantId }),
+      ...(appToolCatalogDigest === undefined ? {} : { appToolCatalogDigest }),
       entry: definition,
       invoke: (request: HostedToolsInvokeRequest) => this.#invoke(binding, request),
     });
@@ -959,10 +984,15 @@ export class HostedToolsBroker {
     const socket = this.#socketForState(state);
     if (socket === undefined) return undefined;
     const attachment = this.#attachment(socket);
-    if (attachment?.allowedMcpIds === undefined) return undefined;
+    if (attachment?.connectGrantId === undefined) return undefined;
     return isConnectGrantId(attachment.connectGrantId)
       ? attachment.connectGrantId
       : INVALID_CONNECT_GRANT_ID;
+  }
+
+  #activeAppToolCatalogDigest(state = this.#persistence.state()): string | undefined {
+    const socket = this.#socketForState(state);
+    return socket === undefined ? undefined : this.#attachment(socket)?.appToolCatalogDigest;
   }
 
   #attachment(socket: WebSocket): HostedToolsSocketAttachment | undefined {

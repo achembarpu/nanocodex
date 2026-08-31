@@ -7,6 +7,10 @@ import { isManagedReadPath, projectAgentObservations } from "../cloud/actions/ag
 import { connectionFromWire } from "../cloud/internal.mjs";
 import { managedBrowserVoiceTransport } from "../managed/internal.mjs";
 import { resolveResponsesTransport } from "../runtime/responses-transport.mjs";
+import {
+  hostedAppToolCatalog,
+  hostedToolCatalogDigest,
+} from "../tools/hostedCatalog.mjs";
 
 test("Connect opens a ticketed local WASM model socket without exposing its grant token", async () => {
   const requests = [];
@@ -341,6 +345,19 @@ test("ConnectAgent publishes app tools with only signed hosted MCPs over the tic
   const sockets = [];
   const initialAttachment = new AbortController();
   let appToolDisposals = 0;
+  const appTools = {
+    app_echo: {
+      description: "Echo an app-owned value.",
+      parameters: {
+        type: "object",
+        properties: { value: { type: "string" } },
+        required: ["value"],
+        additionalProperties: false,
+      },
+      handler: ({ value }) => ({ value: `app:${value}` }),
+      dispose() { appToolDisposals += 1; },
+    },
+  };
   const client = Client.create({
     appId: "grant-mcp-workspace",
     dialog: Dialog.memory(),
@@ -414,6 +431,7 @@ test("ConnectAgent publishes app tools with only signed hosted MCPs over the tic
       { id: firstMcpId, name: "Issue tracker" },
       { id: secondMcpId, name: "Documents" },
     ],
+    appToolCatalogDigest: await appToolDigest(appTools),
   }));
   const OriginalWebSocket = globalThis.WebSocket;
   globalThis.WebSocket = class {
@@ -458,19 +476,7 @@ test("ConnectAgent publishes app tools with only signed hosted MCPs over the tic
     const creating = client.agent.create({
       connection,
       signal: initialAttachment.signal,
-      tools: {
-        app_echo: {
-          description: "Echo an app-owned value.",
-          parameters: {
-            type: "object",
-            properties: { value: { type: "string" } },
-            required: ["value"],
-            additionalProperties: false,
-          },
-          handler: ({ value }) => ({ value: `app:${value}` }),
-          dispose() { appToolDisposals += 1; },
-        },
-      },
+      tools: appTools,
     });
     void creating.then(
       () => { createSettled = true; },
@@ -555,19 +561,20 @@ test("ConnectAgent publishes app tools with only signed hosted MCPs over the tic
 });
 
 test("ConnectAgent creation rejects a terminal tool attachment policy rejection", async () => {
-  const fixture = localToolAttachmentFixture("rejected-tool-host-workspace");
   let appToolDisposals = 0;
+  const tools = {
+    app_echo: {
+      description: "Echo.",
+      handler: ({ value }) => value,
+      dispose() { appToolDisposals += 1; },
+    },
+  };
+  const fixture = await localToolAttachmentFixture("rejected-tool-host-workspace", undefined, tools);
 
   try {
     const creating = fixture.client.agent.create({
       connection: fixture.connection,
-      tools: {
-        app_echo: {
-          description: "Echo.",
-          handler: ({ value }) => value,
-          dispose() { appToolDisposals += 1; },
-        },
-      },
+      tools,
     });
     const rejected = assert.rejects(
       creating,
@@ -583,21 +590,22 @@ test("ConnectAgent creation rejects a terminal tool attachment policy rejection"
 });
 
 test("ConnectAgent creation aborts while waiting for initial tool attachment readiness", async () => {
-  const fixture = localToolAttachmentFixture("aborted-tool-host-workspace");
   const controller = new AbortController();
   const reason = new Error("caller stopped waiting for tool readiness");
   let appToolDisposals = 0;
+  const tools = {
+    app_echo: {
+      description: "Echo.",
+      handler: ({ value }) => value,
+      dispose() { appToolDisposals += 1; },
+    },
+  };
+  const fixture = await localToolAttachmentFixture("aborted-tool-host-workspace", undefined, tools);
   try {
     const creating = fixture.client.agent.create({
       connection: fixture.connection,
       signal: controller.signal,
-      tools: {
-        app_echo: {
-          description: "Echo.",
-          handler: ({ value }) => value,
-          dispose() { appToolDisposals += 1; },
-        },
-      },
+      tools,
     });
     const rejected = assert.rejects(creating, (error) => error === reason);
     await waitForConnect(() => fixture.sockets[0]?.frames.some(({ type }) => type === "catalog"));
@@ -612,15 +620,16 @@ test("ConnectAgent creation aborts while waiting for initial tool attachment rea
 
 for (const status of [401, 403, 409]) {
   test(`ConnectAgent creation rejects terminal tool-host ticket status ${status}`, async () => {
-    const fixture = localToolAttachmentFixture(`terminal-ticket-${status}`, {
+    const tools = { app_echo: { description: "Echo.", handler: ({ value }) => value } };
+    const fixture = await localToolAttachmentFixture(`terminal-ticket-${status}`, {
       status,
       body: { error: { message: `terminal ticket ${status}` } },
-    });
+    }, tools);
     try {
       await assert.rejects(
         fixture.client.agent.create({
           connection: fixture.connection,
-          tools: { app_echo: { description: "Echo.", handler: ({ value }) => value } },
+          tools,
         }),
         new RegExp(`tool attachment rejected: terminal ticket ${status}`),
       );
@@ -940,6 +949,109 @@ test("Connect signs and grants exact pre-registered MCP connections without forw
     /opaque 43-character IDs/,
   );
   assert.equal(walletRequests.length, 1);
+});
+
+test("Connect grants ChatGPT and an exact local tool catalog without delegated key authority", async () => {
+  const expiry = Math.floor(Date.now() / 1_000) + 3_600;
+  const walletRequests = [];
+  const requests = [];
+  const tools = [{
+    name: "cleanup",
+    description: "Preview or apply a declarative cleanup recipe to the selected browser tab.",
+    parameters: {
+      type: "object",
+      properties: { recipe: { type: "object" } },
+      required: ["recipe"],
+      additionalProperties: false,
+    },
+    handler() {},
+  }];
+  const appToolCatalogDigest = await appToolDigest(tools);
+  const client = Client.create({
+    appId: "nanocodex-chrome",
+    appOrigin: "chrome-extension://abcdefghijklmnopabcdefghijklmnop",
+    auth: { resources: ["urn:nanocodex:agent:run"] },
+    dialog: Dialog.memory(),
+    provider: {
+      async request(request) {
+        walletRequests.push(request);
+        return {
+          accounts: [{
+            address: "0x8ba1f109551bd432803012645ac136ddd64dba72",
+            capabilities: { auth: { approval_id: "approval-hosted" } },
+          }],
+        };
+      },
+    },
+    session: false,
+    transport: Transport.from({
+      key: "hosted-connect",
+      name: "hosted-connect",
+      type: "hosted-connect",
+      setup() {
+        return {
+          baseUrl: "https://connect.example",
+          async request(request) {
+            requests.push(request);
+            return testConnectionWire({
+              expiry,
+              capabilities: [
+                "nanocodex.agent",
+                "agent.output.final",
+                "agent.output.actions",
+                "agent.history.read",
+                "agent.trace.read",
+                "chatgpt",
+              ],
+              appToolCatalogDigest,
+              authorizationMode: "hosted",
+            });
+          },
+        };
+      },
+    }),
+  });
+
+  const connection = await client.connection.connect({
+    authorization: "hosted",
+    capabilities: {
+      cloudAccounts: { chatgpt: true },
+      agent: {
+        finalMessages: true,
+        actionSummaries: true,
+        conversationHistory: true,
+        rawTraces: true,
+      },
+    },
+    permission: "agent.run",
+    tools,
+  });
+
+  const resources = walletRequests[0].params[0].capabilities.auth.resources;
+  assert.equal("authorizeAccessKey" in walletRequests[0].params[0].capabilities, false);
+  assert.deepEqual(resources, [
+    "urn:nanocodex:agent:run",
+    "urn:nanocodex:app:nanocodex-chrome",
+    "urn:nanocodex:origin:chrome-extension%3A%2F%2Fabcdefghijklmnopabcdefghijklmnop",
+    "urn:nanocodex:connectors:chatgpt",
+    "urn:nanocodex:agent:visibility:reply,actions,history,traces",
+    "urn:nanocodex:authorization:hosted",
+    `urn:nanocodex:app-tool-catalog:sha256:${appToolCatalogDigest.slice(2)}`,
+  ]);
+  assert.deepEqual(requests[0].body, {
+    app_id: "nanocodex-chrome",
+    account_address: "0x8ba1f109551bd432803012645ac136ddd64dba72",
+    approval_id: "approval-hosted",
+    authorization_mode: "hosted",
+    permission: "agent.run",
+    requested_connectors: ["chatgpt"],
+    requested_app_tool_catalog_digest: appToolCatalogDigest,
+  });
+  assert.equal(connection.authorization, "hosted");
+  assert.equal(connection.accessKey, undefined);
+  assert.equal(connection.mpp, undefined);
+  assert.deepEqual(connection.grant.connectors, ["chatgpt"]);
+  assert.equal(connection.grant.appToolCatalogDigest, appToolCatalogDigest);
 });
 
 test("Connect rejects an initially substituted MCP grant without persisting its session", async () => {
@@ -1702,6 +1814,8 @@ function testConnectionWire({
   sessionId = "019fc927-b280-79a7-8445-1b9996ad2fb1",
   conversationId,
   mcpConnections = [],
+  appToolCatalogDigest,
+  authorizationMode = "access_key",
 }) {
   return {
     grant_token: "grant-session-test",
@@ -1716,8 +1830,12 @@ function testConnectionWire({
       capabilities,
       ...(conversationId === undefined ? {} : { conversation_id: conversationId }),
       mcp_connections: mcpConnections,
+      ...(appToolCatalogDigest === undefined ? {} : {
+        app_tool_catalog_digest: appToolCatalogDigest,
+      }),
     },
-    access_key: {
+    authorization_mode: authorizationMode,
+    ...(authorizationMode === "hosted" ? {} : { access_key: {
       address: keyId,
       chain_id: "4217",
       key_id: keyId,
@@ -1727,8 +1845,8 @@ function testConnectionWire({
       witness: `0x${"22".repeat(32)}`,
       expiry,
       authorization: "0x1234",
-    },
-    mpp: {
+    } }),
+    ...(authorizationMode === "hosted" ? {} : { mpp: {
       token: "0x20c0000000000000000000000000000000000001",
       symbol: "MACHUSD",
       balance_status: "ready",
@@ -1740,7 +1858,7 @@ function testConnectionWire({
       period: 86_400,
       balance_atomics: "0",
       spent_atomics: "0",
-    },
+    } }),
   };
 }
 
@@ -1777,7 +1895,7 @@ function memoryStorage() {
   };
 }
 
-function localToolAttachmentFixture(appId, ticketFailure) {
+async function localToolAttachmentFixture(appId, ticketFailure, tools) {
   const agentId = "019fc927-b280-79a7-8445-1b9996ad2fb0";
   const expiry = Math.floor(Date.now() / 1_000) + 3_600;
   const sockets = [];
@@ -1815,6 +1933,7 @@ function localToolAttachmentFixture(appId, ticketFailure) {
     keyId: "0x1111111111111111111111111111111111111111",
     capabilities: ["nanocodex.agent", "agent.output.final", "chatgpt"],
     mcpConnections: [],
+    appToolCatalogDigest: await appToolDigest(tools),
   }));
   const OriginalWebSocket = globalThis.WebSocket;
   globalThis.WebSocket = class {
@@ -1849,6 +1968,10 @@ function localToolAttachmentFixture(appId, ticketFailure) {
     ticketRequests: () => ticketRequestCount,
     restore() { globalThis.WebSocket = OriginalWebSocket; },
   };
+}
+
+async function appToolDigest(tools) {
+  return hostedToolCatalogDigest(hostedAppToolCatalog(tools));
 }
 
 async function waitForConnect(predicate, timeoutMs = 2_000) {

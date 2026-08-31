@@ -100,6 +100,8 @@ export type Grant = Readonly<{
   connectors: readonly CloudAccount[];
   /** Exact secret-free hosted MCP connections bound to this grant. */
   mcpConnections: readonly McpConnection[];
+  /** Exact signed app-local reverse-tool catalog, when present. */
+  appToolCatalogDigest?: Hex | undefined;
 }>;
 
 export type MppPermission = Readonly<{
@@ -116,14 +118,25 @@ export type MppPermission = Readonly<{
   maxPerRequest: bigint;
 }>;
 
-export type Connection = Readonly<{
+type ConnectionBase = Readonly<{
   accountAddress: Hex;
   agentId: string;
   sessionId: string;
   grant: Grant;
-  accessKey: AccessKey;
-  mpp: MppPermission;
 }>;
+
+export type Connection = ConnectionBase & (
+  | Readonly<{
+    authorization: "access_key";
+    accessKey: AccessKey;
+    mpp: MppPermission;
+  }>
+  | Readonly<{
+    authorization: "hosted";
+    accessKey?: undefined;
+    mpp?: undefined;
+  }>
+);
 
 export type MachineUsdConfig = Readonly<{
   chainId: number;

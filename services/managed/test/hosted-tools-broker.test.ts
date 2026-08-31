@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { hostedToolCatalogDigest } from "nanocodex/tools/hosted-catalog";
 
 import {
   HostedToolsBroker,
@@ -7,11 +8,8 @@ import {
   type HostedToolsBrokerPersistence,
 } from "../src/hosted-tools-broker";
 import {
-  appToolCatalogEntryAllowed,
-  CHROME_CLEANUP_APP_TOOL_POLICY,
   hostedToolCatalogEntryAllowed,
-  type ConnectAppToolPolicy,
-} from "../src/app-tool-policy";
+} from "../src/app-tool-catalog";
 import type { HostedToolCatalogEntry } from "../src/hosted-tools-protocol";
 
 const NOW = 1_000_000;
@@ -23,6 +21,7 @@ const IDS = [
   "22222222-2222-4222-8222-222222222222",
   "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
 ];
+const CLEANUP_DIGEST = await hostedToolCatalogDigest([cleanupEntry()]);
 
 type State = ReturnType<HostedToolsBrokerPersistence["state"]>;
 type CallRow = NonNullable<ReturnType<HostedToolsBrokerPersistence["call"]>>;
@@ -132,10 +131,10 @@ describe("HostedToolsBroker socket-owned protocol", () => {
     expect(fixture.broker.provider().resolve("fixture__lookup")).toBeDefined();
   });
 
-  it("accepts only the exact Chrome cleanup catalog and signed MCP providers", async () => {
+  it("accepts only the exact grant-bound app catalog and signed MCP providers", async () => {
     const mcpId = "m".repeat(43);
     const allowed = createFixture();
-    const allowedHost = allowed.socket([mcpId], CHROME_CLEANUP_APP_TOOL_POLICY, GRANT_A);
+    const allowedHost = allowed.socket([mcpId], CLEANUP_DIGEST, GRANT_A);
     await allowed.broker.message(allowedHost.webSocket, JSON.stringify({
       type: "catalog",
       tools: [cleanupEntry(), { ...entry(), provider: `mcp:${mcpId}` }],
@@ -143,14 +142,14 @@ describe("HostedToolsBroker socket-owned protocol", () => {
     expect(allowedHost.closed).toBeUndefined();
     expect(allowedHost.sent).toEqual([{ type: "ready" }]);
 
-    for (const [candidate, policy] of [
+    for (const [candidate, digest] of [
       [cleanupEntry(), undefined],
-      [cleanupEntry("other"), CHROME_CLEANUP_APP_TOOL_POLICY],
-      [cleanupEntry("cleanup", true), CHROME_CLEANUP_APP_TOOL_POLICY],
-      [{ ...entry(), provider: `mcp:${"x".repeat(43)}` }, CHROME_CLEANUP_APP_TOOL_POLICY],
+      [cleanupEntry("other"), CLEANUP_DIGEST],
+      [cleanupEntry("cleanup", true), CLEANUP_DIGEST],
+      [{ ...entry(), provider: `mcp:${"x".repeat(43)}` }, CLEANUP_DIGEST],
     ] as const) {
       const denied = createFixture();
-      const deniedHost = denied.socket([mcpId], policy, GRANT_A);
+      const deniedHost = denied.socket([mcpId], digest, GRANT_A);
       await denied.broker.message(deniedHost.webSocket, JSON.stringify({
         type: "catalog",
         tools: [candidate],
@@ -166,14 +165,12 @@ describe("HostedToolsBroker socket-owned protocol", () => {
   it("rejects cross-grant replacement and hides the retained host from another grant's turn", async () => {
     const mcpId = "m".repeat(43);
     let activeGrantId = GRANT_A;
-    const fixture = createFixture((candidate, hostGrantId) => {
-      if (hostGrantId !== activeGrantId) return false;
-      const match = /^mcp:([A-Za-z0-9_-]{43})$/.exec(candidate.provider);
-      return match === null
-        ? appToolCatalogEntryAllowed(CHROME_CLEANUP_APP_TOOL_POLICY, candidate)
-        : match[1] === mcpId;
-    });
-    const first = fixture.socket([mcpId], CHROME_CLEANUP_APP_TOOL_POLICY, GRANT_A);
+    const fixture = createFixture((candidate, hostGrantId, hostDigest) => hostedToolCatalogEntryAllowed({
+      grantId: activeGrantId,
+      mcpIds: [mcpId],
+      appToolCatalogDigest: CLEANUP_DIGEST,
+    }, hostGrantId, hostDigest, candidate));
+    const first = fixture.socket([mcpId], CLEANUP_DIGEST, GRANT_A);
     await fixture.broker.message(first.webSocket, JSON.stringify({
       type: "catalog",
       tools: [cleanupEntry(), { ...entry(), provider: `mcp:${mcpId}` }],
@@ -182,7 +179,7 @@ describe("HostedToolsBroker socket-owned protocol", () => {
     expect(fixture.broker.provider().definitions()).toHaveLength(2);
     const selected = fixture.broker.provider().resolve("cleanup")!;
 
-    const competing = fixture.socket([mcpId], CHROME_CLEANUP_APP_TOOL_POLICY, GRANT_B);
+    const competing = fixture.socket([mcpId], CLEANUP_DIGEST, GRANT_B);
     await fixture.broker.message(competing.webSocket, JSON.stringify({
       type: "catalog",
       tools: [cleanupEntry(), { ...entry(), provider: `mcp:${mcpId}` }],
@@ -208,7 +205,7 @@ describe("HostedToolsBroker socket-owned protocol", () => {
     for (const connectFirst of [true, false]) {
       const fixture = createFixture();
       const first = connectFirst
-        ? fixture.socket([], CHROME_CLEANUP_APP_TOOL_POLICY, GRANT_A)
+        ? fixture.socket([], CLEANUP_DIGEST, GRANT_A)
         : fixture.socket();
       await fixture.broker.message(first.webSocket, JSON.stringify({
         type: "catalog",
@@ -218,7 +215,7 @@ describe("HostedToolsBroker socket-owned protocol", () => {
 
       const competing = connectFirst
         ? fixture.socket()
-        : fixture.socket([], CHROME_CLEANUP_APP_TOOL_POLICY, GRANT_A);
+        : fixture.socket([], CLEANUP_DIGEST, GRANT_A);
       await fixture.broker.message(competing.webSocket, JSON.stringify({
         type: "catalog",
         tools: [connectFirst ? entry() : cleanupEntry()],
@@ -236,23 +233,29 @@ describe("HostedToolsBroker socket-owned protocol", () => {
     const connectGrant = {
       grantId: GRANT_A,
       mcpIds: [mcpId],
-      appToolPolicy: CHROME_CLEANUP_APP_TOOL_POLICY,
+      appToolCatalogDigest: CLEANUP_DIGEST,
     } as const;
-    expect(hostedToolCatalogEntryAllowed(undefined, GRANT_A, cleanupEntry())).toBe(false);
-    expect(hostedToolCatalogEntryAllowed(connectGrant, undefined, cleanupEntry())).toBe(false);
-    expect(hostedToolCatalogEntryAllowed(undefined, undefined, entry())).toBe(true);
-    expect(hostedToolCatalogEntryAllowed(connectGrant, GRANT_A, cleanupEntry())).toBe(true);
+    expect(hostedToolCatalogEntryAllowed(undefined, GRANT_A, CLEANUP_DIGEST, cleanupEntry())).toBe(false);
+    expect(hostedToolCatalogEntryAllowed(connectGrant, undefined, CLEANUP_DIGEST, cleanupEntry())).toBe(false);
+    expect(hostedToolCatalogEntryAllowed(undefined, undefined, undefined, entry())).toBe(true);
+    expect(hostedToolCatalogEntryAllowed(connectGrant, GRANT_A, CLEANUP_DIGEST, cleanupEntry())).toBe(true);
     expect(hostedToolCatalogEntryAllowed(
       connectGrant,
       GRANT_A,
+      CLEANUP_DIGEST,
       { ...entry(), provider: `mcp:${mcpId}` },
     )).toBe(true);
   });
 
-  it("blocks a previously selected cleanup tool when the active app policy changes", async () => {
-    let policy: ConnectAppToolPolicy | undefined = CHROME_CLEANUP_APP_TOOL_POLICY;
-    const fixture = createFixture((candidate) => appToolCatalogEntryAllowed(policy, candidate));
-    const host = fixture.socket();
+  it("blocks a previously selected cleanup tool when the active catalog grant changes", async () => {
+    let digest: string | undefined = CLEANUP_DIGEST;
+    const fixture = createFixture((candidate, hostGrantId, hostDigest) => hostedToolCatalogEntryAllowed(
+      digest === undefined ? undefined : { grantId: GRANT_A, mcpIds: [], appToolCatalogDigest: digest as `0x${string}` },
+      hostGrantId,
+      hostDigest,
+      candidate,
+    ));
+    const host = fixture.socket([], CLEANUP_DIGEST, GRANT_A);
     await fixture.broker.message(host.webSocket, JSON.stringify({
       type: "catalog",
       tools: [cleanupEntry()],
@@ -261,7 +264,7 @@ describe("HostedToolsBroker socket-owned protocol", () => {
     const selected = fixture.broker.provider().resolve("cleanup")!;
     expect(selected).toBeDefined();
 
-    policy = undefined;
+    digest = undefined;
     expect(fixture.broker.provider().resolve("cleanup")).toBeUndefined();
     await expect(selected.handler({}, { sessionId: "session:1", callId: "source:1" }))
       .resolves.toMatchObject({
@@ -350,7 +353,11 @@ describe("HostedToolsBroker socket-owned protocol", () => {
 });
 
 function createFixture(
-  entryAllowed?: (entry: HostedToolCatalogEntry, connectGrantId?: string) => boolean,
+  entryAllowed?: (
+    entry: HostedToolCatalogEntry,
+    connectGrantId?: string,
+    appToolCatalogDigest?: string,
+  ) => boolean,
 ) {
   const persistence = new MemoryPersistence();
   const sockets: FakeSocket[] = [];
@@ -371,7 +378,7 @@ function createFixture(
     persistence,
     socket(
       allowedMcpIds?: readonly string[],
-      appToolPolicy?: typeof CHROME_CLEANUP_APP_TOOL_POLICY,
+      appToolCatalogDigest?: `0x${string}`,
       connectGrantId?: string,
     ) {
       const socket = new FakeSocket();
@@ -379,7 +386,7 @@ function createFixture(
         kind: "hosted-tools",
         sessionId: "session:route",
         ...(allowedMcpIds === undefined ? {} : { allowedMcpIds }),
-        ...(appToolPolicy === undefined ? {} : { appToolPolicy }),
+        ...(appToolCatalogDigest === undefined ? {} : { appToolCatalogDigest }),
         ...(connectGrantId === undefined ? {} : { connectGrantId }),
       });
       sockets.push(socket);

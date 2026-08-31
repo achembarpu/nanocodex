@@ -46,10 +46,9 @@ import {
   type ManagedGrantAssertion,
 } from "./managedGrant.mjs";
 import {
-  CHROME_CLEANUP_APP_TOOL_POLICY,
+  appToolCatalogDigestFromResources,
   CHROME_EXTENSION_APP_ID,
-  CHROME_EXTENSION_ORIGIN,
-  connectAppToolPolicy,
+  isChromeExtensionGrantResources,
 } from "./appToolPolicy.mjs";
 
 type WorkerWebSocket = WebSocket & { accept(): void };
@@ -293,7 +292,7 @@ type GrantRecord = Readonly<{
   expiresAt: number;
   capabilities: readonly string[];
   conversationId?: string;
-  appToolPolicy?: typeof CHROME_CLEANUP_APP_TOOL_POLICY;
+  appToolCatalogDigest?: `0x${string}`;
   mcpConnections?: readonly Readonly<{ id: string; name: string }>[];
   accessKey?: Record<string, unknown>;
   balanceAtomics?: string;
@@ -1204,12 +1203,33 @@ async function createConnection(
   }
   const requested = requestedConnectors(body.requested_connectors);
   const requestedMcpIds = requestedMcpConnections(body.requested_mcp_connections);
+  const requestedAppToolCatalogDigest = optionalCatalogDigest(
+    body.requested_app_tool_catalog_digest,
+    "requested_app_tool_catalog_digest",
+  );
   const approval = await readConnectApproval(store, approvalId, accountAddress);
   mark("approval");
   if (approval.appId !== app.appId || approval.appOrigin !== app.origin) {
     throw new ApiFailure(403, "app_not_approved", "The signed approval is not bound to this app origin.");
   }
   requireApprovedCapabilities(approval.resources, appId, requested, requestedMcpIds);
+  let approvedAppToolCatalogDigest: `0x${string}` | undefined;
+  try {
+    approvedAppToolCatalogDigest = appToolCatalogDigestFromResources(approval.resources);
+  } catch {
+    throw new ApiFailure(403, "invalid_app_tool_catalog", "The signed app tool catalog is invalid.");
+  }
+  if (requestedAppToolCatalogDigest !== approvedAppToolCatalogDigest) {
+    throw new ApiFailure(403, "app_tool_catalog_mismatch", "The app tool catalog does not match the signed approval.");
+  }
+  if (appId === CHROME_EXTENSION_APP_ID
+    && (approval.authorization !== "hosted"
+      || !isChromeExtensionGrantResources(approval.resources, appId, app.origin)
+      || requested.length !== 1 || requested[0] !== "chatgpt"
+      || requestedMcpIds.length !== 0
+      || approvedAppToolCatalogDigest === undefined)) {
+    throw new ApiFailure(403, "chrome_grant_mismatch", "The Chrome extension grant must be ChatGPT-only hosted authorization.");
+  }
   const agentCapabilities = approvedAgentCapabilities(approval.resources);
   const credentialImport = await approvedChatGptCredentialImport(
     body.chatgpt_credential_import,
@@ -1265,7 +1285,6 @@ async function createConnection(
     throw new ApiFailure(403, "approval_unavailable", "The signed Connect approval changed before it was consumed.");
   }
   const appScope = await scopedAppId(app);
-  const appToolPolicy = connectAppToolPolicy(app);
   const grantId = await digestHex(`grant:${randomSubject()}`);
   const grantCapabilities = [
     "nanocodex.agent",
@@ -1281,6 +1300,7 @@ async function createConnection(
     connectors,
     grantId,
     mcpIds: mcpConnections.map(({ id }) => id),
+    ...(approvedAppToolCatalogDigest ? { appToolCatalogDigest: approvedAppToolCatalogDigest } : {}),
   };
   if (conversationId && isConnectAgentId(approval.durableAgentId)) {
     throw new ApiFailure(
@@ -1310,7 +1330,7 @@ async function createConnection(
     expiresAt,
     capabilities: grantCapabilities,
     ...(conversationId ? { conversationId } : {}),
-    ...(appToolPolicy === undefined ? {} : { appToolPolicy }),
+    ...(approvedAppToolCatalogDigest ? { appToolCatalogDigest: approvedAppToolCatalogDigest } : {}),
     mcpConnections: mcpConnections.map(({ id, name }) => ({ id, name })),
     ...(accessKey ? { accessKey } : {}),
     spentAtomics: "0",
@@ -1413,6 +1433,7 @@ async function connectionRequestBody(request: Request): Promise<Record<string, u
     "permission",
     "requested_connectors",
     "requested_mcp_connections",
+    "requested_app_tool_catalog_digest",
     "reuse_access_key",
     "signed_key_authorization",
   ]);
@@ -1624,10 +1645,7 @@ function validateGrantAccessKey(
     throw new ApiFailure(403, "invalid_access_key_policy", "The access key policy is incomplete.");
   }
   if (appId === CHROME_EXTENSION_APP_ID) {
-    if (accessKey.scopes.length !== 0 || !hasZeroSpendPolicy(accessKey.limits)) {
-      throw new ApiFailure(403, "invalid_access_key_policy", "The Chrome extension access key cannot spend funds or call contracts.");
-    }
-    return;
+    throw new ApiFailure(403, "invalid_access_key_policy", "The Chrome extension cannot receive an access key.");
   }
   if (appId === CLI_APP_ID && !resources.includes("urn:nanocodex:mpp:machusd:spend")) {
     if (accessKey.scopes.length !== 0
@@ -1839,7 +1857,9 @@ function managedGrantAssertion(grant: GrantRecord): ManagedGrantAssertion {
     connectors: CONNECTOR_IDS.filter((connector) => grant.capabilities.includes(connector)),
     grantId: grant.id,
     mcpIds: (grant.mcpConnections ?? []).map(({ id }) => id),
-    ...(grant.appToolPolicy === undefined ? {} : { appToolPolicy: grant.appToolPolicy }),
+    ...(grant.appToolCatalogDigest === undefined
+      ? {}
+      : { appToolCatalogDigest: grant.appToolCatalogDigest }),
   };
 }
 
@@ -2764,10 +2784,10 @@ async function openGrantToolHostWebSocket(
 }
 
 async function grantToolHostFingerprint(
-  grant: Pick<GrantRecord, "appToolPolicy" | "mcpConnections">,
+  grant: Pick<GrantRecord, "appToolCatalogDigest" | "mcpConnections">,
 ): Promise<`0x${string}`> {
   return digestHex(`connect-tools:${JSON.stringify({
-    appToolPolicy: grant.appToolPolicy ?? null,
+    appToolCatalogDigest: grant.appToolCatalogDigest ?? null,
     mcpConnections: grant.mcpConnections ?? [],
   })}`);
 }
@@ -3176,8 +3196,8 @@ function isGrantRecord(value: unknown): value is GrantRecord {
     && Number.isSafeInteger(value.expiresAt)
     && Array.isArray(value.capabilities)
     && value.capabilities.every((capability) => typeof capability === "string")
-    && (value.appToolPolicy === undefined
-      || value.appToolPolicy === CHROME_CLEANUP_APP_TOOL_POLICY)
+    && (value.appToolCatalogDigest === undefined
+      || /^0x[0-9a-f]{64}$/.test(String(value.appToolCatalogDigest)))
     && (value.mcpConnections === undefined
       || (Array.isArray(value.mcpConnections)
         && value.mcpConnections.length <= 16
@@ -3220,18 +3240,7 @@ function registeredAccessKeyMatchesApp(
     || value.accountAddress.toLowerCase() !== accountAddress.toLowerCase()) {
     return false;
   }
-  if (app.appId !== CHROME_EXTENSION_APP_ID) return true;
-  try {
-    const accessKey = accessKeyWire(
-      value.accessKey,
-      hex(value.accessKey.authorization, "stored access_key.authorization"),
-      accountAddress,
-    );
-    validateGrantAccessKey(accessKey, app.appId, []);
-    return true;
-  } catch {
-    return false;
-  }
+  return app.appId !== CHROME_EXTENSION_APP_ID;
 }
 
 function accessKeyStorageKey(accountAddress: `0x${string}`, keyId: unknown): string {
@@ -4005,6 +4014,14 @@ function requestedMcpConnections(value: unknown): string[] {
   return [...requested];
 }
 
+function optionalCatalogDigest(value: unknown, name: string): `0x${string}` | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || !/^0x[0-9a-f]{64}$/.test(value)) {
+    throw new ApiFailure(400, "invalid_app_tool_catalog", `${name} must be a lowercase SHA-256 digest.`);
+  }
+  return value as `0x${string}`;
+}
+
 function requireRequestedConnectors(
   connected: readonly ConnectorId[],
   requested: readonly ConnectorId[],
@@ -4453,7 +4470,7 @@ function createAuth(
     cors: false,
     origin: authenticationOrigin(request),
     path: "/v1/connect/auth",
-    statement: "Authorize this app to use your Nanocodex agent and bounded MPP access key.",
+    statement: "Authorize this app to use your Nanocodex agent with the exact capabilities shown.",
     store,
     // Connect accepts root passkey accounts, so Tempo's contract-account probe is
     // both unnecessary and an external RPC dependency on the login hot path.
@@ -4474,6 +4491,16 @@ function createAuth(
       const approvalId = randomSubject();
       const resources = siweResources(message);
       const app = approvedAppContext(resources);
+      if (app.appId === CHROME_EXTENSION_APP_ID
+        && !isChromeExtensionGrantResources(resources, app.appId, app.origin)) {
+        throw new Error("The Chrome extension may request only ChatGPT and its exact local browser tool.");
+      }
+      const hostedAuthorization = resources.includes(HOSTED_AUTHORIZATION_RESOURCE);
+      if (hostedAuthorization
+        && (context.keyAuthorization !== undefined
+          || resources.includes("urn:nanocodex:mpp:machusd:spend"))) {
+        throw new Error("Hosted Connect authorization cannot carry an access key or payment authority.");
+      }
       let connectorsDuration = 0;
       const identity = await connectBrokerIdentity(env, store, accountAddress);
       mark("identity");
@@ -4490,7 +4517,7 @@ function createAuth(
         accountAddress,
         appId: app.appId,
         appOrigin: app.origin,
-        authorization: "signed",
+        authorization: hostedAuthorization ? "hosted" : "signed",
         brokerUserId: identity.userId,
         connectedConnectors,
         mcpConnections,
@@ -4620,18 +4647,18 @@ function requireApprovedCapabilities(
   if (requested.some((connector) => !approved.has(connector))) {
     throw new ApiFailure(403, "connector_not_approved", "A requested connector was not present in the signed SIWE approval.");
   }
-  if (appId === CLI_APP_ID
+  if ((appId === CHROME_EXTENSION_APP_ID || appId === CLI_APP_ID)
     && (approved.size !== requested.length || requested.some((connector) => !approved.has(connector)))) {
-    throw new ApiFailure(403, "connector_mismatch", "The CLI grant must exchange exactly its signed connector set.");
+    throw new ApiFailure(403, "connector_mismatch", "The app grant must exchange exactly its signed connector set.");
   }
   const approvedMcpIds = approvedMcpConnectionIds(resources);
   if (requestedMcpIds.some((id) => !approvedMcpIds.includes(id))) {
     throw new ApiFailure(403, "mcp_not_approved", "A requested remote MCP was not present in the signed approval.");
   }
-  if (appId === CLI_APP_ID
+  if ((appId === CHROME_EXTENSION_APP_ID || appId === CLI_APP_ID)
     && (approvedMcpIds.length !== requestedMcpIds.length
       || requestedMcpIds.some((id) => !approvedMcpIds.includes(id)))) {
-    throw new ApiFailure(403, "mcp_mismatch", "The CLI grant must exchange exactly its signed remote MCP set.");
+    throw new ApiFailure(403, "mcp_mismatch", "The app grant must exchange exactly its signed remote MCP set.");
   }
 }
 
@@ -4751,20 +4778,22 @@ function connectionWire(grant: GrantRecord, grantToken: string) {
     grant: grantWire(grant),
     mcp_connections: grant.mcpConnections ?? [],
     authorization_mode: grant.accessKey ? "access_key" : "hosted",
-    ...(grant.accessKey ? { access_key: grant.accessKey } : {}),
-    mpp: {
-      token: MACHINE_USD,
-      symbol: "MACHUSD",
-      balance_atomics: grant.balanceAtomics ?? "0",
-      balance_status: balancesReady ? "ready" : "pending",
-      settlement_token: USDC_E,
-      settlement_symbol: "USDC.e",
-      settlement_balance_atomics: grant.settlementBalanceAtomics ?? "0",
-      spent_atomics: grant.spentAtomics,
-      limit_atomics: MPP_LIMIT.toString(),
-      period: MPP_PERIOD,
-      max_per_request_atomics: MPP_MAX_PER_REQUEST.toString(),
-    },
+    ...(grant.accessKey ? {
+      access_key: grant.accessKey,
+      mpp: {
+        token: MACHINE_USD,
+        symbol: "MACHUSD",
+        balance_atomics: grant.balanceAtomics ?? "0",
+        balance_status: balancesReady ? "ready" : "pending",
+        settlement_token: USDC_E,
+        settlement_symbol: "USDC.e",
+        settlement_balance_atomics: grant.settlementBalanceAtomics ?? "0",
+        spent_atomics: grant.spentAtomics,
+        limit_atomics: MPP_LIMIT.toString(),
+        period: MPP_PERIOD,
+        max_per_request_atomics: MPP_MAX_PER_REQUEST.toString(),
+      },
+    } : {}),
   };
 }
 
@@ -4777,6 +4806,9 @@ function grantWire(grant: GrantRecord) {
     capabilities: grant.capabilities,
     ...(grant.conversationId ? { conversation_id: grant.conversationId } : {}),
     mcp_connections: grant.mcpConnections ?? [],
+    ...(grant.appToolCatalogDigest
+      ? { app_tool_catalog_digest: grant.appToolCatalogDigest }
+      : {}),
   };
 }
 
@@ -5069,9 +5101,6 @@ function validateCallerApp(appId: unknown, origin: unknown): CallerApp {
     throw new ApiFailure(403, "origin_denied", "This origin cannot use Nanocodex Connect.");
   }
   if (origin === PLAYGROUND_ORIGIN && appId !== REGISTERED_APP_ID) {
-    throw new ApiFailure(403, "app_identity_mismatch", "The registered app id does not match this origin.");
-  }
-  if (origin === CHROME_EXTENSION_ORIGIN && appId !== CHROME_EXTENSION_APP_ID) {
     throw new ApiFailure(403, "app_identity_mismatch", "The registered app id does not match this origin.");
   }
   if (origin === CLI_APP_ORIGIN && appId !== CLI_APP_ID) {

@@ -4,6 +4,7 @@ import {
   isAllowedChatGptCredentialImportResource,
 } from "./chatGptCredentialImport.mjs";
 import { isAllowedMcpResource, validateMcpResources } from "./mcpPolicy.mjs";
+import { isAllowedAppToolCatalogResource } from "./appToolPolicy.mjs";
 
 export const cliApp = Object.freeze({
   id: "nanocodex-cli",
@@ -320,6 +321,7 @@ export function requestedConnectorsSatisfied(connected, requested) {
 function isAllowedResource(resource) {
   if (requiredResources.has(resource) || optionalResources.has(resource)) return true;
   if (isAllowedMcpResource(resource)) return true;
+  if (isAllowedAppToolCatalogResource(resource)) return true;
   if (isAllowedChatGptCredentialImportResource(resource)) return true;
   if (resource.startsWith("urn:nanocodex:connector:")) {
     return connectors.has(resource.slice("urn:nanocodex:connector:".length));

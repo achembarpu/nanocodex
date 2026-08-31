@@ -5,6 +5,7 @@ const appOriginResourcePrefix = "urn:nanocodex:origin:";
 const connectorFocusResourcePrefix = "urn:nanocodex:connector-focus:";
 const credentialImportResourcePrefix = "urn:nanocodex:credential-import:";
 const agentConversationResourcePrefix = "urn:nanocodex:agent:conversation:";
+const appToolCatalogResource = /^urn:nanocodex:app-tool-catalog:sha256:[0-9a-f]{64}$/;
 const agentConversationId = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const chatGptCredentialImportResource = /^urn:nanocodex:credential-import:chatgpt:codex-auth-v1:sha256:[A-Za-z0-9_-]{43}$/;
 const connectorIds = new Set(["chatgpt", "github", "gmail", "gdrive", "x"]);
@@ -266,6 +267,14 @@ export function appVisibilityPermissions(resources) {
       resource: conversations[0],
       label: "Conversation",
       detail: "Create and use one new durable conversation",
+    }));
+  }
+  const appToolCatalogs = [...requested].filter((resource) => appToolCatalogResource.test(resource));
+  if (appToolCatalogs.length === 1) {
+    visibility.push(Object.freeze({
+      resource: appToolCatalogs[0],
+      label: "Browser tab tool",
+      detail: "Use only the exact local browser tool catalog approved here",
     }));
   }
   return visibility;

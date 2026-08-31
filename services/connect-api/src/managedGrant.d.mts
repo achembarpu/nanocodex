@@ -1,5 +1,5 @@
 export type ManagedGrantAssertion = Readonly<{
-  appToolPolicy?: "nanocodex-chrome-cleanup-v1";
+  appToolCatalogDigest?: `0x${string}`;
   brokerUserId: string;
   capabilities: readonly string[];
   connectors: readonly string[];

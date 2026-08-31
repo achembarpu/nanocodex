@@ -3,12 +3,22 @@ import { InvalidResponseError } from "./Errors.mjs";
 const CLOUD_ACCOUNT_PROVIDERS = Object.freeze(["github", "gmail", "gdrive", "x", "chatgpt"]);
 const MCP_CONNECTION_ID = /^[A-Za-z0-9_-]{43}$/;
 const AGENT_CONVERSATION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const CATALOG_DIGEST = /^0x[0-9a-f]{64}$/;
 
 export function connectionFromWire(value) {
   const wire = object(value, "connection");
   const grant = object(wire.grant, "connection.grant");
-  const accessKey = object(wire.access_key, "connection.access_key");
-  const mpp = object(wire.mpp, "connection.mpp");
+  const accessKey = wire.access_key === undefined
+    ? undefined
+    : object(wire.access_key, "connection.access_key");
+  const authorization = authorizationMode(wire.authorization_mode ?? (accessKey ? "access_key" : "hosted"));
+  const mpp = wire.mpp === undefined ? undefined : object(wire.mpp, "connection.mpp");
+  if (authorization === "hosted" && (accessKey !== undefined || mpp !== undefined)) {
+    throw new InvalidResponseError("hosted connections cannot contain access-key or MPP authority");
+  }
+  if (authorization === "access_key" && (accessKey === undefined || mpp === undefined)) {
+    throw new InvalidResponseError("access-key connections require access-key and MPP authority");
+  }
   const capabilities = strings(grant.capabilities, "connection.grant.capabilities");
   const grantMcpConnections = mcpConnections(
     grant.mcp_connections,
@@ -35,9 +45,16 @@ export function connectionFromWire(value) {
       connectors: connectors(capabilities, "connection.grant.capabilities"),
       mcpConnections: grantMcpConnections,
       visibility: agentVisibility(capabilities),
+      ...(grant.app_tool_catalog_digest === undefined ? {} : {
+        appToolCatalogDigest: catalogDigest(
+          grant.app_tool_catalog_digest,
+          "connection.grant.app_tool_catalog_digest",
+        ),
+      }),
     }),
-    accessKey: accessKeyFromWire(accessKey),
-    mpp: Object.freeze({
+    authorization,
+    ...(accessKey === undefined ? {} : { accessKey: accessKeyFromWire(accessKey) }),
+    ...(mpp === undefined ? {} : { mpp: Object.freeze({
       token: hex(mpp.token, "connection.mpp.token"),
       symbol: string(mpp.symbol, "connection.mpp.symbol"),
       balance: bigint(mpp.balance_atomics, "connection.mpp.balance_atomics"),
@@ -49,13 +66,17 @@ export function connectionFromWire(value) {
       limit: bigint(mpp.limit_atomics, "connection.mpp.limit_atomics"),
       period: integer(mpp.period, "connection.mpp.period"),
       maxPerRequest: bigint(mpp.max_per_request_atomics, "connection.mpp.max_per_request_atomics"),
-    }),
+    }) }),
   });
 }
 
 export function connectionMatchesRequest(connection, options = {}) {
   if (options.permission !== undefined && connection.grant.permission !== options.permission) {
     return false;
+  }
+  if (options.authorization !== undefined && connection.authorization !== options.authorization) return false;
+  if (Object.hasOwn(options, "appToolCatalogDigest")) {
+    if (options.appToolCatalogDigest !== connection.grant.appToolCatalogDigest) return false;
   }
   if (Object.hasOwn(options, "conversationId")) {
     const requested = options.conversationId;
@@ -106,7 +127,10 @@ export function connectionMatchesRequest(connection, options = {}) {
 
 /** Builds the exact non-secret request projection retained by one minted grant. */
 export function reconnectRequestFromConnection(connection) {
-  return connectionRequestFromGrant(connection.grant);
+  return connectionRequestFromGrant({
+    ...connection.grant,
+    authorization: connection.authorization,
+  });
 }
 
 /** Builds the exact non-secret request projection for normalized grant fields. */
@@ -119,6 +143,8 @@ export function connectionRequestFromGrant(grant) {
       )),
     }),
     mcpConnectionIds: Object.freeze(grant.mcpConnections.map(({ id }) => id)),
+    authorization: grant.authorization ?? "access_key",
+    appToolCatalogDigest: grant.appToolCatalogDigest,
     permission: grant.permission,
     conversationId: grant.conversationId ?? null,
   });
@@ -213,7 +239,22 @@ export function grantFromWire(value) {
     connectors: connectors(capabilities, "grant.capabilities"),
     mcpConnections: grantMcpConnections,
     visibility: agentVisibility(capabilities),
+    ...(grant.app_tool_catalog_digest === undefined ? {} : {
+      appToolCatalogDigest: catalogDigest(grant.app_tool_catalog_digest, "grant.app_tool_catalog_digest"),
+    }),
   });
+}
+
+function authorizationMode(value) {
+  if (value === "access_key" || value === "hosted") return value;
+  throw new InvalidResponseError("connection.authorization_mode must be access_key or hosted");
+}
+
+function catalogDigest(value, name) {
+  if (typeof value !== "string" || !CATALOG_DIGEST.test(value)) {
+    throw new InvalidResponseError(`${name} must be a lowercase SHA-256 digest`);
+  }
+  return value;
 }
 
 const AGENT_VISIBILITY_CAPABILITIES = Object.freeze({

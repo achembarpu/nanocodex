@@ -2324,7 +2324,7 @@ describe("managed agents REST and resumable SSE", () => {
           ...Object.fromEntries(connectGrantHeaders(
             ["github", "chatgpt"],
             USER_ID,
-            "nanocodex-chrome-cleanup-v1",
+            `0x${"c".repeat(64)}`,
           )),
           "content-type": "application/json",
         }),
@@ -2345,7 +2345,7 @@ describe("managed agents REST and resumable SSE", () => {
         grantId: CONNECT_GRANT_ID,
         connectors: ["github", "chatgpt"],
         mcpIds: ["m".repeat(43)],
-        appToolPolicy: "nanocodex-chrome-cleanup-v1",
+        appToolCatalogDigest: `0x${"c".repeat(64)}`,
       },
     });
 
@@ -6632,7 +6632,7 @@ async function modelCommandCount(): Promise<number> {
 function connectGrantHeaders(
   connectors: readonly string[],
   userId = USER_ID,
-  appToolPolicy?: string,
+  appToolCatalogDigest?: string,
 ): Headers {
   return new Headers({
     "x-nanocodex-connect-user": userId,
@@ -6644,9 +6644,9 @@ function connectGrantHeaders(
     ]),
     "x-nanocodex-connect-connectors": JSON.stringify(connectors),
     "x-nanocodex-connect-mcp-ids": JSON.stringify(["m".repeat(43)]),
-    ...(appToolPolicy === undefined
+    ...(appToolCatalogDigest === undefined
       ? {}
-      : { "x-nanocodex-connect-app-tool-policy": appToolPolicy }),
+      : { "x-nanocodex-connect-app-tool-catalog-digest": appToolCatalogDigest }),
   });
 }
 
