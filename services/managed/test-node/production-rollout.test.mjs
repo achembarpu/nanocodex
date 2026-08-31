@@ -8,9 +8,11 @@ import {
   assertWebBuildAttestation,
   buildBoundaryProbeConfig,
   buildManagedProductionConfig,
+  buildManagedClassCutoverConfig,
   buildWebBootstrapConfig,
   buildWebProductionConfig,
   deployProductionManaged,
+  isDurableClassBindingSwapError,
   managedSecretPayload,
   productionWranglerEnvironment,
   webSecretPayload,
@@ -267,6 +269,51 @@ test("managed deployment reports the object-shaped migration tags after Wrangler
   assert.equal(deployment.environment.CLOUDFLARE_ACCOUNT_ID, "account-id");
   assert.equal(deployment.environment.CLOUDFLARE_API_TOKEN, "cloudflare-token");
   assert.equal(deployment.environment.NANOCODEX_ADMIN_TOKEN, undefined);
+});
+
+test("managed deployment removes the legacy session binding for the v5 class cutover", async () => {
+  const deployments = [];
+  const result = await deployProductionManaged({
+    CLOUDFLARE_ACCOUNT_ID: "account-id",
+    CLOUDFLARE_API_TOKEN: "cloudflare-token",
+    NANOCODEX_ADMIN_TOKEN: adminToken,
+    TARGET_SHA: revision,
+  }, {
+    run: async (arguments_) => {
+      const configPath = arguments_[arguments_.indexOf("--config") + 1];
+      const config = JSON.parse(await readFile(configPath, "utf8"));
+      deployments.push(config);
+      if (deployments.length === 1) {
+        throw new Error(
+          "Cannot apply --delete-class migration to class 'NanocodexSession' without also removing the binding that references it. [code: 10061]",
+        );
+      }
+    },
+    verifyArtifact: async () => {},
+    verifyCheckout: () => {},
+  });
+
+  assert.equal(result.status, "deployed");
+  assert.equal(deployments.length, 3);
+  assert.equal(
+    deployments[1].durable_objects.bindings.some(({ name }) => name === "NANOCODEX_SESSIONS"),
+    false,
+  );
+  assert.deepEqual(
+    deployments[2].durable_objects.bindings.find(({ name }) => name === "NANOCODEX_SESSIONS"),
+    { name: "NANOCODEX_SESSIONS", class_name: "DurableAgentSession" },
+  );
+});
+
+test("managed class cutover detection is exact", () => {
+  const config = buildManagedClassCutoverConfig({
+    durable_objects: { bindings: [{ name: "NANOCODEX_SESSIONS" }, { name: "OTHER" }] },
+  });
+  assert.deepEqual(config.durable_objects.bindings, [{ name: "OTHER" }]);
+  assert.equal(isDurableClassBindingSwapError(new Error(
+    "Cannot apply --delete-class migration to class 'NanocodexSession' without also removing the binding that references it. [code: 10061]",
+  )), true);
+  assert.equal(isDurableClassBindingSwapError(new Error("code: 10061")), false);
 });
 
 test("boundary probe and website configs preserve the private service chain", () => {

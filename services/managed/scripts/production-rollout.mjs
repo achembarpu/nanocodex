@@ -202,6 +202,25 @@ export function managedSecretPayload(adminToken) {
   return { NANOCODEX_ADMIN_TOKEN: adminToken };
 }
 
+export function isDurableClassBindingSwapError(error) {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.includes("Cannot apply --delete-class migration to class 'NanocodexSession'")
+    && message.includes("without also removing the binding that references it")
+    && message.includes("code: 10061");
+}
+
+export function buildManagedClassCutoverConfig(config) {
+  return {
+    ...config,
+    durable_objects: {
+      ...config.durable_objects,
+      bindings: config.durable_objects.bindings.filter(
+        ({ name }) => name !== "NANOCODEX_SESSIONS",
+      ),
+    },
+  };
+}
+
 export function webSecretPayload(gitMirrorToken) {
   assertTokenStrength(gitMirrorToken, "NANOCODEX_GIT_TOKEN");
   return { GIT_MIRROR_TOKEN: gitMirrorToken };
@@ -390,12 +409,13 @@ export async function deployProductionManaged(environment = process.env, {
 
   await withPrivateRolloutFiles({
     "managed-config.json": config,
+    "managed-cutover-config.json": buildManagedClassCutoverConfig(config),
     "managed-secrets.json": secrets,
   }, async (paths) => {
-    await run([
+    const deploy = (configPath) => run([
       "deploy",
       "--config",
-      paths["managed-config.json"],
+      configPath,
       "--strict",
       "--tag",
       revision,
@@ -409,6 +429,13 @@ export async function deployProductionManaged(environment = process.env, {
       environment: productionWranglerEnvironment(environment, cloudflare),
       redactions,
     });
+    try {
+      await deploy(paths["managed-config.json"]);
+    } catch (error) {
+      if (!isDurableClassBindingSwapError(error)) throw error;
+      await deploy(paths["managed-cutover-config.json"]);
+      await deploy(paths["managed-config.json"]);
+    }
   });
 
   const result = {
