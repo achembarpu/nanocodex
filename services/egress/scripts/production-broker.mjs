@@ -124,6 +124,10 @@ export function buildProductionBrokerConfig(base, { mainPath }) {
   }
   return {
     ...base,
+    alias: Object.fromEntries(Object.entries(base.alias ?? {}).map(([name, target]) => [
+      name,
+      resolve(directory, target),
+    ])),
     main: mainPath,
     workers_dev: false,
     routes: undefined,

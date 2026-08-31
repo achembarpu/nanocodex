@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { access, readFile, stat } from "node:fs/promises";
+import { isAbsolute } from "node:path";
 import test from "node:test";
 
 import {
@@ -134,6 +135,8 @@ test("the base and generated production configs keep every required DO binding",
   assert.equal(config.routes, undefined);
   assert.deepEqual(config.vars, { ENVIRONMENT: "production" });
   assert.equal(config.main, "/fixed/egress.ts");
+  assert.equal(isAbsolute(config.alias["node-rsa"]), true);
+  assert.match(config.alias["node-rsa"], /\/js\/bindings\/tools\/browser\/unsupportedNodeRsa\.mjs$/);
   const relay = {
     name: "CHATGPT_EGRESS",
     class_name: "ChatGptEgress",
