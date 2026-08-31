@@ -9,11 +9,14 @@ import {
 import {
   appToolCatalogEntryAllowed,
   CHROME_CLEANUP_APP_TOOL_POLICY,
+  hostedToolCatalogEntryAllowed,
   type ConnectAppToolPolicy,
 } from "../src/app-tool-policy";
 import type { HostedToolCatalogEntry } from "../src/hosted-tools-protocol";
 
 const NOW = 1_000_000;
+const GRANT_A = `0x${"a".repeat(64)}`;
+const GRANT_B = `0x${"b".repeat(64)}`;
 const IDS = [
   "11111111-1111-4111-8111-111111111111",
   "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
@@ -132,7 +135,7 @@ describe("HostedToolsBroker socket-owned protocol", () => {
   it("accepts only the exact Chrome cleanup catalog and signed MCP providers", async () => {
     const mcpId = "m".repeat(43);
     const allowed = createFixture();
-    const allowedHost = allowed.socket([mcpId], CHROME_CLEANUP_APP_TOOL_POLICY);
+    const allowedHost = allowed.socket([mcpId], CHROME_CLEANUP_APP_TOOL_POLICY, GRANT_A);
     await allowed.broker.message(allowedHost.webSocket, JSON.stringify({
       type: "catalog",
       tools: [cleanupEntry(), { ...entry(), provider: `mcp:${mcpId}` }],
@@ -147,7 +150,7 @@ describe("HostedToolsBroker socket-owned protocol", () => {
       [{ ...entry(), provider: `mcp:${"x".repeat(43)}` }, CHROME_CLEANUP_APP_TOOL_POLICY],
     ] as const) {
       const denied = createFixture();
-      const deniedHost = denied.socket([mcpId], policy);
+      const deniedHost = denied.socket([mcpId], policy, GRANT_A);
       await denied.broker.message(deniedHost.webSocket, JSON.stringify({
         type: "catalog",
         tools: [candidate],
@@ -158,6 +161,92 @@ describe("HostedToolsBroker socket-owned protocol", () => {
       });
       expect(denied.broker.provider().definitions()).toEqual([]);
     }
+  });
+
+  it("rejects cross-grant replacement and hides the retained host from another grant's turn", async () => {
+    const mcpId = "m".repeat(43);
+    let activeGrantId = GRANT_A;
+    const fixture = createFixture((candidate, hostGrantId) => {
+      if (hostGrantId !== activeGrantId) return false;
+      const match = /^mcp:([A-Za-z0-9_-]{43})$/.exec(candidate.provider);
+      return match === null
+        ? appToolCatalogEntryAllowed(CHROME_CLEANUP_APP_TOOL_POLICY, candidate)
+        : match[1] === mcpId;
+    });
+    const first = fixture.socket([mcpId], CHROME_CLEANUP_APP_TOOL_POLICY, GRANT_A);
+    await fixture.broker.message(first.webSocket, JSON.stringify({
+      type: "catalog",
+      tools: [cleanupEntry(), { ...entry(), provider: `mcp:${mcpId}` }],
+    }));
+    expect(first.sent).toEqual([{ type: "ready" }]);
+    expect(fixture.broker.provider().definitions()).toHaveLength(2);
+    const selected = fixture.broker.provider().resolve("cleanup")!;
+
+    const competing = fixture.socket([mcpId], CHROME_CLEANUP_APP_TOOL_POLICY, GRANT_B);
+    await fixture.broker.message(competing.webSocket, JSON.stringify({
+      type: "catalog",
+      tools: [cleanupEntry(), { ...entry(), provider: `mcp:${mcpId}` }],
+    }));
+    expect(competing.closed).toMatchObject({
+      code: 1008,
+      reason: expect.stringContaining("grant_conflict"),
+    });
+    expect(first.closed).toBeUndefined();
+
+    activeGrantId = GRANT_B;
+    expect(fixture.broker.provider().definitions()).toEqual([]);
+    await expect(selected.handler({}, { sessionId: "session:1", callId: "source:1" }))
+      .resolves.toMatchObject({
+        success: false,
+        structuredResult: { status: "unavailable" },
+      });
+    expect(first.sent.some((frame) => frame.type === "call")).toBe(false);
+    expect(competing.sent.some((frame) => frame.type === "call")).toBe(false);
+  });
+
+  it("rejects replacement across Connect and account host boundaries in both directions", async () => {
+    for (const connectFirst of [true, false]) {
+      const fixture = createFixture();
+      const first = connectFirst
+        ? fixture.socket([], CHROME_CLEANUP_APP_TOOL_POLICY, GRANT_A)
+        : fixture.socket();
+      await fixture.broker.message(first.webSocket, JSON.stringify({
+        type: "catalog",
+        tools: [connectFirst ? cleanupEntry() : entry()],
+      }));
+      expect(first.sent).toEqual([{ type: "ready" }]);
+
+      const competing = connectFirst
+        ? fixture.socket()
+        : fixture.socket([], CHROME_CLEANUP_APP_TOOL_POLICY, GRANT_A);
+      await fixture.broker.message(competing.webSocket, JSON.stringify({
+        type: "catalog",
+        tools: [connectFirst ? entry() : cleanupEntry()],
+      }));
+      expect(competing.closed).toMatchObject({
+        code: 1008,
+        reason: expect.stringContaining("grant_conflict"),
+      });
+      expect(first.closed).toBeUndefined();
+    }
+  });
+
+  it("does not project a Connect host to an account turn or an account host to a Connect turn", () => {
+    const mcpId = "m".repeat(43);
+    const connectGrant = {
+      grantId: GRANT_A,
+      mcpIds: [mcpId],
+      appToolPolicy: CHROME_CLEANUP_APP_TOOL_POLICY,
+    } as const;
+    expect(hostedToolCatalogEntryAllowed(undefined, GRANT_A, cleanupEntry())).toBe(false);
+    expect(hostedToolCatalogEntryAllowed(connectGrant, undefined, cleanupEntry())).toBe(false);
+    expect(hostedToolCatalogEntryAllowed(undefined, undefined, entry())).toBe(true);
+    expect(hostedToolCatalogEntryAllowed(connectGrant, GRANT_A, cleanupEntry())).toBe(true);
+    expect(hostedToolCatalogEntryAllowed(
+      connectGrant,
+      GRANT_A,
+      { ...entry(), provider: `mcp:${mcpId}` },
+    )).toBe(true);
   });
 
   it("blocks a previously selected cleanup tool when the active app policy changes", async () => {
@@ -260,7 +349,9 @@ describe("HostedToolsBroker socket-owned protocol", () => {
   });
 });
 
-function createFixture(entryAllowed?: (entry: HostedToolCatalogEntry) => boolean) {
+function createFixture(
+  entryAllowed?: (entry: HostedToolCatalogEntry, connectGrantId?: string) => boolean,
+) {
   const persistence = new MemoryPersistence();
   const sockets: FakeSocket[] = [];
   const ids = [...IDS];
@@ -281,6 +372,7 @@ function createFixture(entryAllowed?: (entry: HostedToolCatalogEntry) => boolean
     socket(
       allowedMcpIds?: readonly string[],
       appToolPolicy?: typeof CHROME_CLEANUP_APP_TOOL_POLICY,
+      connectGrantId?: string,
     ) {
       const socket = new FakeSocket();
       socket.serializeAttachment({
@@ -288,6 +380,7 @@ function createFixture(entryAllowed?: (entry: HostedToolCatalogEntry) => boolean
         sessionId: "session:route",
         ...(allowedMcpIds === undefined ? {} : { allowedMcpIds }),
         ...(appToolPolicy === undefined ? {} : { appToolPolicy }),
+        ...(connectGrantId === undefined ? {} : { connectGrantId }),
       });
       sockets.push(socket);
       return socket;

@@ -16,6 +16,7 @@ import {
 } from "./app-tool-policy";
 
 const SOCKET_TAG = "hosted-tools";
+const INVALID_CONNECT_GRANT_ID = "invalid-connect-grant";
 const DEFAULT_MAX_IN_FLIGHT = 64;
 const MAX_RETAINED_RECEIPTS = 512;
 const MAX_CALLS_PER_GENERATION = 512;
@@ -73,6 +74,7 @@ type HostedToolsSocketAttachment = {
   sessionId: string;
   allowedMcpIds?: readonly string[];
   appToolPolicy?: ConnectAppToolPolicy;
+  connectGrantId?: string;
   leaseId?: string;
   generation?: number;
   active?: true;
@@ -108,11 +110,13 @@ export type HostedToolsInvokeRequest = Readonly<{
 }>;
 
 export type HostedToolsPreparedTool = Readonly<{
+  connectGrantId?: string;
   entry: HostedToolCatalogEntry;
   invoke(request: HostedToolsInvokeRequest): Promise<HostedToolsInvocationOutcome>;
 }>;
 
 type HostedToolsCatalogBinding = Readonly<{
+  connectGrantId?: string;
   hostId: string;
   leaseId: string;
   generation: number;
@@ -180,7 +184,7 @@ export type HostedToolsBrokerOptions = Readonly<{
   maxCallsPerGeneration?: number;
   persistence?: HostedToolsBrokerPersistence;
   onCatalogChanged?: (definitions: readonly HostedToolsProviderDefinition[]) => void;
-  entryAllowed?: (entry: HostedToolCatalogEntry) => boolean;
+  entryAllowed?: (entry: HostedToolCatalogEntry, connectGrantId?: string) => boolean;
 }>;
 
 /** Owns the reverse tool attachment for one agent Durable Object. */
@@ -193,7 +197,7 @@ export class HostedToolsBroker {
   readonly #maxCallsPerGeneration: number;
   readonly #persistence: HostedToolsBrokerPersistence;
   readonly #onCatalogChanged?: (definitions: readonly HostedToolsProviderDefinition[]) => void;
-  readonly #entryAllowed: (entry: HostedToolCatalogEntry) => boolean;
+  readonly #entryAllowed: (entry: HostedToolCatalogEntry, connectGrantId?: string) => boolean;
   #catalogValidator?: HostedToolsCatalogValidator;
   #nextCandidateGeneration: number;
 
@@ -234,15 +238,18 @@ export class HostedToolsBroker {
       // ToolRouter owns the one aggregate tool_search. This provider exposes
       // only the current attached definitions, which stay deferred and can be
       // overlaid onto exact cloud contracts by that router.
-      definitions: () => this.#definitions()
-        .filter((binding) => this.#entryAllowed(binding))
-        .map((binding) => Object.freeze({
-        ...binding.definition,
-        defer_loading: true as const,
-      })),
+      definitions: () => {
+        const connectGrantId = this.#activeConnectGrantId();
+        return this.#definitions()
+          .filter((binding) => this.#entryAllowed(binding, connectGrantId))
+          .map((binding) => Object.freeze({
+            ...binding.definition,
+            defer_loading: true as const,
+          }));
+      },
       resolve: (name: string) => {
         const prepared = this.#resolve(name);
-        if (!prepared || !this.#entryAllowed(prepared.entry)) return undefined;
+        if (!prepared || !this.#entryAllowed(prepared.entry, prepared.connectGrantId)) return undefined;
         return Object.freeze({
           name,
           parallelSafe: prepared.entry.parallel_safe,
@@ -254,7 +261,7 @@ export class HostedToolsBroker {
             input: unknown,
             context: { sessionId: string; callId: string; model?: string; signal?: AbortSignal },
           ) => {
-            if (!this.#entryAllowed(prepared.entry)) {
+            if (!this.#entryAllowed(prepared.entry, prepared.connectGrantId)) {
               return toolResult("Hosted tool is outside the active grant", {
                 status: "unavailable",
                 message: "Hosted tool is outside the active grant",
@@ -309,7 +316,11 @@ export class HostedToolsBroker {
     sessionId: string,
     allowedMcpIds?: readonly string[],
     appToolPolicy?: ConnectAppToolPolicy,
+    connectGrantId?: string,
   ): Response {
+    if (allowedMcpIds !== undefined && !isConnectGrantId(connectGrantId)) {
+      throw new TypeError("Connect Hosted Tools requires an exact grant ID");
+    }
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair);
     server.serializeAttachment({
@@ -317,6 +328,7 @@ export class HostedToolsBroker {
       sessionId,
       ...(allowedMcpIds === undefined ? {} : { allowedMcpIds: [...allowedMcpIds] }),
       ...(appToolPolicy === undefined ? {} : { appToolPolicy }),
+      ...(connectGrantId === undefined ? {} : { connectGrantId }),
     } satisfies HostedToolsSocketAttachment);
     this.context.acceptWebSocket(server, [SOCKET_TAG]);
     return new Response(null, { status: 101, webSocket: client });
@@ -439,6 +451,17 @@ export class HostedToolsBroker {
     if (this.#nextCandidateGeneration >= Number.MAX_SAFE_INTEGER) {
       throw new HostedToolsProtocolError("generation_exhausted", "Hosted Tools generation is exhausted");
     }
+    const state = this.#persistence.state();
+    const activeSocket = this.#socketForState(state);
+    const activeGrantId = activeSocket === undefined
+      ? undefined
+      : this.#activeConnectGrantId(state);
+    if (activeSocket !== undefined && activeGrantId !== initial.connectGrantId) {
+      throw new HostedToolsProtocolError(
+        "grant_conflict",
+        "another Connect grant already owns this agent's tool host",
+      );
+    }
     const generation = ++this.#nextCandidateGeneration;
     const leaseId = this.#randomUUID();
     const expiresAt = this.#now() + HOSTED_TOOLS_LEASE_MS;
@@ -458,6 +481,9 @@ export class HostedToolsBroker {
     }));
     try {
       if (initial.allowedMcpIds !== undefined) {
+        if (!isConnectGrantId(initial.connectGrantId)) {
+          throw new Error("Connect tool host is missing its exact grant binding");
+        }
         const allowed = new Set(initial.allowedMcpIds);
         const forbidden = frame.tools.find((entry) => {
           const match = /^mcp:([A-Za-z0-9_-]{43})$/.exec(entry.provider);
@@ -482,7 +508,6 @@ export class HostedToolsBroker {
       );
     }
     const now = this.#now();
-    const state = this.#persistence.state();
     const replaced = state.lease_id ? state : undefined;
     // A failed ready send must leave the previous attachment routable.
     this.#send(socket, { type: "ready" });
@@ -618,6 +643,7 @@ export class HostedToolsBroker {
 
   #resolve(name: string): HostedToolsPreparedTool | undefined {
     const state = this.#persistence.state();
+    const connectGrantId = this.#activeConnectGrantId(state);
     const definition = this.#definitions().find((candidate) => candidate.definition.name === name);
     if (!definition) return undefined;
     const binding: HostedToolsCatalogBinding = Object.freeze({
@@ -625,8 +651,13 @@ export class HostedToolsBroker {
       leaseId: state.lease_id!,
       generation: state.generation,
       entry: definition,
+      ...(connectGrantId === undefined ? {} : { connectGrantId }),
     });
-    return Object.freeze({ entry: definition, invoke: (request: HostedToolsInvokeRequest) => this.#invoke(binding, request) });
+    return Object.freeze({
+      ...(connectGrantId === undefined ? {} : { connectGrantId }),
+      entry: definition,
+      invoke: (request: HostedToolsInvokeRequest) => this.#invoke(binding, request),
+    });
   }
 
   #invoke(
@@ -922,6 +953,16 @@ export class HostedToolsBroker {
     return socket && this.#attachment(socket)?.draining !== true ? socket : undefined;
   }
 
+  #activeConnectGrantId(state = this.#persistence.state()): string | undefined {
+    const socket = this.#socketForState(state);
+    if (socket === undefined) return undefined;
+    const attachment = this.#attachment(socket);
+    if (attachment?.allowedMcpIds === undefined) return undefined;
+    return isConnectGrantId(attachment.connectGrantId)
+      ? attachment.connectGrantId
+      : INVALID_CONNECT_GRANT_ID;
+  }
+
   #attachment(socket: WebSocket): HostedToolsSocketAttachment | undefined {
     const value = socket.deserializeAttachment() as HostedToolsSocketAttachment | null;
     return value?.kind === SOCKET_TAG ? value : undefined;
@@ -934,6 +975,10 @@ export class HostedToolsBroker {
   #notifyCatalogChanged(): void {
     this.#onCatalogChanged?.(this.#definitions());
   }
+}
+
+function isConnectGrantId(value: unknown): value is string {
+  return typeof value === "string" && /^0x[0-9a-f]{64}$/.test(value);
 }
 
 class SqlHostedToolsPersistence implements HostedToolsBrokerPersistence {

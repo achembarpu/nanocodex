@@ -4,6 +4,12 @@ export const CHROME_CLEANUP_APP_TOOL_POLICY = "nanocodex-chrome-cleanup-v1";
 
 export type ConnectAppToolPolicy = typeof CHROME_CLEANUP_APP_TOOL_POLICY;
 
+type ConnectHostedToolGrant = Readonly<{
+  grantId: string;
+  mcpIds: readonly string[];
+  appToolPolicy?: ConnectAppToolPolicy;
+}>;
+
 const CHROME_CLEANUP_PARAMETERS = Object.freeze({
   oneOf: [
     {
@@ -71,6 +77,19 @@ export function appToolCatalogEntryAllowed(
     && entry.parallel_safe === false
     && entry.summary === undefined
     && entry.timeout_ms === 120_000;
+}
+
+export function hostedToolCatalogEntryAllowed(
+  grant: ConnectHostedToolGrant | undefined,
+  hostConnectGrantId: string | undefined,
+  entry: HostedToolCatalogEntry,
+): boolean {
+  if (grant === undefined) return hostConnectGrantId === undefined;
+  if (hostConnectGrantId !== grant.grantId) return false;
+  const match = /^mcp:([A-Za-z0-9_-]{43})$/.exec(entry.provider);
+  return match === null
+    ? appToolCatalogEntryAllowed(grant.appToolPolicy, entry)
+    : grant.mcpIds.includes(match[1]!);
 }
 
 function jsonEqual(left: unknown, right: unknown): boolean {

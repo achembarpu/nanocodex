@@ -20,7 +20,7 @@ import { managedCodeEvaluator } from "./code-evaluator";
 import { createDefaultManagedTools } from "./default-mcp";
 import { HostedToolsBroker } from "./hosted-tools-broker";
 import {
-  appToolCatalogEntryAllowed,
+  hostedToolCatalogEntryAllowed,
   isConnectAppToolPolicy,
 } from "./app-tool-policy";
 import type { HostedToolCatalogEntry } from "./hosted-tools-protocol";
@@ -1157,7 +1157,9 @@ export class NanocodexSession extends DurableComputerSession {
       );
     `);
     this.#hostedTools = new HostedToolsBroker(this.ctx, {
-      entryAllowed: (entry) => this.#activeTurnHostedToolAllowed(entry),
+      entryAllowed: (entry, connectGrantId) => (
+        this.#activeTurnHostedToolAllowed(entry, connectGrantId)
+      ),
     });
     this.#eventLog = new DurableEventLog<StreamMessage>(this.ctx.storage);
     this.#eventArchive = new ManagedEventArchive<StreamMessage>(
@@ -1612,6 +1614,7 @@ export class NanocodexSession extends DurableComputerSession {
         session.session_id,
         turnAuthorization.connectGrant?.mcpIds,
         turnAuthorization.connectGrant?.appToolPolicy,
+        turnAuthorization.connectGrant?.grantId,
       );
     }
     if (request.method === "GET" && url.pathname === "/device-host")
@@ -4311,14 +4314,17 @@ export class NanocodexSession extends DurableComputerSession {
         || authorization.connectGrant.connectors.includes(connector));
   }
 
-  #activeTurnHostedToolAllowed(entry: HostedToolCatalogEntry): boolean {
+  #activeTurnHostedToolAllowed(
+    entry: HostedToolCatalogEntry,
+    hostConnectGrantId?: string,
+  ): boolean {
     const authorization = this.#activeTurnAuthorization();
     if (!authorization) return false;
-    if (!authorization.connectGrant) return true;
-    const match = /^mcp:([A-Za-z0-9_-]{43})$/.exec(entry.provider);
-    return match === null
-      ? appToolCatalogEntryAllowed(authorization.connectGrant.appToolPolicy, entry)
-      : authorization.connectGrant.mcpIds.includes(match[1]!);
+    return hostedToolCatalogEntryAllowed(
+      authorization.connectGrant,
+      hostConnectGrantId,
+      entry,
+    );
   }
 
   #historyCitations(turnId: string): HistoryCitation[] {
