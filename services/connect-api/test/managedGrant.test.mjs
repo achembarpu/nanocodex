@@ -7,6 +7,7 @@ import { KeyAuthorization } from "ox/tempo";
 import {
   managedAgentPortabilityGranted,
   managedGrantHeaders,
+  managedGrantWebSocketHeaders,
 } from "../src/managedGrant.mjs";
 
 const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
@@ -76,6 +77,19 @@ test("managed grant headers serialize only the exact delegated slice", () => {
   );
   assert.equal(headers["x-nanocodex-connect-user"], "account-1");
   assert.equal(headers["x-nanocodex-connect-grant-id"], `0x${"a".repeat(64)}`);
+});
+
+test("managed grant WebSocket headers assert the internal service origin", () => {
+  const headers = managedGrantWebSocketHeaders({
+    brokerUserId: "account-1",
+    capabilities: ["nanocodex.agent"],
+    connectors: ["chatgpt"],
+    grantId: `0x${"a".repeat(64)}`,
+    mcpIds: [],
+  }, "https://nanocodex.internal");
+  assert.equal(headers.origin, "https://nanocodex.internal");
+  assert.equal(headers.upgrade, "websocket");
+  assert.equal(headers["x-nanocodex-connect-user"], "account-1");
 });
 
 test("managed portability requires the exact grant plus full history and trace visibility", () => {
@@ -194,7 +208,7 @@ test("tool-host upgrade uses a one-time exact-origin ticket bound to MCP and app
   assert.match(open, /ticket\.grantId\.toLowerCase\(\) !== grantId\.toLowerCase\(\)/);
   assert.match(open, /ticket\.agentId !== agentId/);
   assert.match(open, /ticket\.toolFingerprint\.toLowerCase\(\) !== fingerprint\.toLowerCase\(\)/);
-  assert.match(open, /managedGrantHeaders\(managedGrantAssertion\(grant\)\)/);
+  assert.match(open, /managedGrantWebSocketHeaders\(managedGrantAssertion\(grant\), target\.origin\)/);
   assert.match(open, /superviseGrantSocket\([\s\S]*?\), true\);/);
   assert.doesNotMatch(open, /authenticatedGrant|authorization/);
   assert.match(open, /current\.id\.toLowerCase\(\) === grantId\.toLowerCase\(\)[\s\S]*?current\.agentId === agentId[\s\S]*?current\.appId === grant\.appId[\s\S]*?grantToolHostFingerprint\(current\)/);

@@ -41,6 +41,7 @@ import {
 import {
   managedAgentPortabilityGranted,
   managedGrantHeaders,
+  managedGrantWebSocketHeaders,
   type ManagedGrantAssertion,
 } from "./managedGrant.mjs";
 import {
@@ -2676,10 +2677,7 @@ async function openGrantToolHostWebSocket(
     "https://nanocodex.internal",
   );
   const response = await env.ACCOUNTS.fetch(new Request(target, {
-    headers: {
-      ...managedGrantHeaders(managedGrantAssertion(grant)),
-      upgrade: "websocket",
-    },
+    headers: managedGrantWebSocketHeaders(managedGrantAssertion(grant), target.origin),
   }));
   const upstream = (response as Response & { webSocket?: WorkerWebSocket }).webSocket;
   if (response.status !== 101 || !upstream) return response;
@@ -2755,10 +2753,7 @@ async function openGrantRealtimeWebSocket(
     "https://nanocodex.internal",
   );
   const response = await env.ACCOUNTS.fetch(new Request(target, {
-    headers: {
-      ...managedGrantHeaders(managedGrantAssertion(grant)),
-      upgrade: "websocket",
-    },
+    headers: managedGrantWebSocketHeaders(managedGrantAssertion(grant), target.origin),
   }));
   const upstream = (response as Response & { webSocket?: WorkerWebSocket }).webSocket;
   if (response.status !== 101 || !upstream) return response;

@@ -66,6 +66,7 @@ test("Connect realtime admission follows the exact grant app origin", () => {
   assert.match(websocket, /grant\.capabilities\.includes\("chatgpt"\)/);
   assert.match(websocket, /grant\.capabilities\.includes\("agent\.output\.final"\)/);
   assert.match(websocket, /requireGrantAppOrigin\(request, grant, ticket\)/);
+  assert.match(websocket, /managedGrantWebSocketHeaders\(managedGrantAssertion\(grant\), target\.origin\)/);
 
   const grantRoute = section("async function handleGrantRoute(", "async function connectManagedAgent(");
   const grantAuthentication = grantRoute.indexOf("await authenticatedGrant(request, env.CONNECT_STATE, grantId)");

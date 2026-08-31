@@ -29,3 +29,11 @@ export function managedGrantHeaders(assertion) {
       : { "x-nanocodex-connect-app-tool-policy": assertion.appToolPolicy }),
   };
 }
+
+export function managedGrantWebSocketHeaders(assertion, origin) {
+  return {
+    ...managedGrantHeaders(assertion),
+    origin,
+    upgrade: "websocket",
+  };
+}

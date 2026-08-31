@@ -11,3 +11,7 @@ export function managedAgentPortabilityGranted(capabilities: readonly string[]):
 export function managedGrantHeaders(
   assertion: ManagedGrantAssertion,
 ): Record<string, string>;
+export function managedGrantWebSocketHeaders(
+  assertion: ManagedGrantAssertion,
+  origin: string,
+): Record<string, string>;
