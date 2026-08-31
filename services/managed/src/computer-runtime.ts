@@ -231,12 +231,13 @@ function createStickyExecutionTool(
 function brokeredSshRouting(command: string): "none" | "protected" | "invalid" {
   if (!command.includes("IdentityRef")) return "none";
   const tokens = lexShell(command);
-  if (!tokens || tokens.some(({ kind }) => kind === "operator")) return "invalid";
+  if (!tokens) return "invalid";
   const words = tokens.map(({ value }) => value);
-  if (words[0] !== "ssh") return "invalid";
   const references = words.filter((value, index) => (
     index > 0 && words[index - 1] === "-o" && value.startsWith("IdentityRef=")
   ));
+  if (references.length === 0) return "none";
+  if (tokens.some(({ kind }) => kind === "operator") || words[0] !== "ssh") return "invalid";
   return references.length === 1 ? "protected" : "invalid";
 }
 

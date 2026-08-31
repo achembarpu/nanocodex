@@ -51,6 +51,13 @@ describe("managed Computer escalation", () => {
     expect(sandbox).not.toHaveBeenCalled();
     expect(providerExec).not.toHaveBeenCalled();
 
+    // Unrelated shell arguments may mention IdentityRef without becoming brokered SSH.
+    expect(await runtime.tool.handler({ cmd: "printf IdentityRef" }, context)).toMatchObject({
+      exit_code: 0,
+      output: "IdentityRef",
+    });
+    expect(providerExec).not.toHaveBeenCalled();
+
     await runtime.filesystem.writeFile("Cargo.toml", "[package]\nname='smoke'\nversion='0.1.0'\n");
     await runtime.filesystem.mkdir("src");
     await runtime.filesystem.writeFile("src/lib.rs", "#[test] fn smoke() { assert_eq!(2 + 2, 4); }\n");
