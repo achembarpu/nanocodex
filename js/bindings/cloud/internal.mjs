@@ -2,6 +2,7 @@ import { InvalidResponseError } from "./Errors.mjs";
 
 const CLOUD_ACCOUNT_PROVIDERS = Object.freeze(["github", "gmail", "gdrive", "x", "chatgpt"]);
 const MCP_CONNECTION_ID = /^[A-Za-z0-9_-]{43}$/;
+const AGENT_CONVERSATION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 export function connectionFromWire(value) {
   const wire = object(value, "connection");
@@ -26,6 +27,9 @@ export function connectionFromWire(value) {
       permission: string(grant.permission, "connection.grant.permission"),
       status: status(grant.status),
       expiresAt: integer(grant.expires_at, "connection.grant.expires_at"),
+      ...(grant.conversation_id === undefined ? {} : {
+        conversationId: agentConversationId(grant.conversation_id, "connection.grant.conversation_id"),
+      }),
       capabilities,
       connectors: connectors(capabilities, "connection.grant.capabilities"),
       mcpConnections: grantMcpConnections,
@@ -51,6 +55,15 @@ export function connectionFromWire(value) {
 export function connectionMatchesRequest(connection, options = {}) {
   if (options.permission !== undefined && connection.grant.permission !== options.permission) {
     return false;
+  }
+  if (Object.hasOwn(options, "conversationId")) {
+    const requested = options.conversationId;
+    if (requested === null) {
+      if (connection.grant.conversationId !== undefined) return false;
+    } else if (typeof requested !== "string" || !AGENT_CONVERSATION_ID.test(requested)
+      || connection.grant.conversationId !== requested) {
+      return false;
+    }
   }
   const requestedCloudAccounts = options.capabilities?.cloudAccounts;
   if (requestedCloudAccounts !== undefined) {
@@ -106,6 +119,7 @@ export function connectionRequestFromGrant(grant) {
     }),
     mcpConnectionIds: Object.freeze(grant.mcpConnections.map(({ id }) => id)),
     permission: grant.permission,
+    conversationId: grant.conversationId ?? null,
   });
 }
 
@@ -191,6 +205,9 @@ export function grantFromWire(value) {
     permission: string(grant.permission, "grant.permission"),
     status: status(grant.status),
     expiresAt: integer(grant.expires_at, "grant.expires_at"),
+    ...(grant.conversation_id === undefined ? {} : {
+      conversationId: agentConversationId(grant.conversation_id, "grant.conversation_id"),
+    }),
     capabilities,
     connectors: connectors(capabilities, "grant.capabilities"),
     mcpConnections: grantMcpConnections,
@@ -215,6 +232,12 @@ function agentVisibility(capabilities) {
     conversationHistory: rawTraces || capabilities.includes(AGENT_VISIBILITY_CAPABILITIES.conversationHistory),
     rawTraces,
   });
+}
+
+function agentConversationId(value, name) {
+  const id = string(value, name);
+  if (!AGENT_CONVERSATION_ID.test(id)) throw new InvalidResponseError(`${name} must be a lowercase UUIDv4`);
+  return id;
 }
 
 export function machineUsdConfigFromWire(value) {

@@ -21,6 +21,8 @@ const AGENT_VISIBILITY_RESOURCES = Object.freeze({
   rawTraces: "urn:nanocodex:agent:trace:read",
 });
 const AGENT_VISIBILITY_RESOURCE_PREFIX = "urn:nanocodex:agent:visibility:";
+const AGENT_CONVERSATION_RESOURCE_PREFIX = "urn:nanocodex:agent:conversation:";
+const AGENT_CONVERSATION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const AGENT_VISIBILITY_NAMES = Object.freeze({
   finalMessages: "reply",
   actionSummaries: "actions",
@@ -34,6 +36,7 @@ export async function connect(client, options) {
   if (typeof permission !== "string" || permission.length === 0) throw new TypeError("connect permission must be a non-empty string");
   const requestedConnectors = normalizeCloudAccounts(options.capabilities?.cloudAccounts);
   const agentVisibility = normalizeAgentVisibility(options.capabilities?.agent);
+  const conversationId = normalizeAgentConversationId(options.conversationId);
   const mcpConnections = normalizeMcpConnections(options.mcpConnections ?? []);
   const focusMcpConnectionId = normalizeMcpFocus(options.focusMcpConnectionId, mcpConnections);
   const exactRequest = connectionRequestFromGrant({
@@ -41,6 +44,7 @@ export async function connect(client, options) {
     mcpConnections,
     permission,
     visibility: agentVisibility,
+    ...(conversationId ? { conversationId } : {}),
   });
   const auth = withConnectionResources(
     options.capabilities?.auth ?? client.auth,
@@ -50,6 +54,7 @@ export async function connect(client, options) {
     agentVisibility,
     mcpConnections,
     focusMcpConnectionId,
+    conversationId,
   );
   const walletAuth = delegateAuthVerification(auth);
   client.dialog.showWallet?.();
@@ -176,6 +181,14 @@ function normalizeAgentVisibility(agent) {
   });
 }
 
+function normalizeAgentConversationId(value) {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || !AGENT_CONVERSATION_ID.test(value)) {
+    throw new TypeError("conversationId must be a lowercase UUIDv4");
+  }
+  return value;
+}
+
 function normalizeMcpConnections(value) {
   if (!Array.isArray(value) || value.length > 16) {
     throw new TypeError("mcpConnections must be an array of at most 16 pre-registered connections");
@@ -211,11 +224,13 @@ function withConnectionResources(
   agentVisibility,
   mcpConnections,
   focusMcpConnectionId,
+  conversationId,
 ) {
   const configured = typeof auth === "object" && auth !== null
     ? (auth.resources ?? []).filter((resource) =>
       !Object.values(AGENT_VISIBILITY_RESOURCES).includes(resource)
       && !resource.startsWith(AGENT_VISIBILITY_RESOURCE_PREFIX)
+      && !resource.startsWith(AGENT_CONVERSATION_RESOURCE_PREFIX)
       && !resource.startsWith(CONNECTOR_RESOURCE_PREFIX)
       && !resource.startsWith(CONNECTORS_RESOURCE_PREFIX)
       && !resource.startsWith(MCP_CONNECTION_RESOURCE_PREFIX)
@@ -236,6 +251,7 @@ function withConnectionResources(
     ...(visibility.length === 0
       ? []
       : [`${AGENT_VISIBILITY_RESOURCE_PREFIX}${visibility.join(",")}`]),
+    ...(conversationId ? [`${AGENT_CONVERSATION_RESOURCE_PREFIX}${conversationId}`] : []),
     ...mcpConnections.map(({ id }) => `${MCP_CONNECTION_RESOURCE_PREFIX}${id}`),
     ...(focusMcpConnectionId ? [`${MCP_FOCUS_RESOURCE_PREFIX}${focusMcpConnectionId}`] : []),
   ])];

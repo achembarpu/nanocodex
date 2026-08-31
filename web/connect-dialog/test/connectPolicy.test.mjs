@@ -131,8 +131,8 @@ test("signed agent visibility resources map to compact consent labels", () => {
     },
     {
       resource: "urn:nanocodex:agent:trace:read",
-      label: "Traces",
-      detail: "Full run trace",
+      label: "Thinking & traces",
+      detail: "Reasoning, thinking, and full tool traffic",
     },
   ]);
 });
@@ -150,7 +150,19 @@ test("legacy visibility resources remain readable", () => {
   assert.deepEqual(appVisibilityPermissions([
     "urn:nanocodex:agent:output:final",
     "urn:nanocodex:agent:trace:read",
-  ]).map(({ label }) => label), ["Reply", "Traces"]);
+  ]).map(({ label }) => label), ["Reply", "Thinking & traces"]);
+});
+
+test("a signed durable conversation is visible as a separate approval", () => {
+  const resource = "urn:nanocodex:agent:conversation:0f5f2ab8-2585-4d7c-9403-0de76f55ad18";
+  assert.deepEqual(appVisibilityPermissions([resource]), [{
+    resource,
+    label: "Conversation",
+    detail: "Create and use one new durable conversation",
+  }]);
+  assert.deepEqual(appVisibilityPermissions([
+    "urn:nanocodex:agent:conversation:not-a-uuid",
+  ]), []);
 });
 
 test("hosted history and memory remain separate signed permissions", () => {
@@ -276,6 +288,15 @@ test("signed app and origin resources bind the dialog app exactly once", () => {
     "urn:nanocodex:app:consumer-example",
     "urn:nanocodex:origin:https%3A%2F%2Fother.example",
   ], app), /do not match/);
+  assert.throws(() => signedAppResources([
+    ...resources,
+    "urn:nanocodex:agent:conversation:not-a-uuid",
+  ], app), /durable conversation request is invalid/);
+  assert.throws(() => signedAppResources([
+    ...resources,
+    "urn:nanocodex:agent:conversation:0f5f2ab8-2585-4d7c-9403-0de76f55ad18",
+    "urn:nanocodex:agent:conversation:8dd9ec4e-5bd8-46d2-8749-40456742e9e5",
+  ], app), /durable conversation request is invalid/);
 });
 
 test("wallet result sanitization retains signatures without exposing the account bearer", () => {

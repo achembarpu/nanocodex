@@ -1,6 +1,6 @@
 import { ChevronRight, Menu, MessageSquare, Plus, X } from "lucide-react";
 import { memo, useEffect, useRef } from "react";
-import type { AgentStatus } from "./agentTerminalTypes";
+import type { AgentStatus } from "./types.js";
 
 export type ConversationSummary = Readonly<{
   id: string;

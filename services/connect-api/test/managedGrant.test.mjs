@@ -164,7 +164,7 @@ test("every Connect managed request uses the complete grant assertion", () => {
   assert.doesNotMatch(source, /"x-nanocodex-connect-user"/);
   assert.match(source, /managedGrantHeaders\(managedGrantAssertion\(grant\)\)/);
   assert.match(source, /managedGrantHeaders\(assertion\)/);
-  assert.match(source, /connectManagedAgent\(env, store, appScope, grantAssertion\)/);
+  assert.match(source, /connectManagedAgent\(env, store, appScope, grantAssertion, conversationId\)/);
   assert.doesNotMatch(
     section("async function createHostedAuthorization(", "async function readHostedBrowserSession("),
     /connectManagedAgent/,
@@ -178,7 +178,7 @@ test("every Connect managed request uses the complete grant assertion", () => {
 test("Chrome grants provision and validate a real managed UUID while retaining zero-spend policy", () => {
   const creation = section("const [durableAgentId, egressSubject]", "mark(\"capabilities\")");
   assert.doesNotMatch(creation, /CHROME_EXTENSION_APP_ID[\s\S]*?agentId\(accountAddress\)/);
-  assert.match(creation, /isConnectAgentId\(approval\.durableAgentId\)[\s\S]*?connectManagedAgent\(env, store, appScope, grantAssertion\)/);
+  assert.match(creation, /isConnectAgentId\(approval\.durableAgentId\)[\s\S]*?connectManagedAgent\(env, store, appScope, grantAssertion, conversationId\)/);
   const storedGrant = section("const grant: GrantRecord", "try {");
   assert.match(source, /const appToolPolicy = connectAppToolPolicy\(app\)/);
   assert.match(storedGrant, /appToolPolicy === undefined \? \{\} : \{ appToolPolicy \}/);
@@ -197,6 +197,20 @@ test("Chrome grants provision and validate a real managed UUID while retaining z
   assert.match(signedPolicy, /authorization\.limits === undefined[\s\S]*?explicitly constrain spending/);
   assert.match(signedPolicy, /authorization\.scopes === undefined[\s\S]*?explicitly constrain contract calls/);
   assert.doesNotMatch(signedPolicy, /authorization\.scopes\?\.|\?\? \[\]/);
+});
+
+test("each signed conversation provisions one isolated exact managed agent", () => {
+  const selection = section("function approvedAgentConversationId(", "function approvedHostedCapabilities(");
+  assert.match(selection, /values\.length !== 1/);
+  assert.match(selection, /AGENT_CONVERSATION_ID\.test\(value\)/);
+  const provision = section("async function connectManagedAgent(", "function managedGrantAssertion(");
+  assert.match(provision, /conversationId\?: string/);
+  assert.match(provision, /connect-agent:\$\{appId\}:\$\{assertion\.brokerUserId\}\$\{conversationId/);
+  const creation = section("const conversationId = approvedAgentConversationId", "mark(\"capabilities\")");
+  assert.match(creation, /conversationId && isConnectAgentId\(approval\.durableAgentId\)/);
+  assert.match(creation, /A new durable conversation cannot reuse an existing agent approval/);
+  assert.match(section("const grant: GrantRecord", "try {"), /conversationId \? \{ conversationId \} : \{\}/);
+  assert.match(section("function grantWire(", "function accessKeyWire("), /conversation_id: grant\.conversationId/);
 });
 
 test("standard tools bind to the authenticated grant origin and no-history state loses its prompt", () => {

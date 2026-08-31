@@ -272,12 +272,16 @@ test("compact agent chrome prioritizes the conversation and transcript", () => {
   assert.match(application, /className="mobile-product-navigation"/);
   assert.match(artifactDock, /artifacts\.length === 0 \? " is-empty"/);
   assert.match(ruleBlock(terminalCss, ".nanocodex-demo.is-full .artifact-dock.is-collapsed.is-empty {", compact), /display:\s*none/);
-  const conversationRail = source("../src/ConversationHistoryRail.tsx");
+  const conversationRail = source("../../js/terminal/src/ConversationHistoryRail.tsx");
   assert.match(conversationRail, /className="conversation-mobile-title"/);
   assert.match(conversationRail, /className="conversation-mobile-new"/);
   assert.match(conversationRail, /statusLabel\(agentStatus\)/);
   assert.doesNotMatch(conversationRail, /conversation\.id\.slice/);
-  assert.match(ruleBlock(terminalCss, ".conversation-row {", terminalCss.indexOf(`@media ${compactQuery}`, compact + 1)), /min-height:\s*62px/);
+  assert.match(ruleBlock(
+    terminalPresentationCss,
+    ".conversation-row {",
+    terminalPresentationCss.indexOf(`@media ${compactQuery}`),
+  ), /min-height:\s*62px/);
 });
 
 test("the website presents the public headless controller without duplicating its lifecycle", () => {

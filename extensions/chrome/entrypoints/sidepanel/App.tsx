@@ -1,11 +1,20 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { Agent, AgentControllerEvent, AgentTurn, AgentTurnResult } from "nanocodex-react/agent";
-import { AgentTerminalView, type AgentTerminalState } from "nanocodex-terminal";
+import {
+  AgentTerminalView,
+  ConversationHistoryRail,
+  type AgentStatus,
+  type AgentTerminalState,
+  type ConversationSummary,
+} from "nanocodex-terminal";
 import type { ToolContext } from "nanocodex/host";
 import { createPageAgent, type PageAgentSession } from "../../lib/agent";
 import {
   connectNanocodex,
+  createConversationId,
   disconnectNanocodex,
+  isConversationId,
+  LEGACY_CONVERSATION_ID,
   reconnectNanocodex,
   type NanocodexConnection,
 } from "../../lib/connect";
@@ -28,6 +37,10 @@ interface ActiveOperation {
 }
 
 export function App() {
+  const [conversations, setConversations] = useState<readonly ConversationSummary[]>(loadConversations);
+  const [conversationId, setConversationId] = useState(loadSelectedConversation);
+  const [conversationPending, setConversationPending] = useState(false);
+  const [railOpen, setRailOpen] = useState(false);
   const [connection, setConnection] = useState<NanocodexConnection>();
   const [agentSource, setAgentSource] = useState<Agent>();
   const [agentError, setAgentError] = useState<string>();
@@ -53,9 +66,11 @@ export function App() {
 
   useEffect(() => {
     let mounted = true;
-    void reconnectNanocodex()
+    void reconnectNanocodex(conversationId)
       .then((restored) => {
-        if (mounted) setConnection(restored);
+        if (!mounted) return;
+        if (restored) retainConversation(conversationId, restored.agentId);
+        setConnection(restored);
       })
       .catch((cause) => {
         if (mounted) setError(errorMessage(cause));
@@ -232,13 +247,14 @@ export function App() {
   async function dispatchCleanup(input: CleanupInput, context: ToolContext): Promise<unknown> {
     if (context.signal.aborted) throw context.signal.reason;
     const operation = operationRef.current;
-    if (!operation || operation.cancelled || !operation.ready) {
-      throw new Error("The cleanup turn is no longer active.");
+    if (!operation || operation.cancelled) {
+      throw new Error("The current turn is no longer active.");
     }
+    operation.ready ??= claimSelectedPage(operation);
     const current = await operation.ready;
     if (context.signal.aborted) throw context.signal.reason;
     if (operation.cancelled || operationRef.current !== operation) {
-      throw new Error("The cleanup turn is cancelling.");
+      throw new Error("The current turn is cancelling.");
     }
     setActivity(cleanupActivity(input));
     const requestId = crypto.randomUUID();
@@ -269,15 +285,15 @@ export function App() {
 
   function startPanelTurn(source: Agent, input: string): AgentTurn {
     if (operationRef.current) {
-      throw new Error("The current cleanup is still finishing. Stop it before starting another.");
+      throw new Error("The current turn is still finishing. Stop it before starting another.");
     }
     setError("");
     setKept("");
     setPreview(undefined);
     setActivity("Thinking");
+    recordConversationActivity(input);
     const operation: ActiveOperation = { cancelled: false, controller: new AbortController() };
     operationRef.current = operation;
-    operation.ready = claimSelectedPage(operation);
     let inner: AgentTurn;
     try {
       inner = source.turn.prompt({ input });
@@ -286,7 +302,6 @@ export function App() {
       operation.controller.abort(cause);
       if (operationRef.current === operation) operationRef.current = undefined;
       setActivity(undefined);
-      void operation.ready.catch(() => {});
       throw cause;
     }
     let resultPromise: Promise<AgentTurnResult> | undefined;
@@ -312,16 +327,11 @@ export function App() {
   async function finishPanelTurn(operation: ActiveOperation, turn: AgentTurn): Promise<AgentTurnResult> {
     let lease: PageLease | undefined;
     try {
-      const ready = operation.ready;
-      if (!ready) throw new Error("The selected tab was not claimed.");
-      lease = await ready.catch(async (cause) => {
-        await turn.cancel().catch(() => {});
-        throw cause;
-      });
       const result = await turn.result();
-      if (operation.cancelled || operationRef.current !== operation) {
+      lease = operation.lease;
+      if (lease && (operation.cancelled || operationRef.current !== operation)) {
         await revertFailedTurnPreview(lease);
-      } else {
+      } else if (lease) {
         try {
           setPreview(await sendMessage<PreviewInfo | undefined>({
             type: "preview.info",
@@ -333,6 +343,7 @@ export function App() {
       }
       return result;
     } catch (cause) {
+      lease ??= operation.lease;
       if (lease) await revertFailedTurnPreview(lease);
       throw cause;
     } finally {
@@ -365,7 +376,9 @@ export function App() {
     setConnecting(true);
     setError("");
     try {
-      setConnection(await connectNanocodex());
+      const connected = await connectNanocodex(conversationId);
+      retainConversation(conversationId, connected.agentId);
+      setConnection(connected);
     } catch (cause) {
       setError(errorMessage(cause));
     } finally {
@@ -387,7 +400,7 @@ export function App() {
     setTab(undefined);
     setPreview(undefined);
     try {
-      await disconnectNanocodex();
+      await disconnectNanocodex(conversationId);
     } catch (cause) {
       setError(`Disconnected locally. ${errorMessage(cause)}`);
     }
@@ -439,6 +452,78 @@ export function App() {
     }
   }
 
+  function recordConversationActivity(input: string): void {
+    const now = Date.now();
+    setConversations((current) => persistConversations(current.map((conversation) => (
+      conversation.id === conversationId
+        ? {
+          ...conversation,
+          title: (conversation.turnCount ?? 0) === 0 ? conversationTitle(input) : conversation.title,
+          turnCount: (conversation.turnCount ?? 0) + 1,
+          updatedAt: now,
+        }
+        : conversation
+    )).sort((left, right) => (right.updatedAt ?? 0) - (left.updatedAt ?? 0))));
+  }
+
+  function retainConversation(id: string, agentId: string): void {
+    setConversations((current) => {
+      const existing = current.find((conversation) => conversation.id === id);
+      const next = existing
+        ? current
+        : [{ id, title: "New conversation", updatedAt: Date.now(), turnCount: 0 }, ...current];
+      persistConversationAgent(id, agentId);
+      return persistConversations(next);
+    });
+  }
+
+  async function activateConversation(id: string, connected?: NanocodexConnection): Promise<void> {
+    if (operationRef.current || sessionOpeningRef.current || conversationPending
+      || (id === conversationId && connection)) return;
+    setConversationPending(true);
+    setError("");
+    try {
+      const next = connected ?? await reconnectNanocodex(id);
+      if (!next) throw new Error("Reconnect this conversation to continue.");
+      const expectedAgent = conversationAgent(id);
+      if (expectedAgent && expectedAgent !== next.agentId) {
+        throw new Error("The retained conversation authorization no longer matches this thread.");
+      }
+      connectionRef.current = undefined;
+      setConnection(undefined);
+      await closePanelRuntime();
+      closingRef.current = undefined;
+      setAgentError(undefined);
+      setTab(undefined);
+      setPreview(undefined);
+      setConversationId(id);
+      persistSelectedConversation(id);
+      persistConversationAgent(id, next.agentId);
+      setConnection(next);
+      setRailOpen(false);
+    } catch (cause) {
+      setError(errorMessage(cause));
+    } finally {
+      setConversationPending(false);
+    }
+  }
+
+  async function createConversation(): Promise<void> {
+    if (operationRef.current || sessionOpeningRef.current || conversationPending || connecting) return;
+    const id = createConversationId();
+    setConversationPending(true);
+    setError("");
+    try {
+      const connected = await connectNanocodex(id);
+      retainConversation(id, connected.agentId);
+      setConversationPending(false);
+      await activateConversation(id, connected);
+    } catch (cause) {
+      setError(errorMessage(cause));
+      setConversationPending(false);
+    }
+  }
+
   const panelAgent = useMemo<Agent | undefined>(() => {
     if (!agentSource) return undefined;
     return Object.freeze({
@@ -460,6 +545,13 @@ export function App() {
           : connection
             ? "Connected"
             : "Not connected");
+  const agentStatus: AgentStatus = agentError
+    ? "error"
+    : agentSource
+      ? "ready"
+      : agentOpening || restoring || conversationPending
+        ? "starting"
+        : "idle";
 
   return (
     <main className="app-shell">
@@ -488,24 +580,42 @@ export function App() {
 
       {tab ? <div className="site" title={tab.url}><span aria-hidden="true">●</span>{tab.origin}</div> : null}
 
-      <section className="chat" aria-label="Page cleanup chat">
-        <AgentTerminalView
-          agent={panelAgent}
-          agentError={agentError}
-          inactiveMessage={({ agentError: currentError }) => currentError ?? (!connection ? "Connect Nanocodex to start." : "")}
-          maxEntries={160}
-          mode="full"
-          onConversationActivity={() => {}}
-          onTerminalEvent={(event) => observeTerminalEvent(event, setActivity)}
-          onStateChange={observeTerminalState}
-          promptIntent="steer"
-          retryAgent={() => {
-            if (connection) void ensurePageAgent(connection).catch(() => {});
-          }}
-          showToolCalls
-          welcome="Tell me what to hide, simplify, or emphasize on the selected tab. I’ll inspect it and show a reversible preview."
+      <div className="conversation-workspace">
+        <ConversationHistoryRail
+          agentStatus={agentStatus}
+          conversations={conversations}
+          mobileOpen={railOpen}
+          pending={conversationPending || connecting}
+          runtime="managed"
+          selectedId={conversationId}
+          onClose={() => setRailOpen(false)}
+          onCreate={() => void createConversation()}
+          onOpen={() => setRailOpen(true)}
+          onRetry={() => void activateConversation(conversationId)}
+          onSelect={(id) => void activateConversation(id)}
         />
-      </section>
+        <div className="conversation-main">
+          <section className="chat" aria-label="Durable agent chat">
+            <AgentTerminalView
+              key={conversationId}
+              agent={panelAgent}
+              agentError={agentError}
+              inactiveMessage={({ agentError: currentError }) => currentError ?? (!connection ? "Connect Nanocodex to start." : "")}
+              maxEntries={160}
+              mode="full"
+              onConversationActivity={() => {}}
+              onTerminalEvent={(event) => observeTerminalEvent(event, setActivity)}
+              onStateChange={observeTerminalState}
+              promptIntent="steer"
+              retryAgent={() => {
+                if (connection) void ensurePageAgent(connection).catch(() => {});
+              }}
+              showToolCalls
+              welcome="Chat with your durable Nanocodex agent. Ask it anything, or ask it to inspect and reshape the selected tab."
+            />
+          </section>
+        </div>
+      </div>
 
       {preview ? (
         <section className="preview" aria-label="Active preview">
@@ -533,7 +643,7 @@ export function App() {
         ) : null}
         <details>
           <summary>Privacy and tab access</summary>
-          <p>The agent attaches only the tab you selected. It can inspect rendered page text and apply reversible CSS, but cannot read form values, cookies, or browser storage. Your signed grant allows final messages and conversation history, never raw traces, spending, or contracts.</p>
+          <p>The agent attaches a selected tab only when you ask it to inspect or change the page. It can inspect rendered page text and apply reversible CSS, but cannot read form values, cookies, or browser storage. Your signed grant allows replies, actions, conversation history, and full run traces, but never spending or contracts.</p>
         </details>
       </div>
     </main>
@@ -577,4 +687,69 @@ function asRecord(value: unknown): Record<string, unknown> {
 
 function shortAddress(address: string): string {
   return `${address.slice(0, 6)}…${address.slice(-4)}`;
+}
+
+const CONVERSATIONS_KEY = "nanocodex.chrome.conversations.v1";
+const SELECTED_CONVERSATION_KEY = "nanocodex.chrome.selected-conversation.v1";
+
+function loadConversations(): readonly ConversationSummary[] {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(CONVERSATIONS_KEY) ?? "null") as unknown;
+    if (!Array.isArray(parsed)) return [legacyConversation()];
+    const conversations = parsed.flatMap((item): ConversationSummary[] => {
+      if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+      const value = item as Partial<ConversationSummary>;
+      if (typeof value.id !== "string" || !isConversationId(value.id)
+        || typeof value.title !== "string" || value.title.length === 0 || value.title.length > 80
+        || (value.updatedAt !== undefined && !Number.isSafeInteger(value.updatedAt))
+        || (value.turnCount !== undefined && (!Number.isSafeInteger(value.turnCount) || value.turnCount < 0))) {
+        return [];
+      }
+      return [{
+        id: value.id,
+        title: value.title,
+        ...(value.updatedAt === undefined ? {} : { updatedAt: value.updatedAt }),
+        ...(value.turnCount === undefined ? {} : { turnCount: value.turnCount }),
+      }];
+    });
+    return conversations.length > 0 ? conversations : [legacyConversation()];
+  } catch {
+    return [legacyConversation()];
+  }
+}
+
+function loadSelectedConversation(): string {
+  try {
+    const selected = localStorage.getItem(SELECTED_CONVERSATION_KEY);
+    if (selected && loadConversations().some(({ id }) => id === selected)) return selected;
+  } catch {}
+  return loadConversations()[0]?.id ?? LEGACY_CONVERSATION_ID;
+}
+
+function persistConversations(conversations: readonly ConversationSummary[]): readonly ConversationSummary[] {
+  const frozen = Object.freeze([...conversations]);
+  try { localStorage.setItem(CONVERSATIONS_KEY, JSON.stringify(frozen)); } catch {}
+  return frozen;
+}
+
+function persistSelectedConversation(id: string): void {
+  try { localStorage.setItem(SELECTED_CONVERSATION_KEY, id); } catch {}
+}
+
+function persistConversationAgent(id: string, agentId: string): void {
+  try { localStorage.setItem(`${CONVERSATIONS_KEY}:agent:${id}`, agentId); } catch {}
+}
+
+function conversationAgent(id: string): string | null {
+  try { return localStorage.getItem(`${CONVERSATIONS_KEY}:agent:${id}`); } catch { return null; }
+}
+
+function legacyConversation(): ConversationSummary {
+  return Object.freeze({ id: LEGACY_CONVERSATION_ID, title: "New conversation" });
+}
+
+function conversationTitle(input: string): string {
+  const text = input.replace(/\s+/g, " ").trim();
+  if (!text) return "New conversation";
+  return text.length > 56 ? `${text.slice(0, 55).trimEnd()}…` : text;
 }

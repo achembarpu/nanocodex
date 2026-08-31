@@ -115,6 +115,8 @@ const AGENT_VISIBILITY_RESOURCES = {
   "urn:nanocodex:agent:trace:read": "agent.trace.read",
 } as const;
 const AGENT_VISIBILITY_RESOURCE_PREFIX = "urn:nanocodex:agent:visibility:";
+const AGENT_CONVERSATION_RESOURCE_PREFIX = "urn:nanocodex:agent:conversation:";
+const AGENT_CONVERSATION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const HOSTED_HISTORY_RESOURCE = "urn:nanocodex:history:read";
 const HOSTED_MEMORY_READ_RESOURCE = "urn:nanocodex:memory:read";
 const HOSTED_MEMORY_WRITE_RESOURCE = "urn:nanocodex:memory:write";
@@ -288,6 +290,7 @@ type GrantRecord = Readonly<{
   status: "active" | "revoked";
   expiresAt: number;
   capabilities: readonly string[];
+  conversationId?: string;
   appToolPolicy?: typeof CHROME_CLEANUP_APP_TOOL_POLICY;
   mcpConnections?: readonly Readonly<{ id: string; name: string }>[];
   accessKey?: Record<string, unknown>;
@@ -1254,6 +1257,7 @@ async function createConnection(
     ...connectors,
     ...mcpConnections.map((connection) => `mcp:${connection.id}`),
   ];
+  const conversationId = approvedAgentConversationId(approval.resources);
   const grantAssertion: ManagedGrantAssertion = {
     brokerUserId: identity.userId,
     capabilities: grantCapabilities,
@@ -1261,10 +1265,17 @@ async function createConnection(
     grantId,
     mcpIds: mcpConnections.map(({ id }) => id),
   };
+  if (conversationId && isConnectAgentId(approval.durableAgentId)) {
+    throw new ApiFailure(
+      403,
+      "conversation_mismatch",
+      "A new durable conversation cannot reuse an existing agent approval.",
+    );
+  }
   const [durableAgentId, egressSubject] = await Promise.all([
     isConnectAgentId(approval.durableAgentId)
       ? Promise.resolve(approval.durableAgentId)
-      : connectManagedAgent(env, store, appScope, grantAssertion),
+      : connectManagedAgent(env, store, appScope, grantAssertion, conversationId),
     connectEgressSubject(env, store, identity.userId, appScope),
   ]);
   mark("capabilities");
@@ -1280,6 +1291,7 @@ async function createConnection(
     status: "active",
     expiresAt,
     capabilities: grantCapabilities,
+    ...(conversationId ? { conversationId } : {}),
     ...(appToolPolicy === undefined ? {} : { appToolPolicy }),
     mcpConnections: mcpConnections.map(({ id, name }) => ({ id, name })),
     ...(accessKey ? { accessKey } : {}),
@@ -1766,11 +1778,12 @@ async function connectManagedAgent(
   store: Kv.Kv,
   appId: string,
   assertion: ManagedGrantAssertion,
+  conversationId?: string,
 ): Promise<string> {
   if (!store.create) {
     throw new ApiFailure(500, "durable_agent_unavailable", "Atomic durable-agent provisioning is unavailable.");
   }
-  const recordKey = `connect-agent:${appId}:${assertion.brokerUserId}`;
+  const recordKey = `connect-agent:${appId}:${assertion.brokerUserId}${conversationId ? `:${conversationId}` : ""}`;
   const retained = await store.get<unknown>(recordKey);
   if (isConnectAgentRecord(retained)) return retained.agentId;
   const lockKey = `${recordKey}:lock`;
@@ -4609,6 +4622,19 @@ function approvedAgentCapabilities(resources: readonly string[]): string[] {
   return [...new Set([...legacy, ...combined, ...portability])];
 }
 
+function approvedAgentConversationId(resources: readonly string[]): string | undefined {
+  const values = resources.filter((resource) => resource.startsWith(AGENT_CONVERSATION_RESOURCE_PREFIX));
+  if (values.length === 0) return undefined;
+  if (values.length !== 1) {
+    throw new ApiFailure(403, "conversation_mismatch", "The signed Connect approval must select one durable conversation.");
+  }
+  const value = values[0]!.slice(AGENT_CONVERSATION_RESOURCE_PREFIX.length);
+  if (!AGENT_CONVERSATION_ID.test(value)) {
+    throw new ApiFailure(403, "conversation_mismatch", "The signed durable conversation identifier is invalid.");
+  }
+  return value;
+}
+
 function approvedHostedCapabilities(resources: readonly string[]): string[] {
   const approved = new Set(resources);
   return [
@@ -4695,6 +4721,7 @@ function grantWire(grant: GrantRecord) {
     status: grant.status,
     expires_at: grant.expiresAt,
     capabilities: grant.capabilities,
+    ...(grant.conversationId ? { conversation_id: grant.conversationId } : {}),
     mcp_connections: grant.mcpConnections ?? [],
   };
 }

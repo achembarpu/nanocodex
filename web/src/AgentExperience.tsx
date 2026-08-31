@@ -1,9 +1,8 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { AgentStatus, AgentTerminalMode, AgentTerminalState } from "./agentTerminalTypes";
 import { AgentTerminal, ManagedAgentTerminal } from "./AgentTerminal";
-import { TerminalTranscriptSurface } from "nanocodex-terminal";
+import { ConversationHistoryRail, TerminalTranscriptSurface } from "nanocodex-terminal";
 import { useAccountSession } from "./AccountSession";
-import { ConversationHistoryRail } from "./ConversationHistoryRail";
 import { browserAgentCapabilityError } from "./browserAgentCapabilities";
 import { clientFailureMessage } from "./clientFailure";
 import {

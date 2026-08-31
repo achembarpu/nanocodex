@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
-import { CHROME_CONNECT_REQUEST, CHROME_ZERO_SPEND_LIMITS, isManagedAgentId } from "../lib/connect.ts";
+import {
+  CHROME_CONNECT_REQUEST,
+  CHROME_ZERO_SPEND_LIMITS,
+  createConversationId,
+  isConversationId,
+  isManagedAgentId,
+} from "../lib/connect.ts";
 import {
   CLEANUP_PARAMETERS,
   cleanupPrompt,
@@ -9,6 +16,8 @@ import {
   visibleCleanupPrompt,
 } from "../lib/extension.ts";
 import { acquireCleanupHost } from "../lib/host-lock.ts";
+
+const panelSource = await readFile(new URL("../entrypoints/sidepanel/App.tsx", import.meta.url), "utf8");
 
 test("exposes one narrow direct cleanup tool", async () => {
   const calls: unknown[] = [];
@@ -48,13 +57,23 @@ test("signs an explicit zero-spend access-key policy", () => {
   ]);
 });
 
-test("requests durable chat history without action summaries or raw traces", () => {
+test("asks explicitly for replies, history, actions, and thinking traces", () => {
   assert.deepEqual(CHROME_CONNECT_REQUEST.capabilities.agent, {
     finalMessages: true,
-    actionSummaries: false,
+    actionSummaries: true,
     conversationHistory: true,
-    rawTraces: false,
+    rawTraces: true,
   });
+});
+
+test("creates isolated durable conversation identifiers", () => {
+  const first = createConversationId();
+  const second = createConversationId();
+  assert.equal(isConversationId(first), true);
+  assert.equal(isConversationId(second), true);
+  assert.notEqual(first, second);
+  assert.equal(isConversationId("legacy"), true);
+  assert.equal(isConversationId("../../another-agent"), false);
 });
 
 test("keeps cleanup policy out of the visible transcript", () => {
@@ -63,6 +82,15 @@ test("keeps cleanup policy out of the visible transcript", () => {
   assert.notEqual(modelInput, visible);
   assert.equal(visibleCleanupPrompt(modelInput), visible);
   assert.equal(visibleCleanupPrompt("an unrelated retained prompt"), "an unrelated retained prompt");
+  assert.match(modelInput, /Respond normally to\s+ordinary conversation/);
+  assert.match(modelInput, /cleanup tool is optional/);
+});
+
+test("ordinary chat stays independent from the optional selected-page lease", () => {
+  const dispatch = sourceSection("async function dispatchCleanup(", "function startPanelTurn(");
+  const start = sourceSection("function startPanelTurn(", "async function finishPanelTurn(");
+  assert.match(dispatch, /operation\.ready \?\?= claimSelectedPage\(operation\)/);
+  assert.doesNotMatch(start, /claimSelectedPage/);
 });
 
 test("allows only one side panel to own the cleanup host", async () => {
@@ -83,3 +111,11 @@ test("allows only one side panel to own the cleanup host", async () => {
   assert.ok(next);
   await next.release();
 });
+
+function sourceSection(start: string, end: string): string {
+  const from = panelSource.indexOf(start);
+  const to = panelSource.indexOf(end, from + start.length);
+  assert.notEqual(from, -1, `missing ${start}`);
+  assert.notEqual(to, -1, `missing ${end}`);
+  return panelSource.slice(from, to);
+}
