@@ -59,8 +59,9 @@ function localConnectApplications(): Plugin {
           response.end(method === "HEAD" ? undefined : html);
         };
 
-        const playgroundHost = process.env.NANOCODEX_LOCAL_CONNECT_PLAYGROUND_HOST;
-        if (playgroundHost && hostname === playgroundHost) {
+        const playgroundHost = process.env.NANOCODEX_LOCAL_CONNECT_PLAYGROUND_HOST
+          ?? "playground.nanocodex.localhost";
+        if (hostname === playgroundHost) {
           if (method !== "GET" && method !== "HEAD") {
             response.statusCode = 405;
             response.setHeader("allow", "GET, HEAD");
@@ -197,8 +198,7 @@ function linkPreviewMetadata(): Plugin {
       order: "post",
       handler(html, context) {
         const origin = process.env.NANOCODEX_LOCAL_PUBLIC_ORIGIN
-          ?? context.server?.resolvedUrls?.local[0]
-          ?? "http://localhost:5173";
+          ?? "http://nanocodex.localhost:5173";
         const url = new URL(context.path, origin);
         return renderLinkPreviewDocument(html, url);
       },
@@ -245,10 +245,8 @@ export default defineConfig({
         ? { path: process.env.NANOCODEX_LOCAL_STATE_PATH }
         : undefined,
       config: (config) => ({
-        // `npm run dev` mints this one-use bootstrap credential after rejecting
-        // local env files. Wrangler's required-secret loader cannot consume
-        // process.env while env-file loading is disabled, so bind this exact
-        // non-provider token explicitly to the local Worker.
+        // Local repository publication is optional. Do not make its token a
+        // prerequisite for the direct Vite development path.
         ...(process.env.CLOUDFLARE_ENV === "development"
           ? { secrets: undefined }
           : {}),

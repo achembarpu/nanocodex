@@ -67,115 +67,9 @@ while the existing surfaces are recomposed incrementally.
 
 ## Development
 
-Local development is ordinary loopback HTTP. It needs Node and the repository
-toolchain, not OrbStack, Docker, local TLS, or `.local` DNS. The primary checkout
-runs at `http://nanocodex.localhost:5173`; worktrees receive a deterministic
-single-label `.nanocodex.localhost` host and isolated port. Browsers treat the
-reserved `.localhost` domain as a secure context.
-
-All instances use WebAuthn RP ID `nanocodex.localhost`. A signed HttpOnly
-parent-domain record containing only public passkey metadata lets a fresh,
-isolated worktree verify the same credential without sharing mutable
-Wrangler/Miniflare state. Exact origin, challenge, credential, and signature
-checks remain local to each instance.
-
-Provider OAuth applications register the four fixed
-`http://127.0.0.1:47891/v1/connectors/<provider>/callback` URLs. A standalone
-stateless relay verifies a ten-minute HMAC-authenticated routing envelope and
-returns the browser to a fixed callback path on the initiating worktree. The
-OAuth relay HMAC key is separate from passkey portability. Original broker
-state, PKCE, code exchange, and provider credentials remain private.
-
-```bash
-cd web
-npm install
-npm run dev
-```
-
-That command validates the incremental Rust/WASM package, prepares missing
-dependencies, builds the terminal package, and starts the website, managed,
-egress, and Connect Workers in one local Cloudflare session. It reports ready
-after the canonical site and Connect health boundaries respond. D1 migrations,
-repository publication, and deeper browser journeys are explicit operations;
-run only the ones owned by the feature being exercised. The primary checkout
-retains Cloudflare state under
-`~/.nanocodex/web-development`; worktrees use instance-scoped children of that
-directory. Their Vite ports, application hosts, Durable Objects, R2, and D1
-state are isolated, so multiple versions can run concurrently.
-Passkey eligibility and verified credential identity are deliberately shared;
-agent, account-session, connector, and repository state are not.
-
-Set `NANOCODEX_DEV_INSTANCE=<name>` to pin an explicit instance name, or
-`NANOCODEX_DEV_ORIGIN=http://127.0.0.1:<port>` to resolve a rare deterministic
-port collision. Startup prints both the app and Connect playground URLs for the
-instance. Ordinary shutdown retains that instance's state.
-
-The launcher verifies Connect through the exact `.localhost` authority and
-prints the Account page, playground, relay, and CLI command when ready:
-
-```bash
-NANOCODEX_CONNECT_DEVICE_BASE_URL=http://nanocodex.localhost:5173/v1/device nanocodex login
-NANOCODEX_CONNECT_DEVICE_BASE_URL=http://nanocodex.localhost:5173/v1/device nanocodex connect github
-```
-
-The printed browser URL is the supported exact device authority for
-host-managed browser verification. Its host remains under the shared
-`nanocodex.localhost` WebAuthn RP ID. Do not substitute `127.0.0.1`, another
-Wrangler port, or a standalone Connect dialog: those change the account and
-WebAuthn boundary being tested.
-
-The orchestrator loads the main worktree's root `.env` once before it selects
-auth or starts a child, including when an agent launches the stack from a linked
-worktree. It reconstructs every child environment explicitly: only the private
-managed launcher and its credential broker receive `OPENAI_API_KEY` or Codex
-auth configuration. Vite receives only the derived
-`NANOCODEX_LOCAL_MODEL_ACCESS=managed` and non-secret auth mode; it maps those
-to the website Worker's private `MODEL_EGRESS` binding. Vite and both Workers
-otherwise receive only generated local tokens, secretless bindings, and
-non-secret runtime settings. The legacy credential-bearing development proxy
-is not part of managed localhost.
-Vite env loading is disabled, and website `.dev.vars*` files are rejected; keep
-local development settings in the main worktree's one root `.env` instead.
-
-Local account connectors read their OAuth application credentials from the
-same main-worktree `.env` using the production deployment names. The launcher
-projects them only into the private auxiliary egress Worker:
-
-```text
-NANOCODEX_GITHUB_OAUTH_CLIENT_ID=...
-NANOCODEX_GITHUB_OAUTH_CLIENT_SECRET=...
-NANOCODEX_GOOGLE_OAUTH_CLIENT_ID=...
-NANOCODEX_GOOGLE_OAUTH_CLIENT_SECRET=...
-NANOCODEX_X_OAUTH_CLIENT_ID=...
-NANOCODEX_X_OAUTH_CLIENT_SECRET=...
-```
-
-Register the four callback paths under the instance URL printed at startup, as
-described in `services/egress/README.md`. Connector controls remain visible
-but disabled for browser-only guest sessions; a persistent passkey account is
-required even when that guest session already has a ChatGPT connection.
-
-When `OPENAI_API_KEY` is configured, `npm run dev` uses it without inspecting
-another credential. Otherwise it automatically discovers an existing, valid `0600`
-Codex login on the host and starts the private credential broker and managed
-Multiplayer Worker in subscription mode. Local startup never opens an OAuth or
-device-code flow: if neither credential exists, it stops with the exact
-`codex login`, root `.env`, and web-only options instead. The website Worker
-receives neither credential: it reaches the managed Worker over a local Service
-Binding, and that Worker can reach only the private broker binding. Managed
-readiness is a private child-process attestation emitted only after the broker
-proves its configured auth with the fixed Responses WebSocket upgrade and the
-managed Worker health check succeeds. The outer launcher then requires website
-health to attest the same managed, non-interactive auth mode and opens one
-same-origin `/api/responses` WebSocket through `MODEL_EGRESS`; it accepts only
-the exact `nanocodex.proxy.ready` frame before reporting ready.
-The explicit variants are:
-
-```bash
-npm run dev:subscription # require the local Codex login
-npm run dev:api-key      # require OPENAI_API_KEY
-npm run dev:web          # omit the managed Multiplayer stack
-```
+Operator instructions live only in [`AGENTS.md`](../AGENTS.md). Do not duplicate
+them here or add local bootstrap, launcher, cleanup, readiness, or verification
+wrappers.
 
 The homepage consumes the publishable `nanocodex`, `nanocodex-react`, and
 `nanocodex-terminal` packages under `../js`; it does not reach into generated
@@ -185,11 +79,8 @@ React integration creates the browser agent with
 event stream with `useAgentEvents`. React owns no Worker lifecycle, agent
 history, credential policy, or model-loop state.
 
-The local Worker and Vite client run together on their printed
-`http://*.nanocodex.localhost:<development-port>` origin using the Cloudflare
-Vite-plugin layout. No Docker daemon, Cloudflare account, or remote binding is
-used by the normal development command. Provider credentials remain behind
-private Worker bindings; see the
+The local Worker topology is owned by the Cloudflare Vite plugin. Provider
+credentials remain behind private Worker bindings; see the
 [Cloudflare Worker example](../services/managed/README.md#multiplayer-managed-agent-rooms)
 for the deployment and live-smoke workflow.
 
@@ -363,13 +254,9 @@ Run `npm run bench:dataset` in `js/bindings` for the deterministic 100,000-row
 Snappy Parquet/JSONL browser-path benchmark. It reports cold and repeated query
 latency, pulled bytes, range requests, scanned rows, and cache hits.
 
-Development runs on the isolated `.nanocodex.localhost` origin printed at
-startup. Provider credentials remain behind Worker Service Bindings and never
-enter that browser origin.
-
-Local development reads the optional ignored `.env` from the main Git worktree
-through the repository workflow. BYOK uses the `BYOK_SESSIONS` Durable Object
-binding; ChatGPT login uses its separate server-owned session boundary.
+Provider credentials remain behind Worker Service Bindings and never enter the
+browser origin. BYOK uses the `BYOK_SESSIONS` Durable Object binding; ChatGPT
+login uses its separate server-owned session boundary.
 
 The browser agent does not use JavaScript Promise Integration (JSPI). Its
 consumer startup gate checks only the platform APIs used by the shipped path:

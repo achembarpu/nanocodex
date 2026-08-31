@@ -37,30 +37,6 @@ operation for CI, curl, or another machine.
 The flow uses Tempo Accounts/Wata `wallet_connect`. This name refers to the
 Tempo Accounts RPC method, not the WalletConnect protocol.
 
-## Local development
-
-`cd web && npm run dev` owns the complete local login topology. The website,
-managed account service, credential broker, and Connect API run in one
-Cloudflare Vite multi-Worker session with retained local Durable Object state.
-Use the exact loopback CLI command printed by the launcher; for the primary
-checkout it is:
-
-```text
-NANOCODEX_CONNECT_DEVICE_BASE_URL=http://nanocodex.localhost:5173/v1/device nanocodex login
-NANOCODEX_CONNECT_DEVICE_BASE_URL=http://nanocodex.localhost:5173/v1/device nanocodex connect github
-```
-
-Pass `--no-open` to either command in a headless shell. The CLI still prints the
-complete verification URL and confirmation code for the user to open elsewhere.
-
-The reserved `.localhost` name keeps the native transport loopback-only and
-gives every worktree the stable `nanocodex.localhost` WebAuthn RP ID. No
-OrbStack, Docker, local TLS, or `.local` DNS is required. OAuth providers return
-through the stateless relay on `127.0.0.1:47891`, which verifies a short-lived
-signed routing envelope before returning to the initiating worktree and its
-private token exchange. Provider dashboards use the exact callback URLs in
-`LOCAL_DEVELOPMENT.md`; never register a worktree origin or wildcard callback.
-
 ## End-to-end flow
 
 1. **Choose one action.** `nanocodex login` requests the base installation

@@ -2,8 +2,19 @@
 
 ## Operate
 
-- Start the isolated local platform with `npm run dev --prefix web`; stop it with
-  `node web/scripts/down-local.mjs`.
+- Keep operator process here, not in launcher, bootstrap, cleanup, probe, or
+  verification scripts. Package scripts may call standard tools or build real
+  artifacts; they must not hide multi-step development or release ceremony.
+- Install only the package whose lockfile changed. Rebuild changed browser
+  artifacts with `./scripts/build-js-package.sh` and
+  `npm run build --prefix js/terminal`.
+- For local web work, from `web/` run
+  `npx wrangler d1 migrations apply EVALS_DB --local --env development` when
+  migrations changed, then start with
+  `CLOUDFLARE_ENV=development npx vite --host 127.0.0.1 --port 5173`.
+- Use `http://nanocodex.localhost:5173`; stop Vite with Ctrl-C. For OAuth tests,
+  start `scripts/local-oauth-relay.mjs` directly with the same explicit
+  `NANOCODEX_LOCAL_OAUTH_RELAY_HMAC_KEY` passed to Vite.
 - Production deploys are direct `wrangler deploy` calls. Do not add deploy,
   preflight, rollout, probe, reconciliation, retry, or test wrappers.
 - Build only changed artifacts. Installs, resource creation, D1 migrations,
