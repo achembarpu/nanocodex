@@ -214,7 +214,7 @@ async fn execution_policy_cancellation_reconciliation_defaults_fail_closed() {
 async fn assert_pending_provider_step_is_not_repeated(
     kind: &'static str,
     transport: ResponsesTransport,
-    expected_detail: &'static str,
+    expected_operation: &'static str,
 ) -> Result<()> {
     let provider_calls = Arc::new(AtomicU32::new(0));
     let service_calls = Arc::clone(&provider_calls);
@@ -239,7 +239,8 @@ async fn assert_pending_provider_step_is_not_repeated(
         .expect_err("an EffectPending provider step must fail closed");
     assert!(matches!(
         error,
-        NanocodexError::InvalidAttemptState { detail } if detail == expected_detail
+        NanocodexError::ProviderOutcomeUnknown { operation }
+            if operation == expected_operation
     ));
     assert_eq!(
         provider_calls.load(Ordering::Relaxed),
@@ -256,19 +257,15 @@ async fn pending_model_call_recovery_does_not_call_the_provider_again() -> Resul
     assert_pending_provider_step_is_not_repeated(
         "model_call",
         ResponsesTransport::Https,
-        "model call provider outcome is unknown after durable recovery; refusing to resubmit",
+        "model call",
     )
     .await
 }
 
 #[tokio::test]
 async fn pending_warmup_recovery_does_not_call_the_provider_again() -> Result<()> {
-    assert_pending_provider_step_is_not_repeated(
-        "warmup",
-        ResponsesTransport::WebSocket,
-        "warmup provider outcome is unknown after durable recovery; refusing to resubmit",
-    )
-    .await
+    assert_pending_provider_step_is_not_repeated("warmup", ResponsesTransport::WebSocket, "warmup")
+        .await
 }
 
 #[tokio::test]
@@ -308,8 +305,9 @@ async fn pending_compaction_recovery_does_not_call_the_provider_again() -> Resul
         .expect_err("an EffectPending compaction must fail closed");
     assert!(matches!(
         error,
-        NanocodexError::InvalidAttemptState { detail }
-            if detail == "compaction provider outcome is unknown after durable recovery; refusing to resubmit"
+        NanocodexError::ProviderOutcomeUnknown {
+            operation: "compaction"
+        }
     ));
     assert_eq!(
         provider_calls.load(Ordering::Relaxed),

@@ -122,8 +122,7 @@ MPP without exposing wallet material to the model or MCP server.
 Charge payment is accepted before the complete SSE response has arrived, so
 the CLI limits paid Responses calls to one SDK attempt. A premature close or
 other retryable stream failure is returned to the caller instead of replaying
-the request and risking a second charge. Retrying that prompt is an explicit
-caller action.
+the request automatically. Retrying that prompt is an explicit caller action.
 
 The API base must use HTTPS. Plain HTTP is accepted only for loopback
 development endpoints, including an SSH-forwarded service. The

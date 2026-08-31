@@ -29,8 +29,8 @@ use tokio::{
 use crate::{
     AgentMetadata, AgentResult, AgentStatus, AtifAgent, AtifAgentExtra, AtifObservation,
     AtifObservationExtra, AtifObservationResult, AtifSource, AtifStep, AtifToolCall,
-    AtifToolCallExtra, AtifTrajectory, BillingCompleteness, CleanupPhase, MeasurementCompleteness,
-    UsageTotals, atif::finish_projected_trajectory,
+    AtifToolCallExtra, AtifTrajectory, CleanupPhase, MeasurementCompleteness, UsageTotals,
+    atif::finish_projected_trajectory,
 };
 
 const EVENTS_FILE: &str = "agent/harness-events.jsonl";
@@ -225,12 +225,9 @@ impl HarnessExec {
                     Err(error) => CleanupPhase::failed(cleanup_started, error),
                 };
                 let result = recovered.ok().and_then(|output| {
-                    output.transcript.agent_result(
-                        self,
-                        started.elapsed(),
-                        AgentStatus::Cancelled,
-                        BillingCompleteness::Unknown,
-                    )
+                    output
+                        .transcript
+                        .agent_result(self, started.elapsed(), AgentStatus::Cancelled)
                 });
                 HarnessExecution {
                     result,
@@ -293,12 +290,7 @@ impl HarnessExec {
         let cleanup = CleanupPhase::completed(cleanup_started);
         match output.status {
             HarnessCommandStatus::TimedOut => {
-                let result = transcript.agent_result(
-                    self,
-                    duration,
-                    AgentStatus::Cancelled,
-                    BillingCompleteness::Unknown,
-                );
+                let result = transcript.agent_result(self, duration, AgentStatus::Cancelled);
                 HarnessExecution {
                     result,
                     error: Some(HarnessRunError::Timeout(attempt_timeout)),
@@ -506,14 +498,7 @@ impl HarnessExecution {
         } else {
             AgentStatus::Failed
         };
-        let billing = if output.transcript.usage.is_some() {
-            BillingCompleteness::Complete
-        } else {
-            BillingCompleteness::Unknown
-        };
-        let result = output
-            .transcript
-            .agent_result(config, duration, status, billing);
+        let result = output.transcript.agent_result(config, duration, status);
         Self {
             result,
             error,
@@ -548,12 +533,7 @@ impl HarnessExecution {
         } else {
             AgentStatus::Failed
         };
-        let billing = if transcript.usage.is_some() {
-            BillingCompleteness::Complete
-        } else {
-            BillingCompleteness::Unknown
-        };
-        let result = transcript.agent_result(config, duration, status, billing);
+        let result = transcript.agent_result(config, duration, status);
         Self {
             result,
             error,
@@ -925,7 +905,6 @@ impl HarnessTranscript {
         config: &HarnessExec,
         duration: Duration,
         status: AgentStatus,
-        billing_completeness: BillingCompleteness,
     ) -> Option<AgentResult> {
         let usage = self.usage.as_ref().and_then(HarnessUsage::totals);
         if self.final_message.is_empty()
@@ -955,7 +934,6 @@ impl HarnessTranscript {
             websocket_reconnects: 0,
             response_attempts: 0,
             response_retries: 0,
-            billing_uncertain_response_attempts: u32::from(!self.completed),
             connection_duration_ns: 0,
             retry_backoff_duration_ns: 0,
             model_duration_ns: 0,
@@ -981,7 +959,6 @@ impl HarnessTranscript {
             tool_calls: self.tool_calls,
             usage,
             cost_usd: None,
-            billing_completeness,
             metadata,
         })
     }
@@ -1461,7 +1438,7 @@ mod tests {
     use tempfile::tempdir;
     use tokio::time::sleep;
 
-    use crate::{AgentStatus, AtifSource, BillingCompleteness, MeasurementCompleteness};
+    use crate::{AgentStatus, AtifSource, MeasurementCompleteness};
 
     use super::{
         EVENTS_FILE, HarnessCommandOutput, HarnessCommandRunner, HarnessCommandRunnerError,
@@ -1601,12 +1578,7 @@ mod tests {
         let config =
             HarnessExec::new(std::env::current_exe().unwrap(), "gpt-5.6-sol", "medium").unwrap();
         let result = transcript
-            .agent_result(
-                &config,
-                Duration::from_millis(10),
-                AgentStatus::Failed,
-                BillingCompleteness::Unknown,
-            )
+            .agent_result(&config, Duration::from_millis(10), AgentStatus::Failed)
             .unwrap();
         let trajectory = project_harness_atif(
             &events,
@@ -1624,10 +1596,6 @@ mod tests {
         assert_eq!(
             trajectory.final_metrics.extra.runtime_completeness,
             MeasurementCompleteness::ObservedLowerBound
-        );
-        assert_eq!(
-            trajectory.final_metrics.extra.billing_completeness,
-            Some(BillingCompleteness::Unknown)
         );
     }
 
@@ -1661,12 +1629,7 @@ mod tests {
         let config =
             HarnessExec::new(std::env::current_exe().unwrap(), "gpt-5.6-sol", "medium").unwrap();
         let result = transcript
-            .agent_result(
-                &config,
-                Duration::from_millis(10),
-                AgentStatus::Completed,
-                BillingCompleteness::Complete,
-            )
+            .agent_result(&config, Duration::from_millis(10), AgentStatus::Completed)
             .unwrap();
 
         let trajectory = project_harness_atif(
@@ -1739,10 +1702,6 @@ mod tests {
         assert_eq!(
             trajectory.final_metrics.extra.runtime_completeness,
             MeasurementCompleteness::ObservedLowerBound
-        );
-        assert_eq!(
-            trajectory.final_metrics.extra.usage_completeness,
-            Some(MeasurementCompleteness::Complete)
         );
     }
 

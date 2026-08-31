@@ -5,9 +5,7 @@ use nanocodex_oai_api::{MODEL, responses::Usage};
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 
-use crate::{
-    AgentMetadata, AgentResult, BillingCompleteness, MeasurementCompleteness, Task, UsageTotals,
-};
+use crate::{AgentMetadata, AgentResult, MeasurementCompleteness, Task, UsageTotals};
 
 /// A complete ATIF-v1.7 projection of one agent attempt.
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -226,10 +224,6 @@ pub struct AtifFinalMetrics {
     /// Total cached input tokens.
     pub total_cached_tokens: u64,
     /// Aggregate estimated USD cost when provider usage can be priced.
-    ///
-    /// This is a lower bound when
-    /// [`AtifFinalMetricsExtra::billing_completeness`] is
-    /// `Some(`[`BillingCompleteness::Unknown`]`)`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total_cost_usd: Option<f64>,
     /// Number of user and agent steps.
@@ -247,12 +241,6 @@ pub struct AtifFinalMetricsExtra {
     pub tool_calls: u32,
     /// Complete attempt duration in nanoseconds.
     pub duration_ns: u64,
-    /// Whether every potentially billable model operation reached a terminal
-    /// provider usage event.
-    pub billing_completeness: Option<BillingCompleteness>,
-    /// Whether aggregate token counts are complete, observed lower bounds, or
-    /// absent (`None`).
-    pub usage_completeness: Option<MeasurementCompleteness>,
     /// Whether runtime counters and durations are exact or observed lower
     /// bounds.
     pub runtime_completeness: MeasurementCompleteness,
@@ -272,8 +260,6 @@ pub struct AtifRuntimeMetrics {
     pub response_attempts: u32,
     /// Retried Responses attempts.
     pub response_retries: u32,
-    /// Potentially billable sent attempts whose provider usage was unavailable.
-    pub billing_uncertain_response_attempts: u32,
     /// Time spent establishing Responses connections.
     pub connection_duration_ns: u64,
     /// Time spent inside owned retry backoff.
@@ -439,10 +425,6 @@ impl AtifBuilder {
     /// Finishes the partial trajectory observed before an attempt error.
     #[must_use]
     pub fn finish_failure(self, task: &Task) -> AtifTrajectory {
-        let usage_observed = self
-            .turns
-            .values()
-            .any(|turn| turn.metrics.as_ref().is_some());
         let model_name = self
             .turns
             .values()
@@ -508,9 +490,6 @@ impl AtifBuilder {
                     model_calls,
                     tool_calls: u32::try_from(tool_calls).unwrap_or(u32::MAX),
                     duration_ns,
-                    billing_completeness: None,
-                    usage_completeness: usage_observed
-                        .then_some(MeasurementCompleteness::ObservedLowerBound),
                     runtime_completeness: MeasurementCompleteness::ObservedLowerBound,
                     runtime: AtifRuntimeMetrics::default(),
                 },
@@ -581,8 +560,6 @@ pub(crate) fn finish_projected_trajectory(
                 model_calls: result.model_calls,
                 tool_calls: result.tool_calls,
                 duration_ns: result.metadata.duration_ns,
-                billing_completeness: Some(result.billing_completeness),
-                usage_completeness: atif_usage_completeness(result),
                 runtime_completeness: result.metadata.runtime_completeness,
                 runtime: AtifRuntimeMetrics::from(&result.metadata),
             },
@@ -689,7 +666,6 @@ impl From<&AgentMetadata> for AtifRuntimeMetrics {
             websocket_reconnects: metadata.websocket_reconnects,
             response_attempts: metadata.response_attempts,
             response_retries: metadata.response_retries,
-            billing_uncertain_response_attempts: metadata.billing_uncertain_response_attempts,
             connection_duration_ns: metadata.connection_duration_ns,
             retry_backoff_duration_ns: metadata.retry_backoff_duration_ns,
             model_duration_ns: metadata.model_duration_ns,
@@ -701,16 +677,6 @@ impl From<&AgentMetadata> for AtifRuntimeMetrics {
             reasoning_output_tokens: metadata.usage.reasoning_output_tokens,
         }
     }
-}
-
-fn atif_usage_completeness(result: &AgentResult) -> Option<MeasurementCompleteness> {
-    result.has_observed_usage().then_some(
-        if result.billing_completeness == BillingCompleteness::Complete {
-            MeasurementCompleteness::Complete
-        } else {
-            MeasurementCompleteness::ObservedLowerBound
-        },
-    )
 }
 
 fn append_message(message: &mut String, next: &str) {
@@ -780,8 +746,7 @@ mod tests {
     use std::path::Path;
 
     use crate::{
-        AgentMetadata, AgentResult, AgentStatus, AtifSource, BillingCompleteness,
-        MeasurementCompleteness, Task,
+        AgentMetadata, AgentResult, AgentStatus, AtifSource, MeasurementCompleteness, Task,
     };
     use nanocodex_agent::events::AgentEvent;
 
@@ -852,7 +817,6 @@ mod tests {
             tool_calls: metadata.tool_calls,
             usage: metadata.usage.clone(),
             cost_usd: metadata.cost_usd,
-            billing_completeness: BillingCompleteness::Complete,
             metadata,
         };
 
@@ -893,10 +857,6 @@ mod tests {
             decoded.final_metrics.extra.runtime_completeness,
             MeasurementCompleteness::Complete
         );
-        assert_eq!(
-            decoded.final_metrics.extra.usage_completeness,
-            Some(MeasurementCompleteness::Complete)
-        );
         let mut partial_builder = AtifBuilder::default();
         for event in &events {
             partial_builder.apply(event).unwrap();
@@ -906,15 +866,10 @@ mod tests {
             partial.final_metrics.extra.runtime_completeness,
             MeasurementCompleteness::ObservedLowerBound
         );
-        assert_eq!(
-            partial.final_metrics.extra.usage_completeness,
-            Some(MeasurementCompleteness::ObservedLowerBound)
-        );
         let mut failed = result.clone();
         failed.metadata.status = AgentStatus::Failed;
         failed.metadata.runtime_completeness = MeasurementCompleteness::ObservedLowerBound;
         failed.cost_usd = Some(0.125);
-        failed.billing_completeness = BillingCompleteness::Unknown;
         let mut builder = AtifBuilder::default();
         for event in &events {
             builder.apply(event).unwrap();
@@ -923,14 +878,6 @@ mod tests {
         assert_eq!(trajectory.final_metrics.total_prompt_tokens, 22);
         assert_eq!(trajectory.final_metrics.total_completion_tokens, 5);
         assert_eq!(trajectory.final_metrics.total_cost_usd, Some(0.125));
-        assert_eq!(
-            trajectory.final_metrics.extra.billing_completeness,
-            Some(BillingCompleteness::Unknown)
-        );
-        assert_eq!(
-            trajectory.final_metrics.extra.usage_completeness,
-            Some(crate::MeasurementCompleteness::ObservedLowerBound)
-        );
         assert_eq!(
             trajectory.steps[2]
                 .extra
@@ -977,7 +924,6 @@ mod tests {
         "websocket_reconnects":0,
         "response_attempts":2,
         "response_retries":0,
-        "billing_uncertain_response_attempts":0,
         "connection_duration_ns":1,
         "retry_backoff_duration_ns":0,
         "model_duration_ns":30,

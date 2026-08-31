@@ -135,21 +135,22 @@ Beginning a step returns exactly one value:
 |---|---|---|
 | `Execute` | No prior start, or an unfinished retry-safe start | Dispatch once and commit output |
 | `Replay(output)` | A completed output is durable | Reuse the exact output; do not dispatch |
-| `Unknown` | An unfinished at-most-once start exists | Do not dispatch; commit an explicit unknown result |
+| `Unknown` | An unfinished at-most-once start exists | Do not dispatch; surface the unknown outcome |
 
-`Unknown` is data, not an operation-level exception. An interrupted unsafe tool
-therefore becomes one structured failed tool result, is committed as that
-step's output, and returns control to the model. The message says the effect
-*may* have run because a committed start proves authorization, not handler
-entry or external settlement.
+`Unknown` is a durable protocol result. An interrupted unsafe tool becomes one
+structured failed tool result, is committed as that step's output, and returns
+control to the model. An interrupted provider operation returns the typed
+`ProviderOutcomeUnknown` error and terminalizes the affected turn. In both
+cases, a committed start proves authorization but not external settlement.
 
-Retry-safe model and compaction steps may execute again only with the same
-stable identity and normalized input. Successful dispatch settles in one
-replacement: `effect_pending -> completed(output)`. That replacement is the
-materialization boundary because the output and all operation state share one
-opaque total-state payload. Completed results always replay.
+Provider generation, warmup, and compaction are at-most-once across durable
+owner loss. Bounded transport retries belong only to the uninterrupted live
+Responses attempt. Successful dispatch settles in one replacement:
+`effect_pending -> completed(output)`. That replacement is the materialization
+boundary because the output and all operation state share one opaque total-state
+payload. Completed results always replay.
 
-Standalone compaction is a retry-safe checkpoint transform. It commits
+Standalone compaction is an at-most-once checkpoint transform. It commits
 `CheckpointEffectStarted` through the current owner immediately before provider
 entry, then commits the resulting checkpoint. It cannot run while an accepted
 operation is pending.

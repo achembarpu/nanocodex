@@ -13,7 +13,6 @@ pub struct ResponsesServiceError {
     class: &'static str,
     pub(crate) retry_advice: Option<RetryAdvice>,
     pub(crate) connection_generation: u32,
-    billing_uncertain: bool,
 }
 
 impl ResponsesServiceError {
@@ -30,7 +29,6 @@ impl ResponsesServiceError {
             class,
             retry_advice,
             connection_generation,
-            billing_uncertain: false,
         }
     }
 
@@ -91,35 +89,6 @@ impl ResponsesServiceError {
     pub(crate) const fn with_connection_generation(mut self, connection_generation: u32) -> Self {
         self.connection_generation = connection_generation;
         self
-    }
-
-    pub(crate) const fn with_billing_uncertain(mut self) -> Self {
-        self.billing_uncertain = true;
-        self
-    }
-
-    pub(crate) const fn with_billing_uncertain_unless_provider_terminal(mut self) -> Self {
-        let provider_terminal = matches!(
-            self.responses_error(),
-            Some(
-                ResponsesError::Api { .. }
-                    | ResponsesError::ContextWindowExceeded { .. }
-                    | ResponsesError::InvalidImageRequest { .. }
-                    | ResponsesError::HttpRejected { .. }
-            )
-        );
-        self.billing_uncertain = !provider_terminal;
-        self
-    }
-
-    /// Returns whether a request may have reached the provider without a
-    /// terminal event reporting usage.
-    ///
-    /// This classification is populated by the standard Responses service. It
-    /// does not assert that the provider charged the request.
-    #[must_use]
-    pub const fn billing_uncertain(&self) -> bool {
-        self.billing_uncertain
     }
 
     /// Returns a stable low-cardinality error class.

@@ -659,10 +659,9 @@ impl Driver {
                 Command::FenceCheckpointEffect { caller, result } => {
                     let outcome = match self.authorize(&caller) {
                         Ok(()) if self.state.checkpoint_effect_pending() => {
-                            Err(Error::InvalidState(
-                                "standalone checkpoint provider outcome is unknown after durable recovery; refusing to resubmit"
-                                    .to_owned(),
-                            ))
+                            Err(Error::ProviderOutcomeUnknown {
+                                operation: "standalone checkpoint",
+                            })
                         }
                         Ok(()) => match self.state.first_pending_operation() {
                             Some((pending_id, _))
@@ -674,9 +673,7 @@ impl Driver {
                                 operation_id: "standalone-checkpoint".to_owned(),
                                 pending_id: pending_id.to_owned(),
                             }),
-                            None => {
-                                Ok(())
-                            }
+                            None => Ok(()),
                         },
                         Err(error) => Err(error),
                     };

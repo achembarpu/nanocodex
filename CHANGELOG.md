@@ -151,7 +151,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - [egress] Preserve middleware error chains
 - [vm] Stabilize image cache identity
 - [vm] Own guest command cleanup
-- [oai] Account for usage-uncertain attempts
 - [tools] Keep tool search visible in code mode
 - [tools] Align Code Mode tool contracts
 - [browser] Gate Safari discovery by platform

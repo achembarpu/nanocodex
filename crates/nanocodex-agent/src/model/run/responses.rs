@@ -110,9 +110,9 @@ where
             prompt_history: &recorded_prompt_history,
         };
         let recovered = if let Some(steps) = &execution_steps {
-            // A reopened durable step cannot distinguish a provider rejection
-            // from a submitted-and-billing-uncertain request. The live client
-            // still owns safe retries within this one uninterrupted attempt.
+            // A reopened durable step cannot reconstruct the provider's
+            // terminal outcome. The live client still owns retries within one
+            // uninterrupted attempt.
             match steps
                 .begin::<_, RecordedModelResult>(
                     &step_id,
@@ -131,8 +131,8 @@ where
                     return self.model_call_failed(
                         call_index,
                         started_at,
-                        NanocodexError::InvalidAttemptState {
-                            detail: "model call provider outcome is unknown after durable recovery; refusing to resubmit",
+                        NanocodexError::ProviderOutcomeUnknown {
+                            operation: "model call",
                         },
                     );
                 }

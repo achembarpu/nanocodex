@@ -170,7 +170,6 @@ pub(super) struct RunStats {
     pub(super) websocket_reconnects: u32,
     pub(super) response_attempts: u32,
     pub(super) response_retries: u32,
-    pub(super) billing_uncertain_response_attempts: u32,
     pub(super) connection_duration_ns: u64,
     pub(super) retry_backoff_duration_ns: u64,
     pub(super) model_duration_ns: u64,
@@ -189,7 +188,6 @@ impl RunStats {
         self.websocket_reconnects = delta.websocket_reconnects;
         self.response_attempts = delta.response_attempts;
         self.response_retries = delta.response_retries;
-        self.billing_uncertain_response_attempts = delta.billing_uncertain_response_attempts;
         self.connection_duration_ns = delta.connection_duration_ns;
         self.retry_backoff_duration_ns = delta.retry_backoff_duration_ns;
     }

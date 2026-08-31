@@ -203,11 +203,9 @@ async fn receive_reset_reconnects_without_replaying_completed_tools() -> Result<
     assert_eq!(std::fs::read_to_string(workspace.join("marker.txt"))?, "x");
     assert!(output.contains("\"model.attempt.retrying\""));
     assert!(output.contains("failed to receive a Responses WebSocket frame"));
-    assert!(output.contains("\"billing_uncertain\":true"));
     assert!(output.contains("\"purpose\":\"reconnect\""));
     assert!(output.contains("\"connection_attempts\":2"));
     assert!(output.contains("\"websocket_reconnects\":1"));
-    assert!(output.contains("\"billing_uncertain_response_attempts\":1"));
     assert!(output.contains("\"model_calls\":2"));
     assert!(!output.contains("\"model.call.failed\""));
     assert!(output.contains("\"run.completed\""));

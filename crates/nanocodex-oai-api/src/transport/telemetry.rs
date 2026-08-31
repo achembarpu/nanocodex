@@ -70,7 +70,6 @@ pub(crate) struct AttemptFailed<'a> {
     pub(crate) failure_phase: FailurePhase,
     pub(crate) error_class: &'static str,
     pub(crate) retryable: bool,
-    pub(crate) billing_uncertain: bool,
     pub(crate) connection_generation: u32,
     pub(crate) error: &'a str,
 }

@@ -35,7 +35,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - [oai] Recover forbidden websocket handshakes
 - [oai] Preserve code mode notifications in replay
 - Close remaining Codex wire parity gaps
-- [oai] Account for usage-uncertain attempts
 - [tools] Align Code Mode tool contracts
 - [tls] Standardize rustls on ring
 - Preserve Codex rollout model compatibility

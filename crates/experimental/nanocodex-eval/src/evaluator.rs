@@ -29,11 +29,10 @@ use tracing::{Instrument, Span, info, info_span};
 use uuid::Uuid;
 
 use crate::{
-    AgentMetadata, AgentResult, AgentStatus, BillingCompleteness, CleanupPhase, EvalArtifacts,
-    EvalAttemptOutcome, EvalCleanup, EvalEnvironment, EvalEvent, EvalEventAttempt, EvalEventKind,
-    EvalEvents, EvalException, EvalExceptionKind, EvalFailure, EvalFailureTiming, EvalOutcome,
-    EvalResult, EvalStatus, EvalTiming, PhaseTiming, Task, TaskLoadError, UsageTotals,
-    VerifierResult,
+    AgentMetadata, AgentResult, AgentStatus, CleanupPhase, EvalArtifacts, EvalAttemptOutcome,
+    EvalCleanup, EvalEnvironment, EvalEvent, EvalEventAttempt, EvalEventKind, EvalEvents,
+    EvalException, EvalExceptionKind, EvalFailure, EvalFailureTiming, EvalOutcome, EvalResult,
+    EvalStatus, EvalTiming, PhaseTiming, Task, TaskLoadError, UsageTotals, VerifierResult,
     harness_exec::{HarnessExec, HarnessRunError},
     job::EvalJob,
     native::{NativeAttempt, VerifierExecution},
@@ -46,7 +45,6 @@ const EVENT_CAPACITY: usize = 16_384;
 // join after this deadline: a broken driver quarantines its admission lane
 // instead of racing a verifier against live agent work.
 const AGENT_CANCELLATION_GRACE: Duration = Duration::from_secs(10);
-const ESTIMATED_LOWER_BOUND_COST_STATUS: &str = "estimated_lower_bound";
 
 /// A reusable evaluation recipe. Every task call creates an independent agent
 /// session and disposable workspace.
@@ -788,9 +786,8 @@ impl Evaluator {
                             observation.final_message.clone(),
                         ),
                     };
-                    let completeness = observation.billing_completeness();
                     observation.final_message = final_message;
-                    let selection = observation.select_result(Some(&terminal), completeness);
+                    let selection = observation.select_result(Some(&terminal));
                     if let Some(error) = &selection.terminal_error {
                         tracing::warn!(
                             target: "nanocodex_eval",
@@ -809,7 +806,7 @@ impl Evaluator {
                     }))
                 }
                 Ok(Err(error)) => {
-                    let selection = observation.select_result(None, BillingCompleteness::Unknown);
+                    let selection = observation.select_result(None);
                     Ok(AgentRunState::Finished(AgentTurnOutcome {
                         primary: Some(RecordedEvalError::now(error)),
                         result: selection.result,
@@ -861,7 +858,6 @@ impl Evaluator {
                          resource shutdown remained joined"
                     );
                 }
-                let completeness = observation.billing_completeness();
                 let terminal = match recovery.terminal {
                     Some(Ok(terminal)) => Some(terminal),
                     Some(Err(error)) => {
@@ -876,7 +872,7 @@ impl Evaluator {
                     }
                     None => None,
                 };
-                let selection = observation.select_result(terminal.as_ref(), completeness);
+                let selection = observation.select_result(terminal.as_ref());
                 if let Some(error) = &selection.terminal_error {
                     tracing::warn!(
                         target: "nanocodex_eval",
@@ -1241,9 +1237,6 @@ impl RecordedEvalError {
 
 #[derive(Default)]
 struct AgentObservation {
-    billable_in_flight: u32,
-    billing_unknown: bool,
-    billing_uncertain_response_attempts: u32,
     final_message: String,
     run: Option<ObservedRun>,
     steers: u32,
@@ -1266,12 +1259,6 @@ struct ObservedRun {
     effort: String,
     transport: String,
     orchestration: String,
-}
-
-#[derive(Deserialize)]
-struct AttemptFailureObservation {
-    #[serde(default)]
-    billing_uncertain: bool,
 }
 
 #[derive(Deserialize)]
@@ -1500,16 +1487,7 @@ where
 }
 
 impl AgentObservation {
-    const fn billing_completeness(&self) -> BillingCompleteness {
-        if self.billable_in_flight == 0 && !self.billing_unknown {
-            BillingCompleteness::Complete
-        } else {
-            BillingCompleteness::Unknown
-        }
-    }
-
     fn observe(&mut self, event: &AgentEvent) -> Result<(), EvalError> {
-        self.observe_lifecycle(event.kind);
         match event.kind {
             AgentEventKind::RunStarted => {
                 let run: RunStarted = event.decode_payload()?;
@@ -1549,14 +1527,6 @@ impl AgentObservation {
                         self.retry_backoff_duration_ns.saturating_add(delay_ns);
                 }
             }
-            AgentEventKind::ModelAttemptFailed => {
-                let failure: AttemptFailureObservation = event.decode_payload()?;
-                if failure.billing_uncertain {
-                    self.billing_unknown = true;
-                    self.billing_uncertain_response_attempts =
-                        self.billing_uncertain_response_attempts.saturating_add(1);
-                }
-            }
             AgentEventKind::ModelAttemptRetrying => {
                 let retry: AttemptRetryObservation = event.decode_payload()?;
                 self.response_retries = self.response_retries.saturating_add(1);
@@ -1591,9 +1561,6 @@ impl AgentObservation {
                     .warmup_duration_ns
                     .saturating_add(completed.duration_ns);
                 if completed.source == "response" {
-                    if completed.usage.is_none() {
-                        self.billing_unknown = true;
-                    }
                     self.completed
                         .observe(completed.usage.as_ref(), true, completed.attempt);
                 }
@@ -1607,9 +1574,6 @@ impl AgentObservation {
             }
             AgentEventKind::ModelCallCompleted => {
                 let completed: ModelCallCompleted = event.decode_payload()?;
-                if completed.usage.is_none() {
-                    self.billing_unknown = true;
-                }
                 self.completed.model_calls = self.completed.model_calls.saturating_add(1);
                 self.completed.tool_calls = self
                     .completed
@@ -1631,9 +1595,6 @@ impl AgentObservation {
             }
             AgentEventKind::ModelCompactionCompleted => {
                 let completed: CompactionCompleted = event.decode_payload()?;
-                if completed.usage.is_none() {
-                    self.billing_unknown = true;
-                }
                 self.completed.compactions = self.completed.compactions.saturating_add(1);
                 self.completed.model_duration_ns = self
                     .completed
@@ -1654,11 +1615,7 @@ impl AgentObservation {
         Ok(())
     }
 
-    fn select_result(
-        &self,
-        terminal: Option<&AgentEvent>,
-        billing_completeness: BillingCompleteness,
-    ) -> AgentResultSelection {
+    fn select_result(&self, terminal: Option<&AgentEvent>) -> AgentResultSelection {
         let Some(terminal) = terminal else {
             let result = self.lower_bound_result(None);
             return AgentResultSelection {
@@ -1667,8 +1624,7 @@ impl AgentObservation {
                 terminal_error: None,
             };
         };
-        match AgentResult::from_terminal(self.final_message.clone(), terminal, billing_completeness)
-        {
+        match AgentResult::from_terminal(self.final_message.clone(), terminal) {
             Ok(result) => AgentResultSelection {
                 result: Some(result),
                 terminal_error: None,
@@ -1727,7 +1683,6 @@ impl AgentObservation {
             websocket_reconnects: self.websocket_reconnects,
             response_attempts,
             response_retries,
-            billing_uncertain_response_attempts: self.billing_uncertain_response_attempts,
             connection_duration_ns: self.connection_duration_ns,
             retry_backoff_duration_ns: self.retry_backoff_duration_ns,
             model_duration_ns: self.completed.model_duration_ns,
@@ -1748,30 +1703,8 @@ impl AgentObservation {
             tool_calls,
             usage: self.completed.usage.clone(),
             cost_usd,
-            billing_completeness: BillingCompleteness::Unknown,
             metadata,
         })
-    }
-
-    const fn observe_lifecycle(&mut self, kind: AgentEventKind) {
-        match kind {
-            AgentEventKind::ModelWarmupStarted
-            | AgentEventKind::ModelCallStarted
-            | AgentEventKind::ModelCompactionStarted => {
-                self.billable_in_flight = self.billable_in_flight.saturating_add(1);
-            }
-            AgentEventKind::ModelWarmupCompleted
-            | AgentEventKind::ModelCallCompleted
-            | AgentEventKind::ModelCompactionCompleted => {
-                self.billable_in_flight = self.billable_in_flight.saturating_sub(1);
-            }
-            AgentEventKind::ModelWarmupFailed
-            | AgentEventKind::ModelCallFailed
-            | AgentEventKind::ModelCompactionFailed => {
-                self.billable_in_flight = self.billable_in_flight.saturating_sub(1);
-            }
-            _ => {}
-        }
     }
 }
 
@@ -2370,9 +2303,6 @@ fn attempt_span(eval: &Evaluator, task: &Task, attempt_id: Uuid, trial_name: &st
         agent.response_attempts = tracing::field::Empty,
         agent.response_retries = tracing::field::Empty,
         agent.runtime.completeness = tracing::field::Empty,
-        agent.usage.completeness = tracing::field::Empty,
-        agent.usage.missing = tracing::field::Empty,
-        agent.billing.completeness = tracing::field::Empty,
         gen_ai.usage.input_tokens = tracing::field::Empty,
         gen_ai.usage.cached_input_tokens = tracing::field::Empty,
         gen_ai.usage.cache_write_input_tokens = tracing::field::Empty,
@@ -2458,7 +2388,6 @@ fn record_attempt_success(span: &Span, result: &EvalResult) {
 fn record_agent_metrics(span: &Span, agent: &AgentResult) {
     let usage = &agent.usage;
     let warmup = &agent.metadata.warmup_usage;
-    let usage_observed = agent.has_observed_usage();
     span.record("agent.model_calls", agent.model_calls);
     span.record("agent.tool_calls", agent.tool_calls);
     span.record("agent.response_attempts", agent.metadata.response_attempts);
@@ -2467,46 +2396,29 @@ fn record_agent_metrics(span: &Span, agent: &AgentResult) {
         "agent.runtime.completeness",
         measurement_completeness_label(agent.metadata.runtime_completeness),
     );
-    span.record(
-        "agent.usage.completeness",
-        if !usage_observed {
-            "missing"
-        } else if agent.billing_completeness == BillingCompleteness::Complete {
-            "complete"
-        } else {
-            "observed_lower_bound"
-        },
-    );
-    span.record("agent.usage.missing", !usage_observed);
-    span.record(
-        "agent.billing.completeness",
-        billing_completeness_label(agent.billing_completeness),
-    );
     span.record("cost.status", agent.metadata.cost_status.as_str());
-    if usage_observed {
-        span.record("gen_ai.usage.input_tokens", usage.input_tokens);
-        span.record(
-            "gen_ai.usage.cached_input_tokens",
-            usage.cached_input_tokens,
-        );
-        span.record(
-            "gen_ai.usage.cache_write_input_tokens",
-            usage.cache_write_input_tokens,
-        );
-        span.record("gen_ai.usage.output_tokens", usage.output_tokens);
-        span.record("gen_ai.usage.total_tokens", usage.total_tokens);
-        span.record("agent.warmup.input_tokens", warmup.input_tokens);
-        span.record(
-            "agent.warmup.cached_input_tokens",
-            warmup.cached_input_tokens,
-        );
-        span.record(
-            "agent.warmup.cache_write_input_tokens",
-            warmup.cache_write_input_tokens,
-        );
-        span.record("agent.warmup.output_tokens", warmup.output_tokens);
-        span.record("agent.warmup.total_tokens", warmup.total_tokens);
-    }
+    span.record("gen_ai.usage.input_tokens", usage.input_tokens);
+    span.record(
+        "gen_ai.usage.cached_input_tokens",
+        usage.cached_input_tokens,
+    );
+    span.record(
+        "gen_ai.usage.cache_write_input_tokens",
+        usage.cache_write_input_tokens,
+    );
+    span.record("gen_ai.usage.output_tokens", usage.output_tokens);
+    span.record("gen_ai.usage.total_tokens", usage.total_tokens);
+    span.record("agent.warmup.input_tokens", warmup.input_tokens);
+    span.record(
+        "agent.warmup.cached_input_tokens",
+        warmup.cached_input_tokens,
+    );
+    span.record(
+        "agent.warmup.cache_write_input_tokens",
+        warmup.cache_write_input_tokens,
+    );
+    span.record("agent.warmup.output_tokens", warmup.output_tokens);
+    span.record("agent.warmup.total_tokens", warmup.total_tokens);
     span.record(
         "agent.warmup.duration_ns",
         agent.metadata.warmup_duration_ns,
@@ -2522,13 +2434,6 @@ const fn measurement_completeness_label(
     match completeness {
         crate::MeasurementCompleteness::Complete => "complete",
         crate::MeasurementCompleteness::ObservedLowerBound => "observed_lower_bound",
-    }
-}
-
-const fn billing_completeness_label(completeness: BillingCompleteness) -> &'static str {
-    match completeness {
-        BillingCompleteness::Complete => "complete",
-        BillingCompleteness::Unknown => "unknown",
     }
 }
 
@@ -2675,24 +2580,13 @@ fn trial_name(task: &Task, attempt_id: Uuid) -> String {
 }
 
 impl AgentResult {
-    fn from_terminal(
-        final_message: String,
-        event: &AgentEvent,
-        billing_completeness: BillingCompleteness,
-    ) -> Result<Self, EvalError> {
+    fn from_terminal(final_message: String, event: &AgentEvent) -> Result<Self, EvalError> {
         if !event.kind.is_terminal() {
             return Err(EvalError::AgentEventsClosed);
         }
         let metadata: AgentTerminalMetadata =
             serde_json::from_str(event.payload.get()).map_err(EvalError::AgentTerminal)?;
         let metadata = metadata.into_retained();
-        let billing_completeness = if metadata.billing_uncertain_response_attempts > 0
-            || metadata.cost_status == ESTIMATED_LOWER_BOUND_COST_STATUS
-        {
-            BillingCompleteness::Unknown
-        } else {
-            billing_completeness
-        };
         Ok(Self {
             final_message,
             model: metadata.model.clone(),
@@ -2701,7 +2595,6 @@ impl AgentResult {
             tool_calls: metadata.tool_calls,
             usage: metadata.usage.clone(),
             cost_usd: metadata.cost_usd,
-            billing_completeness,
             metadata,
         })
     }
@@ -2726,8 +2619,6 @@ struct AgentTerminalMetadata {
     websocket_reconnects: u32,
     response_attempts: u32,
     response_retries: u32,
-    #[serde(default)]
-    billing_uncertain_response_attempts: u32,
     connection_duration_ns: u64,
     retry_backoff_duration_ns: u64,
     model_duration_ns: u64,
@@ -2769,7 +2660,6 @@ impl AgentTerminalMetadata {
             websocket_reconnects: self.websocket_reconnects,
             response_attempts: self.response_attempts,
             response_retries: self.response_retries,
-            billing_uncertain_response_attempts: self.billing_uncertain_response_attempts,
             connection_duration_ns: self.connection_duration_ns,
             retry_backoff_duration_ns: self.retry_backoff_duration_ns,
             model_duration_ns: self.model_duration_ns,

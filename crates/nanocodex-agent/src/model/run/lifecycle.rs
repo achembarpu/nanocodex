@@ -266,8 +266,8 @@ where
                 crate::agent::ExecutionStep::Replay(output) => return Ok(output),
                 crate::agent::ExecutionStep::Execute => {}
                 crate::agent::ExecutionStep::Unknown => {
-                    return Err(NanocodexError::InvalidAttemptState {
-                        detail: "warmup provider outcome is unknown after durable recovery; refusing to resubmit",
+                    return Err(NanocodexError::ProviderOutcomeUnknown {
+                        operation: "warmup",
                     });
                 }
             }
@@ -404,8 +404,8 @@ where
                 crate::agent::ExecutionStep::Execute => None,
                 crate::agent::ExecutionStep::Replay(output) => Some(output),
                 crate::agent::ExecutionStep::Unknown => {
-                    let error = NanocodexError::InvalidAttemptState {
-                        detail: "compaction provider outcome is unknown after durable recovery; refusing to resubmit",
+                    let error = NanocodexError::ProviderOutcomeUnknown {
+                        operation: "compaction",
                     };
                     span.record("status", "failed");
                     span.record("otel.status_code", "ERROR");

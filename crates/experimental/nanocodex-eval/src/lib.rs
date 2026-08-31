@@ -111,8 +111,8 @@ pub(crate) use harness_exec::{
 pub use nanocodex_oai_api::{PromptMessage, PromptMessageRole};
 pub use profile::{ResolvedHarness, ResolvedTask};
 pub use result::{
-    AgentMetadata, AgentResult, AgentStatus, BillingCompleteness, CleanupDiagnostic, CleanupPhase,
-    CleanupStatus, EvalArtifacts, EvalAttemptOutcome, EvalCleanup, EvalEnvironment, EvalException,
+    AgentMetadata, AgentResult, AgentStatus, CleanupDiagnostic, CleanupPhase, CleanupStatus,
+    EvalArtifacts, EvalAttemptOutcome, EvalCleanup, EvalEnvironment, EvalException,
     EvalExceptionKind, EvalFailure, EvalFailureTiming, EvalOutcome, EvalResult, EvalStatus,
     EvalTiming, MeasurementCompleteness, PhaseTiming, UsageTotals, VerifierResult,
 };

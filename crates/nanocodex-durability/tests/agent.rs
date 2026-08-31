@@ -1549,13 +1549,13 @@ async fn queued_developer_context_waits_for_unknown_provider_recovery_to_termina
     assert!(
         recovered
             .to_string()
-            .contains("provider outcome is unknown after durable recovery; refusing to resubmit")
+            .contains("provider outcome is unknown after durable recovery")
     );
     append.await??;
     assert_eq!(
         generations.load(Ordering::SeqCst),
         1,
-        "durable recovery must not repeat a provider effect whose outcome may have been billed",
+        "durable recovery must not repeat a provider effect with an unknown outcome",
     );
     let checkpoint = state
         .latest_checkpoint()
@@ -2116,9 +2116,7 @@ async fn cold_reopen_refuses_to_resubmit_a_pending_standalone_compaction() -> Re
         .expect_err("a cold pending provider effect must fail closed");
     let detail = error.to_string();
     assert!(
-        detail.contains(
-            "compaction provider outcome is unknown after durable recovery; refusing to resubmit"
-        ),
+        detail.contains("compaction provider outcome is unknown after durable recovery"),
         "unexpected cold-recovery error: {detail}"
     );
     assert_eq!(
@@ -2173,9 +2171,7 @@ async fn live_replacement_refuses_to_resubmit_a_pending_standalone_compaction() 
         .expect_err("replacement must reconcile the pending provider effect as Unknown");
     let detail = replacement.to_string();
     assert!(
-        detail.contains(
-            "compaction provider outcome is unknown after durable recovery; refusing to resubmit"
-        ),
+        detail.contains("compaction provider outcome is unknown after durable recovery"),
         "unexpected replacement error: {detail}"
     );
     assert!(matches!(first.await?, Err(NanocodexError::TurnCancelled)));

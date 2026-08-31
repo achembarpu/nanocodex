@@ -103,11 +103,9 @@ async fn warmup_failure_falls_back_to_a_full_first_request() -> Result<()> {
         .await
         .map_err(|_| eyre!("mock Responses server did not finish"))???;
     assert!(output.contains("\"model.warmup.failed\""));
-    assert!(output.contains("\"billing_uncertain\":false"));
     assert!(output.contains("\"purpose\":\"warmup_fallback\""));
     assert!(output.contains("\"connection_attempts\":2"));
     assert!(output.contains("\"websocket_reconnects\":1"));
-    assert!(output.contains("\"billing_uncertain_response_attempts\":0"));
     assert!(output.contains("\"run.completed\""));
     std::fs::remove_dir_all(workspace)?;
     Ok(())

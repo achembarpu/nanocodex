@@ -217,8 +217,6 @@ pub struct RunMetrics {
     pub response_attempts: u32,
     /// Retried Responses attempts.
     pub response_retries: u32,
-    /// Sent attempts that ended before provider usage was observed.
-    pub billing_uncertain_response_attempts: u32,
     /// Nanoseconds spent establishing connections.
     pub connection_duration_ns: u64,
     /// Nanoseconds spent in SDK retry backoff.

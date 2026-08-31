@@ -29,7 +29,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - [ci] Preserve typed prompt consumer contracts
 - Close remaining Codex wire parity gaps
 - [tui] Sanitize resume picker metadata
-- [oai] Account for usage-uncertain attempts
 - [tools] Align Code Mode tool contracts
 - [agent] Dispatch unnamespaced hosted tools
 - [tls] Standardize rustls on ring

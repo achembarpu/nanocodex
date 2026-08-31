@@ -52,6 +52,12 @@ pub enum Error {
     /// Retained state violated the durability state machine.
     #[error("invalid durability state: {0}")]
     InvalidState(String),
+    /// A durable restart lost observation of an already-dispatched provider operation.
+    #[error("{operation} provider outcome is unknown after durable recovery")]
+    ProviderOutcomeUnknown {
+        /// Stable name of the provider operation.
+        operation: &'static str,
+    },
     /// An operation ID was reused with different input.
     #[error("durable operation `{operation_id}` already has different input")]
     OperationConflict {

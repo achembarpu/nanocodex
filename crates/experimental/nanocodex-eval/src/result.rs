@@ -102,16 +102,6 @@ pub struct EvalException {
     pub occurred_at: DateTime<Utc>,
 }
 
-/// Whether all potentially billable model operations reached a terminal event.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum BillingCompleteness {
-    /// Every operation that could incur provider usage reached a terminal event.
-    Complete,
-    /// Cancellation interrupted a potentially billable operation in flight.
-    Unknown,
-}
-
 /// Terminal health for one explicit cleanup boundary.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -276,7 +266,7 @@ pub struct EvalResult {
     /// Execution environment used by this attempt.
     pub environment: EvalEnvironment,
     /// Typed terminal agent output and usage, when cancellation or failure
-    /// still produced a terminal billing snapshot.
+    /// still produced a retained terminal snapshot.
     pub agent: Option<AgentResult>,
     /// Verifier exit code and component rewards.
     pub verifier: VerifierResult,
@@ -446,32 +436,9 @@ pub struct AgentResult {
     /// Aggregate provider usage, excluding warmup.
     pub usage: UsageTotals,
     /// Estimated aggregate USD cost when provider usage can be priced.
-    ///
-    /// This is a lower bound when [`Self::billing_completeness`] is
-    /// [`BillingCompleteness::Unknown`].
     pub cost_usd: Option<f64>,
-    /// Whether the provider billing snapshot is known to be terminal.
-    pub billing_completeness: BillingCompleteness,
     /// Complete typed terminal event metadata.
     pub metadata: AgentMetadata,
-}
-
-impl AgentResult {
-    /// Returns whether this snapshot contains provider-reported usage.
-    ///
-    /// A reported all-zero usage record is observed. A runtime-only snapshot
-    /// whose usage was never reported is not.
-    #[must_use]
-    pub fn has_observed_usage(&self) -> bool {
-        self.cost_usd.is_some()
-            || self.metadata.estimated_cost.is_some()
-            || matches!(
-                self.metadata.cost_status.as_str(),
-                "estimated_from_usage" | "estimated_lower_bound"
-            )
-            || self.usage.has_nonzero_value()
-            || self.metadata.warmup_usage.has_nonzero_value()
-    }
 }
 
 /// Typed metadata emitted by Nanocodex's terminal event.
@@ -513,8 +480,6 @@ pub struct AgentMetadata {
     pub response_attempts: u32,
     /// Retried Responses attempts.
     pub response_retries: u32,
-    /// Potentially billable sent attempts whose provider usage was unavailable.
-    pub billing_uncertain_response_attempts: u32,
     /// Time spent connecting to the Responses API.
     pub connection_duration_ns: u64,
     /// Time spent in owned retry backoff.
@@ -579,17 +544,6 @@ pub struct UsageTotals {
     pub reasoning_output_tokens: u64,
     /// Total input plus output tokens.
     pub total_tokens: u64,
-}
-
-impl UsageTotals {
-    const fn has_nonzero_value(&self) -> bool {
-        self.input_tokens != 0
-            || self.cached_input_tokens != 0
-            || self.cache_write_input_tokens != 0
-            || self.output_tokens != 0
-            || self.reasoning_output_tokens != 0
-            || self.total_tokens != 0
-    }
 }
 
 /// Terminal output from the task verifier.
@@ -717,7 +671,6 @@ mod tests {
             "websocket_reconnects": 0,
             "response_attempts": 1,
             "response_retries": 0,
-            "billing_uncertain_response_attempts": 0,
             "connection_duration_ns": 1,
             "retry_backoff_duration_ns": 0,
             "model_duration_ns": 1,

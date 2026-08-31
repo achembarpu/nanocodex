@@ -72,7 +72,6 @@ pub struct TransportStats {
     pub(crate) websocket_reconnects: AtomicU32,
     pub(crate) response_attempts: AtomicU32,
     pub(crate) response_retries: AtomicU32,
-    pub(crate) billing_uncertain_response_attempts: AtomicU32,
     pub(crate) connection_duration_ns: AtomicU64,
     pub(crate) retry_backoff_duration_ns: AtomicU64,
 }
@@ -84,7 +83,6 @@ pub struct TransportStatsSnapshot {
     websocket_reconnects: u32,
     response_attempts: u32,
     response_retries: u32,
-    billing_uncertain_response_attempts: u32,
     connection_duration_ns: u64,
     retry_backoff_duration_ns: u64,
 }
@@ -98,9 +96,6 @@ impl TransportStats {
             websocket_reconnects: self.websocket_reconnects.load(Ordering::Relaxed),
             response_attempts: self.response_attempts.load(Ordering::Relaxed),
             response_retries: self.response_retries.load(Ordering::Relaxed),
-            billing_uncertain_response_attempts: self
-                .billing_uncertain_response_attempts
-                .load(Ordering::Relaxed),
             connection_duration_ns: self.connection_duration_ns.load(Ordering::Relaxed),
             retry_backoff_duration_ns: self.retry_backoff_duration_ns.load(Ordering::Relaxed),
         }
@@ -123,9 +118,6 @@ impl TransportStats {
             response_retries: after
                 .response_retries
                 .saturating_sub(before.response_retries),
-            billing_uncertain_response_attempts: after
-                .billing_uncertain_response_attempts
-                .saturating_sub(before.billing_uncertain_response_attempts),
             connection_duration_ns: after
                 .connection_duration_ns
                 .saturating_sub(before.connection_duration_ns),
@@ -147,8 +139,6 @@ pub struct TransportStatsDelta {
     pub response_attempts: u32,
     /// Responses retries after the first physical attempt.
     pub response_retries: u32,
-    /// Sent attempts that ended before provider usage was observed.
-    pub billing_uncertain_response_attempts: u32,
     /// Nanoseconds spent establishing connections.
     pub connection_duration_ns: u64,
     /// Nanoseconds spent waiting for owned retry backoff.
