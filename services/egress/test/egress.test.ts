@@ -457,9 +457,10 @@ describe("per-user credential broker", () => {
     const subject = "S".repeat(43);
     const user = "user-ssh-egress";
     const privateKey = [
-      "-----BEGIN OPENSSH PRIVATE KEY-----",
+      "-----BEGIN RSA PRIVATE KEY-----",
       "ssh-private-material-that-must-never-leave-egress".repeat(2),
-      "-----END OPENSSH PRIVATE KEY-----",
+      "-----END RSA PRIVATE KEY-----",
+      "",
     ].join("\n");
     await control(`/subjects/${subject}`, "PUT", { user_id: user });
     const stored = await control(`/users/${user}/credentials/ssh/production`, "PUT", {

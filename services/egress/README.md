@@ -87,7 +87,7 @@ request bodies and provider material are never logged or reflected.
 
 An authenticated account may store an SSH identity through
 `PUT /v1/credentials/ssh/:reference`. The JSON document contains
-`private_key`, canonical lowercase `hostname`, `port`, `username`, and the
+unencrypted PEM `private_key`, canonical lowercase `hostname`, `port`, `username`, and the
 server's `host_key_sha256` fingerprint. The private broker encrypts the whole
 record with the same per-user credential vault used for provider credentials.
 Status returns only the reference and target metadata.

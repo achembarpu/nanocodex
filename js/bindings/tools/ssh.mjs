@@ -172,6 +172,7 @@ async function executeSsh(args, options, context) {
     if (args.identityFile) {
       const keySource = await options.readIdentity(args.identityFile, context);
       privateKey = await importKey(keySource);
+      normalizeRsaPublicKeyBlob(privateKey);
     }
     stream = await options.openStream(args.endpoint, context.signal);
     await session.connect(stream, cancellation.token);
@@ -181,7 +182,16 @@ async function executeSsh(args, options, context) {
           username: args.username,
           password: await options.resolvePassword(args.passwordReference),
         };
-    const authenticated = await session.authenticate(credentials, cancellation.token);
+    const serverAuthenticated = await session.authenticateServer(cancellation.token);
+    if (!serverAuthenticated) throw new Error("server host-key authentication failed");
+
+    // Some OpenSSH servers enforce the protocol ordering strictly and ignore a
+    // user-authentication request sent before accepting the ssh-userauth service.
+    await session.requestService("ssh-userauth", cancellation.token);
+    if (!session.activateService("ssh-userauth")) {
+      throw new Error("server did not activate SSH user authentication");
+    }
+    const authenticated = await session.authenticateClient(credentials, cancellation.token);
     if (!authenticated) throw new Error("authentication failed");
 
     const channel = await session.openChannel("session", cancellation.token);
@@ -234,6 +244,15 @@ async function executeSsh(args, options, context) {
     stream?.dispose();
     cancellation.dispose();
   }
+}
+
+function normalizeRsaPublicKeyBlob(key) {
+  if (key?.keyAlgorithmName !== "ssh-rsa" || typeof key.getPublicKeyBytes !== "function") return;
+  const getPublicKeyBytes = key.getPublicKeyBytes.bind(key);
+  // RFC 8332 changes the signature algorithm name, but the public-key blob
+  // remains the RFC 4253 `ssh-rsa` encoding. The dependency otherwise writes
+  // `rsa-sha2-*` into both fields, which strict OpenSSH servers reject.
+  key.getPublicKeyBytes = () => getPublicKeyBytes("ssh-rsa");
 }
 
 async function authenticateHost(publicKey, expected, acceptUnknown) {

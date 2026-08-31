@@ -39,13 +39,13 @@ type Connect = (
 
 export function validateSshIdentity(value: unknown): BrokeredSshIdentity | undefined {
   if (!isRecord(value)) return undefined;
-  const privateKey = exactString(value.private_key);
+  const privateKey = privateKeyString(value.private_key);
   const hostname = exactString(value.hostname);
   const username = exactString(value.username);
   const hostKeySha256 = exactString(value.host_key_sha256);
   const port = value.port;
   if (!privateKey || privateKey.length < 64 || privateKey.length > 64 * 1024
-    || privateKey.includes("\0") || !/-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----/u.test(privateKey)
+    || privateKey.includes("\0") || !/-----BEGIN (?:RSA |EC )?PRIVATE KEY-----/u.test(privateKey)
     || !hostname || canonicalSshHostname(hostname) !== hostname
     || !username || !SSH_USERNAME.test(username)
     || !Number.isInteger(port) || (port as number) < 1 || (port as number) > 65_535
@@ -174,6 +174,16 @@ function abortable<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
 
 function exactString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() === value ? value : undefined;
+}
+
+function privateKeyString(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const body = value.endsWith("\r\n")
+    ? value.slice(0, -2)
+    : value.endsWith("\n")
+      ? value.slice(0, -1)
+      : value;
+  return body.trim() === body ? value : undefined;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
