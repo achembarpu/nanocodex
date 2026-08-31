@@ -1511,6 +1511,35 @@ test("Connect persists, validates, and clears an app-scoped grant session", asyn
   assert.equal(restoredClient._hasSession(), false);
 });
 
+test("Connect grant sessions are memory-only unless persistence is explicit", () => {
+  const expiry = Math.floor(Date.now() / 1_000) + 3_600;
+  const wire = testConnectionWire({
+    expiry,
+    keyId: "0x1111111111111111111111111111111111111111",
+    capabilities: ["nanocodex.agent", "agent.output.final"],
+  });
+  const { grant_token: token, ...connection } = wire;
+  const options = {
+    appId: "memory-only-workspace",
+    dialog: Dialog.memory(),
+    provider: { request() { throw new Error("wallet must not open"); } },
+    transport: Transport.mock(),
+  };
+  const client = Client.create(options);
+
+  client._setSession({ grantId: wire.grant.id, token, connection });
+  assert.equal(client._hasSession(), true);
+  assert.equal(client._getSession().token, token);
+  assert.equal(client._captureSession().token, token);
+
+  const freshClient = Client.create(options);
+  assert.equal(freshClient._hasSession(), false);
+  assert.equal(freshClient._getSession(), undefined);
+
+  client._clearSession();
+  assert.equal(client._hasSession(), false);
+});
+
 test("Connect clears its local grant before remote revocation", async () => {
   const storage = memoryStorage();
   let client;
