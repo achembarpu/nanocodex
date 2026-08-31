@@ -6,6 +6,7 @@ export type ManagedGrantAssertion = Readonly<{
   mcpIds: readonly string[];
 }>;
 
+export function managedAgentPortabilityGranted(capabilities: readonly string[]): boolean;
 export function managedGrantHeaders(
   assertion: ManagedGrantAssertion,
 ): Record<string, string>;

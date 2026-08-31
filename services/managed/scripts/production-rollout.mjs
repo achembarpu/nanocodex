@@ -373,11 +373,15 @@ export async function preflightProductionRollout(environment = process.env) {
   return result;
 }
 
-export async function deployProductionManaged(environment = process.env) {
+export async function deployProductionManaged(environment = process.env, {
+  run = runWrangler,
+  verifyArtifact = verifyManagedWasmArtifact,
+  verifyCheckout = verifyProductionCheckout,
+} = {}) {
   const cloudflare = cloudflareCredentials(environment);
   const revision = productionRevision(environment.TARGET_SHA);
-  verifyProductionCheckout(revision);
-  await verifyManagedWasmArtifact(revision);
+  verifyCheckout(revision);
+  await verifyArtifact(revision);
   const adminToken = requiredSecret(environment, "NANOCODEX_ADMIN_TOKEN");
   const baseConfig = await readJson(managedConfigPath);
   const config = buildManagedProductionConfig(baseConfig);
@@ -388,7 +392,7 @@ export async function deployProductionManaged(environment = process.env) {
     "managed-config.json": config,
     "managed-secrets.json": secrets,
   }, async (paths) => {
-    await runWrangler([
+    await run([
       "deploy",
       "--config",
       paths["managed-config.json"],
@@ -409,7 +413,7 @@ export async function deployProductionManaged(environment = process.env) {
 
   const result = {
     component: "private-managed",
-    migrations: MANAGED_DURABLE_OBJECT_MIGRATIONS.map(([tag]) => tag),
+    migrations: MANAGED_DURABLE_OBJECT_MIGRATIONS.map(({ tag }) => tag),
     revision,
     status: "deployed",
   };

@@ -50,6 +50,7 @@ export type OrganizationRole = "owner" | "writer" | "reader";
 
 export type OrganizationCapability =
   | "agents:read"
+  | "agents:portability"
   | "agents:write"
   | "api_keys:read"
   | "api_keys:write"
@@ -70,6 +71,7 @@ export type ConnectGrantSlice = Readonly<{
 
 const OWNER_CAPABILITIES = [
   "agents:read",
+  "agents:portability",
   "agents:write",
   "api_keys:read",
   "api_keys:write",
@@ -1663,6 +1665,7 @@ export function isOrganizationCapabilities(value: unknown): value is readonly Or
   if (!Array.isArray(value) || new Set(value).size !== value.length) return false;
   return value.every((capability) =>
     capability === "agents:read"
+    || capability === "agents:portability"
     || capability === "agents:write"
     || capability === "api_keys:read"
     || capability === "api_keys:write"
@@ -1677,6 +1680,7 @@ export function isOrganizationCapabilities(value: unknown): value is readonly Or
 
 const CONNECT_CAPABILITIES = new Set<OrganizationCapability>([
   "agents:read",
+  "agents:portability",
   "agents:write",
   "history:read",
   "memory:read",

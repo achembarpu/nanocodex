@@ -2,6 +2,10 @@ const VERSION = 1;
 const DEFAULT_RECENT_TERMINAL_TURNS = 512;
 const MAX_SEAL_RECEIPTS = 32;
 const MAX_RECEIPT_BYTES = 4 * 1024 * 1024;
+const TRANSFER_BATCH_OBJECTS = 64;
+const TRANSFER_BATCH_BYTES = 8 * 1024 * 1024;
+const TRANSFER_COPY_CONCURRENCY = 4;
+const EMPTY_TRANSFER_DIGEST = "0".repeat(64);
 const encoder = new TextEncoder();
 
 export type ManagedTurnReceipt = Readonly<{
@@ -47,6 +51,35 @@ export type ManagedTurnSealResult = Readonly<{
   sealed: boolean;
 }>;
 
+export type ManagedTurnArchiveIdentity = Readonly<{
+  archived_bytes: number;
+  archived_receipts: number;
+  digest: string;
+  objects: number;
+  version: 1;
+}>;
+
+export type ManagedTurnArchiveTransferResult = Readonly<{
+  complete: boolean;
+  identity?: ManagedTurnArchiveIdentity;
+  objects: number;
+}>;
+
+type ArchivedObject = Readonly<{
+  sha256: string;
+  size: number;
+  suffix: string;
+}>;
+
+type TransferProgress = {
+  archived_bytes: number;
+  archived_receipts: number;
+  complete: number;
+  digest: string;
+  last_key: string | null;
+  object_count: number;
+};
+
 /** Immutable terminal receipts kept outside the bounded coordination head. */
 export class ManagedTurnArchive {
   readonly #bucket: R2Bucket;
@@ -74,6 +107,34 @@ export class ManagedTurnArchive {
         object_count INTEGER NOT NULL DEFAULT 0 CHECK (object_count >= 0)
       );
       INSERT OR IGNORE INTO managed_turn_archive_state (singleton) VALUES (1);
+      CREATE TABLE IF NOT EXISTS managed_turn_archive_adoption (
+        singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+        manifest_digest TEXT NOT NULL,
+        source_storage_id TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS managed_turn_archive_manifest_progress (
+        singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+        last_key TEXT,
+        digest TEXT NOT NULL,
+        archived_bytes INTEGER NOT NULL DEFAULT 0,
+        archived_receipts INTEGER NOT NULL DEFAULT 0,
+        object_count INTEGER NOT NULL DEFAULT 0,
+        complete INTEGER NOT NULL DEFAULT 0 CHECK (complete IN (0, 1))
+      );
+      INSERT OR IGNORE INTO managed_turn_archive_manifest_progress (
+        singleton, digest
+      ) VALUES (1, '${EMPTY_TRANSFER_DIGEST}');
+      CREATE TABLE IF NOT EXISTS managed_turn_archive_adoption_progress (
+        singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+        source_storage_id TEXT NOT NULL,
+        manifest_digest TEXT NOT NULL,
+        last_key TEXT,
+        scan_digest TEXT NOT NULL,
+        archived_bytes INTEGER NOT NULL DEFAULT 0,
+        archived_receipts INTEGER NOT NULL DEFAULT 0,
+        object_count INTEGER NOT NULL DEFAULT 0,
+        complete INTEGER NOT NULL DEFAULT 0 CHECK (complete IN (0, 1))
+      );
     `);
   }
 
@@ -110,11 +171,17 @@ export class ManagedTurnArchive {
     return receipt;
   }
 
-  async seal(force = false): Promise<ManagedTurnSealResult> {
+  async seal(
+    force = false,
+    retainTerminalTurns?: number,
+  ): Promise<ManagedTurnSealResult> {
     const terminalCount = this.#terminalCount();
+    const retained = retainTerminalTurns === undefined
+      ? (force ? Math.min(1, terminalCount) : this.#recentTerminalTurns)
+      : Math.min(terminalCount, Math.max(0, retainTerminalTurns));
     const available = Math.max(
       0,
-      terminalCount - (force ? Math.min(1, terminalCount) : this.#recentTerminalTurns),
+      terminalCount - retained,
     );
     if (available === 0) return emptySeal();
     const receipts = this.#storage.sql.exec<ManagedTurnReceipt>(
@@ -186,6 +253,167 @@ export class ManagedTurnArchive {
     };
   }
 
+  async identityBatch(): Promise<ManagedTurnArchiveTransferResult> {
+    const progress = this.#storage.sql.exec<TransferProgress>(
+      `SELECT last_key, digest, archived_bytes, archived_receipts,
+              object_count, complete
+       FROM managed_turn_archive_manifest_progress WHERE singleton = 1`,
+    ).one();
+    if (progress.complete === 1) {
+      return { complete: true, identity: identityFromProgress(progress), objects: 0 };
+    }
+    const page = await this.#archivePage(this.#prefix, progress.last_key);
+    const next = await advanceProgress(progress, page.items);
+    const complete = !page.truncated;
+    if (complete) this.#assertCommittedIdentity(next);
+    this.#storage.sql.exec(
+      `UPDATE managed_turn_archive_manifest_progress
+       SET last_key = ?, digest = ?, archived_bytes = ?, archived_receipts = ?,
+           object_count = ?, complete = ? WHERE singleton = 1`,
+      page.lastKey ?? progress.last_key,
+      next.digest,
+      next.archived_bytes,
+      next.archived_receipts,
+      next.object_count,
+      complete ? 1 : 0,
+    );
+    return {
+      complete,
+      ...(complete ? { identity: identityFromProgress(next) } : {}),
+      objects: page.items.length,
+    };
+  }
+
+  async adoptBatch(
+    sourceStorageId: string,
+    expected: ManagedTurnArchiveIdentity,
+    assertOwnership: () => void = () => {},
+  ): Promise<ManagedTurnArchiveTransferResult> {
+    assertOwnership();
+    if (!/^[0-9a-f]{64}$/.test(sourceStorageId)) {
+      throw new Error("managed turn archive adoption source is invalid");
+    }
+    validateIdentity(expected);
+    let progress = this.#storage.sql.exec<TransferProgress & {
+      manifest_digest: string;
+      source_storage_id: string;
+    }>(
+      `SELECT source_storage_id, manifest_digest, last_key,
+              scan_digest AS digest, archived_bytes, archived_receipts,
+              object_count, complete
+       FROM managed_turn_archive_adoption_progress WHERE singleton = 1`,
+    ).toArray()[0];
+    if (progress) {
+      if (progress.manifest_digest !== expected.digest
+        || progress.source_storage_id !== sourceStorageId) {
+        throw new Error("managed turn archive adoption conflicts with retained identity");
+      }
+      if (progress.complete === 1) return { complete: true, identity: expected, objects: 0 };
+    } else {
+      this.#storage.sql.exec(
+        `INSERT INTO managed_turn_archive_adoption_progress (
+           singleton, source_storage_id, manifest_digest, scan_digest
+         ) VALUES (1, ?, ?, ?)`,
+        sourceStorageId,
+        expected.digest,
+        EMPTY_TRANSFER_DIGEST,
+      );
+      progress = {
+        archived_bytes: 0,
+        archived_receipts: 0,
+        complete: 0,
+        digest: EMPTY_TRANSFER_DIGEST,
+        last_key: null,
+        manifest_digest: expected.digest,
+        object_count: 0,
+        source_storage_id: sourceStorageId,
+      };
+    }
+    if (sourceStorageId === this.#prefix.split("/")[1]) {
+      throw new Error("managed turn archive cannot adopt itself");
+    }
+    const sourcePrefix = `agents/${sourceStorageId}/managed-turns/`;
+    const page = await this.#archivePage(sourcePrefix, progress.last_key, assertOwnership);
+    assertOwnership();
+    await mapWithConcurrency(page.items, TRANSFER_COPY_CONCURRENCY, async (item) => {
+      assertOwnership();
+      const source = await this.#bucket.get(`${sourcePrefix}${item.suffix}`);
+      assertOwnership();
+      if (!source || !source.body || source.size !== item.size) {
+        await source?.body?.cancel();
+        throw new Error("managed turn archive adoption source object is unavailable");
+      }
+      const body = new Uint8Array(await source.arrayBuffer());
+      assertOwnership();
+      if (await sha256Hex(body) !== item.sha256
+        || source.customMetadata?.kind !== "managed_turn_receipt"
+        || source.customMetadata?.version !== String(VERSION)
+        || source.customMetadata?.sha256 !== item.sha256) {
+        throw new Error("managed turn archive adoption source checksum mismatch");
+      }
+      assertOwnership();
+      const envelope = JSON.parse(new TextDecoder().decode(body)) as ReceiptEnvelope;
+      if (envelope.version !== VERSION || envelope.kind !== "managed_turn_receipt") {
+        throw new Error("managed turn archive adoption source envelope is invalid");
+      }
+      validateReceipt(envelope.receipt);
+      const expectedSuffix = item.suffix.startsWith("by-id/")
+        ? `by-id/${await sha256Hex(encoder.encode(envelope.receipt.id))}.json`
+        : envelope.receipt.request_key === null
+        ? undefined
+        : `by-request/${await sha256Hex(encoder.encode(envelope.receipt.request_key))}.json`;
+      assertOwnership();
+      if (expectedSuffix !== item.suffix) {
+        throw new Error("managed turn archive adoption source key conflicts with receipt");
+      }
+      await this.#putImmutable(
+        `${this.#prefix}${item.suffix}`,
+        body,
+        item.sha256,
+        assertOwnership,
+      );
+    });
+    assertOwnership();
+    const next = await advanceProgress(progress, page.items);
+    assertOwnership();
+    const complete = !page.truncated;
+    if (complete && JSON.stringify(identityFromProgress(next)) !== JSON.stringify(expected)) {
+      throw new Error("managed turn archive source identity changed during adoption");
+    }
+    this.#storage.transactionSync(() => {
+      assertOwnership();
+      this.#storage.sql.exec(
+        `UPDATE managed_turn_archive_adoption_progress
+         SET last_key = ?, scan_digest = ?, archived_bytes = ?, archived_receipts = ?,
+             object_count = ?, complete = ? WHERE singleton = 1`,
+        page.lastKey ?? progress.last_key,
+        next.digest,
+        next.archived_bytes,
+        next.archived_receipts,
+        next.object_count,
+        complete ? 1 : 0,
+      );
+      if (!complete) return;
+      const state = this.#state();
+      if (state.archived_bytes !== 0 || state.archived_receipts !== 0 || state.object_count !== 0) {
+        throw new Error("managed turn archive adoption requires an empty destination archive");
+      }
+      this.#storage.sql.exec(
+        `UPDATE managed_turn_archive_state
+         SET archived_receipts = ?, archived_bytes = ?, object_count = ? WHERE singleton = 1`,
+        expected.archived_receipts, expected.archived_bytes, expected.objects,
+      );
+      this.#storage.sql.exec(
+        `INSERT INTO managed_turn_archive_adoption (
+           singleton, manifest_digest, source_storage_id
+         ) VALUES (1, ?, ?)`,
+        expected.digest,
+        sourceStorageId,
+      );
+    });
+    return { complete, ...(complete ? { identity: expected } : {}), objects: page.items.length };
+  }
+
   async deleteAll(): Promise<number> {
     let deleted = 0;
     while (true) {
@@ -201,8 +429,70 @@ export class ManagedTurnArchive {
     this.#storage.sql.exec(`
       UPDATE managed_turn_archive_state
       SET archived_receipts = 0, archived_bytes = 0, object_count = 0
-      WHERE singleton = 1
+      WHERE singleton = 1;
+      DELETE FROM managed_turn_archive_adoption;
+      DELETE FROM managed_turn_archive_adoption_progress;
+      UPDATE managed_turn_archive_manifest_progress
+      SET last_key = NULL, digest = '${EMPTY_TRANSFER_DIGEST}', archived_bytes = 0,
+          archived_receipts = 0, object_count = 0, complete = 0
+      WHERE singleton = 1;
     `);
+  }
+
+  async #archivePage(
+    prefix: string,
+    lastKey: string | null,
+    assertOwnership: () => void = () => {},
+  ): Promise<{
+    items: ArchivedObject[];
+    lastKey?: string;
+    truncated: boolean;
+  }> {
+      assertOwnership();
+      const page = await this.#bucket.list({
+        prefix,
+        limit: TRANSFER_BATCH_OBJECTS,
+        ...(lastKey === null ? {} : { startAfter: lastKey }),
+        include: ["customMetadata"],
+      });
+      assertOwnership();
+      const items: ArchivedObject[] = [];
+      let selectedBytes = 0;
+      for (const object of page.objects) {
+        const suffix = object.key.slice(prefix.length);
+        if (!/^(?:by-id|by-request)\/[0-9a-f]{64}\.json$/.test(suffix)
+          || object.size <= 0 || object.size > MAX_RECEIPT_BYTES
+          || object.customMetadata?.kind !== "managed_turn_receipt"
+          || object.customMetadata?.version !== String(VERSION)
+          || !/^[0-9a-f]{64}$/.test(object.customMetadata?.sha256 ?? "")) {
+          throw new Error("managed turn archive contains an invalid object identity");
+        }
+        // Always make progress on the first valid object, then stop before the
+        // aggregate body budget is exceeded. The durable last key makes the
+        // unselected suffix of this list page the next resumable batch.
+        if (items.length > 0 && selectedBytes + object.size > TRANSFER_BATCH_BYTES) break;
+        items.push({
+          sha256: object.customMetadata.sha256,
+          size: object.size,
+          suffix,
+        });
+        selectedBytes += object.size;
+      }
+    items.sort((left, right) => left.suffix.localeCompare(right.suffix));
+    return {
+      items,
+      lastKey: items.length === 0 ? undefined : `${prefix}${items.at(-1)!.suffix}`,
+      truncated: page.truncated || items.length < page.objects.length,
+    };
+  }
+
+  #assertCommittedIdentity(progress: TransferProgress): void {
+    const state = this.#state();
+    if (progress.archived_bytes !== state.archived_bytes
+      || progress.archived_receipts !== state.archived_receipts
+      || progress.object_count !== state.object_count) {
+      throw new Error("managed turn archive objects do not match committed state");
+    }
   }
 
   async #read(key: string): Promise<ManagedTurnReceipt | undefined> {
@@ -227,15 +517,23 @@ export class ManagedTurnArchive {
     return envelope.receipt;
   }
 
-  async #putImmutable(key: string, body: Uint8Array, sha256: string): Promise<void> {
+  async #putImmutable(
+    key: string,
+    body: Uint8Array,
+    sha256: string,
+    assertOwnership: () => void = () => {},
+  ): Promise<void> {
+    assertOwnership();
     const stored = await this.#bucket.put(key, body, {
       onlyIf: { etagDoesNotMatch: "*" },
       httpMetadata: { contentType: "application/json" },
       customMetadata: { kind: "managed_turn_receipt", sha256, version: String(VERSION) },
       sha256,
     });
+    assertOwnership();
     if (stored) return;
     const existing = await this.#bucket.head(key);
+    assertOwnership();
     if (!existing || existing.size !== body.byteLength
       || existing.customMetadata?.sha256 !== sha256
       || existing.customMetadata?.kind !== "managed_turn_receipt") {
@@ -298,11 +596,74 @@ function validateReceipt(value: ManagedTurnReceipt): void {
   }
 }
 
+function validateIdentity(value: ManagedTurnArchiveIdentity): void {
+  if (!value || typeof value !== "object"
+    || value.version !== VERSION
+    || !Number.isSafeInteger(value.archived_bytes) || value.archived_bytes < 0
+    || !Number.isSafeInteger(value.archived_receipts) || value.archived_receipts < 0
+    || !Number.isSafeInteger(value.objects) || value.objects < 0
+    || value.archived_receipts > value.objects
+    || typeof value.digest !== "string" || !/^[0-9a-f]{64}$/.test(value.digest)) {
+    throw new Error("managed turn archive identity is invalid");
+  }
+}
+
 function emptySeal(): ManagedTurnSealResult {
   return { archived_bytes: 0, archived_receipts: 0, objects: 0, sealed: false };
+}
+
+async function advanceProgress(
+  progress: TransferProgress,
+  items: readonly ArchivedObject[],
+): Promise<TransferProgress> {
+  const digest = items.length === 0
+    ? progress.digest
+    : await sha256Hex(encoder.encode(`${progress.digest}\n${JSON.stringify(items)}`));
+  return {
+    archived_bytes: progress.archived_bytes
+      + items.reduce((sum, item) => sum + item.size, 0),
+    archived_receipts: progress.archived_receipts
+      + items.filter(({ suffix }) => suffix.startsWith("by-id/")).length,
+    complete: 0,
+    digest,
+    last_key: progress.last_key,
+    object_count: progress.object_count + items.length,
+  };
+}
+
+function identityFromProgress(progress: TransferProgress): ManagedTurnArchiveIdentity {
+  return {
+    archived_bytes: progress.archived_bytes,
+    archived_receipts: progress.archived_receipts,
+    digest: progress.digest,
+    objects: progress.object_count,
+    version: VERSION,
+  };
 }
 
 async function sha256Hex(value: Uint8Array): Promise<string> {
   const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", value));
   return [...digest].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+async function mapWithConcurrency<T>(
+  values: readonly T[],
+  concurrency: number,
+  operation: (value: T) => Promise<void>,
+): Promise<void> {
+  let next = 0;
+  const settled = await Promise.allSettled(Array.from(
+    { length: Math.min(concurrency, values.length) },
+    async () => {
+      while (next < values.length) {
+        const index = next;
+        next += 1;
+        await operation(values[index]!);
+      }
+    },
+  ));
+  const failure = settled.find(
+    (result): result is PromiseRejectedResult => result.status === "rejected",
+  );
+  if (failure) throw failure.reason;
 }

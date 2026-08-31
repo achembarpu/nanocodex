@@ -5,6 +5,7 @@ export const cliApp: Readonly<{
 }>;
 export const cliAppResource: string;
 export const cliOriginResource: string;
+export const agentPortabilityResource: "urn:nanocodex:agent:durability:portability";
 export function parseCliWalletRequest(value: unknown): Readonly<{
   id: string | number;
   method: "wallet_connect";

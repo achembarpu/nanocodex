@@ -298,6 +298,8 @@ export class HostedToolsBroker {
 
   isReady(): boolean { return this.#definitions().length > 0; }
 
+  hasPendingCalls(): boolean { return this.#pending.size > 0; }
+
   provider(): HostedToolsDynamicProvider { return this.#provider; }
 
   upgrade(sessionId: string, allowedMcpIds?: readonly string[]): Response {

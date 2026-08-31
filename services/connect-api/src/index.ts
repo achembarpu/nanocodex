@@ -9,6 +9,7 @@ import {
 } from "./chatGptCredentialImport.mjs";
 import type { ChatGptCredentialImport } from "./chatGptCredentialImport.mjs";
 import {
+  agentPortabilityResource,
   cliApp,
   approvedCliAccessKeyMatches,
   parseCliRegisterBody,
@@ -38,6 +39,7 @@ import {
   validateMcpResources,
 } from "./mcpPolicy.mjs";
 import {
+  managedAgentPortabilityGranted,
   managedGrantHeaders,
   type ManagedGrantAssertion,
 } from "./managedGrant.mjs";
@@ -1917,6 +1919,18 @@ async function proxyManagedAgent(
   const suffix = slash === -1 ? "" : resource.slice(slash);
   if (requestedAgentId !== grant.agentId || request.method === "DELETE") {
     throw new ApiFailure(403, "agent_not_granted", "This durable agent is outside the signed Connect authorization.");
+  }
+  if (/^\/durability(?:\/|$)/.test(suffix)) {
+    if (suffix !== "/durability" || request.method !== "POST" || new URL(request.url).search !== "") {
+      throw new ApiFailure(405, "method_not_allowed", "Only an exact durability export request is supported.");
+    }
+    if (!managedAgentPortabilityGranted(grant.capabilities)) {
+      throw new ApiFailure(
+        403,
+        "agent_portability_not_granted",
+        "This connection does not include full agent portability access.",
+      );
+    }
   }
   if (suffix.startsWith("/realtime/")) {
     if (!grant.capabilities.includes("chatgpt")) {
@@ -4535,11 +4549,14 @@ function resourceValues(resources: readonly string[], prefix: string): string[] 
 
 function approvedAgentCapabilities(resources: readonly string[]): string[] {
   const approved = new Set(resources);
+  const portability = approved.has(agentPortabilityResource)
+    ? ["agent.durability.portability"]
+    : [];
   const compact = new Set(resources
     .filter((resource) => resource.startsWith(AGENT_VISIBILITY_RESOURCE_PREFIX))
     .flatMap((resource) => resource.slice(AGENT_VISIBILITY_RESOURCE_PREFIX.length).split(",")));
   if (approved.has("urn:nanocodex:agent:trace:read") || compact.has("traces")) {
-    return [...new Set(Object.values(AGENT_VISIBILITY_RESOURCES))];
+    return [...new Set([...Object.values(AGENT_VISIBILITY_RESOURCES), ...portability])];
   }
   const legacy = Object.entries(AGENT_VISIBILITY_RESOURCES)
     .filter(([resource]) => approved.has(resource))
@@ -4547,7 +4564,7 @@ function approvedAgentCapabilities(resources: readonly string[]): string[] {
   const combined = Object.entries(AGENT_VISIBILITY_NAMES)
     .filter(([name]) => compact.has(name))
     .map(([, capability]) => capability);
-  return [...new Set([...legacy, ...combined])];
+  return [...new Set([...legacy, ...combined, ...portability])];
 }
 
 function approvedHostedCapabilities(resources: readonly string[]): string[] {

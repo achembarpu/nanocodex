@@ -21,11 +21,13 @@ type ReceiptEnvelope = Readonly<{
   version: 1;
 }>;
 
-type ArchiveState = {
+export type ManagedRealtimeArchiveState = Readonly<{
   archived_bytes: number;
   archived_receipts: number;
   object_count: number;
-};
+}>;
+
+type ArchiveState = ManagedRealtimeArchiveState;
 
 export type ManagedRealtimeArchiveCapacity = Readonly<{
   archived_bytes: number;
@@ -74,6 +76,32 @@ export class ManagedRealtimeArchive {
       archived_receipts: state.archived_receipts,
       objects: state.object_count,
     };
+  }
+
+  portableState(): ManagedRealtimeArchiveState {
+    return { ...this.#state() };
+  }
+
+  adoptState(state: ManagedRealtimeArchiveState): void {
+    if (!state || typeof state !== "object"
+      || !Number.isSafeInteger(state.archived_bytes) || state.archived_bytes < 0
+      || !Number.isSafeInteger(state.archived_receipts) || state.archived_receipts < 0
+      || !Number.isSafeInteger(state.object_count) || state.object_count < 0
+      || state.archived_receipts !== state.object_count) {
+      throw new Error("managed realtime archive portable state is invalid");
+    }
+    const current = this.#state();
+    if (current.archived_receipts !== 0 || current.object_count !== 0) {
+      throw new Error("managed realtime archive adoption requires an empty destination archive");
+    }
+    this.#storage.sql.exec(
+      `UPDATE managed_realtime_archive_state
+       SET archived_receipts = ?, archived_bytes = ?, object_count = ?
+       WHERE singleton = 1`,
+      state.archived_receipts,
+      state.archived_bytes,
+      state.object_count,
+    );
   }
 
   needsSeal(): boolean {

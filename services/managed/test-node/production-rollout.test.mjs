@@ -10,6 +10,7 @@ import {
   buildManagedProductionConfig,
   buildWebBootstrapConfig,
   buildWebProductionConfig,
+  deployProductionManaged,
   managedSecretPayload,
   productionWranglerEnvironment,
   webSecretPayload,
@@ -225,6 +226,47 @@ test("managed production config retains the exact private eight-DO topology", as
     () => buildManagedProductionConfig({ ...base, name: "nanocodex-durable-agent" }),
     /non-production template name/,
   );
+});
+
+test("managed deployment reports the object-shaped migration tags after Wrangler succeeds", async () => {
+  let deployment;
+  const result = await deployProductionManaged({
+    CLOUDFLARE_ACCOUNT_ID: "account-id",
+    CLOUDFLARE_API_TOKEN: "cloudflare-token",
+    NANOCODEX_ADMIN_TOKEN: adminToken,
+    TARGET_SHA: revision,
+  }, {
+    run: async (arguments_, options) => {
+      const configPath = arguments_[arguments_.indexOf("--config") + 1];
+      const secretsPath = arguments_[arguments_.indexOf("--secrets-file") + 1];
+      deployment = {
+        arguments_,
+        config: JSON.parse(await readFile(configPath, "utf8")),
+        environment: options.environment,
+        secrets: JSON.parse(await readFile(secretsPath, "utf8")),
+      };
+      return "Successfully published nanocodex-durable-agent";
+    },
+    verifyArtifact: async (actualRevision) => assert.equal(actualRevision, revision),
+    verifyCheckout: (actualRevision) => assert.equal(actualRevision, revision),
+  });
+
+  assert.deepEqual(result, {
+    component: "private-managed",
+    migrations: ["v1", "v2", "v3", "v4", "v5"],
+    revision,
+    status: "deployed",
+  });
+  assert.deepEqual(deployment.arguments_.slice(0, 3), [
+    "deploy",
+    "--config",
+    deployment.arguments_[2],
+  ]);
+  assert.deepEqual(deployment.config.migrations.map(({ tag }) => tag), result.migrations);
+  assert.deepEqual(deployment.secrets, { NANOCODEX_ADMIN_TOKEN: adminToken });
+  assert.equal(deployment.environment.CLOUDFLARE_ACCOUNT_ID, "account-id");
+  assert.equal(deployment.environment.CLOUDFLARE_API_TOKEN, "cloudflare-token");
+  assert.equal(deployment.environment.NANOCODEX_ADMIN_TOKEN, undefined);
 });
 
 test("boundary probe and website configs preserve the private service chain", () => {

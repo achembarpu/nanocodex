@@ -36,6 +36,11 @@ export type DurableEventHistory<Message> = Readonly<{
   latest_cursor: string;
 }>;
 
+export type DurableEventTail<Message> = Readonly<{
+  events: readonly DurableEvent<Message>[];
+  high_water_cursor: string;
+}>;
+
 export class EventLogCapacityError extends Error {
   readonly code = "event_log_full";
 
@@ -162,6 +167,82 @@ export class DurableEventLog<Message extends { type: string }> {
     return this.#storage.sql.exec<{ cursor: string }>(
       "SELECT CAST(COALESCE(MAX(cursor), 0) AS TEXT) AS cursor FROM managed_events",
     ).toArray()[0]?.cursor ?? "0";
+  }
+
+  portableTail(after: string): DurableEventTail<Message> {
+    const events = this.page(after, REPLAY_PAGE_SIZE);
+    const sequence = this.#storage.sql.exec<{ cursor: string }>(
+      `SELECT CAST(COALESCE((
+         SELECT seq FROM sqlite_sequence WHERE name = 'managed_events'
+       ), (SELECT MAX(cursor) FROM managed_events), 0) AS TEXT) AS cursor`,
+    ).toArray()[0]?.cursor ?? "0";
+    return { events, high_water_cursor: sequence };
+  }
+
+  adoptTail(tail: DurableEventTail<Message>, withinTransaction = true): void {
+    const highWater = parseCursor(tail.high_water_cursor);
+    if (highWater === undefined || !Array.isArray(tail.events)) {
+      throw new Error("managed event portable tail is invalid");
+    }
+    let previous = "0";
+    let totalBytes = 0;
+    const encoded = tail.events.map((event) => {
+      if (!event || typeof event !== "object"
+        || typeof event.cursor !== "string" || parseCursor(event.cursor) !== event.cursor
+        || event.cursor === "0" || compareCursor(previous, event.cursor) >= 0
+        || compareCursor(event.cursor, highWater) > 0
+        || !Number.isSafeInteger(event.created_at) || event.created_at < 0
+        || (event.turn_id !== null && typeof event.turn_id !== "string")
+        || !event.message || typeof event.message !== "object"
+        || typeof event.message.type !== "string") {
+        throw new Error("managed event portable tail contains an invalid event");
+      }
+      previous = event.cursor;
+      const messageJson = JSON.stringify(event.message);
+      const bytes = sseEncoder.encode(messageJson).byteLength;
+      if (bytes > MAX_EVENT_BYTES) throw new Error("managed event portable tail exceeds event size");
+      totalBytes += bytes;
+      if (totalBytes > MAX_EVENT_LOG_BYTES) {
+        throw new Error("managed event portable tail exceeds the local event boundary");
+      }
+      return { event, messageJson, bytes };
+    });
+    const adopt = () => {
+      this.clear();
+      for (const { event, messageJson, bytes } of encoded) {
+        const chunked = bytes > DIRECT_EVENT_BYTES;
+        this.#storage.sql.exec(
+          `INSERT INTO managed_events (cursor, turn_id, message_json, created_at)
+           VALUES (CAST(? AS INTEGER), ?, ?, ?)`,
+          event.cursor,
+          event.turn_id,
+          chunked ? "" : messageJson,
+          event.created_at,
+        );
+        if (chunked) {
+          for (const [chunkIndex, chunk] of messageChunks(messageJson).entries()) {
+            this.#storage.sql.exec(
+              `INSERT INTO managed_event_chunks (cursor, chunk_index, message_json)
+               VALUES (CAST(? AS INTEGER), ?, ?)`,
+              event.cursor,
+              chunkIndex,
+              chunk,
+            );
+          }
+        }
+      }
+      this.#storage.sql.exec(
+        "UPDATE managed_event_meta SET total_bytes = ? WHERE singleton = 1",
+        totalBytes,
+      );
+      this.#storage.sql.exec("DELETE FROM sqlite_sequence WHERE name = 'managed_events'");
+      this.#storage.sql.exec(
+        "INSERT INTO sqlite_sequence (name, seq) VALUES ('managed_events', CAST(? AS INTEGER))",
+        highWater,
+      );
+    };
+    if (withinTransaction) this.#storage.transactionSync(adopt);
+    else adopt();
   }
 
   totalBytes(): number {

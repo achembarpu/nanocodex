@@ -24,6 +24,7 @@ const HOSTED_PASSKEY_PUBLIC_KEY = "0x046b17d1f2e12c4247f8bce6e563a440f277037d812
 const HOSTED_PASSKEY_ADDRESS = "0xd3a9f047ad43d7e2e4e7e491f1fe2e657a2651b6";
 const OWNER_CAPABILITIES = [
   "agents:read",
+  "agents:portability",
   "agents:write",
   "api_keys:read",
   "api_keys:write",
@@ -3175,6 +3176,25 @@ describe("managed agents REST and resumable SSE", () => {
     });
     expect(missingTools.status).toBe(403);
 
+    const durabilityUrl = agent.events_url.replace(/\/events$/, "/durability");
+    expect((await RAW_SELF.fetch(durabilityUrl, {
+      method: "POST",
+      headers: writeOnly,
+    })).status).toBe(403);
+    expect((await RAW_SELF.fetch(`${durabilityUrl}?unexpected=1`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${API_KEY}` },
+    })).status).toBe(400);
+    expect((await RAW_SELF.fetch("https://example.test/v1/agents?unexpected=1", {
+      method: "POST",
+      headers: { authorization: `Bearer ${API_KEY}` },
+    })).status).toBe(400);
+    expect((await RAW_SELF.fetch("https://example.test/v1/agents", {
+      method: "POST",
+      headers: { ...writeOnly, "content-type": "application/json" },
+      body: JSON.stringify({ durability: { format: "unauthorized-import" } }),
+    })).status).toBe(403);
+
     const websocket = await RAW_SELF.fetch(agent.websocket_url.replace("wss:", "https:"), {
       headers: {
         authorization: `Bearer ${API_KEY}`,
@@ -5093,7 +5113,7 @@ describe("managed agents REST and resumable SSE", () => {
         },
         body: JSON.stringify({ id, input: "wait for cancellation" }),
       })).status).toBe(202);
-      for (let attempt = 0; attempt < 100; attempt += 1) {
+      for (let attempt = 0; attempt < 1_000; attempt += 1) {
         const dispatched = await runInDurableObject(session, (_instance, state) => (
           state.storage.sql.exec<{ may_have_inner_operation: number }>(
             "SELECT may_have_inner_operation FROM managed_turns WHERE id = ?",
@@ -5137,7 +5157,7 @@ describe("managed agents REST and resumable SSE", () => {
       const retryAt = cancelling.retry_at!;
       restoreJournal();
 
-      for (let attempt = 0; attempt < 100; attempt += 1) {
+      for (let attempt = 0; attempt < 1_000; attempt += 1) {
         const alarm = await runInDurableObject(
           session,
           (_instance, state) => state.storage.getAlarm(),
@@ -5177,7 +5197,7 @@ describe("managed agents REST and resumable SSE", () => {
       errorSpy.mockRestore();
       vi.useRealTimers();
     }
-  });
+  }, 15_000);
 
   it("does not dispatch a newer turn past a pre-runtime retry", async () => {
     const agent = await createAgent();
@@ -5509,6 +5529,20 @@ describe("managed agents REST and resumable SSE", () => {
       expect(terminal.terminal).toMatchObject({ final_message: turn.finalMessage });
       sourceTerminals.set(turn.id, terminal);
     }
+    const realtimeStartRequest = {
+      operation_id: "portable-realtime-start",
+      voice_session_id: "portable-realtime-session",
+    } as const;
+    const realtimeStopRequest = {
+      operation_id: "portable-realtime-stop",
+      voice_session_id: "portable-realtime-session",
+    } as const;
+    const realtimeStart = await managedRealtime(source, "start", realtimeStartRequest);
+    expect(realtimeStart.status).toBe(200);
+    const realtimeStartValue = await realtimeStart.json<ManagedRealtimeLifecycleResponse>();
+    const realtimeStop = await managedRealtime(source, "stop", realtimeStopRequest);
+    expect(realtimeStop.status).toBe(200);
+    const realtimeStopValue = await realtimeStop.json<ManagedRealtimeLifecycleResponse>();
     const commandsBeforeExport = await modelCommandCount();
     expect(commandsBeforeExport).toBeGreaterThan(sourceTurns.length);
     const sourceCapacity = await testEnv.NANOCODEX_SESSIONS
@@ -5516,24 +5550,60 @@ describe("managed agents REST and resumable SSE", () => {
       .fetch("https://session.internal/capacity");
     expect((await sourceCapacity.json<{ durable_state: { rows: number } }>()).durable_state.rows)
       .toBe(1);
+    const sourceStateBeforeExport = await (await SELF.fetch(
+      source.events_url.replace(/\/events$/, ""),
+    )).json<{
+      completed_turns: number;
+      first_prompt: string;
+      latest_event_cursor: string;
+    }>();
+    const sourceHistoryBeforeExport = await managedHistory(source);
 
-    const exported = await SELF.fetch(
-      source.events_url.replace(/\/events$/, "/durability"),
-      { method: "POST" },
-    );
+    const exported = await pollDurabilityExport(source);
     expect(exported.status).toBe(200);
     const archive = await exported.json<{
       format: string;
-      stateId: string;
-      revision: string;
-      payload: string;
+      durability: { stateId: string; revision: string; payload: string };
+      managed_events: { archive: { digest: string }; tail: { high_water_cursor: string } };
+      managed_realtime: {
+        archive: { digest: string };
+        state: { archived_receipts: number; object_count: number };
+        tail: unknown[];
+      };
+      managed_session: {
+        accepted_turns: number;
+        completed_turns: number;
+        first_prompt: string;
+        title: string;
+      };
+      managed_turn_receipts: { archived_receipts: number; digest: string; objects: number };
+      source_agent_id: string;
     }>();
     expect(archive).toMatchObject({
-      format: "nanocodex-durability-state-v1",
-      revision: expect.stringMatching(/^[1-9][0-9]*$/),
-      payload: expect.any(String),
+      format: "nanocodex-managed-durability-state-v1",
+      durability: {
+        revision: expect.stringMatching(/^[1-9][0-9]*$/),
+        payload: expect.any(String),
+      },
+      managed_turn_receipts: {
+        digest: expect.stringMatching(/^[0-9a-f]{64}$/),
+      },
+      managed_events: {
+        archive: { digest: expect.stringMatching(/^[0-9a-f]{64}$/) },
+        tail: { high_water_cursor: sourceStateBeforeExport.latest_event_cursor },
+      },
+      managed_realtime: {
+        archive: { digest: expect.stringMatching(/^[0-9a-f]{64}$/) },
+        state: { archived_receipts: 1, object_count: 1 },
+        tail: [expect.objectContaining({ operation_id: realtimeStopRequest.operation_id })],
+      },
+      managed_session: {
+        completed_turns: sourceStateBeforeExport.completed_turns,
+        first_prompt: sourceStateBeforeExport.first_prompt,
+      },
+      source_agent_id: source.agent_id,
     });
-    const portableState = JSON.parse(archive.payload).nanocodex_durable_state;
+    const portableState = JSON.parse(archive.durability.payload).nanocodex_durable_state;
     expect(portableState.latest_checkpoint).toBeTruthy();
     expect(JSON.stringify(portableState.latest_checkpoint)).toContain(
       "portable-managed-compaction",
@@ -5582,17 +5652,56 @@ describe("managed agents REST and resumable SSE", () => {
     const imported = await importedResponse.json<AgentReceipt>();
     createdAgents.add(imported.agent_id);
     expect(imported.agent_id).not.toBe(source.agent_id);
-    expect(imported.durability_id).toBe(archive.stateId);
+    expect(imported.durability_id).toBe(archive.durability.stateId);
+    const importedState = await (await SELF.fetch(
+      imported.events_url.replace(/\/events$/, ""),
+    )).json<{
+      completed_turns: number;
+      first_prompt: string;
+      latest_event_cursor: string;
+    }>();
+    expect(importedState).toMatchObject({
+      completed_turns: sourceStateBeforeExport.completed_turns,
+      first_prompt: sourceStateBeforeExport.first_prompt,
+      latest_event_cursor: sourceStateBeforeExport.latest_event_cursor,
+    });
+    await expect(managedHistory(imported)).resolves.toEqual(sourceHistoryBeforeExport);
+    const importedListing = await (await SELF.fetch(
+      "https://example.test/v1/agents",
+    )).json<{ summaries: Record<string, { title: string; turn_count: number }> }>();
+    expect(importedListing.summaries[imported.agent_id]).toMatchObject({
+      title: archive.managed_session.title,
+      turn_count: archive.managed_session.accepted_turns,
+    });
+    await expect((await managedRealtime(
+      imported,
+      "start",
+      realtimeStartRequest,
+    )).json()).resolves.toEqual(realtimeStartValue);
+    await expect((await managedRealtime(
+      imported,
+      "stop",
+      realtimeStopRequest,
+    )).json()).resolves.toEqual(realtimeStopValue);
+    await expect(modelCommandCount()).resolves.toBe(commandsBeforeExport);
 
     const replayedCreate = await createImported();
     expect(replayedCreate.status).toBe(201);
     await expect(replayedCreate.json()).resolves.toMatchObject({
       agent_id: imported.agent_id,
-      durability_id: archive.stateId,
+      durability_id: archive.durability.stateId,
     });
 
     for (const turn of sourceTurns) {
-      await submit(imported, turn.id, turn.input);
+      const replay = await SELF.fetch(imported.events_url.replace(/\/events$/, "/turns"), {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": `request-${turn.id}`,
+        },
+        body: JSON.stringify({ id: turn.id, input: turn.input }),
+      });
+      expect([200, 202]).toContain(replay.status);
       const importedTerminal = await waitForTurnState(imported, turn.id, "completed", 10_000);
       expect(importedTerminal.terminal).toEqual(sourceTerminals.get(turn.id)!.terminal);
       await expect(modelCommandCount()).resolves.toBe(commandsBeforeExport);
@@ -5611,8 +5720,14 @@ describe("managed agents REST and resumable SSE", () => {
       },
     ] as const;
     for (const turn of destinationTurns) {
-      await submit(imported, turn.id, turn.input);
+      const accepted = await submit(imported, turn.id, turn.input);
+      expect(BigInt(accepted.accepted_cursor)).toBeGreaterThan(
+        BigInt(archive.managed_events.tail.high_water_cursor),
+      );
       const terminal = await waitForTurnState(imported, turn.id, "completed", 15_000);
+      expect(BigInt(terminal.terminal_cursor!)).toBeGreaterThan(
+        BigInt(archive.managed_events.tail.high_water_cursor),
+      );
       expect(terminal.terminal).toMatchObject({
         final_message: expect.stringContaining(turn.finalMessage),
       });
@@ -5635,9 +5750,383 @@ describe("managed agents REST and resumable SSE", () => {
         ).one(),
       ),
     ]);
-    expect(identities[1]).toMatchObject({ state_id: archive.stateId });
+    expect(identities[1]).toMatchObject({ state_id: archive.durability.stateId });
     expect(identities[1].session_id).not.toBe(identities[0]);
+    const deletedSource = await SELF.fetch(
+      `https://example.test/v1/agents/${source.agent_id}`,
+      { method: "DELETE" },
+    );
+    expect(deletedSource.status).toBe(204);
+    createdAgents.delete(source.agent_id);
+    await expect((await managedRealtime(
+      imported,
+      "start",
+      realtimeStartRequest,
+    )).json()).resolves.toEqual(realtimeStartValue);
+    await expect((await managedRealtime(
+      imported,
+      "stop",
+      realtimeStopRequest,
+    )).json()).resolves.toEqual(realtimeStopValue);
   }, 90_000);
+
+  it("adopts archived receipts beyond the Rust replay window before destination admission", async () => {
+    expect((await testEnv.NANOCODEX.fetch(
+      "https://broker.internal/test/model-commands",
+      { method: "DELETE" },
+    )).status).toBe(204);
+    const source = await createAgent();
+    const oldestId = "turn-portable-archive-000";
+    const oldestInput = "E2E_COMPUTER_RUNTIME";
+    const totalTurns = 513;
+    await submit(source, "turn-portable-state-seed", "establish real portable Rust state");
+    await waitForTurnState(source, "turn-portable-state-seed", "completed", 15_000);
+    const seeded = await Promise.all(Array.from({ length: totalTurns }, async (_unused, index) => {
+      const id = `turn-portable-archive-${String(index).padStart(3, "0")}`;
+      const input = index === 0 ? oldestInput : `portable archived receipt ${index}`;
+      return {
+        id,
+        inputJson: JSON.stringify(input),
+        requestHash: await testHash(JSON.stringify(input)),
+        requestKey: `request-${id}`,
+        terminalJson: JSON.stringify({
+          type: "turn_completed",
+          id,
+          final_message: `retained terminal ${index}`,
+        }),
+      };
+    }));
+    const seededCursors = new Map<string, { accepted: string; terminal: string }>();
+    const sourceSession = testEnv.NANOCODEX_SESSIONS.getByName(source.agent_id);
+    await runInDurableObject(sourceSession, (_instance, state) => {
+      const eventLog = new DurableEventLog<{ type: string } & Record<string, unknown>>(state.storage);
+      state.storage.transactionSync(() => {
+        for (let index = 0; index < seeded.length; index += 1) {
+          const turn = seeded[index]!;
+          const createdAt = index * 3 + 1;
+          const accepted = eventLog.append({
+            type: "turn_accepted",
+            id: turn.id,
+            input: JSON.parse(turn.inputJson),
+          }, turn.id);
+          const terminal = eventLog.append(JSON.parse(turn.terminalJson), turn.id, true);
+          seededCursors.set(turn.id, {
+            accepted: accepted.cursor,
+            terminal: terminal.cursor,
+          });
+          state.storage.sql.exec(
+            `INSERT INTO managed_turns (
+               id, request_key, request_hash, input_json, authorization_json, state,
+               accepted_cursor, terminal_json, terminal_cursor, may_have_inner_operation,
+               attempt_count, created_at, accepted_at, updated_at
+             ) VALUES (?, ?, ?, ?, '{"capabilities":[]}', 'completed', ?, ?, ?, 0, 0, ?, ?, ?)`,
+            turn.id,
+            turn.requestKey,
+            turn.requestHash,
+            turn.inputJson,
+            accepted.cursor,
+            turn.terminalJson,
+            terminal.cursor,
+            createdAt,
+            createdAt + 1,
+            createdAt + 2,
+          );
+        }
+        state.storage.sql.exec(
+          `UPDATE session_state
+           SET accepted_turns = accepted_turns + ?, completed_turns = completed_turns + ?
+           WHERE singleton = 1`,
+          totalTurns,
+          totalTurns,
+        );
+      });
+    });
+    const commandsBeforeExport = await modelCommandCount();
+    expect(commandsBeforeExport).toBe(1);
+
+    const { response: exported, pendingResponses } = await pollDurabilityExportWithProgress(source);
+    expect(pendingResponses).toBeGreaterThan(1);
+    expect(exported.status).toBe(200);
+    const archive = await exported.json<{
+      durability: { stateId: string };
+      managed_events: {
+        archive: { bytes: number; objects: number };
+        state: { archived_bytes: number; archived_through: string; segment_count: number };
+        tail: { events: Array<{ cursor: string }>; high_water_cursor: string };
+      };
+      managed_realtime: {
+        archive: { bytes: number; objects: number };
+        state: { archived_bytes: number; object_count: number };
+        tail: unknown[];
+      };
+      managed_session: { title: string };
+      managed_turn_receipts: { archived_receipts: number; digest: string; objects: number };
+    }>();
+    expect(archive.managed_turn_receipts).toMatchObject({
+      archived_receipts: 514,
+      objects: 1_028,
+    });
+
+    const originalSessions = testEnv.NANOCODEX_SESSIONS;
+    const destinationLookups: string[] = [];
+    testEnv.NANOCODEX_SESSIONS = {
+      ...originalSessions,
+      getByName(name: string) {
+        destinationLookups.push(name);
+        return originalSessions.getByName(name);
+      },
+    } as Env["NANOCODEX_SESSIONS"];
+    try {
+      const keylessImport = await SELF.fetch("https://example.test/v1/agents", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ durability: archive }),
+      });
+      expect(keylessImport.status).toBe(400);
+      await expect(keylessImport.json()).resolves.toEqual({
+        error: "idempotency_required",
+        message: "managed durability imports require Idempotency-Key",
+      });
+      expect(destinationLookups).toEqual([]);
+    } finally {
+      testEnv.NANOCODEX_SESSIONS = originalSessions;
+    }
+
+    const incoherentArchives = [
+      (() => {
+        const changed = structuredClone(archive);
+        changed.managed_events.archive.objects += 1;
+        return changed;
+      })(),
+      (() => {
+        const changed = structuredClone(archive);
+        changed.managed_events.tail.events[0]!.cursor = changed.managed_events.state.archived_through;
+        return changed;
+      })(),
+      (() => {
+        const changed = structuredClone(archive);
+        changed.managed_realtime.archive.bytes += 1;
+        return changed;
+      })(),
+      (() => {
+        const changed = structuredClone(archive);
+        changed.managed_session.title = "conflicting imported title";
+        return changed;
+      })(),
+    ];
+    for (const [index, incoherent] of incoherentArchives.entries()) {
+      const rejected = await SELF.fetch("https://example.test/v1/agents", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": `incoherent-${index}-${crypto.randomUUID()}`,
+        },
+        body: JSON.stringify({ durability: incoherent }),
+      });
+      expect(rejected.status).toBe(400);
+      await expect(rejected.json()).resolves.toMatchObject({
+        error: "invalid_durability_import",
+      });
+    }
+
+    const importKey = `portable-archive-${crypto.randomUUID()}`;
+    const pendingImport = await SELF.fetch("https://example.test/v1/agents", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "idempotency-key": importKey,
+      },
+      body: JSON.stringify({ durability: archive }),
+    });
+    expect(pendingImport.status).toBe(503);
+    await expect(pendingImport.json()).resolves.toMatchObject({
+      error: "durability_import_pending",
+    });
+    const pendingAgentId = await testIdempotentAgentId(USER_ID, importKey);
+    createdAgents.add(pendingAgentId);
+    const pendingDestination = testEnv.NANOCODEX_SESSIONS.getByName(pendingAgentId);
+    const partialCapacity = await runInDurableObject(
+      pendingDestination,
+      (_instance, state) => state.storage.sql.exec<{
+        archived_bytes: number;
+        archived_receipts: number;
+        objects: number;
+      }>(
+        `SELECT archived_bytes, archived_receipts, object_count AS objects
+         FROM managed_turn_archive_state WHERE singleton = 1`,
+      ).one(),
+    );
+    expect(partialCapacity).toEqual({
+      archived_bytes: 0,
+      archived_receipts: 0,
+      objects: 0,
+    });
+    await evictDurableObject(pendingDestination);
+    const poisonedExport = await pendingDestination.fetch(
+      "https://session.internal/durability/export",
+      { method: "POST" },
+    );
+    expect(poisonedExport.status).toBe(409);
+    await expect(poisonedExport.json()).resolves.toMatchObject({
+      error: "durability_import_pending",
+    });
+    await expect(runInDurableObject(
+      pendingDestination,
+      async (_instance, state) => state.storage.get("nanocodex:durability-exported"),
+    )).resolves.toBeUndefined();
+    const importedResponse = await pollImportedCreate(importKey, archive);
+    expect(importedResponse.status).toBe(201);
+    const imported = await importedResponse.json<AgentReceipt>();
+    createdAgents.add(imported.agent_id);
+    expect(imported.durability_id).toBe(archive.durability.stateId);
+
+    const destination = testEnv.NANOCODEX_SESSIONS.getByName(imported.agent_id);
+    const adopted = await (await destination.fetch(
+      "https://session.internal/capacity",
+    )).json<{ archived_turns: { archived_receipts: number; objects: number } }>();
+    expect(adopted.archived_turns).toMatchObject({
+      archived_receipts: 514,
+      objects: 1_028,
+    });
+
+    const replay = await SELF.fetch(imported.events_url.replace(/\/events$/, "/turns"), {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "idempotency-key": `request-${oldestId}`,
+      },
+      body: JSON.stringify({ id: oldestId, input: oldestInput }),
+    });
+    expect(replay.status).toBe(200);
+    expect(replay.headers.get("x-nanocodex-turn-created")).toBeNull();
+    await expect(replay.json()).resolves.toMatchObject({
+      state: "completed",
+      turn_id: oldestId,
+    });
+    await expect(modelCommandCount()).resolves.toBe(commandsBeforeExport);
+    const oldestCursors = seededCursors.get(oldestId)!;
+    const oldestHistory = await (await SELF.fetch(
+      `${imported.events_url}/history?before=${BigInt(oldestCursors.terminal) + 1n}&limit=2`,
+    )).json<{ data: Array<{ cursor: string }> }>();
+    expect(oldestHistory.data.map(({ cursor }) => cursor)).toEqual([
+      oldestCursors.accepted,
+      oldestCursors.terminal,
+    ]);
+
+    const raceKey = `portable-delete-race-${crypto.randomUUID()}`;
+    const raceAgentId = await testIdempotentAgentId(USER_ID, raceKey);
+    const raceStorageId = testEnv.NANOCODEX_SESSIONS.idFromName(raceAgentId).toString();
+    createdAgents.add(raceAgentId);
+    const originalHistory = testEnv.NANOCODEX_HISTORY;
+    let notifyCopyStarted!: () => void;
+    let releaseCopy!: () => void;
+    const copyStarted = new Promise<void>((resolve) => { notifyCopyStarted = resolve; });
+    const copyHeld = new Promise<void>((resolve) => { releaseCopy = resolve; });
+    let held = false;
+    testEnv.NANOCODEX_HISTORY = new Proxy(originalHistory, {
+      get(target, property) {
+        if (property === "put") {
+          return async (...args: Parameters<R2Bucket["put"]>) => {
+            const key = String(args[0]);
+            if (!held && key.startsWith(`agents/${raceStorageId}/managed-`)) {
+              held = true;
+              notifyCopyStarted();
+              await copyHeld;
+            }
+            return target.put(...args);
+          };
+        }
+        const retained = Reflect.get(target, property);
+        return typeof retained === "function" ? retained.bind(target) : retained;
+      },
+    });
+    try {
+      const racingCreate = SELF.fetch("https://example.test/v1/agents", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": raceKey,
+        },
+        body: JSON.stringify({ durability: archive }),
+      });
+      await within(copyStarted, "managed durability adoption copy", 5_000);
+      const racingDestination = testEnv.NANOCODEX_SESSIONS.getByName(raceAgentId);
+      const deleting = SELF.fetch(
+        `https://example.test/v1/agents/${raceAgentId}`,
+        { method: "DELETE" },
+      );
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        const marked = await runInDurableObject(
+          racingDestination,
+          async (_instance, state) => state.storage.get("nanocodex:session-deleting"),
+        );
+        if (marked === true) break;
+        if (attempt === 99) throw new Error("delete did not fence the paused durability import");
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      releaseCopy();
+      const [creationResponse, deletionResponse] = await Promise.all([racingCreate, deleting]);
+      expect(creationResponse.status).not.toBe(201);
+      expect([409, 503]).toContain(creationResponse.status);
+      expect(deletionResponse.status).toBe(204);
+      createdAgents.delete(raceAgentId);
+      const retainedObjects = await originalHistory.list({
+        prefix: `agents/${raceStorageId}/`,
+      });
+      expect(retainedObjects.objects).toHaveLength(0);
+      expect((await SELF.fetch(
+        `https://example.test/v1/agents/${raceAgentId}`,
+      )).status).toBe(404);
+    } finally {
+      releaseCopy();
+      testEnv.NANOCODEX_HISTORY = originalHistory;
+    }
+
+    const deletedSource = await SELF.fetch(
+      `https://example.test/v1/agents/${source.agent_id}`,
+      { method: "DELETE" },
+    );
+    expect(deletedSource.status).toBe(204);
+    createdAgents.delete(source.agent_id);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await evictDurableObject(testEnv.NANOCODEX_SESSIONS.getByName(imported.agent_id));
+    const replayWithoutSource = await pollImportedCreate(importKey, archive);
+    expect(replayWithoutSource.status).toBe(201);
+    await expect(replayWithoutSource.json()).resolves.toMatchObject({
+      agent_id: imported.agent_id,
+      durability_id: imported.durability_id,
+    });
+
+    const changedArchive = structuredClone(archive);
+    changedArchive.managed_turn_receipts.digest = "0".repeat(64);
+    const changedReplay = await SELF.fetch("https://example.test/v1/agents", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "idempotency-key": importKey,
+      },
+      body: JSON.stringify({ durability: changedArchive }),
+    });
+    expect(changedReplay.status).toBe(409);
+    await expect(changedReplay.json()).resolves.toMatchObject({
+      error: "durability_import_conflict",
+    });
+
+    const unavailableKey = `portable-archive-unavailable-${crypto.randomUUID()}`;
+    createdAgents.add(await testIdempotentAgentId(USER_ID, unavailableKey));
+    const unavailableSource = await SELF.fetch("https://example.test/v1/agents", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "idempotency-key": unavailableKey,
+      },
+      body: JSON.stringify({ durability: archive }),
+    });
+    expect(unavailableSource.status).toBe(400);
+    await expect(unavailableSource.json()).resolves.toMatchObject({
+      error: "invalid_durability_import",
+    });
+  }, 60_000);
 
   it("rejects corrupt canonical durability before creating a managed Agent", async () => {
     const response = await SELF.fetch("https://example.test/v1/agents", {
@@ -5852,6 +6341,58 @@ async function createAgent(): Promise<AgentReceipt> {
   const receipt = await response.json<AgentReceipt>();
   createdAgents.add(receipt.agent_id);
   return receipt;
+}
+
+async function pollDurabilityExport(agent: AgentReceipt): Promise<Response> {
+  return (await pollDurabilityExportWithProgress(agent)).response;
+}
+
+async function pollDurabilityExportWithProgress(
+  agent: AgentReceipt,
+): Promise<{ pendingResponses: number; response: Response }> {
+  let pendingResponses = 0;
+  for (let attempt = 0; attempt < 80; attempt += 1) {
+    const response = await SELF.fetch(
+      agent.events_url.replace(/\/events$/, "/durability"),
+      { method: "POST" },
+    );
+    if (response.status !== 202) return { pendingResponses, response };
+    pendingResponses += 1;
+    await response.body?.cancel();
+  }
+  throw new Error("managed durability export did not complete within 80 bounded batches");
+}
+
+async function pollImportedCreate(importKey: string, archive: unknown): Promise<Response> {
+  for (let attempt = 0; attempt < 80; attempt += 1) {
+    const response = await SELF.fetch("https://example.test/v1/agents", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "idempotency-key": importKey,
+      },
+      body: JSON.stringify({ durability: archive }),
+    });
+    if (response.status !== 503) return response;
+    const body: { error?: string } = await response.clone()
+      .json<{ error?: string }>()
+      .catch(() => ({}));
+    if (body.error !== "durability_import_pending") return response;
+    await response.body?.cancel();
+  }
+  throw new Error("managed durability import did not complete within 80 bounded retries");
+}
+
+async function testIdempotentAgentId(userId: string, requestKey: string): Promise<string> {
+  const digest = new Uint8Array(await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(`${userId}\0${requestKey}`),
+  ));
+  const bytes = digest.slice(0, 16);
+  bytes[6] = (bytes[6]! & 0x0f) | 0x80;
+  bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+  const hex = [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
 async function managedFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {

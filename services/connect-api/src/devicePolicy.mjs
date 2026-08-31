@@ -13,6 +13,7 @@ export const cliApp = Object.freeze({
 
 export const cliAppResource = `urn:nanocodex:app:${encodeURIComponent(cliApp.id)}`;
 export const cliOriginResource = `urn:nanocodex:origin:${encodeURIComponent(cliApp.origin)}`;
+export const agentPortabilityResource = "urn:nanocodex:agent:durability:portability";
 
 const requiredResources = new Set([
   "urn:nanocodex:agent:run",
@@ -24,6 +25,7 @@ const optionalResources = new Set([
   "urn:nanocodex:agent:output:actions",
   "urn:nanocodex:agent:history:read",
   "urn:nanocodex:agent:trace:read",
+  agentPortabilityResource,
   "urn:nanocodex:history:read",
   "urn:nanocodex:memory:read",
   "urn:nanocodex:memory:write",

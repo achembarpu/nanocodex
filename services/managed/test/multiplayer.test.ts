@@ -2095,7 +2095,10 @@ async function within<Result>(promise: Promise<Result>, operation: string): Prom
     return await Promise.race([
       promise,
       new Promise<never>((_resolve, reject) => {
-        timer = setTimeout(() => reject(new Error(`${operation} test timed out`)), 1_000);
+        // This is a test-only deadlock guard around deliberately nonsettling
+        // Worker hops. Leave scheduling headroom below Vitest's 15 s timeout;
+        // the production deadline under test remains independently asserted.
+        timer = setTimeout(() => reject(new Error(`${operation} test timed out`)), 5_000);
       }),
     ]);
   } finally {

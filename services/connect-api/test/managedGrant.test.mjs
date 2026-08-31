@@ -2,7 +2,10 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-import { managedGrantHeaders } from "../src/managedGrant.mjs";
+import {
+  managedAgentPortabilityGranted,
+  managedGrantHeaders,
+} from "../src/managedGrant.mjs";
 
 const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
 
@@ -33,6 +36,50 @@ test("managed grant headers serialize only the exact delegated slice", () => {
   assert.deepEqual(JSON.parse(headers["x-nanocodex-connect-mcp-ids"]), ["mcp-1"]);
   assert.equal(headers["x-nanocodex-connect-user"], "account-1");
   assert.equal(headers["x-nanocodex-connect-grant-id"], `0x${"a".repeat(64)}`);
+});
+
+test("managed portability requires the exact grant plus full history and trace visibility", () => {
+  const assertion = {
+    brokerUserId: "account-1",
+    connectors: [],
+    grantId: `0x${"b".repeat(64)}`,
+    mcpIds: [],
+  };
+  const capabilities = (granted) => JSON.parse(managedGrantHeaders({
+    ...assertion,
+    capabilities: granted,
+  })["x-nanocodex-connect-capabilities"]);
+
+  const full = [
+    "agent.durability.portability",
+    "agent.history.read",
+    "agent.trace.read",
+  ];
+  assert.equal(managedAgentPortabilityGranted(full), true);
+  assert.ok(capabilities(full).includes("agents:portability"));
+  assert.equal(managedAgentPortabilityGranted([
+    "agent.durability.portability",
+    "agent.history.read",
+  ]), false);
+  assert.equal(managedAgentPortabilityGranted([
+    "agent.history.read",
+    "agent.trace.read",
+  ]), false);
+
+  const projection = section("function approvedAgentCapabilities(", "function approvedHostedCapabilities(");
+  assert.match(
+    projection,
+    /approved\.has\(agentPortabilityResource\)[\s\S]*?\["agent\.durability\.portability"\]/,
+  );
+});
+
+test("managed proxy denies durability unless the exact export route has full signed portability", () => {
+  const proxy = section("async function proxyManagedAgent(", "async function projectManagedResponse(");
+  assert.match(proxy, /\/\^\\\/durability\(\?:\\\/\|\$\)\//);
+  assert.match(proxy, /suffix !== "\/durability" \|\| request\.method !== "POST" \|\| new URL\(request\.url\)\.search !== ""/);
+  assert.match(proxy, /managedAgentPortabilityGranted\(grant\.capabilities\)/);
+  assert.match(proxy, /agent_portability_not_granted/);
+  assert.ok(proxy.indexOf("agent_portability_not_granted") < proxy.indexOf("env.ACCOUNTS.fetch"));
 });
 
 test("every Connect managed request uses the complete grant assertion", () => {
