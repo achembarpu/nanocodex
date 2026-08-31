@@ -363,7 +363,9 @@
 .account-inline .account-failure button,
 .account-inline .api-key-create button,
 .account-inline .new-api-key button,
-.account-inline .api-key-list button {
+.account-inline .api-key-list button,
+.account-inline .ssh-identity-form button,
+.account-inline .ssh-identity-list button {
   min-height: 34px;
   padding: 0 13px;
   border: 1px solid var(--border-strong);
@@ -579,6 +581,60 @@
 .account-inline .account-api-keys {
   padding: 24px 0 48px;
   gap: 14px;
+}
+
+.account-inline .ssh-identity-manager {
+  gap: 16px;
+}
+
+.account-inline .ssh-identity-intro {
+  max-width: 680px;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.account-inline .ssh-identity-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 2fr) minmax(90px, 0.5fr) minmax(0, 1fr);
+  gap: 12px;
+}
+
+.account-inline .ssh-identity-form label {
+  font-size: 9px;
+}
+
+.account-inline .ssh-identity-form input {
+  height: 40px;
+  padding: 0 12px;
+  border-color: var(--border-strong);
+  border-radius: 0;
+  font-size: 11px;
+}
+
+.account-inline .ssh-identity-form input[type="file"] {
+  height: 40px;
+  padding: 8px 12px;
+}
+
+.account-inline .ssh-fingerprint-field,
+.account-inline .ssh-key-file-field {
+  grid-column: span 2;
+}
+
+.account-inline .ssh-identity-form > button {
+  min-height: 40px;
+  align-self: end;
+  justify-self: start;
+  padding: 0 16px;
+  border: 1px solid var(--border-strong);
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 9px;
+}
+
+.account-inline .ssh-identity-list li {
+  min-height: 64px;
 }
 
 .account-inline .account-api-keys.is-locked .api-key-create {
@@ -1020,6 +1076,8 @@
   .account-inline .api-key-create button,
   .account-inline .new-api-key button,
   .account-inline .api-key-list button,
+  .account-inline .ssh-identity-form button,
+  .account-inline .ssh-identity-list button,
   .account-inline .mcp-connection-actions button,
   .connect-wizard .mcp-connection-actions button {
     min-height: 44px;
@@ -1062,6 +1120,21 @@
   }
 
   .account-inline .api-key-create input {
+    height: 44px;
+    font-size: 16px;
+  }
+
+  .account-inline .ssh-identity-form {
+    grid-template-columns: 1fr;
+  }
+
+  .account-inline .ssh-fingerprint-field,
+  .account-inline .ssh-key-file-field {
+    grid-column: auto;
+  }
+
+  .account-inline .ssh-identity-form input,
+  .account-inline .ssh-identity-form input[type="file"] {
     height: 44px;
     font-size: 16px;
   }
