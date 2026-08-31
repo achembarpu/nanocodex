@@ -20,7 +20,9 @@ export async function create(client, options) {
   if (!connection.grant.connectors?.includes("chatgpt")) {
     throw new Error("Connect ChatGPT before opening the durable Nanocodex agent.");
   }
-  const unsupported = Object.keys(options ?? {}).find((key) => key !== "connection");
+  const unsupported = Object.keys(options ?? {}).find((key) => (
+    key !== "connection" && key !== "tools"
+  ));
   if (unsupported) {
     throw new TypeError(`Connect durable agents do not accept app-local ${unsupported}`);
   }
@@ -32,8 +34,13 @@ export async function create(client, options) {
     grantSession,
   };
   let tools;
-  if (connection.grant.mcpConnections.length > 0) {
-    tools = await createGrantMcpTools(transport, connection.grant.id, connection.grant.mcpConnections);
+  if (options.tools !== undefined || connection.grant.mcpConnections.length > 0) {
+    tools = await createAttachedTools(
+      transport,
+      connection.grant.id,
+      options.tools,
+      connection.grant.mcpConnections,
+    );
   }
   const managedOptions = {
     baseUrl: client.transport.baseUrl,
@@ -127,7 +134,7 @@ function connectAgent(managed, connection, transport, tools) {
   return Object.freeze(agent);
 }
 
-async function createGrantMcpTools({ baseUrl, grantSession }, grantId, connections) {
+async function createAttachedTools({ baseUrl, grantSession }, grantId, tools, connections) {
   const mcp = Object.fromEntries(connections.map(({ id, name }) => {
     if (!MCP_CONNECTION_ID.test(id)) {
       throw new TypeError("Connect grant contains an invalid MCP connection ID");
@@ -139,10 +146,13 @@ async function createGrantMcpTools({ baseUrl, grantSession }, grantId, connectio
     }];
   }));
   return createTools({
-    mcp,
-    mcpOptions: {
-      catalogProvider: (connectionId) => `mcp:${connectionId}`,
-    },
+    ...(tools === undefined ? {} : { tools }),
+    ...(connections.length === 0 ? {} : {
+      mcp,
+      mcpOptions: {
+        catalogProvider: (connectionId) => `mcp:${connectionId}`,
+      },
+    }),
   });
 }
 

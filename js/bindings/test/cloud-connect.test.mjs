@@ -269,7 +269,7 @@ test("Connect opens its grant-provisioned durable agent without a redundant stat
   );
 });
 
-test("ConnectAgent installs only signed hosted MCPs through the grant proxy and ticketed tool host", async () => {
+test("ConnectAgent publishes app tools with only signed hosted MCPs over the ticketed tool host", async () => {
   const firstMcpId = "abcdefghijklmnopqrstuvwxyz0123456789_-ABCDE";
   const secondMcpId = "ZYXWVUTSRQPONMLKJIHGFEDCBA9876543210_-abcde";
   const accountWideMcpId = "0123456789abcdefghijklmnopqrstuvwxyz_-ABCDE";
@@ -277,6 +277,7 @@ test("ConnectAgent installs only signed hosted MCPs through the grant proxy and 
   const expiry = Math.floor(Date.now() / 1_000) + 3_600;
   const requests = [];
   const sockets = [];
+  let appToolDisposals = 0;
   const client = Client.create({
     appId: "grant-mcp-workspace",
     dialog: Dialog.memory(),
@@ -391,7 +392,22 @@ test("ConnectAgent installs only signed hosted MCPs through the grant proxy and 
 
   let agent;
   try {
-    agent = await client.agent.create({ connection });
+    agent = await client.agent.create({
+      connection,
+      tools: {
+        app_echo: {
+          description: "Echo an app-owned value.",
+          parameters: {
+            type: "object",
+            properties: { value: { type: "string" } },
+            required: ["value"],
+            additionalProperties: false,
+          },
+          handler: ({ value }) => ({ value: `app:${value}` }),
+          dispose() { appToolDisposals += 1; },
+        },
+      },
+    });
     await waitForConnect(() => sockets[0]?.frames.some(({ type }) => type === "catalog"));
     const socketUrl = new URL(sockets[0].url);
     assert.equal(socketUrl.pathname, `/v1/grants/${connection.grant.id}/agents/${agentId}/tool-host`);
@@ -403,11 +419,46 @@ test("ConnectAgent installs only signed hosted MCPs through the grant proxy and 
 
     const catalog = sockets[0].frames.find(({ type }) => type === "catalog").tools;
     assert.deepEqual(catalog.map(({ provider, remote_name }) => [provider, remote_name]), [
+      ["javascript", "app_echo"],
       [`mcp:${firstMcpId}`, "search_issues"],
       [`mcp:${secondMcpId}`, "read_document"],
     ]);
     assert.equal(catalog.some(({ provider }) => provider === `mcp:${accountWideMcpId}`), false);
-    assert.equal(catalog.some(({ provider }) => provider === "javascript"), false);
+
+    sockets[0].receive({
+      type: "call",
+      session_id: "session:app-tool",
+      call_id: "call:app-echo",
+      model: "gpt-5.6-sol",
+      name: "app_echo",
+      input: { value: "hello" },
+      output_token_budget: 10_000,
+      output_byte_budget: 128 * 1024,
+      deadline_at: Date.now() + 30_000,
+    });
+    await waitForConnect(() => sockets[0].frames.some(({ type, call_id: callId }) => (
+      type === "result" && callId === "call:app-echo"
+    )));
+    assert.deepEqual(
+      sockets[0].frames.find(({ type, call_id: callId }) => (
+        type === "result" && callId === "call:app-echo"
+      )),
+      {
+        type: "result",
+        call_id: "call:app-echo",
+        outcome: {
+          status: "completed",
+          output: {
+            output: '{"value":"app:hello"}',
+            success: true,
+            structured_result: { value: "app:hello" },
+            metadata: null,
+            process_trace: null,
+          },
+        },
+      },
+    );
+    sockets[0].receive({ type: "ack", call_id: "call:app-echo" });
 
     const mcpRequests = requests.filter((request) => new URL(request.url).pathname.includes("/mcp/"));
     assert.deepEqual([...new Set(mcpRequests.map((request) => new URL(request.url).pathname))], [
@@ -426,6 +477,7 @@ test("ConnectAgent installs only signed hosted MCPs through the grant proxy and 
     globalThis.WebSocket = OriginalWebSocket;
   }
   assert.equal(sockets[0].closed.code, 1000);
+  assert.equal(appToolDisposals, 1);
 });
 
 test("ConnectAgent with an empty signed MCP list creates no MCP runtime or tool-host socket", async () => {
