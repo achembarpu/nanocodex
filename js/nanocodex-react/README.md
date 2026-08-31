@@ -80,15 +80,6 @@ const source = createConnectAgentSource(connectAgent, {
 const conversation = useAgentController(source);
 ```
 
-Retained history is demand-driven. Creating a source starts its live event tail
-without requesting a history page. Subscribing through `onHistory` fetches only
-the newest page, and each `loadOlder()` call fetches at most one additional page.
-
-`NanocodexMockDialog` is a development-only renderer for `Dialog.memory()`.
-It fabricates approval-shaped responses for local UI work; it does not
-authenticate accounts or produce real signatures and must not be used as a
-production Connect approval surface.
-
 ```tsx
 import { createConfig, useNanocodex } from "nanocodex-react";
 

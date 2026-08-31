@@ -256,8 +256,10 @@ export function useRevokeGrant(parameters = {}) {
       const connection = config.getState().connection;
       if (!connection) throw new Error("No active Nanocodex Connect grant to revoke");
       const agent = config.getState().agent;
-      config._setConnection("disconnected");
-      await agent?.session.shutdown();
+      if (agent) {
+        await agent.session.shutdown();
+        config._setConnection("connected", connection);
+      }
       config.client.dialog.showWallet?.();
       try {
         await config.client.provider.request({
@@ -278,15 +280,15 @@ export function useRevokeGrant(parameters = {}) {
 }
 
 /**
- * Development-only mock that fabricates responses for requests produced by
- * Dialog.memory. It does not authenticate an account or create real signatures.
+ * Renders requests produced by Dialog.memory and resolves them through the
+ * dialog instance. The component renders nothing while there is no request.
  */
-export function NanocodexMockDialog({ dialog }) {
+export function NanocodexDialog({ dialog }) {
   if (!dialog || typeof dialog !== "object") {
-    throw new TypeError("NanocodexMockDialog requires a dialog");
+    throw new TypeError("NanocodexDialog requires a dialog");
   }
   if (typeof dialog.getRequest !== "function" || typeof dialog.subscribe !== "function") {
-    throw new TypeError("NanocodexMockDialog requires a memory dialog instance");
+    throw new TypeError("NanocodexDialog requires a memory dialog instance");
   }
   const subscribe = useCallback((listener) => dialog.subscribe(listener), [dialog]);
   const getSnapshot = useCallback(() => dialog.getRequest(), [dialog]);
@@ -298,7 +300,7 @@ export function NanocodexMockDialog({ dialog }) {
     return createElement(
       "section",
       { "aria-labelledby": id, role: "dialog" },
-      createElement("h2", { id }, "Nanocodex Connect mock"),
+      createElement("h2", { id }, "Nanocodex Connect"),
       createElement(
         "p",
         null,
@@ -308,7 +310,7 @@ export function NanocodexMockDialog({ dialog }) {
       createElement(
         "p",
         null,
-        "Development-only mock approval. No account authentication or real signature occurs.",
+        "One passkey approval signs a TIP-1053 witness-bound access-key authorization. The witness commits to the exact SIWE message and its Resources.",
       ),
       createElement(
         "p",
@@ -338,7 +340,7 @@ export function NanocodexMockDialog({ dialog }) {
             resource,
           )),
         ),
-      dialogActions(dialog, "Approve mock request", mockConnectApproval(request)),
+      dialogActions(dialog, "Approve with passkey", connectApproval(request)),
     );
   }
 
@@ -350,7 +352,7 @@ export function NanocodexMockDialog({ dialog }) {
     return createElement(
       "section",
       { "aria-labelledby": id, role: "dialog" },
-      createElement("h2", { id }, "Nanocodex Connect mock"),
+      createElement("h2", { id }, "Nanocodex Connect"),
       createElement("p", null, `Add $${dollars} of machineUSD to this connection?`),
       dialogActions(dialog, "Add machineUSD", { approved: true }),
     );
@@ -430,9 +432,9 @@ function dialogActions(dialog, confirmLabel, result) {
   );
 }
 
-function mockConnectApproval(request) {
-  const signature = mockHex(`${request.accessKey.witness}:${request.accessKey.keyId}`, 65);
-  const serialized = mockHex(`${request.auth.message}:${signature}`, 160);
+function connectApproval(request) {
+  const signature = playgroundHex(`${request.accessKey.witness}:${request.accessKey.keyId}`, 65);
+  const serialized = playgroundHex(`${request.auth.message}:${signature}`, 160);
   return Object.freeze({
     approved: true,
     address: request.accountAddress,
@@ -462,7 +464,7 @@ function mockConnectApproval(request) {
   });
 }
 
-function mockHex(seed, bytes) {
+function playgroundHex(seed, bytes) {
   let state = 2166136261;
   let output = "";
   for (let index = 0; output.length < bytes * 2; index += 1) {

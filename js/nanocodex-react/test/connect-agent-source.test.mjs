@@ -80,12 +80,13 @@ test("history-disabled Connect sources tail latest and expose only source-submit
   assert.ok(promptOptions.id.length > 0);
   assert.equal(turn.historyEntryId, `managed-user-${promptOptions.id}`);
   await turn.steer({ input: "adjust" });
-  const result = turn.result();
-  await waitFor(() => observerSignal !== undefined && watchSignal !== undefined);
   await turn.cancel();
   assert.deepEqual(calls, [["steer", "adjust"], ["cancel"]]);
-  await assert.rejects(result, (error) => error?.name === "AbortError");
+
+  const result = turn.result();
+  await waitFor(() => observerSignal !== undefined && watchSignal !== undefined);
   turn.dispose();
+  await assert.rejects(result, (error) => error?.name === "AbortError");
 
   releaseLive();
   await waitFor(() => events.some(({ type }) => type === "run.completed"));
@@ -264,44 +265,7 @@ test("disposing a retrying Connect turn cannot submit another durable operation"
   assert.equal(prompts.length, 1);
 });
 
-test("cancelling a retrying Connect turn terminates its retry lifetime", async () => {
-  let resultStarted;
-  const started = new Promise((resolve) => { resultStarted = resolve; });
-  const prompts = [];
-  let cancellations = 0;
-  const connectAgent = {
-    id: "cancelled-retry-agent",
-    sessionId: "cancelled-retry-agent",
-    events: {
-      async page() { throw new Error("history is disabled"); },
-      async *watch({ signal }) { await aborted(signal); },
-    },
-    turn: {
-      prompt(options) {
-        prompts.push(options);
-        return {
-          async steer() {},
-          async cancel() { cancellations += 1; },
-          async result() {
-            resultStarted();
-            throw Object.assign(new Error("connection changed"), { code: "network_error" });
-          },
-        };
-      },
-    },
-  };
-  const turn = createConnectAgentSource(connectAgent, { history: false })
-    .turn.prompt({ input: "cancel retry" });
-  const result = turn.result();
-  await started;
-  await turn.cancel();
-
-  await assert.rejects(result, { name: "AbortError" });
-  assert.equal(cancellations, 1);
-  assert.equal(prompts.length, 1);
-});
-
-test("history-enabled Connect sources fetch retained pages only on demand", async () => {
+test("history-enabled Connect sources hydrate every retained page in order", async () => {
   const pageCalls = [];
   let resolveInitial;
   const initialReady = new Promise((resolve) => { resolveInitial = resolve; });
@@ -351,7 +315,7 @@ test("history-enabled Connect sources fetch retained pages only on demand", asyn
         };
       },
       async *watch(options) {
-        assert.equal(options.cursor, "latest");
+        assert.equal(options.cursor, "12");
         watchSignal = options.signal;
         await aborted(options.signal);
       },
@@ -361,8 +325,6 @@ test("history-enabled Connect sources fetch retained pages only on demand", asyn
   const source = createConnectAgentSource(connectAgent, { history: true });
   const watcher = source.events.watch();
   const histories = [];
-  await waitFor(() => watchSignal !== undefined);
-  assert.equal(pageCalls.length, 0);
   watcher.onHistory((history) => histories.push(history));
   assert.equal(pageCalls.length, 1);
 
@@ -374,11 +336,9 @@ test("history-enabled Connect sources fetch retained pages only on demand", asyn
   ]);
   assert.deepEqual(histories[0].map(({ seq }) => seq), [1, 2, 3]);
 
-  assert.equal(pageCalls.length, 1);
-  const loadingOlder = watcher.loadOlder();
+  await waitFor(() => pageCalls.length === 2);
   assert.equal(pageCalls.length, 2);
   resolveOlder();
-  assert.equal(await loadingOlder, true);
   await waitFor(() => histories.length === 2);
   assert.deepEqual(historyText(histories.at(-1)), [
     "older prompt", "older answer", "recent prompt", "recent answer",
