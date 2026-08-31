@@ -31,6 +31,8 @@ void standalone;
 void decorated;
 
 declare const connection: Connection;
+connection.agentId satisfies string;
+connection.sessionId satisfies string;
 const connector = connection.grant.connectors[0];
 connector satisfies "github" | "gmail" | "gdrive" | "x" | "chatgpt" | undefined;
 
@@ -41,6 +43,9 @@ client.connection.connect({
   },
 });
 const agent = client.agent.create({ connection });
+const connectedAgent = await agent;
+connectedAgent.agentId satisfies string;
+connectedAgent.sessionId satisfies string;
 const voice = Voice.create(await agent);
 const agentTurn = (await agent).turn.prompt({ input: "Review my pull requests" });
 const agentResult = agentTurn.result();

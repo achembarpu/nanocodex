@@ -97,6 +97,7 @@ export function mock(options = {}) {
               grant_token: `mock-grant-${grantId.slice(2)}`,
               account_address: accountAddress,
               agent_id: `agent_${grantId.slice(2, 14)}`,
+              session_id: `session_${grantId.slice(2, 14)}`,
               grant: {
                 id: grantId,
                 permission: request.body?.permission ?? "agent.run",
@@ -246,6 +247,7 @@ export function mock(options = {}) {
               grant_token: `mock-grant-${grantId.slice(2)}`,
               account_address: prepared.account_address,
               agent_id: `agent_${grantId.slice(2, 14)}`,
+              session_id: `session_${grantId.slice(2, 14)}`,
               grant: {
                 id: grantId,
                 permission: prepared.permission.id,

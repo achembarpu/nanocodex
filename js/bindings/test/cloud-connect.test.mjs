@@ -188,6 +188,7 @@ test("Connect durable prompts reach native fetch without wrapping their POST bod
 test("Connect opens its grant-provisioned durable agent without a redundant state probe", async () => {
   const requests = [];
   const agentId = "019fc927-b280-79a7-8445-1b9996ad2fb0";
+  const sessionId = "019fc927-b280-79a7-8445-1b9996ad2fb1";
   const expiry = Math.floor(Date.now() / 1_000) + 3_600;
   const client = Client.create({
     appId: "durable-workspace",
@@ -221,6 +222,7 @@ test("Connect opens its grant-provisioned durable agent without a redundant stat
   client._setSessionToken("grant-session-test");
   const connection = connectionFromWire(testConnectionWire({
     agentId,
+    sessionId,
     expiry,
     keyId: "0x1111111111111111111111111111111111111111",
     capabilities: ["nanocodex.agent", "agent.output.final", "chatgpt"],
@@ -228,6 +230,8 @@ test("Connect opens its grant-provisioned durable agent without a redundant stat
   const agent = await client.agent.create({ connection });
 
   assert.equal(agent.id, agentId);
+  assert.equal(agent.agentId, agentId);
+  assert.equal(agent.sessionId, sessionId);
   assert.equal(agent.type, "connect");
   assert.equal(requests.length, 0);
   const voice = Voice.create(agent);
@@ -1010,6 +1014,16 @@ test("Connect rejects contradictory MCP capability and metadata projections", ()
   })), /MCP capabilities and metadata must match exactly/);
 });
 
+test("Connect requires the managed conversation identity in every connection projection", () => {
+  const wire = testConnectionWire({
+    expiry: Math.floor(Date.now() / 1_000) + 3_600,
+    keyId: "0x1111111111111111111111111111111111111111",
+    capabilities: ["nanocodex.agent"],
+  });
+  delete wire.session_id;
+  assert.throws(() => connectionFromWire(wire), /connection\.session_id must be a non-empty string/);
+});
+
 test("Connect keeps the hosted dialog open until the grant session is committed", async () => {
   const events = [];
   let releaseConnection;
@@ -1685,6 +1699,7 @@ function testConnectionWire({
   keyId,
   capabilities,
   agentId = "agent_connectors",
+  sessionId = "019fc927-b280-79a7-8445-1b9996ad2fb1",
   conversationId,
   mcpConnections = [],
 }) {
@@ -1692,6 +1707,7 @@ function testConnectionWire({
     grant_token: "grant-session-test",
     account_address: "0x8ba1f109551bd432803012645ac136ddd64dba72",
     agent_id: agentId,
+    session_id: sessionId,
     grant: {
       id: `0x${"33".repeat(32)}`,
       permission: "agent.run",
