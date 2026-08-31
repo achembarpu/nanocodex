@@ -191,11 +191,26 @@ export function buildManagedProductionConfig(baseConfig, {
     }
   }
   assertNoProviderConfiguration(baseConfig, "managed config");
+  if (!Array.isArray(baseConfig.containers) || baseConfig.containers.length !== 1
+    || baseConfig.containers[0]?.class_name !== "Sandbox"
+    || typeof baseConfig.containers[0].image !== "string"
+    || isAbsolute(baseConfig.containers[0].image)) {
+    throw new Error("production managed Worker requires one relative Sandbox container image");
+  }
 
   return {
     ...baseConfig,
+    alias: Object.fromEntries(Object.entries(baseConfig.alias ?? {}).map(([name, target]) => [
+      name,
+      resolve(workersRoot, target),
+    ])),
     name: MANAGED_NAME,
     main: resolve(mainPath),
+    containers: [{
+      ...baseConfig.containers[0],
+      image: resolve(workersRoot, baseConfig.containers[0].image),
+      image_build_context: workersRoot,
+    }],
   };
 }
 

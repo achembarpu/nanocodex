@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { access, readFile, stat } from "node:fs/promises";
+import { isAbsolute } from "node:path";
 import test from "node:test";
 
 import {
@@ -201,6 +202,8 @@ test("managed production config retains the exact private nine-DO topology", asy
   assert.equal(config.name, "nanocodex-durable-agent");
   assert.equal(config.workers_dev, false);
   assert.equal(config.main, "/fixed/managed.ts");
+  assert.equal(isAbsolute(config.alias["node-rsa"]), true);
+  assert.match(config.alias["node-rsa"], /\/js\/bindings\/tools\/browser\/unsupportedNodeRsa\.mjs$/);
   assert.equal(config.upload_source_maps, true);
   assert.deepEqual(config.observability, base.observability);
   assert.deepEqual(config.compatibility_flags, ["nodejs_compat", "global_fetch_strictly_public"]);
@@ -224,6 +227,12 @@ test("managed production config retains the exact private nine-DO topology", asy
     new_sqlite_classes: ["Sandbox"],
   });
   assert.equal(config.vars.NANOCODEX_COMPUTE_PROVIDER, "cloudflare");
+  assert.deepEqual(config.containers, [{
+    class_name: "Sandbox",
+    image: new URL("../Dockerfile", import.meta.url).pathname,
+    image_build_context: new URL("..", import.meta.url).pathname.replace(/\/$/u, ""),
+    instance_type: "lite",
+  }]);
   assert.doesNotMatch(JSON.stringify(config), /NANOCODEX_AUTH_MODE|OPENAI_API_KEY|CODEX_OAUTH_BOOTSTRAP|CODEX_RELAY_URL/);
   assert.deepEqual(managedSecretPayload(adminToken), { NANOCODEX_ADMIN_TOKEN: adminToken });
   assert.deepEqual(webSecretPayload("g".repeat(43)), {
