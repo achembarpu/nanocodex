@@ -29,8 +29,6 @@ jobs:
             rust: stable
           - os: ubuntu-latest
             rust: "1.97"
-          - os: macos-latest
-            rust: stable
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
@@ -55,7 +53,7 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9
         with:
-          toolchain: stable
+          toolchain: "1.97"
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
         with:
@@ -154,7 +152,7 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9
         with:
-          toolchain: stable
+          toolchain: "1.97"
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
         with:
@@ -212,8 +210,12 @@ jobs:
           node --test examples/browser-cdn/*.test.mjs
           npm test --prefix examples/node
           npm run check --prefix examples/rivet-actors
-          npm run check --prefix js/egress
-          npm run check --prefix js/managed
+          npm run typecheck --prefix js/egress
+          npm test --prefix js/egress
+          npm run dry-run:broker --prefix js/egress
+          npm run typecheck --prefix js/managed
+          npm test --prefix js/managed
+          npm run build --prefix js/managed
           npm run check --prefix examples/vercel-workflows
           npm test --prefix examples/react-vite
           npm run build --prefix examples/react-vite
