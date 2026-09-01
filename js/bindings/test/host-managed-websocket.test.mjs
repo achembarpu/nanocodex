@@ -43,7 +43,7 @@ test("host-managed sockets bind the session and consume the proxy readiness fram
 
   assert.equal(
     FakeWebSocket.openedUrl,
-    "wss://nanocodex.example/api/responses?session_id=session-1",
+    "wss://nanocodex.example/api/responses?session_id=session-1&thread_id=session-1",
   );
   assert.equal(socket.closed, false);
 });

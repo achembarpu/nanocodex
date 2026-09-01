@@ -45,7 +45,7 @@ where
         let mut default_fast_mode = self.spawner.config.fast_mode;
         let inherited_checkpoint = self.initial_model.as_ref().map(|initial| {
             Arc::new(CommittedSession::new(
-                Arc::clone(&self.spawner.provider_session_id),
+                Arc::clone(&self.spawner.lineage_id),
                 thread_model,
                 initial.checkpoint.clone(),
             ))

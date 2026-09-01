@@ -36,8 +36,11 @@ export function createBrowserHost(options = {}) {
   toolsLifecycle?.available();
   const WebSocketImpl = options.WebSocketImpl ?? globalThis.WebSocket;
   const createWebSocket = options.createWebSocket
-    ?? (options.hostManagedProtocol && ((endpoint, sessionId) =>
-      openHostManagedWebSocket(endpoint, sessionId, { WebSocketImpl })))
+    ?? (options.hostManagedProtocol && ((endpoint, sessionId, request) =>
+      openHostManagedWebSocket(endpoint, sessionId, {
+        WebSocketImpl,
+        threadId: request.threadId,
+      })))
     ?? (WebSocketImpl && ((endpoint) => new WebSocketImpl(endpoint)));
   if (!options.mpp && !createWebSocket) {
     throw new Error("WebSocket is unavailable in this runtime");
@@ -158,8 +161,12 @@ export function createBrowserHost(options = {}) {
     delete request.authorization;
     delete request.bearerToken;
     Object.assign(request, authorization);
-    const ownership = takePreconnected(endpoint, sessionId)
-      ?? openOwned(() => createWebSocket(endpoint, sessionId, request));
+    const threadId = metadata.threadId ?? sessionId;
+    let ownership = threadId === sessionId ? takePreconnected(endpoint, sessionId) : undefined;
+    if (ownership === undefined) {
+      if (preconnected !== undefined) await closePreconnected();
+      ownership = openOwned(() => createWebSocket(endpoint, sessionId, request));
+    }
     const opened = await ownership.promise;
     const { socket, ...handshake } = normalizeWebSocketConnection(opened);
     return new Promise((resolve, reject) => {

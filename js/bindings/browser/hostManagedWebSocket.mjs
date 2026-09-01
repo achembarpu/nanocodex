@@ -11,6 +11,7 @@ export function openHostManagedWebSocket(endpoint, sessionId, options = {}) {
   }
   const socketUrl = resolveWebSocketUrl(endpoint);
   socketUrl.searchParams.set("session_id", sessionId);
+  socketUrl.searchParams.set("thread_id", options.threadId ?? sessionId);
   return waitForProxyHandshake(
     new WebSocketImpl(socketUrl),
     options.timeoutMs ?? DEFAULT_TIMEOUT_MS,

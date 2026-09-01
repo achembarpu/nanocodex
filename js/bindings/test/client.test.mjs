@@ -66,6 +66,39 @@ test("the memory durability store replaces one complete opaque state", () => {
     payload: "{\"nanocodex_durable_state\":{}}",
   });
   assert.throws(() => store.load("other"), /unknown durability state/);
+  assert.deepEqual(store.acquire("child", { ownerId: "child-owner" }), {
+    ownerId: "child-owner",
+    fence: "1",
+    revision: "0",
+    payload: null,
+  });
+  assert.deepEqual(store.replace("child", {
+    ownerId: "child-owner",
+    fence: "1",
+    expectedRevision: "0",
+    payload: "child-state",
+  }), { status: "replaced", revision: "1" });
+  assert.deepEqual(store.load("child"), { revision: "1", payload: "child-state" });
+  assert.equal(store.snapshot().revision, "2");
+  assert.throws(
+    () => store.acquire("invalid-child", { ownerId: "" }),
+    /owner ID must be a non-empty string/,
+  );
+  assert.throws(() => store.load("invalid-child"), /unknown durability state/);
+  assert.throws(
+    () => store.importState("invalid-import", { revision: "1", payload: null }),
+    /payload must be null exactly at revision zero/,
+  );
+  assert.throws(() => store.load("invalid-import"), /unknown durability state/);
+  assert.throws(
+    () => store.importState(
+      "conflicting-import",
+      { revision: "1", payload: "imported" },
+      { expectedRevision: "1" },
+    ),
+    /expected destination revision 1.*but found 0/,
+  );
+  assert.throws(() => store.load("conflicting-import"), /unknown durability state/);
   assert.equal(durabilityRevision("18446744073709551615"), "18446744073709551615");
   assert.throws(
     () => durabilityRevision("18446744073709551616"),
@@ -547,13 +580,14 @@ test("the WASM host bridge routes owner-fenced durability per Agent binding", as
       )),
       { status: "fenced" },
     );
-    await assert.rejects(
-      globalThis.nanocodexHost.durabilityAcquire(
+    assert.equal(
+      JSON.parse(await globalThis.nanocodexHost.durabilityAcquire(
         firstRoute.id,
         "another-state",
         "owner-3",
-      ),
-      /route does not own state/,
+      )).owner_id,
+      "owner-3",
+      "one private route must serve independently fenced spawned states",
     );
     releaseDurabilityHost(firstHost, firstRoute.id);
     assert.equal(
@@ -562,7 +596,7 @@ test("the WASM host bridge routes owner-fenced durability per Agent binding", as
         "state-1",
         "owner-3",
       )).fence,
-      "3",
+      "4",
       "releasing a child host reference must preserve its parent's state binding",
     );
     releaseDurabilityHost(firstHost, firstRoute.id);
@@ -580,7 +614,7 @@ test("the WASM host bridge routes owner-fenced durability per Agent binding", as
         "state-1",
         "owner-5",
       )).fence,
-      "4",
+      "5",
       "releasing one route must not release another route for the same state",
     );
   } finally {
@@ -750,6 +784,7 @@ test("the host bridge keeps retry timing and handshake detail session-scoped", a
       assert.deepEqual(metadata, {
         accountId: "acct-left",
         fedramp: true,
+        threadId: "session-left",
         turnState: "turn-left",
       });
       throw error;
@@ -782,6 +817,7 @@ test("the host bridge keeps retry timing and handshake detail session-scoped", a
       "secret",
       "acct-left",
       true,
+      "session-left",
       "session-left",
       "turn-left",
     ),

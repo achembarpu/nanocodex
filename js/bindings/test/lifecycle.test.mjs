@@ -477,12 +477,11 @@ test("manual compaction and historical forks preserve exact committed boundaries
 
     const branch = await server.nextConnection();
     const branchRequest = await messageReader(branch).next();
-    assert.equal(branchRequest.previous_response_id, "resp-first");
-    assert.equal(branchRequest.input.length, 1);
+    assert.equal(branchRequest.previous_response_id, undefined);
     const encoded = JSON.stringify(branchRequest.input);
     assert.match(encoded, /historical branch/);
-    assert.doesNotMatch(encoded, /remember copper/);
-    assert.doesNotMatch(encoded, /stored copper/);
+    assert.match(encoded, /remember copper/);
+    assert.match(encoded, /stored copper/);
     assert.doesNotMatch(encoded, /remember silver/);
     assert.doesNotMatch(encoded, /after compaction/);
     sendFinal(branch, "resp-historical", "BRANCHED");

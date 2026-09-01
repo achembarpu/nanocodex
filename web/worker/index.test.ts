@@ -597,6 +597,7 @@ test("Responses proxy closes an upstream opened after the browser leaves during 
   const OriginalWebSocketPair = (globalThis as any).WebSocketPair;
   let resolveUpstream!: (response: Response) => void;
   const upstreamResponse = new Promise<Response>((resolve) => { resolveUpstream = resolve; });
+  let upstreamHeaders = new Headers();
   let markDialStarted!: () => void;
   const dialStarted = new Promise<void>((resolve) => { markDialStarted = resolve; });
   const sockets: FakeWorkerSocket[] = [];
@@ -644,9 +645,10 @@ test("Responses proxy closes an upstream opened after the browser leaves during 
       sockets.push(this[0], this[1]);
     }
   };
-  globalThis.fetch = (async (input: string | URL | Request) => {
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
     if (url === "https://api.openai.com/v1/responses") {
+      upstreamHeaders = new Headers(init?.headers);
       markDialStarted();
       return upstreamResponse;
     }
@@ -654,7 +656,7 @@ test("Responses proxy closes an upstream opened after the browser leaves during 
   }) as typeof fetch;
   try {
     const response = await worker.fetch(new Request(
-      "https://demo.test/api/responses?session_id=session-1",
+      "https://demo.test/api/responses?session_id=provider-session&thread_id=thread-1",
       {
         headers: {
           cookie: TEST_BYOK_COOKIE,
@@ -666,6 +668,9 @@ test("Responses proxy closes an upstream opened after the browser leaves during 
     ), { ENVIRONMENT: "test", BYOK_SESSIONS: namespace });
     assert.equal(response.status, 101);
     await dialStarted;
+    assert.equal(upstreamHeaders.get("session-id"), "provider-session");
+    assert.equal(upstreamHeaders.get("thread-id"), "thread-1");
+    assert.equal(upstreamHeaders.get("x-client-request-id"), "thread-1");
     sockets[0]?.close();
     const upstream = new FakeWorkerSocket();
     resolveUpstream(new WorkerTestResponse(null, {

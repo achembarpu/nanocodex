@@ -83,13 +83,14 @@ export function createNodeHost(options = {}) {
     return new Promise((resolve, reject) => {
       let settled = false;
       let upgradeResponse;
+      const threadId = metadata.threadId ?? sessionId;
       const headers = {
         Authorization: `Bearer ${apiKey}`,
         "OpenAI-Beta": RESPONSES_WEBSOCKETS_BETA,
         "x-openai-internal-codex-responses-lite": "true",
         "session-id": sessionId,
-        "thread-id": sessionId,
-        "x-client-request-id": sessionId,
+        "thread-id": threadId,
+        "x-client-request-id": threadId,
         "x-responsesapi-include-timing-metrics": "true",
         "User-Agent": USER_AGENT,
       };

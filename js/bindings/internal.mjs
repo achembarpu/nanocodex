@@ -413,13 +413,14 @@ export function releaseDefinitionHost(id) {
 }
 
 const hostBridge = Object.freeze({
-  async connect(endpoint, apiKey, accountId, fedramp, sessionId, turnState) {
-    const host = requiredSessionHost(sessionId);
+  async connect(endpoint, apiKey, accountId, fedramp, sessionId, threadId, turnState) {
+    const host = requiredSessionHost(threadId);
     let result;
     try {
       result = JSON.parse(await host.connect(endpoint, apiKey, sessionId, {
         accountId: accountId ?? undefined,
         fedramp,
+        threadId,
         turnState: turnState ?? undefined,
       }));
     } catch (error) {
@@ -427,7 +428,7 @@ const hostBridge = Object.freeze({
     }
     const handle = nextHostConnection++;
     hostConnections.set(handle, { host, handle: result.handle });
-    hostSessions.set(sessionId, host);
+    hostSessions.set(threadId, host);
     return JSON.stringify({ ...result, handle });
   },
   send(handle, message) {

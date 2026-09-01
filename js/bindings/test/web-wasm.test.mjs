@@ -138,10 +138,10 @@ test("web-target WASM runs the shared model loop through the browser host", asyn
     const branchSocket = await branchConnection;
     const branchReader = messageReader(branchSocket);
     const branchRequest = await branchReader.next();
-    assert.equal(branchRequest.previous_response_id, "web-final");
+    assert.equal(branchRequest.previous_response_id, undefined);
     const delta = JSON.stringify(branchRequest.input);
-    assert.doesNotMatch(delta, /Reply with WEB_WASM_OK/);
-    assert.doesNotMatch(delta, /WEB_WASM_OK/);
+    assert.match(delta, /Reply with WEB_WASM_OK/);
+    assert.match(delta, /WEB_WASM_OK/);
     assert.match(delta, /WEB_FORK_OK/);
     assert.match(delta, /input_image/);
     send(branchSocket, {
