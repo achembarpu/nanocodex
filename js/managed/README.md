@@ -91,63 +91,22 @@ Browser-local agents continue to use OPFS. Managed and Multiplayer agents
 cannot use OPFS, while a plain in-memory filesystem would disappear on Durable
 Object eviction, so the small Computer VFS is the only retained Computer layer.
 
-## Run locally
+## Develop and deploy
 
-From the repository root, build the optimized WASM package and install both
-ordinary-Worker examples:
+Install this package, then use Wrangler directly with the checked-in
+configuration:
 
 ```sh
-just build-wasm
 npm ci --prefix js/managed
-npm ci --prefix js/egress
+npx wrangler dev --config js/managed/wrangler.jsonc
+npx wrangler deploy --config js/managed/wrangler.jsonc
 ```
 
-Canonical local development does not require Docker or experimental Worker
-Loader support.
-
-For OAuth, sign in once with Codex and start the two Workers:
-
-```sh
-codex login
-npm run dev:subscription --prefix js/managed
-```
-
-For a normal OpenAI API key, put it only in the parent shell and select the
-other fixed deployment mode:
-
-```sh
-OPENAI_API_KEY='<key>' npm run dev:api-key --prefix js/managed
-```
-
-Open <http://127.0.0.1:8787> for the deliberately thin browser operator, or use
-the REPL below. First issue an API key from the same Nanocodex account (the
-account UI calls `POST /v1/api-keys`) and paste that `NANOCODEX_API_KEY` into
-the page. The page keeps the key only in this tab's memory. Browser local
-storage contains only the token-free agent receipt, a bounded transcript, and
-an unfinished turn; reload or detach requires the key again. Reconnecting
-resubmits the same idempotent turn ID and rejoins or replays the Durable Object
-result. The embedded operator uses authenticated REST and a `fetch()`-streamed
-SSE response because the browser WebSocket constructor cannot attach the
-required bearer header. It never opens OAuth or device-code UI. The production
-Multiplayer site keeps the managed Worker private and injects a distinct
-create-room-only allocator capability in its server-side Service Binding proxy.
-
-The launcher securely reads `$CODEX_HOME/auth.json` (normally
-`~/.codex/auth.json`), requires mode `0600`, and selects only its current access
-token and account metadata. It never selects, returns, copies, or uploads the
-Codex refresh-token field. Each launcher invocation also uses separate,
-disposable Miniflare state roots for the broker and managed Worker. Durable
-recovery is preserved for the life of that invocation without reviving stale
-room alarms from an earlier local run; deployed Durable Object storage is
-unaffected. When no fixed OAuth relay is configured, the launcher also starts
-the included bounded relay on a random-capability `127.0.0.1` URL. Only that
-launcher sets the broker's explicit loopback-development flag; production relay
-configuration remains TLS-only.
-For either mode, it writes provider material to a temporary mode-`0600` broker
-env file and writes only router policy to a different managed-Worker env file.
-It also removes provider variables from the managed Wrangler subprocess. Both
-files are deleted when either Worker exits. If the access-only OAuth credential
-expires, run `codex login` and restart.
+The managed Worker receives only its private egress binding. Configure provider
+credentials at that egress boundary; they never belong in this Worker, browser
+state, or Wrangler vars. Exercise changed routes through the canonical account
+application and inspect its browser console, network, storage, streams, and
+secret absence as required by the repository behavior matrix.
 
 ## Multiplayer room API
 
@@ -213,15 +172,6 @@ than manufacturing success or letting later work pass silently.
 Room deletion deletes exactly that owned agent and its durable state before clearing
 room state and releasing the quota lease; the Multiplayer profile never creates
 a Computer workspace.
-
-Run the three-player end-to-end probe against the local pair. It checks ordered
-broadcast, idempotent replay, one real managed-agent answer, reconnect from the
-last durable cursor, and absence of provider/agent/turn capabilities in all
-public frames:
-
-```sh
-npm run smoke:multiplayer --prefix js/managed
-```
 
 ## Managed REST and resumable SSE
 
@@ -372,60 +322,10 @@ documented above is deliberately organization-wide. This inheritance and its
 administration API must be implemented and tested before any child team can be
 created.
 
-Start workerd in one terminal and run the live probes in another:
-
-```sh
-npm run smoke:managed --prefix js/managed
-npm run smoke:multiplayer --prefix js/managed
-npm run repl --prefix js/managed
-npm run smoke --prefix js/managed
-npm run multiclient --prefix js/managed
-npm run stress --prefix js/managed
-npm run soak --prefix js/managed
-npm run fanout --prefix js/managed
-```
-
-The REPL is intentionally disposable. Supply `NANOCODEX_API_KEY` in its process
-environment. Its state file, `.nanocodex/cloudflare-repl.json`, retains only
-non-secret agent routing metadata and an unfinished turn ID/input; it never
-copies the account key into the receipt or state file. The WASM agent, model
-socket, history, and execution remain in the Durable Object. Press Ctrl-C during
-inference to drop only the local connection. Re-running with the account key
-reconnects and resubmits the idempotent turn ID, which either joins the active
-turn or replays its committed terminal result. Use `/status` or `/exit` at the
-prompt. Set `NANOCODEX_REPL_STATE` to isolate another local REPL state file.
-
-This demonstrates durable client detachment plus step recovery, not a claim
-that arbitrary external effects are magically exactly once. A completed model
-step is replayed from retained state after Worker loss. A tool start without a
-committed completion becomes an explicit unknown-outcome tool result; the
-effect is not repeated and the model may inspect or reconcile the external
-system.
-
-`smoke:managed` drives the complete REST/SSE contract: durable acceptance,
-idempotent replay and conflict, strict monotonic cursors, standard
-`Last-Event-ID` resume, cold and restored turn timing, `runtimeInfo`, bounded
-`exec_command`, Computer workspace persistence across idle agent teardown, and
-durable cancellation. It prints one JSON timing record suitable for before/after
-TTFT comparisons and deletes its agent in a `finally` block.
-
-The model smoke performs real model turns, verifies duplicate suppression,
-detaches its client, waits for idle teardown, reconnects to the durable snapshot,
-proves that a follow-on remembers history, and requires completed `runtimeInfo`
-and durable `exec_command` tool call/result pairs.
-`multiclient` attaches at least two clients before prompting and requires every
-client to receive the same accepted turn, assistant-delta stream, event count,
-and terminal result without reconnecting.
-`stress` drives ping round trips through one object, `soak`
-checks parallel sessions for cross-session leakage and duplicate model calls,
-and `fanout` broadcasts a bursty model stream to 64 attached clients. Override
-their `NANOCODEX_*` environment variables to change the workload.
-
-The Worker-native suite uses an actual local Service Binding to a deterministic
-broker Worker. That broker accepts only the fixed OpenAI placeholder handshake
-and returns a streamed Responses WebSocket, so tests exercise the real WASM
-host-managed transport without placing a credential in the managed Worker's
-bindings.
+Durable recovery does not imply exactly-once external effects. A completed model
+step is replayed from retained state after Worker loss; a tool start without a
+committed completion becomes an explicit unknown-outcome tool result rather
+than being repeated.
 
 The Worker selects the WASM binding's CSP-safe direct-tool mode because Workers
 forbid `eval` and `new Function`. This retains Nanocodex's typed Rust tool
@@ -442,12 +342,11 @@ the tool runtime. Their conversational instructions remain profile-specific.
 
 ## Validate and deploy
 
-- Run `npm run check --prefix js/managed` for this boundary.
-- Follow `../../AGENTS.md` for direct Wrangler commands, deploy order, secrets,
-  and the production behavior matrix.
-
-`npm run check` type-checks, runs the retained Worker and Durable Object
-boundaries, and asks Wrangler to build the deployment without uploading it.
+Run `npm run check --prefix js/managed` for typechecking, the focused policy
+and protocol suite, and a non-uploading Wrangler build. Deploy directly with
+`npx wrangler deploy --config js/managed/wrangler.jsonc`; follow
+`../../AGENTS.md` for deploy order, secret handling, and canonical browser
+evidence.
 
 `POST /v1/agents` and every `/v1/agents/<agent-id>` owner route require the same
 account session or account-issued API key. The receipt contains only

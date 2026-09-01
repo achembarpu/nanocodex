@@ -1,0 +1,196 @@
+name: Cloudflare
+
+permissions: {}
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Upload preview versions or deploy production
+        required: true
+        default: preview
+        type: choice
+        options: [preview, production]
+
+jobs:
+  preview:
+    if: >-
+      vars.CLOUDFLARE_DEPLOY_ENABLED == 'true' &&
+      ((github.event_name == 'pull_request' &&
+       github.event.pull_request.head.repo.full_name == github.repository) ||
+      (github.event_name == 'workflow_dispatch' && inputs.target == 'preview'))
+    name: validate Workers and publish asset previews
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: cloudflare-preview
+    concurrency:
+      group: cloudflare-preview-${{ github.event.pull_request.number || github.run_id }}
+      cancel-in-progress: true
+    permissions:
+      contents: read
+    env:
+      CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      DEPLOY_MESSAGE: GitHub Actions preview ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9
+        with:
+          toolchain: stable
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
+        with:
+          cache-on-failure: true
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            js/account/package-lock.json
+            js/connect-api/package-lock.json
+            js/connect-dialog/package-lock.json
+            js/connect-playground/package-lock.json
+            js/egress/package-lock.json
+            js/managed/package-lock.json
+            js/nanocodex/package-lock.json
+            js/nanocodex-react/package-lock.json
+            js/nanocodex-terminal/package-lock.json
+            js/nanocodex-vite/package-lock.json
+      - uses: taiki-e/install-action@3522286d40783523f9c7880e33f785905b4c20d0 # v2
+        with:
+          tool: wasm-bindgen-cli@0.2.126
+      - name: Install deployment packages
+        run: |
+          npm ci --prefix js/nanocodex
+          npm ci --prefix js/nanocodex-react
+          npm ci --prefix js/nanocodex-vite
+          npm ci --prefix js/nanocodex-terminal
+          npm ci --prefix js/egress
+          npm ci --prefix js/managed
+          npm ci --prefix js/connect-api
+          npm ci --prefix js/connect-dialog
+          npm ci --prefix js/connect-playground
+          npm ci --prefix js/account
+      - name: Prepare managed evaluator asset
+        working-directory: js/managed
+        run: npm run prepare:code-evaluator
+      - name: Build deployable applications
+        run: |
+          npm run build --prefix js/nanocodex-terminal
+          npm run build --prefix js/connect-dialog
+          npm run build --prefix js/connect-playground
+          npm run build --prefix js/account
+          npm run typecheck --prefix js/connect-api
+      # Cloudflare does not issue preview URLs for Durable Object or container
+      # Workers. Dry-run those and publish previews only for asset Workers.
+      - name: Validate egress Worker
+        working-directory: js/egress
+        run: npx wrangler deploy --dry-run --config wrangler.broker.jsonc
+      - name: Validate managed Worker
+        working-directory: js/managed
+        run: npx wrangler deploy --dry-run --config wrangler.jsonc
+      - name: Upload Connect dialog preview version
+        working-directory: js/connect-dialog
+        run: npx wrangler versions upload --config wrangler.jsonc --preview-alias "pr-${{ github.event.pull_request.number || github.run_id }}" --message "$DEPLOY_MESSAGE"
+      - name: Validate Connect API Worker
+        working-directory: js/connect-api
+        run: npx wrangler deploy --dry-run --config wrangler.jsonc
+      - name: Validate account Worker
+        working-directory: js/account
+        run: npx wrangler deploy --dry-run --config dist/nanocodex/wrangler.json
+      - name: Upload Connect playground preview version
+        working-directory: js/connect-playground
+        run: npx wrangler versions upload --config wrangler.jsonc --preview-alias "pr-${{ github.event.pull_request.number || github.run_id }}" --message "$DEPLOY_MESSAGE"
+
+  production:
+    if: >-
+      vars.CLOUDFLARE_DEPLOY_ENABLED == 'true' &&
+      ((github.event_name == 'push' && github.ref == 'refs/heads/master') ||
+      (github.event_name == 'workflow_dispatch' && inputs.target == 'production'))
+    name: deploy Cloudflare production
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: cloudflare-production
+    concurrency:
+      group: cloudflare-production
+      cancel-in-progress: false
+    permissions:
+      contents: read
+    env:
+      CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      DEPLOY_MESSAGE: GitHub Actions production ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9
+        with:
+          toolchain: stable
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
+        with:
+          cache-on-failure: true
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            js/account/package-lock.json
+            js/connect-api/package-lock.json
+            js/connect-dialog/package-lock.json
+            js/connect-playground/package-lock.json
+            js/egress/package-lock.json
+            js/managed/package-lock.json
+            js/nanocodex/package-lock.json
+            js/nanocodex-react/package-lock.json
+            js/nanocodex-terminal/package-lock.json
+            js/nanocodex-vite/package-lock.json
+      - uses: taiki-e/install-action@3522286d40783523f9c7880e33f785905b4c20d0 # v2
+        with:
+          tool: wasm-bindgen-cli@0.2.126
+      - name: Install deployment packages
+        run: |
+          npm ci --prefix js/nanocodex
+          npm ci --prefix js/nanocodex-react
+          npm ci --prefix js/nanocodex-vite
+          npm ci --prefix js/nanocodex-terminal
+          npm ci --prefix js/egress
+          npm ci --prefix js/managed
+          npm ci --prefix js/connect-api
+          npm ci --prefix js/connect-dialog
+          npm ci --prefix js/connect-playground
+          npm ci --prefix js/account
+      - name: Prepare managed evaluator asset
+        working-directory: js/managed
+        run: npm run prepare:code-evaluator
+      - name: Build deployable applications
+        run: |
+          npm run build --prefix js/nanocodex-terminal
+          npm run build --prefix js/connect-dialog
+          npm run build --prefix js/connect-playground
+          npm run build --prefix js/account
+          npm run typecheck --prefix js/connect-api
+      - name: Deploy egress broker
+        working-directory: js/egress
+        run: npx wrangler deploy --config wrangler.broker.jsonc --message "$DEPLOY_MESSAGE"
+      - name: Deploy managed agent service
+        working-directory: js/managed
+        run: npx wrangler deploy --config wrangler.jsonc --message "$DEPLOY_MESSAGE"
+      - name: Deploy Connect dialog assets
+        working-directory: js/connect-dialog
+        run: npx wrangler deploy --config wrangler.jsonc --message "$DEPLOY_MESSAGE"
+      - name: Deploy Connect API
+        working-directory: js/connect-api
+        run: npx wrangler deploy --config wrangler.jsonc --message "$DEPLOY_MESSAGE"
+      - name: Deploy Connect playground
+        working-directory: js/connect-playground
+        run: npx wrangler deploy --config wrangler.jsonc --message "$DEPLOY_MESSAGE"
+      - name: Deploy account application
+        working-directory: js/account
+        run: npx wrangler deploy --config dist/nanocodex/wrangler.json --message "$DEPLOY_MESSAGE"

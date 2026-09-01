@@ -7,15 +7,15 @@
     "node": ">=22.13.0"
   },
   "scripts": {
-    "build": "npm run build:broker && npm run build:agent",
-    "build:agent": "wrangler deploy --dry-run --outdir dist/agent -c wrangler.agent.jsonc",
-    "build:broker": "wrangler deploy --dry-run --outdir dist/broker -c wrangler.broker.jsonc",
-    "check": "npm run typecheck && npm test && npm run build",
+    "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit"
+    "dry-run:agent": "wrangler deploy --dry-run --config wrangler.agent.jsonc",
+    "deploy:agent": "wrangler deploy --config wrangler.agent.jsonc",
+    "dry-run:broker": "wrangler deploy --dry-run --config wrangler.broker.jsonc",
+    "deploy:broker": "wrangler deploy --config wrangler.broker.jsonc"
   },
   "dependencies": {
-    "nanocodex": "file:../../js/bindings"
+    "nanocodex": "file:../nanocodex"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.22.0",

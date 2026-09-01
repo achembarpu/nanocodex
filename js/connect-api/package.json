@@ -4,9 +4,10 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "tsc --noEmit && wrangler deploy --dry-run --config ./wrangler.jsonc --outdir dist",
-    "dev": "wrangler dev",
-    "test": "node --test"
+    "typecheck": "tsc --noEmit",
+    "test": "node --test test/*.test.mjs",
+    "dry-run": "wrangler deploy --dry-run --config wrangler.jsonc",
+    "deploy": "wrangler deploy --config wrangler.jsonc"
   },
   "dependencies": {
     "accounts": "0.17.0",

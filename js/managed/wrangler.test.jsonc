@@ -5,50 +5,6 @@
   "compatibility_date": "2026-07-29",
   "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
   "alias": {
-    "node-rsa": "../../js/bindings/tools/browser/unsupportedNodeRsa.mjs"
-  },
-  "services": [
-    {
-      "binding": "NANOCODEX",
-      "service": "nanocodex-egress"
-    }
-  ],
-  "r2_buckets": [
-    {
-      "binding": "NANOCODEX_HISTORY",
-      "bucket_name": "nanocodex-managed-history-test"
-    }
-  ],
-  "durable_objects": {
-    "bindings": [
-      { "name": "NANOCODEX_SESSIONS", "class_name": "DurableAgentSession" },
-      { "name": "NANOCODEX_ROOMS", "class_name": "MultiplayerRoom" },
-      { "name": "NANOCODEX_MULTIPLAYER_QUOTA", "class_name": "MultiplayerQuota" },
-      { "name": "NANOCODEX_AUTH", "class_name": "NonceStorage" },
-      { "name": "NANOCODEX_USERS", "class_name": "UserAccount" },
-      { "name": "NANOCODEX_API_KEYS", "class_name": "ApiKeyRecord" },
-      { "name": "NANOCODEX_MEMORY", "class_name": "MemoryScope" },
-      { "name": "NANOCODEX_ORGANIZATIONS", "class_name": "Organization" }
-    ]
-  },
-  "migrations": [
-    {
-      "tag": "v1",
-      "new_sqlite_classes": ["NanocodexSession", "MultiplayerRoom", "MultiplayerQuota"]
-    },
-    {
-      "tag": "v2",
-      "new_sqlite_classes": ["NonceStorage", "UserAccount", "ApiKeyRecord"]
-    },
-    { "tag": "v3", "new_sqlite_classes": ["MemoryScope"] },
-    { "tag": "v4", "new_sqlite_classes": ["Organization"] },
-    {
-      "tag": "v5",
-      "new_sqlite_classes": ["DurableAgentSession"],
-      "deleted_classes": ["NanocodexSession"]
-    }
-  ],
-  "vars": {
-    "AGENT_IDLE_TIMEOUT_MS": "30000"
+    "node-rsa": "../nanocodex/tools/browser/unsupportedNodeRsa.mjs"
   }
 }

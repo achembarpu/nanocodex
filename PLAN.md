@@ -3,10 +3,10 @@
 ## Purpose
 
 Make ownership visible in the filesystem and use ordinary Vite and Wrangler
-interfaces. This phase is a move-only boundary change: preserve product behavior,
-Cloudflare identities, bindings, migrations, stable package exports, and the
-Rust/WASM contract. The Vite surface moves intact from `nanocodex/vite` to its
-own `nanocodex-vite` package.
+interfaces. Preserve product behavior, Cloudflare identities, bindings,
+migrations, stable package exports, and the Rust/WASM contract. Remove redundant
+product tests and custom operator scripts; the Vite surface, WASM build, and
+OAuth relay belong to `nanocodex-vite`.
 
 ## Target tree
 
@@ -50,11 +50,11 @@ trace for changed journeys.
 Install only the changed package. From `js/account`, start the complete local
 product through the standard Cloudflare Vite plugin with
 `npx vite --host 127.0.0.1`; deploy a Worker or asset app from its directory with
-`npx wrangler deploy --config wrangler.jsonc`. Workers with multiple checked-in
-configs use the same command with the exact config file. Apply D1 migrations
-directly with Wrangler only when a migration changed. Deploy existing binding
-dependencies first and the public account app last; verify behavior separately
-on the canonical URL.
+`npx wrangler deploy --config wrangler.jsonc`. The account Vite build emits the
+standard deployment snapshot at `dist/nanocodex/wrangler.json`; deploy that file
+with the same Wrangler command. Apply D1 migrations directly with Wrangler only
+when a migration changed. Deploy existing binding dependencies first and the
+public account app last; verify behavior separately on the canonical URL.
 
 ## Behavior matrix
 
@@ -78,6 +78,7 @@ on the canonical URL.
 | Packages | Stable bindings/React exports remain compatible; `nanocodex-vite` owns plugin, WASM, and OAuth integration |
 | Direct dev | `npx vite --host 127.0.0.1` from `js/account` starts the complete local product through the standard Cloudflare plugin |
 | Deployables | Checked-in Vite/Wrangler configs deploy with direct standard commands and no custom stack/deploy/test wrappers |
+| CI | Preview validation and production deployment start independently of tests; production uses direct Wrangler deploys |
 | Stable tests | Binding, React, Vite, and terminal contract gates pass |
 | Browser flows | Every applicable behavior-matrix journey passes on the canonical URL, including desktop/touch and durable or multi-account contexts |
-| Scope | Diff is move-only apart from path/config/docs corrections; no Rust file changed |
+| Scope | Path moves, redundant test/script deletion, docs, and deployment config only; no Rust implementation changed |

@@ -16,10 +16,15 @@ Read `PLAN.md` for the active boundary and completion matrix.
   protocol boundaries. Require canonical browser and real service/Worker
   evidence for product behavior.
 - Develop directly from `js/account` with the standard Vite command and
-  Cloudflare plugin: `npx vite --host 127.0.0.1`. Deploy each checked-in config
-  directly with `npx wrangler deploy --config <config>`.
+  Cloudflare plugin: `npx vite --host 127.0.0.1`. Deploy Workers directly from
+  their checked-in configs; after `vite build`, deploy `js/account` from the
+  plugin output `dist/nanocodex/wrangler.json`. Deploy dependencies first and
+  `js/account` last.
 - Do not add custom stack, deploy, test, rollout, probe, or verification wrappers.
   Keep installs, migrations, resource changes, deployment, and evidence explicit.
+- CI deployment starts independently of tests. Pull requests dry-run stateful
+  Workers and publish Cloudflare previews only for Workers that support them;
+  `master` deploys the production configs directly.
 - Wrangler upload success is not behavior evidence. Exercise the exact changed
   journey, inspect console/network/storage/sockets/CSP, and verify provider
   secrets never reach browser or app surfaces.

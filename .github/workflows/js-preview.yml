@@ -46,14 +46,6 @@ jobs:
           npm ci --prefix js/nanocodex
           npm ci --prefix js/nanocodex-vite
           ./js/nanocodex-vite/scripts/build-js-package.sh
-      - name: Test JS runtime
-        working-directory: js/nanocodex
-        run: node --test --test-timeout=15000 test/*.test.mjs
-      - name: Check package
-        run: |
-          npm run test:typecheck --prefix js/nanocodex
-          npm run check:package --prefix js/nanocodex
-          npm test --prefix js/nanocodex-vite
       - name: Publish immutable commit previews
         working-directory: js/nanocodex
         run: >-

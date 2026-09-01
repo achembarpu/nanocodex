@@ -124,7 +124,10 @@ function localConnectApplications(): Plugin {
               await serveDocument(
                 connectDialogIndex,
                 `${url.pathname}${url.search}`,
-                (html) => html.replace('src="/src/main.tsx"', 'src="/connect-dialog/src/main.tsx"'),
+                (html) => html.replace(
+                  'src="/src/main.tsx"',
+                  `src="${rewriteConnectDialogDevModuleUrl("/connect-dialog/src/main.tsx")}"`,
+                ),
               );
             } catch (error) {
               next(error as Error);
