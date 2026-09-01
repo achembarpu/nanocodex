@@ -217,7 +217,7 @@ jobs:
         run: |
           npm ci --prefix js/nanocodex
           npm ci --prefix js/nanocodex-vite
-          ./js/nanocodex-vite/scripts/build-js-package.sh
+          ./js/nanocodex-vite/scripts/build-js-package.sh --release
           npm test --prefix js/nanocodex
           npm test --prefix js/nanocodex-vite
           (cd js/nanocodex && npm pack --dry-run)

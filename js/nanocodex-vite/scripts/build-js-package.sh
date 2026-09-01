@@ -11,6 +11,17 @@ if [[ "$target_dir" != /* ]]; then
   target_dir="$repository_root/$target_dir"
 fi
 
+build_mode=development
+cargo_profile=debug
+if [[ "$#" -gt 0 ]]; then
+  if [[ "$#" -ne 1 || "$1" != "--release" ]]; then
+    echo "usage: $0 [--release]" >&2
+    exit 1
+  fi
+  build_mode=release
+  cargo_profile=wasm
+fi
+
 mkdir -p "$target_dir"
 lock_file="$repository_root/.nanocodex-js-package.lock"
 lock_timeout_seconds="${NANOCODEX_WASM_LOCK_TIMEOUT_SECONDS:-600}"
@@ -54,15 +65,30 @@ cleanup() {
 
 trap cleanup EXIT
 
-cargo build --locked -p nanocodex-wasm --target "$wasm_target" --profile wasm
-wasm_artifact="$target_dir/$wasm_target/wasm/nanocodex_wasm.wasm"
-binaryen="$repository_root/js/nanocodex/node_modules/.bin/wasm-opt"
-if [[ ! -x "$binaryen" ]]; then
-  echo "missing Binaryen dependency for the nanocodex WASM build" >&2
-  exit 1
+if [[ "$build_mode" == release ]]; then
+  cargo build --locked -p nanocodex-wasm --target "$wasm_target" --profile wasm
+else
+  cargo build --locked -p nanocodex-wasm --target "$wasm_target"
 fi
+wasm_artifact="$target_dir/$wasm_target/$cargo_profile/nanocodex_wasm.wasm"
 stamp_path="js/nanocodex/pkg-web/.nanocodex-bindgen-stamp"
-fingerprint="$(wasm-bindgen --version; "$binaryen" --version; printf 'worker-bundler-v1-simd\n'; cksum < "$wasm_artifact")"
+binaryen=""
+if [[ "$build_mode" == release ]]; then
+  binaryen="$repository_root/js/nanocodex/node_modules/.bin/wasm-opt"
+  if [[ ! -x "$binaryen" ]]; then
+    echo "missing Binaryen dependency for the Nanocodex release WASM build" >&2
+    exit 1
+  fi
+fi
+fingerprint="$({
+  wasm-bindgen --version
+  printf 'build-mode=%s\n' "$build_mode"
+  printf 'worker-bundler-v1-simd\n'
+  if [[ "$build_mode" == release ]]; then
+    "$binaryen" --version
+  fi
+  cksum < "$wasm_artifact"
+})"
 if [[ -f "$stamp_path" ]] \
   && [[ -f js/nanocodex/pkg-web/nanocodex_bg.wasm ]] \
   && [[ -f js/nanocodex/pkg-web/nanocodex_bg.js ]] \
@@ -94,18 +120,20 @@ cmp "$worker_bindings/nanocodex_bg.wasm" js/nanocodex/pkg-web/nanocodex_bg.wasm
 cp "$worker_bindings/nanocodex_bg.js" js/nanocodex/pkg-web/nanocodex_bg.js
 cp "$worker_bindings/nanocodex.js" js/nanocodex/pkg-web/nanocodex_worker.js
 generated_wasm="js/nanocodex/pkg-web/nanocodex_bg.wasm"
-optimized_wasm="$generated_dir/nanocodex.wasm"
-"$binaryen" -Oz \
-  --enable-bulk-memory \
-  --enable-bulk-memory-opt \
-  --enable-nontrapping-float-to-int \
-  --enable-simd \
-  --strip-debug \
-  --strip-producers \
-  --strip-toolchain-annotations \
-  "$generated_wasm" \
-  -o "$optimized_wasm"
-mv "$optimized_wasm" "$generated_wasm"
+if [[ "$build_mode" == release ]]; then
+  optimized_wasm="$generated_dir/nanocodex.wasm"
+  "$binaryen" -Oz \
+    --enable-bulk-memory \
+    --enable-bulk-memory-opt \
+    --enable-nontrapping-float-to-int \
+    --enable-simd \
+    --strip-debug \
+    --strip-producers \
+    --strip-toolchain-annotations \
+    "$generated_wasm" \
+    -o "$optimized_wasm"
+  mv "$optimized_wasm" "$generated_wasm"
+fi
 node js/nanocodex/scripts/deduplicate-wasm.mjs
 node js/nanocodex/scripts/write-package-types.mjs
 printf '%s\n' "$fingerprint" > "$stamp_path"

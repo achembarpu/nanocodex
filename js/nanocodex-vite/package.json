@@ -28,6 +28,7 @@
   },
   "scripts": {
     "build:wasm": "./scripts/build-js-package.sh",
+    "build:wasm:release": "./scripts/build-js-package.sh --release",
     "test": "node --test test/*.test.mjs && npm run test:typecheck",
     "test:typecheck": "tsc -p test/tsconfig.json"
   },
