@@ -30,7 +30,7 @@ if [[ "${NANOCODEX_WASM_LOCK_HELD:-}" != "$repository_root" ]]; then
       lock_status=$?
     fi
   elif command -v lockf >/dev/null 2>&1; then
-    if lockf -t "$lock_timeout_seconds" "$lock_file" \
+    if lockf -k -t "$lock_timeout_seconds" "$lock_file" \
       env NANOCODEX_WASM_LOCK_HELD="$repository_root" "$script_path" "$@"; then
       exit 0
     else
