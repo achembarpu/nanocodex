@@ -168,8 +168,7 @@ enum WorkerCommand {
     },
     CollapseBtw {
         id: u64,
-        steer_id: u64,
-        prompt: SubmittedPrompt,
+        delivery: CollapseDelivery,
     },
     SplitBtw {
         id: u64,
@@ -381,6 +380,11 @@ enum SteerOutcome {
     Admitted,
     Queued(Option<TrackedTurn>),
     Failed,
+}
+
+enum CollapseDelivery {
+    Steer { id: u64, prompt: SubmittedPrompt },
+    Prompt { id: u64, prompt: SubmittedPrompt },
 }
 
 #[derive(Clone, Copy)]
@@ -1378,7 +1382,9 @@ impl AgentWorker {
                 target,
                 prompt_id,
                 prompt,
-            } => self.prompt(target, prompt_id, prompt).await,
+            } => {
+                let _ = self.prompt(target, prompt_id, prompt).await;
+            }
             WorkerCommand::Steer { target, id, prompt } => {
                 let _ = self.steer(target, id, prompt).await;
             }
@@ -1402,11 +1408,9 @@ impl AgentWorker {
                     self.btw = None;
                 }
             }
-            WorkerCommand::CollapseBtw {
-                id,
-                steer_id,
-                prompt,
-            } => self.collapse_btw(id, steer_id, prompt).await,
+            WorkerCommand::CollapseBtw { id, delivery } => {
+                self.collapse_btw(id, delivery).await;
+            }
             WorkerCommand::SplitBtw { id, cwd } => self.split_btw(id, &cwd).await,
             WorkerCommand::EditHistorical {
                 source_branch_id,
@@ -1641,7 +1645,7 @@ impl AgentWorker {
         drop(self.updates.send(update));
     }
 
-    async fn prompt(&mut self, target: PaneId, prompt_id: u64, prompt: SubmittedPrompt) {
+    async fn prompt(&mut self, target: PaneId, prompt_id: u64, prompt: SubmittedPrompt) -> bool {
         match target {
             PaneId::Main => {
                 if let Some(turn) = start_turn(
@@ -1661,6 +1665,9 @@ impl AgentWorker {
                 {
                     self.main.prompt_order.push(prompt_id);
                     self.main.turns.push_back(turn);
+                    true
+                } else {
+                    false
                 }
             }
             PaneId::Btw(id) => {
@@ -1670,7 +1677,7 @@ impl AgentWorker {
                         main_branch_id: None,
                         error: Some("BTW branch is not available".to_owned()),
                     }));
-                    return;
+                    return false;
                 };
                 let prompt = branch.prepare_prompt(prompt);
                 if let Some(turn) = start_turn(
@@ -1689,6 +1696,9 @@ impl AgentWorker {
                 .await
                 {
                     branch.turns.push_back(turn);
+                    true
+                } else {
+                    false
                 }
             }
         }
@@ -1768,7 +1778,7 @@ impl AgentWorker {
         }
     }
 
-    async fn collapse_btw(&mut self, id: u64, steer_id: u64, prompt: SubmittedPrompt) {
+    async fn collapse_btw(&mut self, id: u64, delivery: CollapseDelivery) {
         let failure = self.btw.as_ref().filter(|branch| branch.id == id).map_or(
             Some("BTW branch is not available"),
             |branch| {
@@ -1784,11 +1794,7 @@ impl AgentWorker {
             },
         );
         if let Some(error) = failure {
-            drop(self.updates.send(WorkerEvent::SteerFailed {
-                target: PaneId::Main,
-                id: steer_id,
-                error: format!("BTW was not collapsed: {error}"),
-            }));
+            self.reject_collapse_delivery(&delivery, error);
             drop(self.updates.send(WorkerEvent::BtwCollapseFailed {
                 id,
                 error: error.to_owned(),
@@ -1796,7 +1802,11 @@ impl AgentWorker {
             return;
         }
 
-        if self.steer(PaneId::Main, steer_id, prompt).await {
+        let admitted = match delivery {
+            CollapseDelivery::Steer { id, prompt } => self.steer(PaneId::Main, id, prompt).await,
+            CollapseDelivery::Prompt { id, prompt } => self.prompt(PaneId::Main, id, prompt).await,
+        };
+        if admitted {
             self.btw = None;
             drop(self.updates.send(WorkerEvent::BtwCollapseCompleted { id }));
         } else {
@@ -1804,6 +1814,26 @@ impl AgentWorker {
                 id,
                 error: "main steer was not admitted; BTW was retained".to_owned(),
             }));
+        }
+    }
+
+    fn reject_collapse_delivery(&self, delivery: &CollapseDelivery, error: &str) {
+        let error = format!("BTW was not collapsed: {error}");
+        match delivery {
+            CollapseDelivery::Steer { id, .. } => {
+                drop(self.updates.send(WorkerEvent::SteerFailed {
+                    target: PaneId::Main,
+                    id: *id,
+                    error,
+                }));
+            }
+            CollapseDelivery::Prompt { .. } => {
+                drop(self.updates.send(WorkerEvent::TurnFinished {
+                    target: PaneId::Main,
+                    main_branch_id: Some(self.main.id),
+                    error: Some(error),
+                }));
+            }
         }
     }
 
@@ -1887,7 +1917,7 @@ impl AgentWorker {
                     steer_ids,
                 }),
         );
-        self.prompt(target, prompt_id, prompt).await;
+        let _ = self.prompt(target, prompt_id, prompt).await;
     }
 
     async fn open_btw(&mut self, id: u64, prompt_id: Option<u64>, prompt: Option<SubmittedPrompt>) {
@@ -3071,18 +3101,20 @@ fn submit(
                 return Ok(());
             }
             let prompt = collapse_btw_prompt(&thread_id);
-            let Some(steer_id) = app.queue_steer(PaneId::Main, prompt.clone()) else {
-                app.push_active_error("main thread is not available");
-                return Ok(());
+            let delivery = if app.is_running(PaneId::Main) {
+                let Some(id) = app.queue_steer(PaneId::Main, prompt.clone()) else {
+                    app.push_active_error("main thread is not available");
+                    return Ok(());
+                };
+                CollapseDelivery::Steer { id, prompt }
+            } else {
+                let Some(id) = app.queue_prompt(PaneId::Main, prompt.display().to_owned()) else {
+                    app.push_active_error("main thread is not available");
+                    return Ok(());
+                };
+                CollapseDelivery::Prompt { id, prompt }
             };
-            send_command(
-                commands,
-                WorkerCommand::CollapseBtw {
-                    id,
-                    steer_id,
-                    prompt,
-                },
-            )?;
+            send_command(commands, WorkerCommand::CollapseBtw { id, delivery })?;
         }
         Submission::SplitBtw => {
             let Some(id) = app.btw_id() else {
@@ -3362,11 +3394,12 @@ mod tests {
     use tokio_tungstenite::{WebSocketStream, accept_async, tungstenite::Message};
 
     use super::{
-        BTW_BOUNDARY, PaneId, RedrawPriority, SubagentCompletionTracker, Submission, SubmitIntent,
-        TerminalAction, UiAction, UiModel, UiUpdate, VoiceControl, WorkerCommand, WorkerEvent,
-        active_session_id, apply_main_agent_event_batch, classify_submission, handle_key,
-        handle_subagent_update, handle_worker_update, paste_clipboard_image, prepare_btw_prompt,
-        report_cancel_outcome, session_trace_url, spawn_agent_worker, submit,
+        BTW_BOUNDARY, CollapseDelivery, PaneId, RedrawPriority, SubagentCompletionTracker,
+        Submission, SubmitIntent, TerminalAction, UiAction, UiModel, UiUpdate, VoiceControl,
+        WorkerCommand, WorkerEvent, active_session_id, apply_main_agent_event_batch,
+        classify_submission, handle_key, handle_subagent_update, handle_worker_update,
+        paste_clipboard_image, prepare_btw_prompt, report_cancel_outcome, session_trace_url,
+        spawn_agent_worker, submit,
     };
     use crate::subagents::{AgentId, AgentStatus, AgentUpdate, ScopedAgentUpdate};
     use crate::tui::{
@@ -3692,7 +3725,7 @@ mod tests {
     }
 
     #[test]
-    fn collapse_submission_waits_for_main_steer_before_closing_btw() {
+    fn idle_collapse_queues_main_before_worker_start_and_closes_after_admission() {
         let (commands, mut worker) = mpsc::unbounded_channel();
         let mut app = App::new("/workspace".into());
         let id = app.begin_btw();
@@ -3705,21 +3738,25 @@ mod tests {
         assert_eq!(app.btw_id(), Some(id));
         assert!(app.btw_collapsing(id));
         assert_eq!(app.focus, PaneId::Btw(id));
-        assert_eq!(app.main.pending_steers.len(), 1);
+        assert!(app.main.pending_steers.is_empty());
         assert_eq!(
-            app.main.pending_steers[0].prompt(),
-            "BTW Codex thread ID: btw-thread-id"
+            app.main.queued_prompts.front().map(String::as_str),
+            Some("BTW Codex thread ID: btw-thread-id")
         );
+        assert_eq!(app.main.pending_turns, 1);
         let WorkerCommand::CollapseBtw {
             id: collapsed_id,
-            steer_id,
-            prompt,
+            delivery:
+                CollapseDelivery::Prompt {
+                    id: prompt_id,
+                    prompt,
+                },
         } = worker.try_recv().unwrap()
         else {
-            panic!("collapse must atomically close BTW and steer main");
+            panic!("idle collapse must enter main through its prompt queue");
         };
         assert_eq!(collapsed_id, id);
-        assert!(steer_id > 0);
+        assert!(prompt_id > 0);
         assert_eq!(prompt.display(), "BTW Codex thread ID: btw-thread-id");
         assert!(matches!(
             prompt.into_prompt().instruction,
@@ -3766,11 +3803,16 @@ mod tests {
         let mut app = App::new("/workspace".into());
         let id = app.begin_btw();
         app.btw_opened(id, Arc::from("btw-thread-id"));
+        app.main.running = true;
         app.input = "/collapse".to_owned();
         app.cursor = app.input.len();
 
         submit(&mut app, "main-thread", &commands, SubmitIntent::Immediate).unwrap();
-        let WorkerCommand::CollapseBtw { steer_id, .. } = worker.try_recv().unwrap() else {
+        let WorkerCommand::CollapseBtw {
+            delivery: CollapseDelivery::Steer { id: steer_id, .. },
+            ..
+        } = worker.try_recv().unwrap()
+        else {
             panic!("collapse command missing");
         };
         handle_worker_update(
