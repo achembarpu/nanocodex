@@ -22,6 +22,26 @@ and running attempts in memory under its fenced owner capability. Losing the
 driver loses those claims; it does not require a state mutation to release
 them.
 
+## Agent identity and clean descendants
+
+Attaching durability to an agent also attaches it to every clean spawned
+descendant. A clean spawn first chooses its own UUIDv7 session ID. That exact ID
+is the child's durability state key; no parent ID or tree path participates in
+storage routing. Each descendant has an independent owner fence, operation
+journal, checkpoint, and recursive clean-spawn lifecycle.
+
+Opening child storage is deferred until the child first crosses an execution
+policy boundary. Spawn itself therefore remains synchronous inside the parent
+driver and never awaits host storage. A serialized store handle lets these
+independent state drivers share a caller-supplied backend whose contract takes
+exclusive mutable access.
+
+Agent durability does not persist orchestration topology. Tree-local IDs,
+parent/child relationships, mailboxes, roles, task status, and the mapping from
+an orchestrator ID to an agent session ID belong to the orchestrator. Reopening
+an individual child by its retained session ID restores that agent; rebuilding
+a complete task tree requires a separate durable registry.
+
 ## Store contract
 
 The live store protocol implements two operations:

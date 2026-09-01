@@ -11,7 +11,8 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::{
     DurableState, EncodedPayload, Error, OperationStatus, OwnerId, OwnerToken, Result, RetryPolicy,
-    StateStore, StepStatus, StoreError, StoredState, Transition, state::RetainedCheckpoint,
+    StateStore, StepStatus, StoreError, StoredState, Transition, shared_store::SharedStore,
+    state::RetainedCheckpoint,
 };
 
 const COMMAND_CAPACITY: usize = 64;
@@ -1201,6 +1202,8 @@ fn reduce(stored: StoredState) -> Result<DurableState> {
 /// live operation claims. Clones only enqueue commands and await typed replies.
 pub struct DurableSession {
     state_id: Arc<str>,
+    store: SharedStore,
+    terminal_receipt_limit: Option<usize>,
     commands: mpsc::Sender<Command>,
     releases: mpsc::UnboundedSender<ReleaseSignal>,
     caller_id: OwnerId,
@@ -1211,6 +1214,8 @@ impl Clone for DurableSession {
     fn clone(&self) -> Self {
         Self {
             state_id: Arc::clone(&self.state_id),
+            store: self.store.clone(),
+            terminal_receipt_limit: self.terminal_receipt_limit,
             commands: self.commands.clone(),
             releases: self.releases.clone(),
             caller_id: OwnerId::new(),
@@ -1270,13 +1275,22 @@ impl DurableSession {
     }
 
     async fn open_inner<S>(
-        mut store: S,
+        store: S,
         state_id: String,
         terminal_receipt_limit: Option<usize>,
     ) -> Result<Self>
     where
         S: StateStore + 'static,
     {
+        let store = SharedStore::new(store)?;
+        Self::open_shared(store, state_id, terminal_receipt_limit).await
+    }
+
+    async fn open_shared(
+        mut store: SharedStore,
+        state_id: String,
+        terminal_receipt_limit: Option<usize>,
+    ) -> Result<Self> {
         if state_id.trim().is_empty() {
             return Err(Error::InvalidState(
                 "state identity must not be empty".to_owned(),
@@ -1288,7 +1302,7 @@ impl DurableSession {
         let (commands, receiver) = mpsc::channel(COMMAND_CAPACITY);
         let (releases, release_receiver) = mpsc::unbounded_channel();
         spawn_driver(Driver {
-            store: Box::new(store),
+            store: Box::new(store.clone()),
             state_id: Arc::clone(&state_id),
             state,
             terminal_receipt_limit,
@@ -1304,6 +1318,8 @@ impl DurableSession {
         })?;
         Ok(Self {
             state_id,
+            store,
+            terminal_receipt_limit,
             commands,
             releases,
             caller_id: OwnerId::new(),
@@ -1315,6 +1331,10 @@ impl DurableSession {
     #[must_use]
     pub fn state_id(&self) -> &str {
         &self.state_id
+    }
+
+    pub(crate) async fn open_agent_state(&self, state_id: String) -> Result<Self> {
+        Self::open_shared(self.store.clone(), state_id, self.terminal_receipt_limit).await
     }
 
     /// Copies the current reduced state from the owning driver.

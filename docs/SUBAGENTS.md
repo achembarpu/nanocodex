@@ -79,6 +79,12 @@ bounded during cleanup. Subagents share the root’s provider, workspace, base
 tools, and process authority; clean conversation context is not a security
 sandbox.
 
+When the root agent uses `nanocodex-durability`, every clean child and
+grandchild also persists its execution state under its own agent session ID.
+That does not make the in-memory subagent registry durable: tree-local
+`AgentId`s, topology, mailboxes, roles, status, and their mapping to session IDs
+still require a separate orchestrator-owned store for cold tree recovery.
+
 Tact’s subagent tree TUI is presentation owned by Tact and is not copied into
 Nanocodex’s existing Ratatui application. Nanocodex drains the same typed
 runtime updates so lifecycle observation remains independent of the scheduler.

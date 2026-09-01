@@ -46,6 +46,76 @@ struct FailReplaceOnce {
 }
 
 #[derive(Clone)]
+struct CountingAcquires {
+    inner: crate::MemoryStore,
+    acquisitions: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+#[derive(Clone)]
+struct GateFirstChildAcquire {
+    inner: crate::MemoryStore,
+    root_state_id: &'static str,
+    gated: Arc<AtomicBool>,
+    started: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+impl crate::StateStore for GateFirstChildAcquire {
+    fn acquire<'a>(
+        &'a mut self,
+        state_id: &'a str,
+        owner_id: crate::OwnerId,
+    ) -> crate::StoreFuture<'a, std::result::Result<crate::OwnedState, crate::StoreError>> {
+        if state_id != self.root_state_id && !self.gated.swap(true, Ordering::SeqCst) {
+            let started = Arc::clone(&self.started);
+            let release = Arc::clone(&self.release);
+            return Box::pin(async move {
+                started.notify_one();
+                release.notified().await;
+                self.inner.acquire(state_id, owner_id).await
+            });
+        }
+        self.inner.acquire(state_id, owner_id)
+    }
+
+    fn replace<'a>(
+        &'a mut self,
+        state_id: &'a str,
+        owner: &'a crate::OwnerToken,
+        expected_revision: u64,
+        payload: &'a str,
+    ) -> crate::StoreFuture<'a, std::result::Result<u64, crate::StoreError>> {
+        self.inner
+            .replace(state_id, owner, expected_revision, payload)
+    }
+}
+
+impl crate::StateStore for CountingAcquires {
+    fn acquire<'a>(
+        &'a mut self,
+        state_id: &'a str,
+        owner_id: crate::OwnerId,
+    ) -> crate::StoreFuture<'a, std::result::Result<crate::OwnedState, crate::StoreError>> {
+        self.acquisitions
+            .lock()
+            .expect("acquisition recorder lock is not poisoned")
+            .push(state_id.to_owned());
+        self.inner.acquire(state_id, owner_id)
+    }
+
+    fn replace<'a>(
+        &'a mut self,
+        state_id: &'a str,
+        owner: &'a crate::OwnerToken,
+        expected_revision: u64,
+        payload: &'a str,
+    ) -> crate::StoreFuture<'a, std::result::Result<u64, crate::StoreError>> {
+        self.inner
+            .replace(state_id, owner, expected_revision, payload)
+    }
+}
+
+#[derive(Clone)]
 struct FailEntryOnce {
     inner: crate::MemoryStore,
     entry_tag: &'static str,
@@ -3310,9 +3380,18 @@ async fn changed_tool_profile_blocks_replay_after_spawn_without_creating_a_ghost
 }
 
 #[tokio::test]
-async fn attached_execution_policy_spawns_a_nondurable_clean_child() -> Result<()> {
+async fn durability_attached_agent_gives_each_clean_descendant_its_own_durable_state() -> Result<()>
+{
     let store = crate::MemoryStore::new()?;
-    let state = crate::DurableSession::open(store, "spawn-policy").await?;
+    let acquisitions = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let state = crate::DurableSession::open(
+        CountingAcquires {
+            inner: store.clone(),
+            acquisitions: Arc::clone(&acquisitions),
+        },
+        "spawn-policy",
+    )
+    .await?;
     let service_factories = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let generations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let openai = OpenAi::builder("test-key")
@@ -3336,12 +3415,152 @@ async fn attached_execution_policy_spawns_a_nondurable_clean_child() -> Result<(
     let (agent, events) = builder.build()?;
 
     let (child, child_events) = agent.spawn().await?;
+    let child_id = child.session_id().parse::<SessionId>()?;
+    assert_eq!(
+        *acquisitions
+            .lock()
+            .expect("acquisition recorder lock is not poisoned"),
+        ["spawn-policy", "spawn-policy"],
+        "root spawn must not acquire the new child's state"
+    );
+    let (grandchild, grandchild_events) = child.spawn().await?;
+    let grandchild_id = grandchild.session_id().parse::<SessionId>()?;
     assert_eq!(
         service_factories.load(std::sync::atomic::Ordering::SeqCst),
-        2,
-        "the clean child must receive its own service and driver"
+        3,
+        "each clean descendant must receive its own service and driver"
+    );
+    assert_eq!(
+        *acquisitions
+            .lock()
+            .expect("acquisition recorder lock is not poisoned"),
+        ["spawn-policy".to_owned(), "spawn-policy".to_owned(),],
+        "clean spawn must not acquire either the parent or new child state"
     );
 
+    let child_result = child
+        .prompt(PromptRequest::new("child work").request_id("child-turn"))
+        .await?
+        .result()
+        .await?;
+    let grandchild_result = grandchild
+        .prompt(PromptRequest::new("grandchild work").request_id("grandchild-turn"))
+        .await?
+        .result()
+        .await?;
+    assert_eq!(child_result.final_message(), "durably replayed");
+    assert_eq!(grandchild_result.final_message(), "durably replayed");
+    assert_eq!(generations.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert_eq!(
+        *acquisitions
+            .lock()
+            .expect("acquisition recorder lock is not poisoned"),
+        [
+            "spawn-policy".to_owned(),
+            "spawn-policy".to_owned(),
+            child_id.to_string(),
+            child_id.to_string(),
+            grandchild_id.to_string(),
+            grandchild_id.to_string(),
+        ],
+        "each descendant must open and attach exactly its own state ID"
+    );
+
+    grandchild.shutdown().await?;
+    drop((grandchild, grandchild_events));
+    child.shutdown().await?;
+    drop((child, child_events));
+    agent.shutdown().await?;
+    drop((agent, events));
+
+    for (session_id, request_id, input) in [
+        (child_id, "child-turn", "child work"),
+        (grandchild_id, "grandchild-turn", "grandchild work"),
+    ] {
+        let reopened_state =
+            crate::DurableSession::open(store.clone(), session_id.to_string()).await?;
+        let reopened_builder = Nanocodex::builder(
+            OpenAi::builder("test-key")
+                .service({
+                    let generations = Arc::clone(&generations);
+                    move || DurableReplayService {
+                        generations: Arc::clone(&generations),
+                    }
+                })
+                .build()?,
+        )
+        .workspace(&workspace)
+        .session_id(session_id)
+        .durability(reopened_state)
+        .await?;
+        let (reopened, reopened_events) = reopened_builder.build()?;
+        let replayed = reopened
+            .prompt(PromptRequest::new(input).request_id(request_id))
+            .await?
+            .result()
+            .await?;
+        assert_eq!(replayed.final_message(), "durably replayed");
+        reopened.shutdown().await?;
+        drop((reopened, reopened_events));
+    }
+    assert_eq!(
+        generations.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "reopening either descendant must replay without another model call"
+    );
+
+    std::fs::remove_dir_all(workspace)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn blocked_child_state_acquisition_does_not_block_the_parent_driver() -> Result<()> {
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let store = GateFirstChildAcquire {
+        inner: crate::MemoryStore::new()?,
+        root_state_id: "nonblocking-spawn-policy",
+        gated: Arc::new(AtomicBool::new(false)),
+        started: Arc::clone(&started),
+        release: Arc::clone(&release),
+    };
+    let state = crate::DurableSession::open(store, "nonblocking-spawn-policy").await?;
+    let generations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let openai = OpenAi::builder("test-key")
+        .service({
+            let generations = Arc::clone(&generations);
+            move || DurableReplayService {
+                generations: Arc::clone(&generations),
+            }
+        })
+        .build()?;
+    let workspace = temporary_workspace("durability-nonblocking-spawn")?;
+    let (agent, events) = Nanocodex::builder(openai)
+        .workspace(&workspace)
+        .durability(state)
+        .await?
+        .build()?;
+    let (child, child_events) = agent.spawn().await?;
+    let child_prompt = child.clone();
+    let child_result = tokio::spawn(async move {
+        child_prompt
+            .prompt(PromptRequest::new("blocked child work").request_id("blocked-child-turn"))
+            .await?
+            .result()
+            .await
+    });
+
+    tokio::time::timeout(Duration::from_secs(1), started.notified())
+        .await
+        .map_err(|_| eyre!("the child never reached its gated durability acquisition"))?;
+    let (sibling, sibling_events) = tokio::time::timeout(Duration::from_secs(1), agent.spawn())
+        .await
+        .map_err(|_| eyre!("the child store blocked the parent driver"))??;
+
+    release.notify_one();
+    assert_eq!(child_result.await??.final_message(), "durably replayed");
+    sibling.shutdown().await?;
+    drop((sibling, sibling_events));
     child.shutdown().await?;
     drop((child, child_events));
     agent.shutdown().await?;

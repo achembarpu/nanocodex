@@ -364,12 +364,13 @@ test("a durable Node-hosted root runs the canonical in-memory Rust subagent task
   const events = [];
   const rootToolContexts = [];
   const durabilityId = "node-durable-root-subagents";
+  const durability = createMemoryDurabilityStore(durabilityId);
   const agent = await createWarmAgent({
     apiKey: "test-key",
     websocketUrl: server.url,
     thinking: "none",
     sessionId: "018f1f9a-7b3c-7a08-8000-000000000008",
-    durability: createMemoryDurabilityStore(durabilityId),
+    durability,
     durabilityId,
     tools: [
       {
@@ -512,6 +513,10 @@ test("a durable Node-hosted root runs the canonical in-memory Rust subagent task
       task: "Return the word portable.",
     });
     assert.ok(events.some((event) => event.request_id === childSessionId));
+    const childState = durability.load(childSessionId);
+    assert.notEqual(childState.revision, "0");
+    assert.match(childState.payload, /nanocodex_durable_state/);
+    assert.notDeepEqual(childState, durability.load(durabilityId));
   } finally {
     watch.off();
     await agent.session.shutdown();

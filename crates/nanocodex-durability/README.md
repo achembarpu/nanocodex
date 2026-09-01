@@ -75,13 +75,22 @@ checkpoint only after the transform completes.
 Completed tool outputs are replayed only while the recovered agent still owns
 the named tool. If a deployment removes a runtime-owned tool, recovery emits an
 explicit failed tool result rather than returning an opaque handle whose owner
-no longer exists. Child agents need independent execution policies; the root
-policy is never silently discarded during `spawn` or `fork`.
+no longer exists. A durability-attached agent passes the same lifecycle to
+every clean descendant. Each child uses its own stable session ID as its state
+ID and owns an independent fence, operation journal, and checkpoint. Forking a
+durable checkpoint remains unsupported because a fork is not a clean state.
+
+This persists agent execution, not a higher-level task-tree registry. An
+orchestrator that assigns separate tree-local IDs, mailboxes, roles, or status
+must persist that topology independently and map those IDs to agent session
+IDs when it needs cold tree reconstruction.
 
 The runtime follows the same ownership model as the agent SDK. A
 `DurableSession` is a cheap channel handle; one spawned task owns its reducer,
-live claims, revision, and store. The store itself is moved into that task.
-There is no shared mutable reducer or `Arc<Mutex<Connection>>` contract.
+live claims, revision, and owner token. One separate task serializes access to
+the caller-owned store so independent agent state drivers can address distinct
+state IDs even when the backend itself is not cloneable. There is no shared
+mutable reducer or `Arc<Mutex<Connection>>` contract.
 
 ```rust
 use nanocodex_durability::{Admission, DurableSession, MemoryStore};

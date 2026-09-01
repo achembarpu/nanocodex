@@ -9,6 +9,7 @@ use nanocodex_agent::{
     session::SessionSnapshot,
 };
 use serde_json::value::RawValue;
+use tokio::sync::OnceCell;
 
 use crate::{
     Admission, BeginStep, DurableSession, Error, ReconciledStep, RetryPolicy, session::DurableOwner,
@@ -23,7 +24,8 @@ pub trait DurableAgentExt: Sized {
 
 impl<F> DurableAgentExt for NanocodexBuilder<F> {
     async fn durability(self, state: DurableSession) -> AgentResult<Self> {
-        let mut builder = self.default_prompt_cache_key(state.state_id().to_owned());
+        let state_id = state.state_id().to_owned();
+        let mut builder = self;
         let (owner, checkpoint) = state.acquire_agent().await.map_err(agent_error)?;
         if let Some(checkpoint) = checkpoint {
             let restored = checkpoint
@@ -39,36 +41,116 @@ impl<F> DurableAgentExt for NanocodexBuilder<F> {
                 ));
             }
             builder = builder.resume(restored);
+        } else {
+            builder = builder.default_prompt_cache_key(state_id);
         }
         let owner = Arc::new(Mutex::new(Some(owner)));
-        Ok(builder.execution_policy_factory(move || {
-            let owner = owner
-                .lock()
-                .map_err(|_| {
-                    NanocodexError::InvalidExecutionPolicy(
-                        "the durability-attached builder owner lock was poisoned".to_owned(),
-                    )
-                })?
-                .take()
-                .ok_or_else(|| {
-                    NanocodexError::InvalidExecutionPolicy(
-                        "a durability-attached builder can build only one agent; attach durability again to reopen the state"
-                            .to_owned(),
-                    )
-                })?;
-            let policy: Arc<dyn ExecutionPolicy> = Arc::new(DurableExecution { owner });
-            Ok(policy)
-        }))
+        let child_states = state.clone();
+        Ok(builder
+            .execution_policy_factory(move || {
+                let owner = owner
+                    .lock()
+                    .map_err(|_| {
+                        NanocodexError::InvalidExecutionPolicy(
+                            "the durability-attached builder owner lock was poisoned".to_owned(),
+                        )
+                    })?
+                    .take()
+                    .ok_or_else(|| {
+                        NanocodexError::InvalidExecutionPolicy(
+                            "a durability-attached builder can build only one agent; attach durability again to reopen the state"
+                                .to_owned(),
+                        )
+                    })?;
+                let policy: Arc<dyn ExecutionPolicy> =
+                    Arc::new(DurableExecution::ready(owner));
+                Ok(policy)
+            })
+            .spawned_execution_policy_factory(move |session_id| {
+                let policy: Arc<dyn ExecutionPolicy> = Arc::new(DurableExecution::lazy(
+                    child_states.clone(),
+                    session_id.to_owned(),
+                ));
+                Ok(policy)
+            }))
     }
 }
 
 struct DurableExecution {
-    owner: DurableOwner,
+    owner: DurableExecutionOwner,
+}
+
+enum DurableExecutionOwner {
+    Ready(DurableOwner),
+    Lazy {
+        states: DurableSession,
+        state_id: String,
+        owner: OnceCell<DurableOwner>,
+    },
+}
+
+impl DurableExecution {
+    const fn ready(owner: DurableOwner) -> Self {
+        Self {
+            owner: DurableExecutionOwner::Ready(owner),
+        }
+    }
+
+    fn lazy(states: DurableSession, state_id: String) -> Self {
+        Self {
+            owner: DurableExecutionOwner::Lazy {
+                states,
+                state_id,
+                owner: OnceCell::new(),
+            },
+        }
+    }
+
+    async fn owner(&self) -> AgentResult<&DurableOwner> {
+        match &self.owner {
+            DurableExecutionOwner::Ready(owner) => Ok(owner),
+            DurableExecutionOwner::Lazy {
+                states,
+                state_id,
+                owner,
+            } => {
+                owner
+                    .get_or_try_init(|| async {
+                        let state = states
+                            .open_agent_state(state_id.clone())
+                            .await
+                            .map_err(agent_error)?;
+                        let (owner, checkpoint) =
+                            state.acquire_agent().await.map_err(agent_error)?;
+                        if checkpoint.is_some() {
+                            return Err(NanocodexError::InvalidExecutionPolicy(
+                                "a fresh spawned agent found an existing durability checkpoint"
+                                    .to_owned(),
+                            ));
+                        }
+                        Ok(owner)
+                    })
+                    .await
+            }
+        }
+    }
+
+    fn initialized_owner(&self) -> Option<&DurableOwner> {
+        match &self.owner {
+            DurableExecutionOwner::Ready(owner) => Some(owner),
+            DurableExecutionOwner::Lazy { owner, .. } => owner.get(),
+        }
+    }
 }
 
 impl ExecutionPolicy for DurableExecution {
     fn shutdown<'a>(&'a self) -> ExecutionFuture<'a, AgentResult<()>> {
-        Box::pin(async move { self.owner.shutdown().await.map_err(agent_error) })
+        Box::pin(async move {
+            let Some(owner) = self.initialized_owner() else {
+                return Ok(());
+            };
+            owner.shutdown().await.map_err(agent_error)
+        })
     }
 
     fn commit_checkpoint<'a>(
@@ -76,7 +158,8 @@ impl ExecutionPolicy for DurableExecution {
         snapshot: SessionSnapshot,
     ) -> ExecutionFuture<'a, AgentResult<()>> {
         Box::pin(async move {
-            self.owner
+            self.owner()
+                .await?
                 .commit_checkpoint(&snapshot)
                 .await
                 .map_err(agent_error)
@@ -85,7 +168,8 @@ impl ExecutionPolicy for DurableExecution {
 
     fn fence_checkpoint_effect<'a>(&'a self) -> ExecutionFuture<'a, AgentResult<()>> {
         Box::pin(async move {
-            self.owner
+            self.owner()
+                .await?
                 .fence_checkpoint_effect()
                 .await
                 .map_err(agent_error)
@@ -99,7 +183,8 @@ impl ExecutionPolicy for DurableExecution {
     ) -> ExecutionFuture<'a, AgentResult<ExecutionAdmission>> {
         Box::pin(async move {
             let input = raw(input_json)?;
-            self.owner
+            self.owner()
+                .await?
                 .admit_typed::<_, SessionSnapshot, ExecutionOutput>(operation_id, &input)
                 .await
                 .map(map_admission)
@@ -115,7 +200,8 @@ impl ExecutionPolicy for DurableExecution {
         Box::pin(async move {
             let input = raw(input_json)?;
             let admission = self
-                .owner
+                .owner()
+                .await?
                 .admit_automatic_typed::<_, SessionSnapshot, ExecutionOutput>(
                     candidate_operation_id,
                     &input,
@@ -129,7 +215,9 @@ impl ExecutionPolicy for DurableExecution {
 
     fn release<'a>(&'a self, operation_id: String) -> ExecutionFuture<'a, ()> {
         Box::pin(async move {
-            let _ = self.owner.release_claim(operation_id).await;
+            if let Some(owner) = self.initialized_owner() {
+                let _ = owner.release_claim(operation_id).await;
+            }
         })
     }
 
@@ -139,7 +227,8 @@ impl ExecutionPolicy for DurableExecution {
         snapshot: Option<SessionSnapshot>,
     ) -> ExecutionFuture<'a, AgentResult<()>> {
         Box::pin(async move {
-            self.owner
+            self.owner()
+                .await?
                 .cancel(operation_id, snapshot.as_ref())
                 .await
                 .map_err(agent_error)
@@ -148,7 +237,8 @@ impl ExecutionPolicy for DurableExecution {
 
     fn begin_attempt<'a>(&'a self, operation_id: String) -> ExecutionFuture<'a, AgentResult<()>> {
         Box::pin(async move {
-            self.owner
+            self.owner()
+                .await?
                 .begin_attempt(operation_id)
                 .await
                 .map(|_| ())
@@ -167,7 +257,8 @@ impl ExecutionPolicy for DurableExecution {
         Box::pin(async move {
             let input = raw(input_json)?;
             match self
-                .owner
+                .owner()
+                .await?
                 .begin_step(operation_id, step_id, kind, &input, map_retry(retry))
                 .await
             {
@@ -189,7 +280,8 @@ impl ExecutionPolicy for DurableExecution {
     ) -> ExecutionFuture<'a, AgentResult<()>> {
         Box::pin(async move {
             let output = raw(output_json)?;
-            self.owner
+            self.owner()
+                .await?
                 .complete_step(operation_id, step_id, &output)
                 .await
                 .map_err(agent_error)
@@ -205,7 +297,8 @@ impl ExecutionPolicy for DurableExecution {
         Box::pin(async move {
             let unknown_output = raw(unknown_output_json)?;
             match self
-                .owner
+                .owner()
+                .await?
                 .reconcile_cancelled_step(operation_id, step_id, &unknown_output)
                 .await
             {
@@ -225,7 +318,8 @@ impl ExecutionPolicy for DurableExecution {
         output: ExecutionOutput,
     ) -> ExecutionFuture<'a, AgentResult<()>> {
         Box::pin(async move {
-            self.owner
+            self.owner()
+                .await?
                 .complete(operation_id, &snapshot, &output)
                 .await
                 .map_err(agent_error)
@@ -238,7 +332,8 @@ impl ExecutionPolicy for DurableExecution {
         error: String,
     ) -> ExecutionFuture<'a, AgentResult<()>> {
         Box::pin(async move {
-            self.owner
+            self.owner()
+                .await?
                 .fail_attempt(operation_id, error)
                 .await
                 .map_err(agent_error)
@@ -252,7 +347,8 @@ impl ExecutionPolicy for DurableExecution {
         error: String,
     ) -> ExecutionFuture<'a, AgentResult<()>> {
         Box::pin(async move {
-            self.owner
+            self.owner()
+                .await?
                 .fail(operation_id, &snapshot, error)
                 .await
                 .map_err(agent_error)

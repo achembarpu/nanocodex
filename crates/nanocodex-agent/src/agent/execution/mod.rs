@@ -346,19 +346,25 @@ pub trait ExecutionPolicy: Send + Sync {
 pub(crate) struct ExecutionConfig {
     platform: platform::Config,
     policy: Option<ExecutionPolicyRecipe>,
+    spawned_policy: Option<SpawnedExecutionPolicyFactory>,
 }
+
+type SpawnedExecutionPolicyFactory =
+    Arc<dyn Fn(&str) -> Result<Arc<dyn ExecutionPolicy>> + Send + Sync>;
 
 #[derive(Clone)]
 enum ExecutionPolicyRecipe {
     Shared(Arc<dyn ExecutionPolicy>),
     PerAgent(Arc<dyn Fn() -> Result<Arc<dyn ExecutionPolicy>> + Send + Sync>),
+    Spawned(SpawnedExecutionPolicyFactory),
 }
 
 impl ExecutionPolicyRecipe {
-    fn instantiate(&self) -> Result<Arc<dyn ExecutionPolicy>> {
+    fn instantiate(&self, session_id: &str) -> Result<Arc<dyn ExecutionPolicy>> {
         match self {
             Self::Shared(policy) => Ok(Arc::clone(policy)),
             Self::PerAgent(factory) => factory(),
+            Self::Spawned(factory) => factory(session_id),
         }
     }
 }
@@ -380,17 +386,25 @@ impl ExecutionConfig {
         self.policy = Some(ExecutionPolicyRecipe::PerAgent(factory));
     }
 
+    pub(crate) fn set_spawned_policy_factory(&mut self, factory: SpawnedExecutionPolicyFactory) {
+        self.spawned_policy = Some(factory);
+    }
+
     // The WASM platform configuration is const, while native rollout cloning is not.
     #[cfg_attr(target_family = "wasm", allow(clippy::missing_const_for_fn))]
     pub(crate) fn for_new_thread(&self, operation: &'static str) -> Result<Self> {
-        if self.policy.is_some() && operation != "spawn" {
+        if (self.policy.is_some() || self.spawned_policy.is_some()) && operation != "spawn" {
             return Err(NanocodexError::ExecutionPolicyBranchUnsupported { operation });
         }
         Ok(Self {
             platform: self.platform.for_new_thread(),
-            // A clean child is a new in-memory agent. It must never share the
-            // root's operation journal or execution-policy owner.
-            policy: None,
+            // A clean child never shares its parent's owner. A configured
+            // child recipe is instantiated under the child's own session ID.
+            policy: self
+                .spawned_policy
+                .as_ref()
+                .map(|factory| ExecutionPolicyRecipe::Spawned(Arc::clone(factory))),
+            spawned_policy: self.spawned_policy.as_ref().map(Arc::clone),
         })
     }
 
@@ -418,7 +432,7 @@ impl ExecutionConfig {
             policy: self
                 .policy
                 .as_ref()
-                .map(ExecutionPolicyRecipe::instantiate)
+                .map(|recipe| recipe.instantiate(session_id))
                 .transpose()?,
         })
     }

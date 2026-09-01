@@ -223,8 +223,9 @@ Cloudflare Agents default to direct tool mode because Workers prohibit dynamic
 evaluator. Select `toolMode: "code"` only when also supplying an evaluator that
 is explicitly compatible with the deployed Worker runtime. Runtime-owned
 Subagents are installed by default, including on a durable root. Clean children
-use the existing in-memory Rust task tree and are closed with the live root;
-their lifecycles are not reconstructed from durable execution state. Use
+persist independent execution state under their own agent session IDs. The
+Rust task-tree registry remains in memory and is closed with the live root, so
+tree-local IDs and topology are not reconstructed from those agent states. Use
 `Subagents.create({ maxConcurrency })` in `tools` only to override the default
 maximum concurrency of 32.
 

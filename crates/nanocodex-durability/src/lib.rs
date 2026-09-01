@@ -7,6 +7,7 @@ mod memory;
 #[cfg(all(feature = "postgres", not(target_family = "wasm")))]
 mod postgres;
 mod session;
+mod shared_store;
 #[cfg(all(feature = "sqlite", not(target_family = "wasm")))]
 mod sqlite;
 mod state;
