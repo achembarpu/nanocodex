@@ -166,6 +166,11 @@ enum WorkerCommand {
     CloseBtw {
         id: u64,
     },
+    CollapseBtw {
+        id: u64,
+        steer_id: u64,
+        prompt: SubmittedPrompt,
+    },
     SplitBtw {
         id: u64,
         cwd: PathBuf,
@@ -256,6 +261,13 @@ enum WorkerEvent {
     },
     BtwEventStreamClosed {
         id: u64,
+    },
+    BtwCollapseCompleted {
+        id: u64,
+    },
+    BtwCollapseFailed {
+        id: u64,
+        error: String,
     },
     BtwSplitCompleted {
         id: u64,
@@ -363,6 +375,12 @@ struct TrackedTurn {
 struct SteerRequest {
     id: u64,
     prompt: SubmittedPrompt,
+}
+
+enum SteerOutcome {
+    Admitted,
+    Queued(Option<TrackedTurn>),
+    Failed,
 }
 
 #[derive(Clone, Copy)]
@@ -623,6 +641,7 @@ enum Submission {
     Prompt(SubmittedPrompt),
     Btw(Option<SubmittedPrompt>),
     CloseBtw,
+    CollapseBtw,
     SplitBtw,
     Cancel,
     Trace,
@@ -1153,10 +1172,12 @@ fn handle_worker_update(
             let _ = app.on_agent_event(PaneId::Btw(id), &event.event);
         }
         WorkerEvent::BtwEventStreamClosed { id } => {
-            if app.btw_id() == Some(id) && !app.btw_splitting(id) {
+            if app.btw_id() == Some(id) && !app.btw_splitting(id) && !app.btw_collapsing(id) {
                 app.btw_failed(id, "BTW event stream closed".to_owned());
             }
         }
+        WorkerEvent::BtwCollapseCompleted { id } => app.btw_collapse_completed(id),
+        WorkerEvent::BtwCollapseFailed { id, error } => app.btw_collapse_failed(id, error),
         WorkerEvent::BtwSplitCompleted { id, destination } => {
             app.btw_split_completed(id, destination);
         }
@@ -1358,7 +1379,9 @@ impl AgentWorker {
                 prompt_id,
                 prompt,
             } => self.prompt(target, prompt_id, prompt).await,
-            WorkerCommand::Steer { target, id, prompt } => self.steer(target, id, prompt).await,
+            WorkerCommand::Steer { target, id, prompt } => {
+                let _ = self.steer(target, id, prompt).await;
+            }
             WorkerCommand::Cancel { target } => self.cancel(target).await,
             WorkerCommand::InterruptForSteers {
                 target,
@@ -1379,6 +1402,11 @@ impl AgentWorker {
                     self.btw = None;
                 }
             }
+            WorkerCommand::CollapseBtw {
+                id,
+                steer_id,
+                prompt,
+            } => self.collapse_btw(id, steer_id, prompt).await,
             WorkerCommand::SplitBtw { id, cwd } => self.split_btw(id, &cwd).await,
             WorkerCommand::EditHistorical {
                 source_branch_id,
@@ -1666,8 +1694,8 @@ impl AgentWorker {
         }
     }
 
-    async fn steer(&mut self, target: PaneId, steer_id: u64, prompt: SubmittedPrompt) {
-        let turn = match target {
+    async fn steer(&mut self, target: PaneId, steer_id: u64, prompt: SubmittedPrompt) -> bool {
+        let outcome = match target {
             PaneId::Main => {
                 steer_turn(
                     &self.main.agent,
@@ -1694,7 +1722,7 @@ impl AgentWorker {
                         id: steer_id,
                         error: "BTW branch is not available".to_owned(),
                     }));
-                    return;
+                    return false;
                 };
                 steer_turn(
                     &branch.agent,
@@ -1715,19 +1743,67 @@ impl AgentWorker {
                 .await
             }
         };
-        if let Some(turn) = turn {
-            match target {
-                PaneId::Main => {
-                    self.main.prompt_order.push(turn.prompt_id);
-                    self.main.turns.push_back(turn);
-                }
-                PaneId::Btw(branch_id) => {
-                    if let Some(branch) = self.btw.as_mut().filter(|branch| branch.id == branch_id)
-                    {
-                        branch.turns.push_back(turn);
+        match outcome {
+            SteerOutcome::Admitted => true,
+            SteerOutcome::Failed => false,
+            SteerOutcome::Queued(turn) => {
+                let admitted = turn.is_some();
+                if let Some(turn) = turn {
+                    match target {
+                        PaneId::Main => {
+                            self.main.prompt_order.push(turn.prompt_id);
+                            self.main.turns.push_back(turn);
+                        }
+                        PaneId::Btw(branch_id) => {
+                            if let Some(branch) =
+                                self.btw.as_mut().filter(|branch| branch.id == branch_id)
+                            {
+                                branch.turns.push_back(turn);
+                            }
+                        }
                     }
                 }
+                admitted
             }
+        }
+    }
+
+    async fn collapse_btw(&mut self, id: u64, steer_id: u64, prompt: SubmittedPrompt) {
+        let failure = self.btw.as_ref().filter(|branch| branch.id == id).map_or(
+            Some("BTW branch is not available"),
+            |branch| {
+                if !branch.turns.is_empty() {
+                    Some("BTW has an active turn; wait for it to finish before /collapse")
+                } else if !branch.has_durable_turn {
+                    Some("BTW needs one completed turn before /collapse")
+                } else if branch.agent.rollout().is_none() {
+                    Some("/collapse requires rollout recording; restart without `--rollouts false`")
+                } else {
+                    None
+                }
+            },
+        );
+        if let Some(error) = failure {
+            drop(self.updates.send(WorkerEvent::SteerFailed {
+                target: PaneId::Main,
+                id: steer_id,
+                error: format!("BTW was not collapsed: {error}"),
+            }));
+            drop(self.updates.send(WorkerEvent::BtwCollapseFailed {
+                id,
+                error: error.to_owned(),
+            }));
+            return;
+        }
+
+        if self.steer(PaneId::Main, steer_id, prompt).await {
+            self.btw = None;
+            drop(self.updates.send(WorkerEvent::BtwCollapseCompleted { id }));
+        } else {
+            drop(self.updates.send(WorkerEvent::BtwCollapseFailed {
+                id,
+                error: "main steer was not admitted; BTW was retained".to_owned(),
+            }));
         }
     }
 
@@ -2256,7 +2332,7 @@ async fn steer_turn(
     next_turn_id: &mut u64,
     finished: &mpsc::UnboundedSender<FinishedTurn>,
     updates: &mpsc::UnboundedSender<WorkerEvent>,
-) -> Option<TrackedTurn> {
+) -> SteerOutcome {
     for turn in turns {
         let started_at = Instant::now();
         let span = info_span!(
@@ -2289,7 +2365,7 @@ async fn steer_turn(
                     target: target.pane,
                     id: request.id,
                 }));
-                return None;
+                return SteerOutcome::Admitted;
             }
             Err(NanocodexError::TurnNotSteerable) => {
                 span.record("status", "not_steerable");
@@ -2303,7 +2379,7 @@ async fn steer_turn(
                     id: request.id,
                     error: error.to_string(),
                 }));
-                return None;
+                return SteerOutcome::Failed;
             }
         }
     }
@@ -2314,16 +2390,18 @@ async fn steer_turn(
         id: request.id,
         prompt: request.prompt.display().to_owned(),
     }));
-    start_turn(
-        agent,
-        target,
-        request.id,
-        request.prompt,
-        next_turn_id,
-        finished,
-        updates,
+    SteerOutcome::Queued(
+        start_turn(
+            agent,
+            target,
+            request.id,
+            request.prompt,
+            next_turn_id,
+            finished,
+            updates,
+        )
+        .await,
     )
-    .await
 }
 
 async fn cancel_turn(
@@ -2901,6 +2979,12 @@ fn submit(
         app.set_active_status("Moving BTW to another terminal");
         return Ok(());
     }
+    if let PaneId::Btw(id) = app.focus
+        && app.btw_collapsing(id)
+    {
+        app.set_active_status("Collapsing BTW into main");
+        return Ok(());
+    }
     let Some(input) = app.take_submission() else {
         return Ok(());
     };
@@ -2962,6 +3046,43 @@ fn submit(
                     send_command(commands, WorkerCommand::CloseBtw { id })?;
                 }
             }
+        }
+        Submission::CollapseBtw => {
+            let Some(id) = app.btw_id() else {
+                app.push_active_error("/collapse requires an open /btw thread");
+                app.set_active_status("No BTW to collapse");
+                return Ok(());
+            };
+            if app.btw_busy() {
+                app.reject_btw_collapse_while_busy();
+                return Ok(());
+            }
+            let Some(thread_id) = app
+                .btw
+                .as_ref()
+                .filter(|btw| btw.id == id)
+                .and_then(|btw| btw.request_id.as_deref())
+                .map(ToOwned::to_owned)
+            else {
+                let _ = app.begin_btw_collapse(id);
+                return Ok(());
+            };
+            if !app.begin_btw_collapse(id) {
+                return Ok(());
+            }
+            let prompt = collapse_btw_prompt(&thread_id);
+            let Some(steer_id) = app.queue_steer(PaneId::Main, prompt.clone()) else {
+                app.push_active_error("main thread is not available");
+                return Ok(());
+            };
+            send_command(
+                commands,
+                WorkerCommand::CollapseBtw {
+                    id,
+                    steer_id,
+                    prompt,
+                },
+            )?;
         }
         Submission::SplitBtw => {
             let Some(id) = app.btw_id() else {
@@ -3040,6 +3161,12 @@ fn classify_submission(input: impl Into<SubmittedPrompt>) -> Submission {
     }
     if trimmed == "/close" {
         return Submission::CloseBtw;
+    }
+    if trimmed == "/collapse" {
+        return Submission::CollapseBtw;
+    }
+    if trimmed.starts_with("/collapse ") {
+        return Submission::InvalidCommand("Usage: /collapse".to_owned());
     }
     if trimmed == "/split" {
         return Submission::SplitBtw;
@@ -3141,6 +3268,14 @@ fn classify_submission(input: impl Into<SubmittedPrompt>) -> Submission {
         );
     }
     Submission::Prompt(input)
+}
+
+fn collapse_btw_prompt(thread_id: &str) -> SubmittedPrompt {
+    let mut prompt = SubmittedPrompt::text(format!("BTW Codex thread ID: {thread_id}"));
+    prompt.set_instruction(format!(
+        "The user completed a /btw side exploration in local Codex thread {thread_id}. Read that thread and incorporate its relevant findings into the main task. Use `read_session` with source `local` and session_id `{thread_id}` when available; otherwise locate the local Codex rollout by this thread ID and inspect it with local tools."
+    ));
+    prompt
 }
 
 fn active_session_id<'a>(app: &'a App, root_session_id: &'a str) -> Option<&'a str> {
@@ -3415,6 +3550,11 @@ mod tests {
             classify_submission("/close".to_owned()),
             Submission::CloseBtw
         );
+        assert_eq!(classify_submission(" /collapse "), Submission::CollapseBtw);
+        assert_eq!(
+            classify_submission("/collapse now"),
+            Submission::InvalidCommand("Usage: /collapse".to_owned())
+        );
         assert_eq!(classify_submission(" /split "), Submission::SplitBtw);
         assert_eq!(
             classify_submission("/split right"),
@@ -3511,6 +3651,10 @@ mod tests {
             Submission::Prompt("/splitwise".into())
         );
         assert_eq!(
+            classify_submission("/collapsible"),
+            Submission::Prompt("/collapsible".into())
+        );
+        assert_eq!(
             classify_submission("/simplify-this"),
             Submission::Prompt("/simplify-this".into())
         );
@@ -3545,6 +3689,117 @@ mod tests {
             Ok(WorkerCommand::SplitBtw { id: split_id, cwd })
                 if split_id == id && cwd.as_path() == std::path::Path::new("/workspace")
         ));
+    }
+
+    #[test]
+    fn collapse_submission_waits_for_main_steer_before_closing_btw() {
+        let (commands, mut worker) = mpsc::unbounded_channel();
+        let mut app = App::new("/workspace".into());
+        let id = app.begin_btw();
+        app.btw_opened(id, Arc::from("btw-thread-id"));
+        app.input = "/collapse".to_owned();
+        app.cursor = app.input.len();
+
+        submit(&mut app, "main-thread", &commands, SubmitIntent::Immediate).unwrap();
+
+        assert_eq!(app.btw_id(), Some(id));
+        assert!(app.btw_collapsing(id));
+        assert_eq!(app.focus, PaneId::Btw(id));
+        assert_eq!(app.main.pending_steers.len(), 1);
+        assert_eq!(
+            app.main.pending_steers[0].prompt(),
+            "BTW Codex thread ID: btw-thread-id"
+        );
+        let WorkerCommand::CollapseBtw {
+            id: collapsed_id,
+            steer_id,
+            prompt,
+        } = worker.try_recv().unwrap()
+        else {
+            panic!("collapse must atomically close BTW and steer main");
+        };
+        assert_eq!(collapsed_id, id);
+        assert!(steer_id > 0);
+        assert_eq!(prompt.display(), "BTW Codex thread ID: btw-thread-id");
+        assert!(matches!(
+            prompt.into_prompt().instruction,
+            PromptInput::Text(text)
+                if text.contains("local Codex thread btw-thread-id")
+                    && text.contains("session_id `btw-thread-id`")
+        ));
+        assert!(worker.try_recv().is_err());
+
+        handle_worker_update(
+            &mut app,
+            WorkerEvent::BtwCollapseCompleted { id },
+            &commands,
+        )
+        .unwrap();
+        assert!(app.btw.is_none());
+        assert_eq!(app.focus, PaneId::Main);
+    }
+
+    #[test]
+    fn collapse_retains_a_busy_btw_without_steering_main() {
+        let (commands, mut worker) = mpsc::unbounded_channel();
+        let mut app = App::new("/workspace".into());
+        let id = app.begin_btw();
+        app.btw_opened(id, Arc::from("btw-thread-id"));
+        app.btw.as_mut().unwrap().conversation.running = true;
+        app.input = "/collapse".to_owned();
+        app.cursor = app.input.len();
+
+        submit(&mut app, "main-thread", &commands, SubmitIntent::Immediate).unwrap();
+
+        assert_eq!(app.btw_id(), Some(id));
+        assert!(app.main.pending_steers.is_empty());
+        assert!(worker.try_recv().is_err());
+        assert_eq!(
+            app.btw.as_ref().unwrap().conversation.status,
+            "BTW still running"
+        );
+    }
+
+    #[test]
+    fn collapse_failure_retains_btw_and_clears_the_pending_main_steer() {
+        let (commands, mut worker) = mpsc::unbounded_channel();
+        let mut app = App::new("/workspace".into());
+        let id = app.begin_btw();
+        app.btw_opened(id, Arc::from("btw-thread-id"));
+        app.input = "/collapse".to_owned();
+        app.cursor = app.input.len();
+
+        submit(&mut app, "main-thread", &commands, SubmitIntent::Immediate).unwrap();
+        let WorkerCommand::CollapseBtw { steer_id, .. } = worker.try_recv().unwrap() else {
+            panic!("collapse command missing");
+        };
+        handle_worker_update(
+            &mut app,
+            WorkerEvent::SteerFailed {
+                target: PaneId::Main,
+                id: steer_id,
+                error: "rollout unavailable".to_owned(),
+            },
+            &commands,
+        )
+        .unwrap();
+        handle_worker_update(
+            &mut app,
+            WorkerEvent::BtwCollapseFailed {
+                id,
+                error: "rollout unavailable".to_owned(),
+            },
+            &commands,
+        )
+        .unwrap();
+
+        assert_eq!(app.btw_id(), Some(id));
+        assert!(!app.btw_collapsing(id));
+        assert!(app.main.pending_steers.is_empty());
+        assert_eq!(
+            app.btw.as_ref().unwrap().conversation.status,
+            "Collapse unavailable"
+        );
     }
 
     #[test]

@@ -1038,6 +1038,7 @@ fn smooth_scroll_drain(pending_rows: usize) -> usize {
 pub(super) struct BtwPane {
     pub(super) id: u64,
     pub(super) request_id: Option<Arc<str>>,
+    collapsing: bool,
     splitting: bool,
     pub(super) conversation: Conversation,
 }
@@ -2109,6 +2110,7 @@ impl App {
         self.btw = Some(BtwPane {
             id,
             request_id: None,
+            collapsing: false,
             splitting: false,
             conversation,
         });
@@ -2149,8 +2151,17 @@ impl App {
 
     pub(super) fn btw_busy(&self) -> bool {
         self.btw.as_ref().is_some_and(|btw| {
-            btw.splitting || btw.conversation.running || btw.conversation.pending_turns > 0
+            btw.collapsing
+                || btw.splitting
+                || btw.conversation.running
+                || btw.conversation.pending_turns > 0
         })
+    }
+
+    pub(super) fn btw_collapsing(&self, id: u64) -> bool {
+        self.btw
+            .as_ref()
+            .is_some_and(|btw| btw.id == id && btw.collapsing)
     }
 
     pub(super) fn btw_splitting(&self, id: u64) -> bool {
@@ -2161,7 +2172,9 @@ impl App {
 
     pub(super) fn reject_btw_close_while_busy(&mut self) {
         if let Some(btw) = self.btw.as_mut() {
-            let (error, status) = if btw.splitting {
+            let (error, status) = if btw.collapsing {
+                ("BTW is already collapsing into main", "Collapsing BTW")
+            } else if btw.splitting {
                 ("BTW is already moving to another terminal", "Moving BTW")
             } else {
                 (
@@ -2172,6 +2185,52 @@ impl App {
             btw.conversation
                 .push_output(TranscriptItem::Error(error.to_owned()));
             status.clone_into(&mut btw.conversation.status);
+        }
+    }
+
+    pub(super) fn reject_btw_collapse_while_busy(&mut self) {
+        if let Some(btw) = self.btw.as_mut() {
+            let (error, status) = if btw.collapsing {
+                ("BTW is already collapsing into main", "Collapsing BTW")
+            } else if btw.splitting {
+                ("BTW is already moving to another terminal", "Moving BTW")
+            } else {
+                (
+                    "BTW has an active or queued turn; wait for it to finish before /collapse",
+                    "BTW still running",
+                )
+            };
+            btw.conversation
+                .push_output(TranscriptItem::Error(error.to_owned()));
+            status.clone_into(&mut btw.conversation.status);
+        }
+    }
+
+    pub(super) fn begin_btw_collapse(&mut self, id: u64) -> bool {
+        let Some(btw) = self.btw.as_mut().filter(|btw| btw.id == id) else {
+            return false;
+        };
+        if btw.request_id.is_none() {
+            btw.conversation.push_output(TranscriptItem::Error(
+                "wait for the BTW fork to finish opening before /collapse".to_owned(),
+            ));
+            "BTW still opening".clone_into(&mut btw.conversation.status);
+            return false;
+        }
+        btw.collapsing = true;
+        "Collapsing BTW into main".clone_into(&mut btw.conversation.status);
+        true
+    }
+
+    pub(super) fn btw_collapse_completed(&mut self, id: u64) {
+        self.close_btw(id);
+    }
+
+    pub(super) fn btw_collapse_failed(&mut self, id: u64, error: String) {
+        if let Some(btw) = self.btw.as_mut().filter(|btw| btw.id == id) {
+            btw.collapsing = false;
+            btw.conversation.push_output(TranscriptItem::Error(error));
+            "Collapse unavailable".clone_into(&mut btw.conversation.status);
         }
     }
 

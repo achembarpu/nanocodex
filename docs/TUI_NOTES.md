@@ -63,6 +63,7 @@ that may affect the current run, while `Tab` creates a later queued turn.
 | --- | --- |
 | `/btw <question>` | Fork the latest safe mainline checkpoint into a side pane and submit the question there. Partial model output and unmatched tool calls are excluded. |
 | `/btw` | Open an empty side fork, or focus the existing side pane. |
+| `/collapse` | After one completed side turn, steer its recorded local Codex thread ID into the main agent and close the `/btw` pane only after that steer is preserved. If the main agent is already idle, the steer becomes a new turn. Requires rollout recording. |
 | `/split` | Move an idle, completed `/btw` into a right-hand tmux, Zellij, WezTerm, or iTerm2 pane when available, otherwise into a detected terminal window. The fork is durably closed before `nanocodex resume <thread-id>` starts, and the main TUI is freed for another `/btw`. |
 | `/close` | Close the `/btw` pane once it is idle. A busy pane is retained and reports why it cannot close. |
 | `/cancel` | Cancel the focused turn without the two-stage Escape gesture. |
