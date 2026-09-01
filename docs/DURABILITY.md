@@ -32,6 +32,34 @@ SQLite remains the only restart authority, and one explicit request ID cannot
 be combined with `--repeat` greater than one. Use SIGKILL to test process loss;
 SIGINT and SIGTERM exercise the CLI's graceful cancellation path.
 
+For managed lifecycle testing, `nanocodex managed-server` exposes the
+REST, resumable SSE, and `/tool-host` lifecycle subset consumed by
+`nanocodex2`, on a literal loopback address only:
+
+```console
+nanocodex managed-server \
+  --sqlite /tmp/nanocodex-managed.sqlite \
+  --workspace "$PWD" \
+  --openai-api-key "$OPENAI_API_KEY" \
+  --bearer 'ncx_live_<testing-id>_<testing-secret>'
+```
+
+The SQLite file holds both the opaque per-agent durability states and a small
+managed projection for agent identity, idempotent turn receipts, terminals,
+and event cursors. This permits real `nanocodex2` create, run, steer, cancel,
+client detach/reconnect, cold server recovery, and concurrent same-key
+admission exercises.
+
+The loopback server has one static testing principal. Its `/tool-host` support
+covers catalog acknowledgement, socket replacement, heartbeat, drain, and
+reconnect, but it does not route reverse-attached tool calls. It also does not
+implement the advertised `/ws` command socket. Steer delivery is live: once a
+later model boundary is committed the steer is in the durable checkpoint, but
+a server crash between the steer receipt and that boundary may lose it. Use the
+Cloudflare managed tests for account/grant isolation and full reverse-tool
+routing. This command is a durability fault harness, not another managed
+backend.
+
 ## Authority
 
 | Layer | Durable responsibility | Never authoritative for |

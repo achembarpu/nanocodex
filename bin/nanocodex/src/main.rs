@@ -17,6 +17,7 @@ mod eval;
 mod eval;
 mod login;
 mod managed_memory;
+mod managed_server;
 mod mcp;
 #[cfg_attr(not(feature = "tempo"), path = "mpp_disabled.rs")]
 mod mpp;
@@ -111,6 +112,8 @@ enum Command {
     VmRunConfig(vm::VmRunConfig),
     /// Run one prompt and stream JSONL events to stdout.
     Run(Box<RunCommand>),
+    /// Run a loopback-only managed-agent durability test server.
+    ManagedServer(managed_server::ManagedServer),
     /// Resume a Codex or Nanocodex thread in the interactive TUI.
     Resume(Box<ResumeCommand>),
     /// Install, cache, or switch CLI builds.
@@ -205,6 +208,7 @@ async fn run(cli: Cli) -> Result<()> {
             let _observability = command.observability.install(false, command.agent.cwd())?;
             command.run.run(command.agent, command.vm).await
         }
+        Some(Command::ManagedServer(command)) => command.run().await,
         Some(Command::Resume(command)) => {
             let codex_home = config::default_codex_home()?;
             let rollouts = RolloutConfig::new(&codex_home);
