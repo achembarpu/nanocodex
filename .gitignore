@@ -6,6 +6,7 @@
 .wrangler/
 .harness/
 .nanocodex/
+.nanocodex-js-package.lock
 .venv/
 target/
 py/bindings/.venv/
@@ -22,6 +23,7 @@ js/tui/dist/
 js/tui-react/node_modules/
 js/tui-react/dist/
 js/nanocodex-terminal/node_modules/
+js/nanocodex-terminal/dist/
 js/nanocodex/pkg-node/
 js/nanocodex/pkg-web/
 examples/node/node_modules/

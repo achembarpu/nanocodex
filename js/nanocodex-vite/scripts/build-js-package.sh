@@ -2,6 +2,7 @@
 set -euo pipefail
 
 repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+script_path="$repository_root/js/nanocodex-vite/scripts/build-js-package.sh"
 cd "$repository_root"
 
 wasm_target=wasm32-unknown-unknown
@@ -9,6 +10,49 @@ target_dir="${CARGO_TARGET_DIR:-$repository_root/target}"
 if [[ "$target_dir" != /* ]]; then
   target_dir="$repository_root/$target_dir"
 fi
+
+mkdir -p "$target_dir"
+lock_file="$repository_root/.nanocodex-js-package.lock"
+lock_timeout_seconds="${NANOCODEX_WASM_LOCK_TIMEOUT_SECONDS:-600}"
+generated_dir=""
+
+if [[ ! "$lock_timeout_seconds" =~ ^[0-9]+$ ]]; then
+  echo "NANOCODEX_WASM_LOCK_TIMEOUT_SECONDS must be a non-negative integer" >&2
+  exit 1
+fi
+
+if [[ "${NANOCODEX_WASM_LOCK_HELD:-}" != "$repository_root" ]]; then
+  if command -v flock >/dev/null 2>&1; then
+    if flock -E 75 -w "$lock_timeout_seconds" "$lock_file" \
+      env NANOCODEX_WASM_LOCK_HELD="$repository_root" "$script_path" "$@"; then
+      exit 0
+    else
+      lock_status=$?
+    fi
+  elif command -v lockf >/dev/null 2>&1; then
+    if lockf -t "$lock_timeout_seconds" "$lock_file" \
+      env NANOCODEX_WASM_LOCK_HELD="$repository_root" "$script_path" "$@"; then
+      exit 0
+    else
+      lock_status=$?
+    fi
+  else
+    echo "the Nanocodex WASM build requires flock or lockf for checkout-local serialization" >&2
+    exit 1
+  fi
+  if [[ "$lock_status" -eq 75 ]]; then
+    echo "timed out waiting for the checkout-local Nanocodex WASM build lock" >&2
+  fi
+  exit "$lock_status"
+fi
+
+cleanup() {
+  if [[ -n "$generated_dir" && -d "$generated_dir" ]]; then
+    rm -rf "$generated_dir"
+  fi
+}
+
+trap cleanup EXIT
 
 cargo build --locked -p nanocodex-wasm --target "$wasm_target" --profile wasm
 wasm_artifact="$target_dir/$wasm_target/wasm/nanocodex_wasm.wasm"
@@ -32,7 +76,6 @@ if [[ -f "$stamp_path" ]] \
 fi
 
 generated_dir="$(mktemp -d)"
-trap 'rm -rf "$generated_dir"' EXIT
 worker_bindings="$generated_dir/worker"
 mkdir "$worker_bindings"
 wasm-bindgen "$wasm_artifact" \

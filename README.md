@@ -71,6 +71,28 @@ VIRTUAL_ENV="$PWD/py/bindings/.venv" \
   py/bindings/.venv/bin/maturin develop --manifest-path py/bindings/Cargo.toml
 ```
 
+The Node.js 22.13+ line is the published package's consumer floor. Developing
+from this repository uses Rust 1.97, the `wasm32-unknown-unknown` target,
+`wasm-bindgen-cli` 0.2.126, Node.js 24 from `.node-version`, and pnpm 11.25.0
+from the root `packageManager` field:
+
+```sh
+rustup toolchain install 1.97
+rustup target add wasm32-unknown-unknown --toolchain 1.97
+cargo +1.97 install --locked wasm-bindgen-cli --version 0.2.126
+corepack enable
+pnpm install --frozen-lockfile
+pnpm build
+pnpm dev
+```
+
+`pnpm dev` starts the complete Turbo stack through Portless. Local HTTPS needs
+one-time certificate trust, and binding port 443 may also need administrator
+approval on macOS. `PORTLESS_PORT=1355 pnpm dev` avoids the privileged bind and
+serves the same names with `:1355` appended. Portless's proxy is user-global,
+while app routes, processes, and Wrangler state remain isolated per checkout
+and worktree.
+
 Or install the native CLI/TUI on Apple Silicon macOS or x86-64 glibc Linux:
 
 ```sh

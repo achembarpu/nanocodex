@@ -17,7 +17,8 @@
   `https://nanocodex.localhost`; linked worktrees get
   `https://<branch>.nanocodex.localhost`. The paired playground is
   `https://playground.nanocodex.localhost` or
-  `https://<branch>.playground.nanocodex.localhost`. Deploy from
+  `https://<branch>.playground.nanocodex.localhost`. With a high
+  `PORTLESS_PORT`, append that port to each URL. Deploy from
   the root with `pnpm deploy:<component>`; deploy dependencies first and
   `pnpm deploy:account` last.
 - pnpm owns the JavaScript workspace, Turbo owns task concurrency and build

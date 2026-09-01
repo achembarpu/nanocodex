@@ -5,6 +5,11 @@
       "dependsOn": ["^build"],
       "outputs": ["dist/**"]
     },
+    "nanocodex#build": {
+      "dependsOn": ["^build"],
+      "cache": false,
+      "outputs": []
+    },
     "nanocodex-web#build": {
       "cache": false,
       "dependsOn": ["^build"],
