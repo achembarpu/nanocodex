@@ -329,7 +329,7 @@ Use `Transport.chatGpt({ subscription })` for a caller-owned ChatGPT
 subscription or `Transport.mpp({ session })` for a caller-owned MPP session.
 Transport constructors are explicit immutable configurations; Nanocodex does
 not infer provider portability from them. See the complete
-[JavaScript guide](js/bindings/README.md) and runnable
+[JavaScript guide](js/nanocodex/README.md) and runnable
 [Node session](examples/node/session.mjs).
 
 ### A complete coding workspace in a browser
@@ -383,7 +383,7 @@ one persistent agent in a module Worker and forwards ordered events into React.
 The package also exposes composable browser-safe web search, image generation,
 public Parquet/JSONL/Hugging Face dataset queries, and live React artifact
 tools. Read their exact contracts and bounds in
-[`js/bindings/README.md`](js/bindings/README.md#standard-web-and-browser-tools).
+[`js/nanocodex/README.md`](js/nanocodex/README.md#standard-web-and-browser-tools).
 
 ### Bring any terminal or product interface
 
@@ -576,8 +576,8 @@ client projection, and sandbox policy while reusing one agent lifecycle:
 | [Native CLI and Ratatui TUI](bin/nanocodex) | Interactive sessions, JSONL one-shot adapter, branching UI, MCP, browser, VM, voice, and full lifecycle cleanup. |
 | [Static browser CDN page](examples/browser-cdn/README.md) | One HTML file runs the Rust/WASM agent from the npm package with no framework, bundler, or install step. |
 | [React + Vite Worker](examples/react-vite/README.md) | A browser Worker owns one persistent session and React consumes ordered events without reshaping the contract. |
-| [Cloudflare managed agents + Multiplayer](services/managed/README.md) | Signed room objects add ordered N-human chat, bounded replay, a tool-free host-owned agent, and a global durable spend/allocation quota; provider credentials stay behind a private broker binding. |
-| [Cloudflare credential broker](services/egress/README.md) | Two ordinary Workers use a private Service Binding for exact API-key or OAuth replacement and a singleton rotating Codex OAuth broker. |
+| [Cloudflare managed agents + Multiplayer](js/managed/README.md) | Signed room objects add ordered N-human chat, bounded replay, a tool-free host-owned agent, and a global durable spend/allocation quota; provider credentials stay behind a private broker binding. |
+| [Cloudflare credential broker](js/egress/README.md) | Two ordinary Workers use a private Service Binding for exact API-key or OAuth replacement and a singleton rotating Codex OAuth broker. |
 | [Cloudflare fetch + MCP](examples/cloudflare-fetch-mcp/README.md) | CSP-safe QuickJS Code Mode, deferred remote MCP, and caller-owned paid transport inside a serialized Durable Object. |
 | [Rivet Actor](examples/rivet-actors/README.md) | Durable SQLite snapshots and idempotent turns around the WASM driver, with an actor-owned AgentOS workspace and previews. |
 | [Vercel Workflow actor](examples/vercel-workflows/README.md) | A Rust-owned journal between stateless steps, replayable multi-client streams rendered through a replaceable wterm agent UI, and a persistent caller-owned Vercel Sandbox with a separate ephemeral wterm operator shell. |
@@ -604,7 +604,7 @@ tracing, and benchmark gates; stable crates never depend on them.
 | [`nanocodex-tools`](crates/nanocodex-tools/README.md) | Stable, published | Tool contract, standard tools, shell/process lifecycle, Code Mode, deferred search, MCP, and remote dispatch. |
 | [`nanocodex-subagents`](crates/nanocodex-subagents/README.md) | Source/Git-only optional workspace extension | Task-tree lifecycle and the seven canonical child-agent tools above the core. |
 | [`nanocodex-observability`](crates/nanocodex-observability/README.md) | Stable, published, optional | Full-fidelity tracing and application-owned OpenTelemetry initialization. |
-| [`nanocodex` for JavaScript](js/bindings/README.md) | Published headless core binding; narrow source companions | Node/browser hosts around the Rust/WASM agent, plus the React hooks, optional terminal presentation, and artifacts packages under [`js/`](js/README.md). Agent lifecycle remains headless and caller-owned. |
+| [`nanocodex` for JavaScript](js/nanocodex/README.md) | Published headless core binding; narrow source companions | Node/browser hosts around the Rust/WASM agent, plus React hooks, Vite integration, and optional terminal presentation under [`js/`](js/README.md). Agent lifecycle remains headless and caller-owned. |
 | [`nanocodex` for Python](py/bindings/README.md) | Source-distributed language binding | Native PyO3 consumer of the Rust-owned lifecycle, built and tested with Maturin. |
 | [`nanocodex-browser`](crates/experimental/nanocodex-browser/README.md) | Experimental, unpublished | Deterministic Chromium control and optional headed browser VM. |
 | [`nanocodex-vm`](crates/experimental/nanocodex-vm/README.md) | Experimental, unpublished | libkrun images, retained/ephemeral guests, and canonical VM-backed workspace tools. |
@@ -640,7 +640,7 @@ crates/
 ├── nanocodex-subagents/        optional task-tree extension
 ├── nanocodex-observability/    optional tracing and OTLP setup
 └── experimental/               browser, VM, voice, egress, eval
-js/                             Node, browser/WASM, React, artifacts, TUI
+js/                             npm packages, account/Connect apps, Workers
 py/                             native Python binding
 bin/nanocodex/                  CLI and Ratatui product consumer
 examples/                       native, language, browser, actor, sandbox proofs

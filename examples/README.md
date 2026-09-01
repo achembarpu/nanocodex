@@ -56,7 +56,7 @@ npm run subagents --prefix examples/node -- "Review the JS API"
 just build-react-example
 just build-rivet-example
 just build-cloudflare-example
-npm run check --prefix services/egress
+npm run check --prefix js/egress
 just build-vercel-example
 ```
 

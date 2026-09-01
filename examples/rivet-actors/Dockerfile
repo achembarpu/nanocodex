@@ -10,16 +10,16 @@ RUN rustup target add wasm32-unknown-unknown \
     && wasm_bindgen_version="$(awk '/^name = "wasm-bindgen"$/ { getline; gsub(/"/, "", $3); print $3; exit }' Cargo.lock)" \
     && test -n "$wasm_bindgen_version" \
     && cargo install wasm-bindgen-cli --version "$wasm_bindgen_version" --locked
-COPY js/bindings/package.json js/bindings/package-lock.json ./js/bindings/
-RUN npm ci --prefix js/bindings
+COPY js/nanocodex/package.json js/nanocodex/package-lock.json ./js/nanocodex/
+RUN npm ci --prefix js/nanocodex
 COPY . .
-RUN ./scripts/build-js-package.sh
-RUN package="$(npm pack ./js/bindings --pack-destination /tmp --silent | tail -n 1)" \
+RUN ./js/nanocodex-vite/scripts/build-js-package.sh
+RUN package="$(npm pack ./js/nanocodex --pack-destination /tmp --silent | tail -n 1)" \
     && mv "/tmp/$package" /tmp/nanocodex.tgz
 
 FROM node:24-bookworm-slim AS app-builder
 WORKDIR /app
-COPY --from=wasm-builder /src/js/bindings ./js/bindings
+COPY --from=wasm-builder /src/js/nanocodex ./js/nanocodex
 COPY --from=wasm-builder /tmp/nanocodex.tgz /tmp/nanocodex.tgz
 COPY examples/rivet-actors/package.json examples/rivet-actors/package-lock.json ./examples/rivet-actors/
 RUN npm ci --prefix examples/rivet-actors \

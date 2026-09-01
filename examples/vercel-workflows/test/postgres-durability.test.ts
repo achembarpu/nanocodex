@@ -274,7 +274,7 @@ describe("Vercel PostgreSQL durability store", () => {
 
   it("round-trips one compacted multi-turn Agent through Cloudflare and PostgreSQL", async () => {
     const module = await readFile(
-      new URL("../../../js/bindings/pkg-web/nanocodex_bg.wasm", import.meta.url),
+      new URL("../../../js/nanocodex/pkg-web/nanocodex_bg.wasm", import.meta.url),
     );
     const server = await startResponsesServer();
     const pool = new PGlitePool();

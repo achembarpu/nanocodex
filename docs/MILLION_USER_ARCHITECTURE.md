@@ -190,15 +190,15 @@ per-agent historical data retained in the hot SQLite database.
 
 Current source anchors:
 
-- `services/managed/src/index.ts` owns the session, managed turns, managed
+- `js/managed/src/index.ts` owns the session, managed turns, managed
   event projection, and idempotent create/cleanup state machine;
-- `services/managed/src/account-auth.ts` owns the row-wise account agent index;
-- `services/managed/src/durable-events.ts` owns managed cursor replay;
-- `js/bindings/cloudflare/Agent.mjs` installs the raw AgentEvent projection;
-- `js/bindings/cloudflare/event-socket.mjs` retains raw AgentEvents;
-- `js/bindings/runtime/durability-store.mjs` retains and reloads one complete
+- `js/managed/src/account-auth.ts` owns the row-wise account agent index;
+- `js/managed/src/durable-events.ts` owns managed cursor replay;
+- `js/nanocodex/cloudflare/Agent.mjs` installs the raw AgentEvent projection;
+- `js/nanocodex/cloudflare/event-socket.mjs` retains raw AgentEvents;
+- `js/nanocodex/runtime/durability-store.mjs` retains and reloads one complete
   current-state value; and
-- `services/egress/src/egress.ts` and `services/egress/src/broker.ts` route to
+- `js/egress/src/egress.ts` and `js/egress/src/broker.ts` route to
   and own the direct one-subject state machines.
 
 ## What currently grows

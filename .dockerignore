@@ -10,10 +10,9 @@
 **/.wrangler
 **/node_modules
 **/dist
-bindings
 generated_images
-js/bindings/pkg-node
-js/bindings/pkg-web
+js/nanocodex/pkg-node
+js/nanocodex/pkg-web
 py/bindings/python/nanocodex/*.so
 py/bindings/python/nanocodex/*.dylib
 py/bindings/python/nanocodex/*.pyd
@@ -21,6 +20,6 @@ jobs
 reverse-me
 target
 trials
-web/public/data
+js/account/public/data
 **/__pycache__
 **/*.pyc

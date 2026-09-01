@@ -1,4 +1,4 @@
-import { nanocodex } from "nanocodex/vite";
+import { nanocodex } from "nanocodex-vite";
 import { defineConfig } from "wxt";
 
 export default defineConfig({

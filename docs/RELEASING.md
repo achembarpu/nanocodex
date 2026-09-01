@@ -1,7 +1,7 @@
 # Releasing Nanocodex
 
 Nanocodex releases eight crates.io packages in lockstep with the CLI binaries and
-npm package. The process combines Alloy's conventional-commit changelog with
+the `nanocodex` and `nanocodex-vite` npm packages. The process combines Alloy's conventional-commit changelog with
 Foundry's label-grouped, contributor-attributed GitHub release notes.
 
 ## Nightly releases
@@ -28,13 +28,14 @@ one invocation.
 ## JavaScript package previews
 
 Every pull request and every commit merged to `master` builds and tests the
-actual Node/browser WASM package, then publishes an immutable SHA-addressed
-preview through pkg.pr.new. The workflow can also be dispatched manually for a
+actual Node/browser WASM and Vite packages, then publishes immutable SHA-addressed
+previews through pkg.pr.new. The workflow can also be dispatched manually for a
 selected ref. Preview package versions are rewritten to
 `0.0.0-preview-<sha>` so a lockfile cannot confuse them with an npm release.
 
 Install the pkg.pr.new GitHub App on `gakonst/nanocodex`; the preview CLI is a
-pinned development dependency in `js/bindings/package-lock.json`. Pull-request
+pinned development dependency in the `js/nanocodex` and `js/nanocodex-vite`
+lockfiles. Pull-request
 comments use commit URLs, so every tested artifact remains reproducible after
 new commits are pushed.
 
@@ -82,7 +83,8 @@ Then prepare a release pull request from the latest `master`:
 
 1. Choose a new semantic version and update `workspace.package.version` plus every
    `nanocodex*` entry in `workspace.dependencies` in `Cargo.toml`, and keep
-   `js/bindings/package.json` on that same version. Never reuse a version
+   `js/nanocodex/package.json` and `js/nanocodex-vite/package.json` on that same
+   version. Never reuse a version
    already published to crates.io; the stable-API refactor after `0.2.0` is
    source-breaking and therefore requires a new version.
 2. Run `cargo check --workspace` to refresh `Cargo.lock`.

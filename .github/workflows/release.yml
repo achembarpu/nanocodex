@@ -28,7 +28,8 @@ jobs:
         run: |
           version=$(cargo metadata --no-deps --format-version 1 | jq -er '.packages[] | select(.name == "nanocodex") | .version')
           test "$GITHUB_REF_NAME" = "v$version"
-          test "$(node -p "require('./js/bindings/package.json').version")" = "$version"
+          test "$(node -p "require('./js/nanocodex/package.json').version")" = "$version"
+          test "$(node -p "require('./js/nanocodex-vite/package.json').version")" = "$version"
           test "$(cargo metadata --no-deps --format-version 1 | jq -er '.packages[] | select(.name == "nanocodex-python") | .version')" = "$version"
           grep -Fq 'dynamic = ["version"]' py/bindings/pyproject.toml
           grep -Fq "## [$version]" CHANGELOG.md
@@ -186,7 +187,7 @@ jobs:
           ./scripts/publish-crates.sh
 
   publish-npm:
-    name: publish npm package
+    name: publish npm packages
     needs: validate
     runs-on: ubuntu-22.04
     timeout-minutes: 30
@@ -214,48 +215,60 @@ jobs:
       - name: Build and test the publishable package
         shell: bash
         run: |
-          npm ci --prefix js/bindings
-          ./scripts/build-js-package.sh
-          npm test --prefix js/bindings
-          cd js/bindings
-          npm pack --dry-run
-      - name: Publish immutable npm version
+          npm ci --prefix js/nanocodex
+          npm ci --prefix js/nanocodex-vite
+          ./js/nanocodex-vite/scripts/build-js-package.sh
+          npm test --prefix js/nanocodex
+          npm test --prefix js/nanocodex-vite
+          (cd js/nanocodex && npm pack --dry-run)
+          (cd js/nanocodex-vite && npm pack --dry-run)
+      - name: Publish immutable npm versions
         shell: bash
-        working-directory: js/bindings
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
-          version=$(node -p "require('./package.json').version")
-
           is_published() {
-            [[ "$(npm view "nanocodex@$version" version 2>/dev/null || true)" == "$version" ]]
+            local package_name="$1"
+            local version="$2"
+            [[ "$(npm view "$package_name@$version" version 2>/dev/null || true)" == "$version" ]]
           }
 
-          if is_published; then
-            echo "nanocodex@$version is already published"
-            exit 0
-          fi
+          publish_package() {
+            local package_dir="$1"
+            local package_name
+            local version
+            package_name=$(node -p "require('./$package_dir/package.json').name")
+            version=$(node -p "require('./$package_dir/package.json').version")
 
-          if ! npm publish --access public --provenance; then
-            if is_published; then
-              echo "nanocodex@$version was published despite the client error"
-              exit 0
+            if is_published "$package_name" "$version"; then
+              echo "$package_name@$version is already published"
+              return
             fi
-            echo "npm publish failed and nanocodex@$version is not available" >&2
-            exit 1
-          fi
 
-          for attempt in {1..12}; do
-            if is_published; then
-              echo "nanocodex@$version is available from the registry"
-              exit 0
+            if ! (cd "$package_dir" && npm publish --access public --provenance); then
+              if is_published "$package_name" "$version"; then
+                echo "$package_name@$version was published despite the client error"
+                return
+              fi
+              echo "npm publish failed and $package_name@$version is not available" >&2
+              return 1
             fi
-            echo "Waiting for nanocodex@$version registry propagation (attempt $attempt/12)..."
-            sleep 10
-          done
 
-          echo "nanocodex@$version was published but did not propagate within 120 seconds" >&2
-          exit 1
+            for attempt in {1..12}; do
+              if is_published "$package_name" "$version"; then
+                echo "$package_name@$version is available from the registry"
+                return
+              fi
+              echo "Waiting for $package_name@$version registry propagation (attempt $attempt/12)..."
+              sleep 10
+            done
+
+            echo "$package_name@$version did not propagate within 120 seconds" >&2
+            return 1
+          }
+
+          publish_package js/nanocodex
+          publish_package js/nanocodex-vite
 
   finalize-release:
     name: attach GitHub release assets

@@ -22,7 +22,7 @@ members = [
     "crates/nanocodex-tools/macros",
     "examples",
     "examples/exe-dev",
-    "js/bindings",
+    "js/nanocodex",
     "py/bindings",
 ]
 # Root Cargo commands target the public library facade. Use `just run` or

@@ -72,7 +72,7 @@ and require one fresh approval because they do not identify a durable agent.
 ## Build and check
 
 ```sh
-npm ci --prefix js/bindings
+npm ci --prefix js/nanocodex
 npm ci --prefix extensions/chrome
 npm test --prefix extensions/chrome
 npm run build --prefix extensions/chrome

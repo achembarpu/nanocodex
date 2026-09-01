@@ -3,9 +3,9 @@ extend-exclude = [
     ".nanocodex/",
     "crates/experimental/nanocodex-browser/assets/axe.js",
     "crates/experimental/nanocodex-browser/assets/react_diagnostics.js",
-    "web/public/data/",
-    "web/src/data/harness-repository.json",
-    "web/worker-configuration.d.ts",
+    "js/account/public/data/",
+    "js/account/src/data/harness-repository.json",
+    "js/account/worker-configuration.d.ts",
 ]
 
 [default.extend-words]

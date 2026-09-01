@@ -12,7 +12,7 @@
   "dependencies": {
     "accounts": "^0.15.5",
     "mppx": "^0.8.14",
-    "nanocodex": "file:../../js/bindings",
+    "nanocodex": "file:../../js/nanocodex",
     "viem": "^2.55.8",
     "ws": "^8.18.3"
   },

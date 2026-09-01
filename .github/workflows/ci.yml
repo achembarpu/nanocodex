@@ -164,14 +164,14 @@ jobs:
           node-version: 22.15.0
           cache: npm
           cache-dependency-path: |
-            js/bindings/package-lock.json
-            js/artifacts/package-lock.json
-            js/react/package-lock.json
-            js/terminal/package-lock.json
+            js/nanocodex/package-lock.json
+            js/nanocodex-react/package-lock.json
+            js/nanocodex-vite/package-lock.json
+            js/nanocodex-terminal/package-lock.json
             examples/node/package-lock.json
             examples/rivet-actors/package-lock.json
-            services/egress/package-lock.json
-            services/managed/package-lock.json
+            js/egress/package-lock.json
+            js/managed/package-lock.json
             examples/vercel-workflows/package-lock.json
             examples/react-vite/package-lock.json
       - uses: taiki-e/install-action@3522286d40783523f9c7880e33f785905b4c20d0 # v2
@@ -186,41 +186,41 @@ jobs:
             --package nanocodex \
             --package nanocodex-wasm \
             -- -D warnings
-          npm ci --prefix js/bindings
-          npm ci --prefix js/artifacts
-          npm ci --prefix js/react
-          npm ci --prefix js/terminal
-          ./scripts/build-js-package.sh
+          npm ci --prefix js/nanocodex
+          npm ci --prefix js/nanocodex-react
+          npm ci --prefix js/nanocodex-vite
+          npm ci --prefix js/nanocodex-terminal
+          ./js/nanocodex-vite/scripts/build-js-package.sh
           npm ci --prefix examples/node
           npm ci --prefix examples/rivet-actors
-          npm ci --prefix services/egress
-          npm ci --prefix services/managed
+          npm ci --prefix js/egress
+          npm ci --prefix js/managed
           npm ci --prefix examples/vercel-workflows
           npm ci --prefix examples/react-vite
       - name: Test JS runtime
-        working-directory: js/bindings
+        working-directory: js/nanocodex
         run: |
           node --test --test-timeout=15000 test/*.test.mjs
           npm run test:performance
       - name: Check JS consumers
         run: |
-          npm run test:typecheck --prefix js/bindings
-          npm run check:package --prefix js/bindings
-          npm test --prefix js/artifacts
-          npm test --prefix js/react
-          npm test --prefix js/terminal
+          npm run test:typecheck --prefix js/nanocodex
+          npm run check:package --prefix js/nanocodex
+          npm test --prefix js/nanocodex-react
+          npm test --prefix js/nanocodex-vite
+          npm test --prefix js/nanocodex-terminal
           node --test examples/browser-cdn/*.test.mjs
           npm test --prefix examples/node
           npm run check --prefix examples/rivet-actors
-          npm run check --prefix services/egress
-          npm run check --prefix services/managed
+          npm run check --prefix js/egress
+          npm run check --prefix js/managed
           npm run check --prefix examples/vercel-workflows
           npm test --prefix examples/react-vite
           npm run build --prefix examples/react-vite
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: nanocodex-web-wasm
-          path: js/bindings/pkg-web
+          path: js/nanocodex/pkg-web
           if-no-files-found: error
 
   python:
@@ -285,8 +285,8 @@ jobs:
           "$RUNNER_TEMP/nanocodex-python/bin/python" -m compileall \
             -q "$GITHUB_WORKSPACE/examples/python"
 
-  web:
-    name: website
+  apps:
+    name: JavaScript apps
     needs: bindings
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -301,29 +301,34 @@ jobs:
           node-version: 22.15.0
           cache: npm
           cache-dependency-path: |
-            js/bindings/package-lock.json
-            js/react/package-lock.json
-            js/artifacts/package-lock.json
-            js/terminal/package-lock.json
-            web/connect-playground/package-lock.json
-            web/package-lock.json
+            js/nanocodex/package-lock.json
+            js/nanocodex-react/package-lock.json
+            js/nanocodex-vite/package-lock.json
+            js/nanocodex-terminal/package-lock.json
+            js/account/package-lock.json
+            js/connect-dialog/package-lock.json
+            js/connect-playground/package-lock.json
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: nanocodex-web-wasm
-          path: js/bindings/pkg-web
+          path: js/nanocodex/pkg-web
       - name: Build local website packages
         run: |
-          npm ci --prefix js/bindings
-          npm ci --prefix js/react
-          npm ci --prefix js/terminal
-          npm run build --prefix js/terminal
-          npm ci --prefix web/connect-playground
-          npm ci --prefix web
-      - name: Type-check and build the website
-        working-directory: web
+          npm ci --prefix js/nanocodex
+          npm ci --prefix js/nanocodex-react
+          npm ci --prefix js/nanocodex-vite
+          npm ci --prefix js/nanocodex-terminal
+          npm run build --prefix js/nanocodex-terminal
+          npm ci --prefix js/account
+          npm ci --prefix js/connect-dialog
+          npm ci --prefix js/connect-playground
+      - name: Type-check and build the account app
+        working-directory: js/account
         run: npm run test:web && npm run build
+      - name: Type-check and build the Connect dialog
+        run: npm run build --prefix js/connect-dialog
       - name: Type-check and build the Connect playground
-        run: npm run build --prefix web/connect-playground
+        run: npm run build --prefix js/connect-playground
   codeql:
     name: CodeQL actions
     runs-on: ubuntu-latest
@@ -347,7 +352,7 @@ jobs:
   ci-success:
     name: ci success
     if: always()
-    needs: [test, quality, vm-guest, policy, bindings, python, web, codeql]
+    needs: [test, quality, vm-guest, policy, bindings, python, apps, codeql]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -359,7 +364,7 @@ jobs:
           POLICY: ${{ needs.policy.result }}
           BINDINGS: ${{ needs.bindings.result }}
           PYTHON: ${{ needs.python.result }}
-          WEB: ${{ needs.web.result }}
+          APPS: ${{ needs.apps.result }}
           CODEQL: ${{ needs.codeql.result }}
         run: |
           test "$TEST" = success
@@ -368,5 +373,5 @@ jobs:
           test "$POLICY" = success
           test "$BINDINGS" = success
           test "$PYTHON" = success
-          test "$WEB" = success
+          test "$APPS" = success
           test "$CODEQL" = success

@@ -20,7 +20,7 @@
     "@modelcontextprotocol/sdk": "1.30.0",
     "minisearch": "7.2.0",
     "mppx": "0.8.17",
-    "nanocodex": "file:../../js/bindings",
+    "nanocodex": "file:../../js/nanocodex",
     "quickjs-emscripten-core": "0.32.0",
     "viem": "2.55.8"
   },

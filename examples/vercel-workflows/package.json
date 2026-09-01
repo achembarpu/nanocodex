@@ -23,7 +23,7 @@
     "@vercel/sandbox": "2.9.2",
     "@wterm/dom": "0.3.4",
     "@wterm/react": "0.3.4",
-    "nanocodex": "file:../../js/bindings",
+    "nanocodex": "file:../../js/nanocodex",
     "next": "16.3.1",
     "pg": "8.23.0",
     "react": "19.2.8",

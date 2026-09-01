@@ -35,22 +35,27 @@ jobs:
         with:
           node-version: 22.13.0
           cache: npm
-          cache-dependency-path: js/bindings/package-lock.json
+          cache-dependency-path: |
+            js/nanocodex/package-lock.json
+            js/nanocodex-vite/package-lock.json
       - uses: taiki-e/install-action@3522286d40783523f9c7880e33f785905b4c20d0 # v2
         with:
           tool: wasm-bindgen-cli@0.2.126
       - name: Build package
         run: |
-          npm ci --prefix js/bindings
-          ./scripts/build-js-package.sh
+          npm ci --prefix js/nanocodex
+          npm ci --prefix js/nanocodex-vite
+          ./js/nanocodex-vite/scripts/build-js-package.sh
       - name: Test JS runtime
-        working-directory: js/bindings
+        working-directory: js/nanocodex
         run: node --test --test-timeout=15000 test/*.test.mjs
       - name: Check package
-        working-directory: js/bindings
         run: |
-          npm run test:typecheck
-          npm run check:package
-      - name: Publish immutable commit preview
-        working-directory: js/bindings
-        run: npm exec -- pkg-pr-new publish --previewVersion --compact --commentWithSha .
+          npm run test:typecheck --prefix js/nanocodex
+          npm run check:package --prefix js/nanocodex
+          npm test --prefix js/nanocodex-vite
+      - name: Publish immutable commit previews
+        working-directory: js/nanocodex
+        run: >-
+          npm exec -- pkg-pr-new publish --previewVersion --compact
+          --commentWithSha . ../nanocodex-vite
