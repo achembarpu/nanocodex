@@ -19,6 +19,7 @@ export type BrowserToolMap = Record<string, BrowserTool>;
 type BrowserWebSocketMetadata = {
   accountId?: string | undefined;
   fedramp?: boolean | undefined;
+  threadId?: string | undefined;
   turnState?: string | undefined;
 };
 

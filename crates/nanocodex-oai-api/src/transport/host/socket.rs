@@ -37,14 +37,16 @@ impl ResponsesSocket {
         endpoint: &str,
         auth: &OpenAiAuthSnapshot,
         session_id: &str,
+        thread_id: &str,
         turn_state: Option<&str>,
     ) -> Result<(Self, ConnectionMetadata), ResponsesError> {
-        let request = HostConnectRequest::new(
+        let request = HostConnectRequest::new_with_thread_id(
             endpoint,
             auth.bearer(),
             auth.account_id(),
             auth.is_fedramp(),
             session_id,
+            thread_id,
             turn_state,
         );
         let (connection, metadata) = host

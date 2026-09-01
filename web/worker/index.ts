@@ -811,10 +811,14 @@ async function upgradeResponsesWebSocket(
   if (!sessionId || !/^[A-Za-z0-9._:-]{1,200}$/.test(sessionId)) {
     return new Response("Invalid session", { status: 400 });
   }
+  const threadId = url.searchParams.get("thread_id") ?? sessionId;
+  if (!/^[A-Za-z0-9._:-]{1,200}$/.test(threadId)) {
+    return new Response("Invalid thread", { status: 400 });
+  }
   const pair = new WebSocketPair();
   const [client, server] = Object.values(pair);
   server.accept();
-  const setup = setupResponsesWebSocket(request, env, sessionId, server, context);
+  const setup = setupResponsesWebSocket(request, env, sessionId, threadId, server, context);
   if (context) context.waitUntil(setup);
   else void setup;
   return new Response(null, { status: 101, webSocket: client });
@@ -824,6 +828,7 @@ async function setupResponsesWebSocket(
   request: Request,
   env: WorkerEnv,
   sessionId: string,
+  threadId: string,
   downstream: WebSocket,
   context?: ExecutionContext,
 ): Promise<void> {
@@ -863,7 +868,7 @@ async function setupResponsesWebSocket(
       }
       if (downstreamClosed) return;
       try {
-        const opened = await openManagedResponsesWebSocket(managed, sessionId);
+        const opened = await openManagedResponsesWebSocket(managed, sessionId, threadId);
         upstream = opened.socket;
         upstreamAccepted = true;
       } catch (error) {
@@ -897,6 +902,7 @@ async function setupResponsesWebSocket(
         env,
         credential,
         sessionId,
+        threadId,
         chatGptApiBaseUrl(env),
       );
       if (credential.kind === "chatgpt" && upstreamResponse.status === 401) {
@@ -908,6 +914,7 @@ async function setupResponsesWebSocket(
             env,
             credential,
             sessionId,
+            threadId,
             chatGptApiBaseUrl(env),
           );
         }
@@ -1056,6 +1063,7 @@ function openResponsesWebSocket(
   env: WorkerEnv,
   credential: Credential,
   sessionId: string,
+  threadId: string,
   chatGptBaseUrl: string,
 ): Promise<Response> {
   const headers: Record<string, string> = {
@@ -1064,8 +1072,8 @@ function openResponsesWebSocket(
     "OpenAI-Beta": RESPONSES_WEBSOCKETS_BETA,
     "x-openai-internal-codex-responses-lite": "true",
     "session-id": sessionId,
-    "thread-id": sessionId,
-    "x-client-request-id": sessionId,
+    "thread-id": threadId,
+    "x-client-request-id": threadId,
     "x-responsesapi-include-timing-metrics": "true",
     originator: CODEX_ORIGINATOR,
     "User-Agent": CODEX_USER_AGENT,

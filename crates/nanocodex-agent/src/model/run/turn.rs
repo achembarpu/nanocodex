@@ -670,6 +670,7 @@ where
     ) -> ModelCheckpoint {
         ModelCheckpoint {
             workspace: session.workspace.clone(),
+            provider_session_id: Arc::from(session.factory.profile().session_id()),
             conversation: session.conversation.clone(),
             request_prefix: session.factory.profile().shared_prefix(),
             prompt_cache_key: Arc::from(session.factory.profile().prompt_cache_key()),
@@ -687,6 +688,7 @@ where
         session.conversation.commit_tail();
         snapshots.send_replace(Some(ModelCheckpoint {
             workspace: session.workspace.clone(),
+            provider_session_id: Arc::from(session.factory.profile().session_id()),
             conversation: session.conversation.clone(),
             request_prefix: session.factory.profile().shared_prefix(),
             prompt_cache_key: Arc::from(session.factory.profile().prompt_cache_key()),

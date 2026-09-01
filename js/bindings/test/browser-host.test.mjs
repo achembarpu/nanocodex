@@ -540,6 +540,47 @@ test("browser host preconnects once and gives the exact socket to the first mode
   }]);
 });
 
+test("browser forks close an incompatible preconnect before opening their routed thread", async () => {
+  const endpoint = "wss://api.openai.test/v1/responses";
+  const preconnected = new FakeWebSocket(endpoint);
+  const routed = new FakeWebSocket(endpoint);
+  preconnected.readyState = FakeWebSocket.OPEN;
+  routed.readyState = FakeWebSocket.OPEN;
+  const requests = [];
+  const host = createBrowserHost({
+    hostAuth: true,
+    createWebSocket(url, sessionId, request) {
+      requests.push({ url, sessionId, request });
+      return requests.length === 1 ? preconnected : routed;
+    },
+  });
+
+  await host.preconnect(endpoint, "thread-1");
+  const connected = JSON.parse(await host.connect(
+    endpoint,
+    "host-managed",
+    "provider-session",
+    { threadId: "thread-1" },
+  ));
+
+  assert.equal(connected.status, 101);
+  assert.equal(preconnected.readyState, 3);
+  assert.equal(routed.readyState, FakeWebSocket.OPEN);
+  assert.deepEqual(requests, [
+    {
+      url: endpoint,
+      sessionId: "thread-1",
+      request: { authorization: "preconnect" },
+    },
+    {
+      url: endpoint,
+      sessionId: "provider-session",
+      request: { authorization: "host_managed", threadId: "thread-1" },
+    },
+  ]);
+  await host.dispose();
+});
+
 test("disposing a host owns a taken preconnect through handshake completion", async () => {
   const handshake = deferred();
   const socket = new FakeWebSocket("wss://api.openai.test/v1/responses");

@@ -84,12 +84,14 @@ export async function managedModelStatus(access: ManagedModelAccess): Promise<Ma
 export function openManagedResponsesWebSocket(
   access: ManagedModelAccess,
   sessionId: string,
+  threadId: string = sessionId,
 ) {
   const endpoint = cloudflareEgress({
     binding: access.binding,
   });
   return endpoint.createWebSocket(endpoint.websocketUrl, sessionId, {
     authorization: "host_managed",
+    threadId,
   });
 }
 

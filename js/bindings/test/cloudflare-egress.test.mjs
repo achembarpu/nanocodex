@@ -62,7 +62,11 @@ test("Cloudflare EGRESS sends one fixed placeholder through the private binding"
     const connection = await options.createWebSocket(
       options.websocketUrl,
       "runtime-session-1",
-      { authorization: "host_managed", turnState: "current-state" },
+      {
+        authorization: "host_managed",
+        threadId: "runtime-thread-1",
+        turnState: "current-state",
+      },
     );
     assert.equal(calls.length, 1);
     assert.equal(calls[0].input, "https://nanocodex.internal/v1/responses");
@@ -72,8 +76,8 @@ test("Cloudflare EGRESS sends one fixed placeholder through the private binding"
     assert.equal(headers.get("chatgpt-account-id"), null);
     assert.equal(headers.get("openai-beta"), "responses_websockets=2026-02-06");
     assert.equal(headers.get("session-id"), "runtime-session-1");
-    assert.equal(headers.get("thread-id"), "runtime-session-1");
-    assert.equal(headers.get("x-client-request-id"), "runtime-session-1");
+    assert.equal(headers.get("thread-id"), "runtime-thread-1");
+    assert.equal(headers.get("x-client-request-id"), "runtime-thread-1");
     assert.equal(headers.get("x-codex-turn-state"), "current-state");
     assert.equal(headers.get("x-nanocodex-subject"), "c".repeat(64));
     assert.equal(headers.get("upgrade"), "websocket");

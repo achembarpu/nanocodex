@@ -11,6 +11,7 @@ use crate::{ModelConfig, Thinking};
 #[derive(Clone)]
 pub struct RequestProfile {
     session_id: String,
+    thread_id: String,
     prompt_cache_key: String,
     prefix: Arc<[ResponseItem]>,
     code_mode_tool_names: Arc<BTreeMap<String, CodeModeToolName>>,
@@ -24,8 +25,10 @@ impl RequestProfile {
         prompt_cache_key: impl Into<String>,
         prefix: Arc<[ResponseItem]>,
     ) -> Self {
+        let session_id = session_id.into();
         Self {
-            session_id: session_id.into(),
+            thread_id: session_id.clone(),
+            session_id,
             prompt_cache_key: prompt_cache_key.into(),
             prefix,
             code_mode_tool_names: Arc::default(),
@@ -36,6 +39,19 @@ impl RequestProfile {
     #[must_use]
     pub fn session_id(&self) -> &str {
         &self.session_id
+    }
+
+    /// Returns the current agent thread identity.
+    #[must_use]
+    pub fn thread_id(&self) -> &str {
+        &self.thread_id
+    }
+
+    /// Uses a fresh thread identity while retaining the provider session.
+    #[must_use]
+    pub fn with_thread_id(mut self, thread_id: impl Into<String>) -> Self {
+        self.thread_id = thread_id.into();
+        self
     }
 
     /// Returns the stable prompt-cache identity.
@@ -616,7 +632,7 @@ impl<'a> ResponseCreate<'a> {
             generate,
             client_metadata: ClientMetadata {
                 session_id: profile.session_id(),
-                thread_id: profile.session_id(),
+                thread_id: profile.thread_id(),
                 responses_lite: websocket.then_some("true"),
                 turn_state: websocket.then_some(turn_state).flatten(),
                 turn_metadata: (!profile.code_mode_tool_names.is_empty()).then_some(
@@ -721,13 +737,14 @@ mod tests {
                 text: "system prompt".into(),
             }],
         )]);
-        let profile = RequestProfile::new("branch-a", "lineage-a", prefix);
+        let profile =
+            RequestProfile::new("session-a", "lineage-a", prefix).with_thread_id("branch-a");
         let request =
             ResponseCreate::warmup(&config, Model::Sol, Thinking::Low, false, &profile, None);
         let request = serde_json::to_value(request).expect("request should serialize");
 
         assert_eq!(request["prompt_cache_key"], json!("lineage-a"));
-        assert_eq!(request["client_metadata"]["session_id"], json!("branch-a"));
+        assert_eq!(request["client_metadata"]["session_id"], json!("session-a"));
         assert_eq!(request["client_metadata"]["thread_id"], json!("branch-a"));
         assert_eq!(request["store"], false);
         assert_eq!(request["generate"], false);

@@ -70,6 +70,7 @@ where
         } else {
             ModelRun::new(
                 self.events.clone(),
+                Arc::clone(&self.spawner.provider_session_id),
                 Arc::clone(&self.spawner.config),
                 self.client,
                 Arc::clone(&self.transport_stats),
@@ -1569,6 +1570,7 @@ where
     } else {
         ModelRun::new(
             events.clone(),
+            Arc::clone(&spawner.provider_session_id),
             Arc::clone(&spawner.config),
             client,
             Arc::clone(transport_stats),

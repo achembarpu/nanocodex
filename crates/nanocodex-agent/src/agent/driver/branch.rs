@@ -4,6 +4,7 @@ pub(in crate::agent) struct BranchSpawner<S> {
     pub(in crate::agent) config: Arc<ModelConfig>,
     pub(in crate::agent) tools: ToolsConfiguration,
     pub(in crate::agent) lineage_id: Arc<str>,
+    pub(in crate::agent) provider_session_id: Arc<str>,
     pub(in crate::agent) prompt_cache_key: Option<Arc<str>>,
     pub(in crate::agent) shared_prompt_cache: Option<SharedPromptCache>,
     pub(in crate::agent) context_config: ContextSourceConfig,
@@ -26,6 +27,7 @@ impl<S> BranchSpawner<S> {
             config: Arc::clone(&self.config),
             tools: self.tools.clone(),
             lineage_id: Arc::clone(&self.lineage_id),
+            provider_session_id: Arc::clone(&self.provider_session_id),
             prompt_cache_key: self.prompt_cache_key.as_ref().map(Arc::clone),
             shared_prompt_cache: self.shared_prompt_cache.clone(),
             context_config: self.context_config.clone(),
@@ -134,6 +136,7 @@ where
                 || {
                     InitialResume::History(Box::new(HistoryCheckpoint {
                         workspace: restored_workspace.clone(),
+                        provider_session_id: Arc::clone(&lineage_id),
                         canonical_context,
                         history,
                         prompt_cache_key: Arc::clone(&prompt_cache_key),
@@ -160,6 +163,7 @@ where
             config: Arc::new(config),
             tools: self.tools.clone(),
             lineage_id,
+            provider_session_id: Arc::clone(&self.provider_session_id),
             prompt_cache_key: Some(prompt_cache_key),
             shared_prompt_cache: self.shared_prompt_cache.clone(),
             context_config: self.context_config.clone(),

@@ -47,6 +47,10 @@ async function openBrokeredWebSocket(
   if (typeof sessionId !== "string" || !sessionId) {
     throw new TypeError("Cloudflare EGRESS requires a non-empty session ID");
   }
+  const threadId = request?.threadId ?? sessionId;
+  if (typeof threadId !== "string" || !threadId) {
+    throw new TypeError("Cloudflare EGRESS requires a non-empty thread ID");
+  }
   const url = exactWebSocketEndpoint(endpoint, BROKER_WEBSOCKET_URL);
   url.protocol = "https:";
   const headers = new Headers({
@@ -54,8 +58,8 @@ async function openBrokeredWebSocket(
     Upgrade: "websocket",
     "OpenAI-Beta": OPENAI_WEBSOCKET_BETA,
     "session-id": sessionId,
-    "thread-id": sessionId,
-    "x-client-request-id": sessionId,
+    "thread-id": threadId,
+    "x-client-request-id": threadId,
     "x-openai-internal-codex-responses-lite": "true",
     "x-responsesapi-include-timing-metrics": "true",
     "User-Agent": "nanocodex-js/cloudflare",

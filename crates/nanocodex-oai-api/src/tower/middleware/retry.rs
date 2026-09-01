@@ -149,7 +149,7 @@ impl Policy<ResponsesAttempt, ResponsesServiceResponse, ResponsesServiceError>
             return Some(
                 self.delay
                     .clone_for_retry()
-                    .wait(request.profile.session_id().to_owned(), Duration::ZERO),
+                    .wait(request.profile.thread_id().to_owned(), Duration::ZERO),
             );
         }
         if !checkpoint_missing && advice.is_none() {
@@ -217,10 +217,10 @@ impl Policy<ResponsesAttempt, ResponsesServiceResponse, ResponsesServiceError>
         }
         let stats = Arc::clone(&request.observer.stats);
         let delay_runtime = self.delay.clone_for_retry();
-        let session_id = request.profile.session_id().to_owned();
+        let thread_id = request.profile.thread_id().to_owned();
         Some(Box::pin(async move {
             let started_at = Instant::now();
-            delay_runtime.wait(session_id, delay).await;
+            delay_runtime.wait(thread_id, delay).await;
             stats
                 .retry_backoff_duration_ns
                 .fetch_add(elapsed_ns(started_at), Ordering::Relaxed);

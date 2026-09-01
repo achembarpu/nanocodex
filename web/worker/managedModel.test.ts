@@ -92,7 +92,7 @@ test("brokered sockets use the credentialless Cloudflare egress leaf", async () 
       } as unknown as Response;
     }),
   })!;
-  const opened = await openManagedResponsesWebSocket(access, "session-one");
+  const opened = await openManagedResponsesWebSocket(access, "session-one", "thread-one");
   assert.equal(opened.socket, socket);
   assert.equal(socket.accepted, true);
   assert.equal(socket.binaryType, "arraybuffer");
@@ -100,6 +100,8 @@ test("brokered sockets use the credentialless Cloudflare egress leaf", async () 
   assert.equal(forwarded?.headers.get("authorization"), "Bearer NANOCODEX_PROVIDER_CREDENTIAL");
   assert.equal(forwarded?.headers.get("chatgpt-account-id"), null);
   assert.equal(forwarded?.headers.get("session-id"), "session-one");
+  assert.equal(forwarded?.headers.get("thread-id"), "thread-one");
+  assert.equal(forwarded?.headers.get("x-client-request-id"), "thread-one");
 });
 
 test("managed Realtime call and sideband stay bound to one selected durable Agent", async () => {

@@ -244,75 +244,97 @@ function durabilityUint64(value, field) {
 
 export function createMemoryDurabilityStore(stateId, initial) {
   requireId(stateId, "state");
-  let state = copyState(initial ?? { revision: "0", payload: null });
-  let owner;
+  const states = new Map([[stateId, {
+    state: copyState(initial ?? { revision: "0", payload: null }),
+    owner: undefined,
+  }]]);
   const select = (selected) => {
-    if (selected !== stateId) throw new Error(`unknown durability state: ${selected}`);
+    requireId(selected, "state");
+    const entry = states.get(selected);
+    if (entry === undefined) throw new Error(`unknown durability state: ${selected}`);
+    return entry;
   };
   return Object.freeze({
     stateId,
     load(selected) {
-      select(selected);
-      return state;
+      return select(selected).state;
     },
     acquire(selected, request) {
-      select(selected);
+      requireId(selected, "state");
       const ownerId = requireId(request?.ownerId, "owner");
-      if (owner?.ownerId === ownerId) return acquiredState(owner, state);
-      const previousFence = owner?.fence ?? "0";
+      let entry = states.get(selected);
+      if (entry === undefined) {
+        entry = {
+          state: copyState({ revision: "0", payload: null }),
+          owner: Object.freeze({ ownerId, fence: "1" }),
+        };
+        states.set(selected, entry);
+        return acquiredState(entry.owner, entry.state);
+      }
+      if (entry.owner?.ownerId === ownerId) return acquiredState(entry.owner, entry.state);
+      const previousFence = entry.owner?.fence ?? "0";
       if (previousFence === MAX_REVISION_TEXT) {
         throw new RangeError("in-memory durability fence overflow");
       }
-      owner = Object.freeze({
+      entry.owner = Object.freeze({
         ownerId,
         fence: durabilityFence(BigInt(previousFence) + 1n),
       });
-      return acquiredState(owner, state);
+      return acquiredState(entry.owner, entry.state);
     },
     replace(selected, request) {
-      select(selected);
+      const entry = select(selected);
       const ownerId = requireId(request?.ownerId, "owner");
       const fence = durabilityFence(request?.fence);
-      if (ownerId !== owner?.ownerId || fence !== owner.fence) return { status: "fenced" };
+      if (ownerId !== entry.owner?.ownerId || fence !== entry.owner.fence) {
+        return { status: "fenced" };
+      }
       const expectedRevision = durabilityRevision(request?.expectedRevision);
-      if (expectedRevision !== state.revision) {
-        if (state.revision === nextRevision(expectedRevision)
+      if (expectedRevision !== entry.state.revision) {
+        if (entry.state.revision === nextRevision(expectedRevision)
           && typeof request?.payload === "string"
-          && state.payload === request.payload) {
-          return { status: "replaced", revision: state.revision };
+          && entry.state.payload === request.payload) {
+          return { status: "replaced", revision: entry.state.revision };
         }
-        return { status: "conflict", actualRevision: state.revision };
+        return { status: "conflict", actualRevision: entry.state.revision };
       }
       if (expectedRevision === MAX_REVISION_TEXT) {
         return { status: "not_committed", message: "in-memory durability revision overflow" };
       }
       const payload = requirePayload(request?.payload);
       const revision = durabilityRevision(BigInt(expectedRevision) + 1n);
-      state = Object.freeze({ revision, payload });
+      entry.state = Object.freeze({ revision, payload });
       return { status: "replaced", revision };
     },
     importState(selected, imported, options) {
-      select(selected);
+      requireId(selected, "state");
       const next = copyState(imported);
       const expectedRevision = options?.expectedRevision === undefined
         ? undefined
         : durabilityRevision(options.expectedRevision);
       const expectedPayload = expectedImportPayload(options, expectedRevision);
+      const existing = states.get(selected);
+      const entry = existing ?? {
+        state: copyState({ revision: "0", payload: null }),
+        owner: undefined,
+      };
       if (expectedRevision === undefined
-        ? owner !== undefined || state.revision !== "0"
-        : state.revision !== expectedRevision
-          || expectedPayload.present && state.payload !== expectedPayload.value) {
-        throw new DurabilityImportConflictError(selected, expectedRevision, state.revision);
+        ? entry.owner !== undefined || entry.state.revision !== "0"
+        : entry.state.revision !== expectedRevision
+          || expectedPayload.present && entry.state.payload !== expectedPayload.value) {
+        throw new DurabilityImportConflictError(selected, expectedRevision, entry.state.revision);
       }
-      owner = Object.freeze({
+      const owner = Object.freeze({
         ownerId: PORTABLE_IMPORT_OWNER,
-        fence: durabilityFence(BigInt(owner?.fence ?? "0") + 1n),
+        fence: durabilityFence(BigInt(entry.owner?.fence ?? "0") + 1n),
       });
-      state = next;
-      return state;
+      if (existing === undefined) states.set(selected, entry);
+      entry.owner = owner;
+      entry.state = next;
+      return entry.state;
     },
     snapshot() {
-      return state;
+      return states.get(stateId).state;
     },
   });
 }

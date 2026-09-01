@@ -91,7 +91,7 @@ struct PendingProviderStep {
 }
 
 impl PendingProviderStep {
-    fn new(pending_kind: &'static str) -> Self {
+    const fn new(pending_kind: &'static str) -> Self {
         Self {
             pending_kind,
             admissions: Mutex::new(Vec::new()),

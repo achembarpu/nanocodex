@@ -72,6 +72,7 @@ use nanocodex_tools::{
 
 pub(crate) struct ModelRun<S> {
     events: EventSink,
+    provider_session_id: Arc<str>,
     config: Arc<ModelConfig>,
     model: Model,
     thinking: Thinking,
@@ -121,6 +122,7 @@ pub(crate) struct CompletedModelTurn {
 #[derive(Clone)]
 pub(crate) struct ModelCheckpoint {
     workspace: String,
+    provider_session_id: Arc<str>,
     conversation: ConversationState,
     request_prefix: Arc<[ResponseItem]>,
     prompt_cache_key: Arc<str>,
@@ -138,6 +140,7 @@ pub(crate) struct PreparedCheckpoint {
 
 pub(crate) struct HistoryCheckpoint {
     pub(crate) workspace: String,
+    pub(crate) provider_session_id: Arc<str>,
     pub(crate) canonical_context: ResponseItem,
     pub(crate) history: Vec<ResponseItem>,
     pub(crate) prompt_cache_key: Arc<str>,
@@ -177,8 +180,13 @@ impl ModelCheckpoint {
         &self.context_baseline
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "checkpoint restoration keeps each retained boundary explicit"
+    )]
     pub(crate) fn resume(
         workspace: String,
+        provider_session_id: Arc<str>,
         request_prefix: Vec<ResponseItem>,
         prompt_cache_key: Arc<str>,
         canonical_context: ResponseItem,
@@ -190,6 +198,7 @@ impl ModelCheckpoint {
             context_baseline.unwrap_or_else(|| ContextBaseline::reconstruct(&history));
         Ok(Self {
             workspace,
+            provider_session_id,
             conversation: ConversationState::resume(canonical_context, history)?,
             request_prefix: Arc::from(request_prefix),
             prompt_cache_key,
@@ -201,8 +210,13 @@ impl ModelCheckpoint {
 }
 
 impl<S> ModelRun<S> {
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the private run owns each injected lifecycle component directly"
+    )]
     pub(crate) fn new(
         events: EventSink,
+        provider_session_id: Arc<str>,
         config: Arc<ModelConfig>,
         client: ResponsesClient<S>,
         transport_stats: Arc<TransportStats>,
@@ -216,6 +230,7 @@ impl<S> ModelRun<S> {
         let global_instructions = context_source.global_instructions();
         Self {
             events,
+            provider_session_id,
             config,
             model,
             thinking,
@@ -254,15 +269,17 @@ impl<S> ModelRun<S> {
             context_source,
             selected_agents_md,
         } = prepared;
+        let provider_session_id = Arc::clone(&checkpoint.provider_session_id);
         let active_tools = runtime.control();
         let (_, code_mode_tool_names) = model_tool_contract(&runtime, events.request_id());
         let factory = ResponsesAttemptFactory::new(
             with_code_mode_tool_names(
                 RequestProfile::new(
-                    events.request_id(),
+                    checkpoint.provider_session_id.to_string(),
                     checkpoint.prompt_cache_key.to_string(),
                     Arc::clone(&checkpoint.request_prefix),
-                ),
+                )
+                .with_thread_id(events.request_id()),
                 code_mode_tool_names,
             ),
             events.clone(),
@@ -276,6 +293,7 @@ impl<S> ModelRun<S> {
         let global_instructions = context_source.global_instructions();
         Self {
             events,
+            provider_session_id,
             config,
             model,
             thinking,
@@ -352,6 +370,7 @@ impl<S> ModelRun<S> {
         session.preserve_inherited_delta = true;
         Ok(ModelCheckpoint {
             workspace: session.workspace.clone(),
+            provider_session_id: Arc::from(session.factory.profile().session_id()),
             conversation: session.conversation.clone(),
             request_prefix: session.factory.profile().shared_prefix(),
             prompt_cache_key: Arc::from(session.factory.profile().prompt_cache_key()),
@@ -396,6 +415,7 @@ impl<S> ModelRun<S> {
         attempt_factory(
             &self.events,
             &self.transport_stats,
+            &self.provider_session_id,
             self.prompt_cache.key(),
             tools,
             self.config.system_prompt(),
@@ -435,6 +455,11 @@ pub(crate) fn prepare_resumed_checkpoint(
     session_id: &str,
     context_source: ContextSource,
 ) -> Result<PreparedCheckpoint> {
+    // Unstored response IDs are scoped to the live transport connection. A fork
+    // owns a fresh client, so it must replay client-owned history instead.
+    if !config.store_responses {
+        checkpoint.conversation.reset_for_full_request();
+    }
     checkpoint.global_instructions = context_source
         .global_instructions()
         .or(checkpoint.global_instructions);
@@ -471,6 +496,7 @@ pub(crate) fn prepare_history_checkpoint(
 ) -> Result<PreparedCheckpoint> {
     let HistoryCheckpoint {
         workspace,
+        provider_session_id,
         canonical_context,
         history,
         prompt_cache_key,
@@ -492,6 +518,7 @@ pub(crate) fn prepare_history_checkpoint(
     .to_vec();
     let checkpoint = ModelCheckpoint::resume(
         workspace,
+        provider_session_id,
         request_prefix,
         prompt_cache_key,
         canonical_context,

@@ -28,11 +28,20 @@ pub(crate) async fn connect_socket(
     config: &ModelConfig,
     auth: &OpenAiAuthSnapshot,
     session_id: &str,
+    thread_id: &str,
     turn_state: Option<&str>,
 ) -> Result<(ResponsesSocket, ConnectionMetadata), ResponsesError> {
     let host = platform
         .host
         .as_deref()
         .ok_or(ResponsesError::HostUnavailable)?;
-    ResponsesSocket::connect(host, &config.websocket_url, auth, session_id, turn_state).await
+    ResponsesSocket::connect(
+        host,
+        &config.websocket_url,
+        auth,
+        session_id,
+        thread_id,
+        turn_state,
+    )
+    .await
 }

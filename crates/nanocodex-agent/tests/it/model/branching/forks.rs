@@ -1,6 +1,60 @@
 use super::*;
 
 #[tokio::test]
+async fn latest_completed_ephemeral_fork_replays_parent_history() -> Result<()> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let endpoint = format!("ws://{}", listener.local_addr()?);
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await?;
+        let mut root = accept_async(stream).await?;
+        assert_warmup(&next_json(&mut root).await?);
+        send_warmup(&mut root, "resp-warmup").await?;
+        let root_turn = next_json(&mut root).await?;
+        assert_eq!(root_turn["previous_response_id"], "resp-warmup");
+        send_final(&mut root, "resp-root").await?;
+
+        let (stream, _) = listener.accept().await?;
+        let mut branch = accept_async(stream).await?;
+        let fork = next_json(&mut branch).await?;
+        assert!(fork.get("previous_response_id").is_none());
+        let fork_text = fork.to_string();
+        assert!(fork_text.contains("completed root prompt"));
+        assert!(fork_text.contains("BTW question"));
+        send_final(&mut branch, "resp-branch").await
+    });
+
+    let workspace = temporary_workspace("latest-ephemeral-fork")?;
+    let openai = OpenAi::builder("test-key")
+        .websocket_url(endpoint)
+        .build()?;
+    let (agent, root_events) = Nanocodex::builder(openai)
+        .workspace(&workspace)
+        .session_id(test_session_id())
+        .build()?;
+    agent
+        .prompt("completed root prompt")
+        .await?
+        .result()
+        .await?;
+    let (fork, fork_events) = agent.fork().await?;
+    assert_eq!(
+        fork.prompt("BTW question")
+            .await?
+            .result()
+            .await?
+            .final_message(),
+        "done"
+    );
+
+    drop((agent, fork, root_events, fork_events));
+    timeout(std::time::Duration::from_secs(5), server)
+        .await
+        .map_err(|_| eyre!("mock Responses server did not finish"))???;
+    std::fs::remove_dir_all(workspace)?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn latest_fork_during_streaming_inherits_the_active_prompt_delta() -> Result<()> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let endpoint = format!("ws://{}", listener.local_addr()?);
@@ -349,6 +403,7 @@ async fn historical_fork_runs_while_the_mainline_turn_is_in_flight() -> Result<(
         assert_warmup_with_store(&warmup, true);
         let lineage = warmup["prompt_cache_key"].clone();
         let root_session = warmup["client_metadata"]["session_id"].clone();
+        let root_thread = warmup["client_metadata"]["thread_id"].clone();
         send_warmup(&mut root, "resp-warmup").await?;
 
         let first = next_json(&mut root).await?;
@@ -375,7 +430,8 @@ async fn historical_fork_runs_while_the_mainline_turn_is_in_flight() -> Result<(
         let fork = next_json(&mut branch).await?;
         assert_eq!(fork["previous_response_id"], "resp-first");
         assert_eq!(fork["prompt_cache_key"], lineage);
-        assert_ne!(fork["client_metadata"]["session_id"], root_session);
+        assert_eq!(fork["client_metadata"]["session_id"], root_session);
+        assert_ne!(fork["client_metadata"]["thread_id"], root_thread);
         assert_eq!(fork["input"].as_array().map(Vec::len), Some(1));
         assert_eq!(fork["input"][0]["content"][0]["text"], "fork prompt");
         branch_started

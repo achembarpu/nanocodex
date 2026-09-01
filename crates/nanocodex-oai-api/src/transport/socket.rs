@@ -80,6 +80,7 @@ impl ResponsesSocket {
         endpoint: &str,
         auth: &OpenAiAuthSnapshot,
         session_id: &str,
+        thread_id: &str,
         turn_state: Option<&str>,
     ) -> Result<(Self, ConnectionMetadata), ResponsesError> {
         let mut request =
@@ -119,10 +120,18 @@ impl ResponsesSocket {
         request
             .headers_mut()
             .insert(RESPONSES_LITE_HEADER, HeaderValue::from_static("true"));
-        for name in ["session-id", "thread-id", "x-client-request-id"] {
+        request.headers_mut().insert(
+            "session-id",
+            HeaderValue::from_str(session_id).map_err(|error| {
+                ResponsesError::InvalidSessionId {
+                    detail: error.to_string(),
+                }
+            })?,
+        );
+        for name in ["thread-id", "x-client-request-id"] {
             request.headers_mut().insert(
                 name,
-                HeaderValue::from_str(session_id).map_err(|error| {
+                HeaderValue::from_str(thread_id).map_err(|error| {
                     ResponsesError::InvalidSessionId {
                         detail: error.to_string(),
                     }
@@ -617,7 +626,8 @@ mod tests {
         }
         let endpoint = env::var("NANOCODEX_HTTP_PROXY_TEST_ENDPOINT")?;
         let auth = crate::OpenAiAuth::api_key("test-key").snapshot().await?;
-        let result = ResponsesSocket::connect(&endpoint, &auth, "session-proxy", None).await;
+        let result =
+            ResponsesSocket::connect(&endpoint, &auth, "session-proxy", "thread-proxy", None).await;
         let expected_rejection = env::var("NANOCODEX_HTTP_PROXY_TEST_EXPECT_REJECTION")
             .ok()
             .map(|status| status.parse::<u16>())
@@ -677,14 +687,14 @@ mod tests {
                         .headers()
                         .get("thread-id")
                         .and_then(|v| v.to_str().ok()),
-                    Some("session-test")
+                    Some("thread-test")
                 );
                 assert_eq!(
                     request
                         .headers()
                         .get("x-client-request-id")
                         .and_then(|v| v.to_str().ok()),
-                    Some("session-test")
+                    Some("thread-test")
                 );
                 assert_eq!(
                     request
@@ -731,9 +741,14 @@ mod tests {
             true,
             1,
         );
-        let (mut socket, _) =
-            ResponsesSocket::connect(&endpoint, &auth, "session-test", Some("turn-state-test"))
-                .await?;
+        let (mut socket, _) = ResponsesSocket::connect(
+            &endpoint,
+            &auth,
+            "session-test",
+            "thread-test",
+            Some("turn-state-test"),
+        )
+        .await?;
 
         server.await??;
         let text = socket.next_text().await?;
@@ -770,9 +785,14 @@ mod tests {
             false,
             0,
         );
-        let (socket, _) =
-            ResponsesSocket::connect(&format!("ws://{address}"), &auth, "bounded-backlog", None)
-                .await?;
+        let (socket, _) = ResponsesSocket::connect(
+            &format!("ws://{address}"),
+            &auth,
+            "bounded-backlog",
+            "bounded-backlog",
+            None,
+        )
+        .await?;
         server.await??;
 
         timeout(Duration::from_secs(1), async {

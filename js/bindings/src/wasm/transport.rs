@@ -18,6 +18,7 @@ extern "C" {
         account_id: Option<&str>,
         fedramp: bool,
         session_id: &str,
+        thread_id: &str,
         turn_state: Option<&str>,
     ) -> Result<Promise, JsValue>;
 
@@ -112,6 +113,7 @@ impl HostTransport for JavaScriptResponsesHost {
                 request.account_id(),
                 request.is_fedramp(),
                 request.session_id(),
+                request.thread_id(),
                 request.turn_state(),
             )
             .map_err(|error| decode_host_error(&error, true))?;

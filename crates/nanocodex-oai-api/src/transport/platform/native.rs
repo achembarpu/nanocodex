@@ -37,7 +37,15 @@ pub(crate) async fn connect_socket(
     config: &ModelConfig,
     auth: &OpenAiAuthSnapshot,
     session_id: &str,
+    thread_id: &str,
     turn_state: Option<&str>,
 ) -> Result<(ResponsesSocket, ConnectionMetadata), ResponsesError> {
-    ResponsesSocket::connect(&config.websocket_url, auth, session_id, turn_state).await
+    ResponsesSocket::connect(
+        &config.websocket_url,
+        auth,
+        session_id,
+        thread_id,
+        turn_state,
+    )
+    .await
 }

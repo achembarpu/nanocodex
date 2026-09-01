@@ -401,6 +401,7 @@ test("a durable Node-hosted root runs the canonical in-memory Rust subagent task
   let childSessionId;
   const scenario = (async () => {
     const rootSocket = await server.connection;
+    const rootProviderSessionId = rootSocket.request.headers["session-id"];
     const rootReader = messageReader(rootSocket);
     const rootWarmup = await rootReader.next();
     assert.deepEqual(
@@ -442,8 +443,10 @@ test("a durable Node-hosted root runs the canonical in-memory Rust subagent task
     }]);
 
     const childSocket = await childConnection;
-    childSessionId = childSocket.request.headers["session-id"];
+    assert.equal(childSocket.request.headers["session-id"], rootProviderSessionId);
+    childSessionId = childSocket.request.headers["thread-id"];
     assert.ok(childSessionId);
+    assert.notEqual(childSessionId, rootProviderSessionId);
     const childReader = messageReader(childSocket);
     const childWarmup = await childReader.next();
     assert.equal(childWarmup.input[0].tools.some((tool) => tool.name === "send_agent_message"), true);
@@ -757,7 +760,8 @@ test("WASM snapshots rebind deployed policy while retaining authoritative histor
   });
   const resumedScenario = (async () => {
     const socket = await resumedServer.connection;
-    assert.equal(socket.request.headers["session-id"], SESSION_IDS.resumed);
+    assert.equal(socket.request.headers["session-id"], SESSION_IDS.original);
+    assert.equal(socket.request.headers["thread-id"], SESSION_IDS.resumed);
     const request = await messageReader(socket).next();
     assert.equal(request.previous_response_id, undefined);
     assert.equal(request.prompt_cache_key, snapshot.prompt_cache_key);

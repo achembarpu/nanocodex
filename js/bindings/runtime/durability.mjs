@@ -36,7 +36,7 @@ export function abandon(host, routeId) {
 }
 
 export async function acquire(routeId, stateId, ownerId) {
-  const stored = await requiredRoute(routeId, stateId).store.acquire(stateId, { ownerId });
+  const stored = await requiredRoute(routeId).store.acquire(stateId, { ownerId });
   if (!stored || typeof stored !== "object" || Array.isArray(stored)) {
     throw new TypeError("durability.acquire() must return an acquired state object");
   }
@@ -68,7 +68,7 @@ export async function replace(
   expectedRevision,
   payload,
 ) {
-  const result = await requiredRoute(routeId, stateId).store.replace(stateId, {
+  const result = await requiredRoute(routeId).store.replace(stateId, {
     ownerId,
     fence,
     expectedRevision,
@@ -104,12 +104,9 @@ export async function replace(
   );
 }
 
-function requiredRoute(routeId, stateId) {
+function requiredRoute(routeId) {
   const route = hosts.get(routeId);
   if (!route) throw new Error(`no Nanocodex host owns durability route: ${routeId}`);
-  if (route.stateId !== stateId) {
-    throw new Error(`Nanocodex durability route does not own state: ${stateId}`);
-  }
   const store = route.store;
   if (!store || typeof store.acquire !== "function" || typeof store.replace !== "function") {
     throw new TypeError("the selected Nanocodex host must define a durability state store");

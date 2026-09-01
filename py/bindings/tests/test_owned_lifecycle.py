@@ -223,8 +223,11 @@ class OwnedLifecycleTests(unittest.TestCase):
             }
             for prompt in ("historical branch", "latest branch"):
                 request = branch_requests[prompt]
-                self.assertEqual(request["previous_response_id"], "resp-final-2")
-                self.assertEqual(user_texts(request), [prompt])
+                self.assertNotIn("previous_response_id", request)
+                self.assertEqual(
+                    user_texts(request)[-2:],
+                    ["root checkpoint", prompt],
+                )
             resumed_request = branch_requests["resumed branch"]
             self.assertNotIn("previous_response_id", resumed_request)
             self.assertIn("root checkpoint", user_texts(resumed_request))

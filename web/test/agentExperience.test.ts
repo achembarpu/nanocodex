@@ -18,7 +18,7 @@ const viteConfig = source("../vite.config.ts");
 test("one thread-scoped Config supplies clone-safe MCP servers to the retained Agent", () => {
   const declaration = section(terminal, "export const AgentTerminal", "export const ManagedAgentTerminal");
   assert.equal(matches(terminal, /createConfig\(/g), 1);
-  assert.match(declaration, /useMemo\(\(\) => createConfig\(\{[\s\S]*?mcp: browserMcpConfiguration\(location\.origin, threadId\)[\s\S]*?durability: false[\s\S]*?\[threadId\]/);
+  assert.match(declaration, /useMemo\(\(\) => createConfig\(\{[\s\S]*?mcp: browserMcpConfiguration\(location\.origin, threadId, accountMcpConnections\)[\s\S]*?durability: false[\s\S]*?\[accountMcpConnections, threadId\]/);
   assert.match(
     terminal,
     /useNanocodex\(\{ config: agentConfig, threadId \}\)/,
