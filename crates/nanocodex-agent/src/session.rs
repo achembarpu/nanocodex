@@ -247,6 +247,7 @@ impl SessionSnapshot {
             .map(|request_prefix| {
                 ModelCheckpoint::resume(
                     self.workspace.clone(),
+                    Arc::clone(&lineage_id),
                     request_prefix,
                     Arc::clone(&prompt_cache_key),
                     self.canonical_context.clone(),

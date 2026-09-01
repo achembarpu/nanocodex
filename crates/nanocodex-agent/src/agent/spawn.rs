@@ -47,6 +47,7 @@ where
             || {
                 InitialResume::History(Box::new(HistoryCheckpoint {
                     workspace,
+                    provider_session_id: Arc::clone(&lineage_id),
                     canonical_context,
                     history,
                     prompt_cache_key: Arc::clone(&restored_cache_key),
@@ -96,11 +97,13 @@ where
         ))
     };
     let service = service_factory(Arc::clone(&config));
+    let provider_session_id = Arc::clone(&lineage_id);
     spawn_agent_driver(
         BranchSpawner {
             config,
             tools,
             lineage_id,
+            provider_session_id,
             prompt_cache_key,
             shared_prompt_cache: shared,
             context_config: codex.context,

@@ -55,10 +55,15 @@ pub(crate) async fn run(
         },
     )?;
     let send_started_at = Instant::now();
-    let (mut response, metadata) =
-        send_with_auth_recovery(service, request.profile.session_id(), &encoded, connection)
-            .await
-            .map_err(|error| ResponsesServiceError::responses(error, FailurePhase::Send, 0))?;
+    let (mut response, metadata) = send_with_auth_recovery(
+        service,
+        request.profile.session_id(),
+        request.profile.thread_id(),
+        &encoded,
+        connection,
+    )
+    .await
+    .map_err(|error| ResponsesServiceError::responses(error, FailurePhase::Send, 0))?;
     connection.observe_turn_state(metadata.turn_state.as_deref());
     let send_duration_ns = elapsed_ns(send_started_at);
     span.record("request.send.duration_ns", send_duration_ns);
@@ -116,6 +121,7 @@ impl ResponseEventSource for ResponsesHttpStream {
 async fn send_with_auth_recovery(
     service: &ResponsesService,
     session_id: &str,
+    thread_id: &str,
     request: &EncodedRequest,
     guard: &mut AttemptGuard<'_>,
 ) -> Result<(ResponsesHttpStream, HttpMetadata), ResponsesError> {
@@ -128,6 +134,7 @@ async fn send_with_auth_recovery(
             &service.config.api_base_url,
             &auth,
             session_id,
+            thread_id,
             turn_state.as_deref(),
             request,
         )
@@ -152,6 +159,7 @@ async fn send_with_auth_recovery(
                     &service.config.api_base_url,
                     &refreshed,
                     session_id,
+                    thread_id,
                     turn_state.as_deref(),
                     request,
                 )

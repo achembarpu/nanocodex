@@ -571,7 +571,11 @@ impl ResponsesService {
             duration_ns = tracing::field::Empty,
         );
         let result = self
-            .connect_with_auth_recovery(request.profile.session_id(), turn_state)
+            .connect_with_auth_recovery(
+                request.profile.session_id(),
+                request.profile.thread_id(),
+                turn_state,
+            )
             .instrument(connect_span.clone())
             .await;
         let elapsed = started_at.elapsed();
@@ -626,11 +630,19 @@ impl ResponsesService {
     async fn connect_with_auth_recovery(
         &self,
         session_id: &str,
+        thread_id: &str,
         turn_state: Option<&str>,
     ) -> Result<(ResponsesSocket, ConnectionMetadata), ResponsesError> {
         let auth = self.auth_snapshot().await?;
-        match platform::connect_socket(&self.platform, &self.config, &auth, session_id, turn_state)
-            .await
+        match platform::connect_socket(
+            &self.platform,
+            &self.config,
+            &auth,
+            session_id,
+            thread_id,
+            turn_state,
+        )
+        .await
         {
             Err(ResponsesError::HandshakeRejected { status: 401, .. })
                 if auth.mode() == OpenAiAuthMode::ChatGpt =>
@@ -648,6 +660,7 @@ impl ResponsesService {
                     &self.config,
                     &refreshed,
                     session_id,
+                    thread_id,
                     turn_state,
                 )
                 .await

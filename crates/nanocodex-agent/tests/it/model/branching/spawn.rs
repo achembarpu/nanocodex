@@ -11,6 +11,7 @@ async fn per_agent_tool_factory_binds_recursive_forks_to_the_invoking_driver() -
         assert_eq!(warmup["store"], true);
         let lineage = warmup["prompt_cache_key"].clone();
         let root_session = warmup["client_metadata"]["session_id"].clone();
+        let root_thread = warmup["client_metadata"]["thread_id"].clone();
         send_warmup(&mut root, "resp-warmup").await?;
         let root_turn = next_json(&mut root).await?;
         assert_eq!(root_turn["previous_response_id"], "resp-warmup");
@@ -20,9 +21,11 @@ async fn per_agent_tool_factory_binds_recursive_forks_to_the_invoking_driver() -
         let mut child = accept_async(stream).await?;
         let child_turn = next_json(&mut child).await?;
         let child_session = child_turn["client_metadata"]["session_id"].clone();
+        let child_thread = child_turn["client_metadata"]["thread_id"].clone();
         assert_eq!(child_turn["previous_response_id"], "resp-root");
         assert_eq!(child_turn["prompt_cache_key"], lineage);
-        assert_ne!(child_session, root_session);
+        assert_eq!(child_session, root_session);
+        assert_ne!(child_thread, root_thread);
         send_final(&mut child, "resp-child").await?;
 
         let (stream, _) = listener.accept().await?;
@@ -30,9 +33,13 @@ async fn per_agent_tool_factory_binds_recursive_forks_to_the_invoking_driver() -
         let grandchild_turn = next_json(&mut grandchild).await?;
         assert_eq!(grandchild_turn["previous_response_id"], "resp-child");
         assert_eq!(grandchild_turn["prompt_cache_key"], lineage);
-        assert_ne!(
+        assert_eq!(
             grandchild_turn["client_metadata"]["session_id"],
             child_session
+        );
+        assert_ne!(
+            grandchild_turn["client_metadata"]["thread_id"],
+            child_thread
         );
         send_final(&mut grandchild, "resp-grandchild").await
     });
@@ -116,7 +123,11 @@ async fn clean_spawn_reuses_the_root_cache_key_without_history() -> Result<()> {
         let child_session = child_warmup["client_metadata"]["session_id"]
             .as_str()
             .ok_or_else(|| eyre!("clean child warmup omitted its session id"))?;
-        assert_ne!(child_session, TEST_SESSION_ID);
+        assert_eq!(child_session, TEST_SESSION_ID);
+        assert_ne!(
+            child_warmup["client_metadata"]["thread_id"],
+            TEST_SESSION_ID
+        );
         assert_eq!(child_warmup["prompt_cache_key"], TEST_SESSION_ID);
         assert!(child_warmup.get("previous_response_id").is_none());
         assert!(

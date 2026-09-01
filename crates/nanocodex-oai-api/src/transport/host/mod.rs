@@ -64,6 +64,7 @@ pub struct HostConnectRequest<'a> {
     account_id: Option<&'a str>,
     fedramp: bool,
     session_id: &'a str,
+    thread_id: &'a str,
     turn_state: Option<&'a str>,
 }
 
@@ -82,12 +83,33 @@ impl<'a> HostConnectRequest<'a> {
         session_id: &'a str,
         turn_state: Option<&'a str>,
     ) -> Self {
+        Self::new_with_thread_id(
+            endpoint,
+            bearer_token,
+            account_id,
+            fedramp,
+            session_id,
+            session_id,
+            turn_state,
+        )
+    }
+
+    pub(crate) const fn new_with_thread_id(
+        endpoint: &'a str,
+        bearer_token: &'a str,
+        account_id: Option<&'a str>,
+        fedramp: bool,
+        session_id: &'a str,
+        thread_id: &'a str,
+        turn_state: Option<&'a str>,
+    ) -> Self {
         Self {
             endpoint,
             bearer_token,
             account_id,
             fedramp,
             session_id,
+            thread_id,
             turn_state,
         }
     }
@@ -123,6 +145,12 @@ impl<'a> HostConnectRequest<'a> {
     #[must_use]
     pub const fn session_id(&self) -> &'a str {
         self.session_id
+    }
+
+    /// Returns the current agent thread identity sent on the handshake.
+    #[must_use]
+    pub const fn thread_id(&self) -> &'a str {
+        self.thread_id
     }
 
     /// Returns opaque server turn state retained across a replacement socket.

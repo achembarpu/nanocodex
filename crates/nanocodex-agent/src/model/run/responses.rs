@@ -615,6 +615,7 @@ pub(super) fn request_profile(
 pub(super) fn attempt_factory(
     events: &EventSink,
     transport_stats: &Arc<TransportStats>,
+    provider_session_id: &str,
     prompt_cache_key: &str,
     tools: &ToolRuntime,
     system_prompt: &str,
@@ -622,12 +623,13 @@ pub(super) fn attempt_factory(
     let (tool_specs, code_mode_tool_names) = model_tool_contract(tools, events.request_id());
     Ok(ResponsesAttemptFactory::new(
         request_profile(
-            events.request_id(),
+            provider_session_id,
             prompt_cache_key,
             tool_specs,
             code_mode_tool_names,
             system_prompt,
-        )?,
+        )?
+        .with_thread_id(events.request_id()),
         events.clone(),
         Arc::clone(transport_stats),
     ))

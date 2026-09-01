@@ -41,6 +41,7 @@ impl ResponsesHttp {
         api_base_url: &str,
         auth: &OpenAiAuthSnapshot,
         session_id: &str,
+        thread_id: &str,
         turn_state: Option<&str>,
         request: &EncodedRequest,
     ) -> Result<(ResponsesHttpStream, HttpMetadata), ResponsesError> {
@@ -53,8 +54,8 @@ impl ResponsesHttp {
             .header(header::ACCEPT, "text/event-stream")
             .header(RESPONSES_LITE_HEADER, "true")
             .header("session-id", session_id)
-            .header("thread-id", session_id)
-            .header("x-client-request-id", session_id)
+            .header("thread-id", thread_id)
+            .header("x-client-request-id", thread_id)
             .header(
                 header::USER_AGENT,
                 concat!("nanocodex/", env!("CARGO_PKG_VERSION")),

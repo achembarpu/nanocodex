@@ -403,6 +403,7 @@ async fn historical_fork_runs_while_the_mainline_turn_is_in_flight() -> Result<(
         assert_warmup_with_store(&warmup, true);
         let lineage = warmup["prompt_cache_key"].clone();
         let root_session = warmup["client_metadata"]["session_id"].clone();
+        let root_thread = warmup["client_metadata"]["thread_id"].clone();
         send_warmup(&mut root, "resp-warmup").await?;
 
         let first = next_json(&mut root).await?;
@@ -429,7 +430,8 @@ async fn historical_fork_runs_while_the_mainline_turn_is_in_flight() -> Result<(
         let fork = next_json(&mut branch).await?;
         assert_eq!(fork["previous_response_id"], "resp-first");
         assert_eq!(fork["prompt_cache_key"], lineage);
-        assert_ne!(fork["client_metadata"]["session_id"], root_session);
+        assert_eq!(fork["client_metadata"]["session_id"], root_session);
+        assert_ne!(fork["client_metadata"]["thread_id"], root_thread);
         assert_eq!(fork["input"].as_array().map(Vec::len), Some(1));
         assert_eq!(fork["input"][0]["content"][0]["text"], "fork prompt");
         branch_started
