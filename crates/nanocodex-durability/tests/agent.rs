@@ -12,7 +12,7 @@ use std::{
 use eyre::{Result, eyre};
 use nanocodex_agent::{
     ExecutionPolicyDisposition, Nanocodex, NanocodexError, OpenAi, PromptRequest, PromptRoute,
-    ResponseError, Tools,
+    ResponseError, SpawnOptions, Tools,
     events::{AgentEventKind, AgentEvents, RunStatus, RunTerminal},
     execution::{
         ExecutionAdmission, ExecutionFuture, ExecutionOutput, ExecutionPolicy, ExecutionRetry,
@@ -3310,9 +3310,9 @@ async fn changed_tool_profile_blocks_replay_after_spawn_without_creating_a_ghost
 }
 
 #[tokio::test]
-async fn attached_execution_policy_spawns_a_nondurable_clean_child() -> Result<()> {
+async fn attached_durability_spawns_independently_durable_clean_descendants() -> Result<()> {
     let store = crate::MemoryStore::new()?;
-    let state = crate::DurableSession::open(store, "spawn-policy").await?;
+    let state = crate::DurableSession::open(store.clone(), "spawn-policy").await?;
     let service_factories = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let generations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let openai = OpenAi::builder("test-key")
@@ -3328,7 +3328,7 @@ async fn attached_execution_policy_spawns_a_nondurable_clean_child() -> Result<(
         })
         .build()?;
     let workspace = temporary_workspace("durability-spawn-policy")?;
-    let builder = Nanocodex::builder(openai)
+    let builder = Nanocodex::builder(openai.clone())
         .workspace(&workspace)
         .session_id(test_session_id())
         .durability(state)
@@ -3336,16 +3336,66 @@ async fn attached_execution_policy_spawns_a_nondurable_clean_child() -> Result<(
     let (agent, events) = builder.build()?;
 
     let (child, child_events) = agent.spawn().await?;
+    let child_session_id = child
+        .local_session_id()
+        .ok_or_else(|| eyre!("spawned child did not expose its local session identity"))?;
+    let child_state_id = child.session_id().to_owned();
+    let (grandchild, grandchild_events) = child.spawn().await?;
+    let grandchild_state_id = grandchild.session_id().to_owned();
     assert_eq!(
         service_factories.load(std::sync::atomic::Ordering::SeqCst),
-        2,
-        "the clean child must receive its own service and driver"
+        3,
+        "every clean descendant must receive its own service and driver"
+    );
+    let child_turn = child.prompt("durable child turn").await?;
+    assert!(child_turn.request_id().is_some());
+    assert_eq!(
+        child_turn.result().await?.final_message(),
+        "durably replayed"
+    );
+    let grandchild_turn = grandchild.prompt("durable grandchild turn").await?;
+    assert!(grandchild_turn.request_id().is_some());
+    assert_eq!(
+        grandchild_turn.result().await?.final_message(),
+        "durably replayed"
     );
 
+    grandchild.shutdown().await?;
+    drop((grandchild, grandchild_events));
     child.shutdown().await?;
     drop((child, child_events));
     agent.shutdown().await?;
     drop((agent, events));
+
+    let root_state = crate::DurableSession::open(store.clone(), "spawn-policy").await?;
+    let builder = Nanocodex::builder(openai)
+        .workspace(&workspace)
+        .session_id(test_session_id())
+        .durability(root_state)
+        .await?;
+    let (resumed_root, resumed_root_events) = builder.build()?;
+    let (resumed_child, resumed_child_events) = resumed_root
+        .spawn_with(SpawnOptions::new().session_id(child_session_id))
+        .await?;
+    assert_eq!(resumed_child.session_id(), child_state_id);
+    assert_eq!(
+        resumed_child
+            .prompt("continue durable child")
+            .await?
+            .result()
+            .await?
+            .final_message(),
+        "durably replayed"
+    );
+    resumed_child.shutdown().await?;
+    drop((resumed_child, resumed_child_events));
+    resumed_root.shutdown().await?;
+    drop((resumed_root, resumed_root_events));
+
+    let child_state = crate::DurableSession::open(store.clone(), child_state_id).await?;
+    assert!(child_state.latest_checkpoint().await?.is_some());
+    let grandchild_state = crate::DurableSession::open(store, grandchild_state_id).await?;
+    assert!(grandchild_state.latest_checkpoint().await?.is_some());
     std::fs::remove_dir_all(workspace)?;
     Ok(())
 }

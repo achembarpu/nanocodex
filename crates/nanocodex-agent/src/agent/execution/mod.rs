@@ -17,6 +17,31 @@ use crate::{
     usage::TurnUsage,
 };
 
+/// Identity of a newly spawned clean agent whose execution policy is being built.
+#[doc(hidden)]
+#[derive(Clone, Debug)]
+pub struct SpawnedExecutionContext {
+    /// Stable session identity assigned to the child agent.
+    pub session_id: String,
+    /// Stable session identity of the agent that spawned the child.
+    pub parent_session_id: String,
+}
+
+/// Execution policy and optional restart boundary for a newly spawned agent.
+#[doc(hidden)]
+pub struct SpawnedExecutionPolicy {
+    policy: Arc<dyn ExecutionPolicy>,
+    snapshot: Option<SessionSnapshot>,
+}
+
+impl SpawnedExecutionPolicy {
+    /// Creates a spawned-agent policy attachment.
+    #[must_use]
+    pub fn new(policy: Arc<dyn ExecutionPolicy>, snapshot: Option<SessionSnapshot>) -> Self {
+        Self { policy, snapshot }
+    }
+}
+
 #[cfg(not(target_family = "wasm"))]
 use crate::rollout::{RolloutConfig, RolloutInfo};
 
@@ -346,7 +371,14 @@ pub trait ExecutionPolicy: Send + Sync {
 pub(crate) struct ExecutionConfig {
     platform: platform::Config,
     policy: Option<ExecutionPolicyRecipe>,
+    spawned_policy: Option<SpawnedExecutionPolicyFactory>,
 }
+
+type SpawnedExecutionPolicyFactory = Arc<
+    dyn Fn(SpawnedExecutionContext) -> ExecutionFuture<'static, Result<SpawnedExecutionPolicy>>
+        + Send
+        + Sync,
+>;
 
 #[derive(Clone)]
 enum ExecutionPolicyRecipe {
@@ -380,18 +412,50 @@ impl ExecutionConfig {
         self.policy = Some(ExecutionPolicyRecipe::PerAgent(factory));
     }
 
-    // The WASM platform configuration is const, while native rollout cloning is not.
-    #[cfg_attr(target_family = "wasm", allow(clippy::missing_const_for_fn))]
-    pub(crate) fn for_new_thread(&self, operation: &'static str) -> Result<Self> {
-        if self.policy.is_some() && operation != "spawn" {
-            return Err(NanocodexError::ExecutionPolicyBranchUnsupported { operation });
+    pub(crate) fn set_spawned_policy_factory(&mut self, factory: SpawnedExecutionPolicyFactory) {
+        self.spawned_policy = Some(factory);
+    }
+
+    pub(crate) fn for_fork(&self) -> Result<Self> {
+        if self.policy.is_some() || self.spawned_policy.is_some() {
+            return Err(NanocodexError::ExecutionPolicyBranchUnsupported { operation: "fork" });
         }
         Ok(Self {
             platform: self.platform.for_new_thread(),
-            // A clean child is a new in-memory agent. It must never share the
-            // root's operation journal or execution-policy owner.
             policy: None,
+            spawned_policy: None,
         })
+    }
+
+    pub(crate) async fn for_spawn(
+        &self,
+        session_id: String,
+        parent_session_id: String,
+    ) -> Result<(Self, Option<SessionSnapshot>)> {
+        let Some(factory) = self.spawned_policy.as_ref() else {
+            return Ok((
+                Self {
+                    platform: self.platform.for_new_thread(),
+                    // A clean child must never share the root's execution-policy owner.
+                    policy: None,
+                    spawned_policy: None,
+                },
+                None,
+            ));
+        };
+        let attachment = factory(SpawnedExecutionContext {
+            session_id,
+            parent_session_id,
+        })
+        .await?;
+        Ok((
+            Self {
+                platform: self.platform.for_new_thread(),
+                policy: Some(ExecutionPolicyRecipe::Shared(attachment.policy)),
+                spawned_policy: Some(Arc::clone(factory)),
+            },
+            attachment.snapshot,
+        ))
     }
 
     #[allow(clippy::too_many_arguments)]

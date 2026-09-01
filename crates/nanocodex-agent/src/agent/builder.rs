@@ -274,6 +274,30 @@ impl<F> NanocodexBuilder<F> {
         self.codex.execution.set_policy_factory(Arc::new(factory));
         self
     }
+
+    /// Builds an independent execution policy and restart boundary for every
+    /// clean agent spawned from this agent tree.
+    ///
+    /// This is an internal composition seam for durability implementations.
+    /// Forks remain unsupported because they inherit a parent checkpoint rather
+    /// than reopening an independently identified clean-agent state.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn spawned_execution_policy_factory<P>(mut self, factory: P) -> Self
+    where
+        P: Fn(
+                execution::SpawnedExecutionContext,
+            )
+                -> execution::ExecutionFuture<'static, Result<execution::SpawnedExecutionPolicy>>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.codex
+            .execution
+            .set_spawned_policy_factory(Arc::new(factory));
+        self
+    }
 }
 
 #[cfg(not(target_family = "wasm"))]

@@ -273,7 +273,7 @@ pub(super) struct TurnDefaults {
     pub(super) fast_mode: bool,
 }
 
-pub(super) fn handle_idle_command<S>(
+pub(super) async fn handle_idle_command<S>(
     command: Command,
     latest: Option<&Arc<CommittedSession>>,
     spawner: &BranchSpawner<S>,
@@ -304,8 +304,16 @@ pub(super) fn handle_idle_command<S>(
         Command::Spawn { options, result } => {
             let model = options.model.unwrap_or(defaults.model);
             let thinking = options.thinking.unwrap_or(defaults.thinking);
-            let outcome =
-                spawner.spawn_clean(workspace, session_id, model, thinking, defaults.fast_mode);
+            let outcome = spawner
+                .spawn_clean(
+                    workspace,
+                    session_id,
+                    options.session_id,
+                    model,
+                    thinking,
+                    defaults.fast_mode,
+                )
+                .await;
             drop(result.send(outcome));
         }
         Command::SpawnBatch {
@@ -313,13 +321,9 @@ pub(super) fn handle_idle_command<S>(
             observer,
             result,
         } => {
-            let outcome = spawner.spawn_clean_many(
-                workspace,
-                session_id,
-                defaults,
-                count,
-                observer.as_deref(),
-            );
+            let outcome = spawner
+                .spawn_clean_many(workspace, session_id, defaults, count, observer.as_deref())
+                .await;
             drop(result.send(outcome));
         }
         Command::Steer { result, .. } => {

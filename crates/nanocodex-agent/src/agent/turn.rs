@@ -315,6 +315,7 @@ impl From<&str> for PromptRequest {
 pub struct SpawnOptions {
     pub(super) model: Option<Model>,
     pub(super) thinking: Option<Thinking>,
+    pub(super) session_id: Option<SessionId>,
 }
 
 impl SpawnOptions {
@@ -324,6 +325,7 @@ impl SpawnOptions {
         Self {
             model: None,
             thinking: None,
+            session_id: None,
         }
     }
 
@@ -338,6 +340,16 @@ impl SpawnOptions {
     #[must_use]
     pub const fn thinking(mut self, thinking: Thinking) -> Self {
         self.thinking = Some(thinking);
+        self
+    }
+
+    /// Selects the stable identity of a clean child being reopened.
+    ///
+    /// A fresh spawn normally generates this identity. Durable orchestrators
+    /// retain it and supply it again to restore that child's independent state.
+    #[must_use]
+    pub const fn session_id(mut self, session_id: SessionId) -> Self {
+        self.session_id = Some(session_id);
         self
     }
     /// Returns the requested model override, when supplied.
