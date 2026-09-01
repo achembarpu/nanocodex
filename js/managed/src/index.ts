@@ -1086,7 +1086,7 @@ export default {
       if (request.method !== "GET" || request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
         return new Response("Expected WebSocket upgrade", { status: 426 });
       }
-      if (principal.kind === "api_key") {
+      if (principal.kind === "api_key" && resource !== "tool-host") {
         return json({ error: "forbidden" }, { status: 403 });
       }
       if (!principal.capabilities.includes("agents:write")
@@ -1098,7 +1098,7 @@ export default {
         && !principal.connectGrant.connectors.includes("chatgpt")) {
         return json({ error: "connector_forbidden" }, { status: 403 });
       }
-      if (request.headers.get("origin") !== url.origin) {
+      if (principal.kind !== "api_key" && request.headers.get("origin") !== url.origin) {
         return json({ error: "forbidden_origin" }, { status: 403 });
       }
       return stub.fetch(
