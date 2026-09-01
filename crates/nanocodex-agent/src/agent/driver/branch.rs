@@ -136,6 +136,7 @@ where
                 || {
                     InitialResume::History(Box::new(HistoryCheckpoint {
                         workspace: restored_workspace.clone(),
+                        provider_session_id: Arc::clone(&lineage_id),
                         canonical_context,
                         history,
                         prompt_cache_key: Arc::clone(&prompt_cache_key),
