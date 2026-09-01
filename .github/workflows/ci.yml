@@ -160,7 +160,6 @@ jobs:
             js/nanocodex-vite/package-lock.json
             js/nanocodex-terminal/package-lock.json
             examples/node/package-lock.json
-            examples/rivet-actors/package-lock.json
             js/egress/package-lock.json
             js/managed/package-lock.json
             examples/vercel-workflows/package-lock.json
@@ -183,7 +182,6 @@ jobs:
           npm ci --prefix js/nanocodex-terminal
           ./js/nanocodex-vite/scripts/build-js-package.sh
           npm ci --prefix examples/node
-          npm ci --prefix examples/rivet-actors
           npm ci --prefix js/egress
           npm ci --prefix js/managed
           npm ci --prefix examples/vercel-workflows
@@ -202,7 +200,6 @@ jobs:
           npm test --prefix js/nanocodex-terminal
           node --test examples/browser-cdn/*.test.mjs
           npm test --prefix examples/node
-          npm run check --prefix examples/rivet-actors
           npm run typecheck --prefix js/egress
           npm test --prefix js/egress
           npm run dry-run:broker --prefix js/egress
