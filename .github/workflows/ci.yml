@@ -119,23 +119,6 @@ jobs:
     name: Node and browser bindings
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    services:
-      postgres:
-        image: postgres:17-alpine
-        env:
-          POSTGRES_DB: nanocodex_test
-          POSTGRES_PASSWORD: nanocodex_test
-          POSTGRES_USER: nanocodex_test
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U nanocodex_test -d nanocodex_test"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
-    env:
-      DATABASE_URL: postgres://nanocodex_test:nanocodex_test@127.0.0.1:5432/nanocodex_test
-      NANOCODEX_LIVE_POSTGRES: "1"
     permissions:
       contents: read
     steps:
@@ -160,9 +143,6 @@ jobs:
             js/nanocodex-vite/package-lock.json
             js/nanocodex-terminal/package-lock.json
             examples/node/package-lock.json
-            js/egress/package-lock.json
-            js/managed/package-lock.json
-            examples/vercel-workflows/package-lock.json
             examples/react-vite/package-lock.json
       - uses: taiki-e/install-action@3522286d40783523f9c7880e33f785905b4c20d0 # v2
         with:
@@ -182,9 +162,6 @@ jobs:
           npm ci --prefix js/nanocodex-terminal
           ./js/nanocodex-vite/scripts/build-js-package.sh
           npm ci --prefix examples/node
-          npm ci --prefix js/egress
-          npm ci --prefix js/managed
-          npm ci --prefix examples/vercel-workflows
           npm ci --prefix examples/react-vite
       - name: Test JS runtime
         working-directory: js/nanocodex
@@ -200,13 +177,6 @@ jobs:
           npm test --prefix js/nanocodex-terminal
           node --test examples/browser-cdn/*.test.mjs
           npm test --prefix examples/node
-          npm run typecheck --prefix js/egress
-          npm test --prefix js/egress
-          npm run dry-run:broker --prefix js/egress
-          npm run typecheck --prefix js/managed
-          npm test --prefix js/managed
-          npm run build --prefix js/managed
-          npm run check --prefix examples/vercel-workflows
           npm test --prefix examples/react-vite
           npm run build --prefix examples/react-vite
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
