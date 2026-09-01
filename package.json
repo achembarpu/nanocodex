@@ -12,7 +12,7 @@
     "typecheck": "turbo run typecheck",
     "test": "turbo run test",
     "deploy:egress": "pnpm --filter nanocodex-egress-service run deploy:broker",
-    "deploy:managed": "pnpm --filter nanocodex-managed-service run deploy",
+    "deploy:managed": "pnpm --filter nanocodex-vite run build:wasm && pnpm --filter nanocodex-managed-service run deploy",
     "deploy:connect-dialog": "turbo run build --filter=@nanocodex/connect-dialog && pnpm --filter @nanocodex/connect-dialog run deploy",
     "deploy:connect-api": "pnpm --filter @nanocodex/connect-api run deploy",
     "deploy:connect-playground": "turbo run build --filter=@nanocodex/connect-playground && pnpm --filter @nanocodex/connect-playground run deploy",
