@@ -47,3 +47,9 @@ export function managedGrantUpstreamMethod(method, resource) {
     ? "GET"
     : method;
 }
+
+export function managedAgentExistenceStatus(response) {
+  if (response.status === 204) return "available";
+  if (response.status === 404) return "missing";
+  return "unavailable";
+}

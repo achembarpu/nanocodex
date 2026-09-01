@@ -40,6 +40,7 @@ import {
 } from "./mcpPolicy.mjs";
 import {
   managedAgentPortabilityGranted,
+  managedAgentExistenceStatus,
   managedGrantHeaders,
   managedGrantUpstreamMethod,
   managedGrantWebSocketHeaders,
@@ -55,10 +56,63 @@ type WorkerWebSocket = WebSocket & { accept(): void };
 declare const WebSocketPair: {
   new(): { 0: WorkerWebSocket; 1: WorkerWebSocket };
 };
+type AtomicNonceStorage = Kv.NonceStorage.State["storage"] & {
+  transaction<Value>(
+    operation: (storage: Kv.NonceStorage.State["storage"]) => Promise<Value>,
+  ): Promise<Value>;
+};
 
 export class ConnectNonceStorage extends Kv.NonceStorage {
   override async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
+    if (url.pathname === "/delete-if-value") {
+      if (request.method !== "POST") {
+        return Response.json({ error: "method not allowed" }, { status: 405 });
+      }
+      const key = url.searchParams.get("key");
+      const body = await request.json().catch(() => undefined) as { value?: unknown } | undefined;
+      if (!key || !body || typeof body.value !== "string") {
+        return Response.json({ error: "invalid compare-delete request" }, { status: 400 });
+      }
+      const deleted = await (this.state.storage as AtomicNonceStorage).transaction(async (storage) => {
+        const entry = await storage.get<Kv.NonceStorage.Entry>(key);
+        const active = entry !== undefined
+          && (entry.expiresAt === undefined || Date.now() < entry.expiresAt);
+        const matches = active && entry.value === body.value;
+        if (matches || (entry !== undefined && !active)) await storage.delete(key);
+        return matches;
+      });
+      return Response.json({ deleted });
+    }
+    if (url.pathname === "/publish-connect-agent") {
+      if (request.method !== "POST") {
+        return Response.json({ error: "method not allowed" }, { status: 405 });
+      }
+      const body = await request.json().catch(() => undefined) as Record<string, unknown> | undefined;
+      const lockKey = body?.lock_key;
+      const lockValue = body?.lock_value;
+      const recordKey = body?.record_key;
+      const agentId = body?.agent_id;
+      if (typeof lockKey !== "string"
+        || typeof lockValue !== "string"
+        || typeof recordKey !== "string"
+        || !recordKey.startsWith("connect-agent:")
+        || lockKey !== `${recordKey}:lock`
+        || !isConnectAgentId(agentId)) {
+        return Response.json({ error: "invalid agent publication" }, { status: 400 });
+      }
+      const published = await (this.state.storage as AtomicNonceStorage).transaction(async (storage) => {
+        const lock = await storage.get<Kv.NonceStorage.Entry>(lockKey);
+        const ownsLock = lock !== undefined
+          && (lock.expiresAt === undefined || Date.now() < lock.expiresAt)
+          && lock.value === lockValue;
+        if (!ownsLock) return false;
+        await storage.put(recordKey, { value: { agentId } });
+        await storage.delete(lockKey);
+        return true;
+      });
+      return Response.json({ published });
+    }
     if (url.pathname !== "/resolve-grant") return super.fetch(request);
     const token = url.searchParams.get("token");
     if (!token || !/^[A-Za-z0-9_-]{43}$/.test(token)) {
@@ -1798,33 +1852,113 @@ async function connectManagedAgent(
   }
   const recordKey = `connect-agent:${appId}:${assertion.brokerUserId}${conversationId ? `:${conversationId}` : ""}`;
   const retained = await store.get<unknown>(recordKey);
-  if (isConnectAgentRecord(retained)) return retained.agentId;
+  if (isConnectAgentRecord(retained)
+    && await managedAgentExists(env, assertion, retained.agentId)) {
+    return retained.agentId;
+  }
   const lockKey = `${recordKey}:lock`;
   const lockValue = randomSubject();
   let acquired = false;
-  for (let attempt = 0; attempt < 8; attempt += 1) {
+  const lockDeadline = Date.now() + 60_000;
+  while (Date.now() < lockDeadline) {
     acquired = await store.create(lockKey, lockValue, { ttl: 60 });
     if (acquired) break;
-    await new Promise((resolve) => setTimeout(resolve, 25 * (attempt + 1)));
+    const winner = await store.get<unknown>(recordKey);
+    if (isConnectAgentRecord(winner)
+      && (!isConnectAgentRecord(retained) || winner.agentId !== retained.agentId)
+      && await managedAgentExists(env, assertion, winner.agentId)) {
+      return winner.agentId;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
   }
   if (!acquired) {
     throw new ApiFailure(409, "durable_agent_busy", "The account's durable agent is already being provisioned.");
   }
   try {
     const retainedAfterLock = await store.get<unknown>(recordKey);
-    if (isConnectAgentRecord(retainedAfterLock)) return retainedAfterLock.agentId;
+    if (isConnectAgentRecord(retainedAfterLock)
+      && await managedAgentExists(env, assertion, retainedAfterLock.agentId)) {
+      return retainedAfterLock.agentId;
+    }
 
     const agentId = await createManagedAgent(env, assertion);
+    let publicationError: unknown;
     try {
-      await store.set(recordKey, { agentId } satisfies ConnectAgentRecord);
-      return agentId;
+      if (await publishConnectAgent(env.CONNECT_STATE, recordKey, lockKey, lockValue, agentId)) {
+        return agentId;
+      }
     } catch (cause) {
-      await deleteManagedAgent(env, assertion, agentId).catch(() => {});
-      throw cause;
+      publicationError = cause;
     }
+    // A lost publication response must never delete the agent that the atomic
+    // publication already made canonical. Resolve the retained winner first.
+    const winner = await store.get<unknown>(recordKey);
+    if (isConnectAgentRecord(winner) && winner.agentId === agentId) return agentId;
+    if (isConnectAgentRecord(winner)) {
+      try {
+        if (await managedAgentExists(env, assertion, winner.agentId)) {
+          await deleteManagedAgent(env, assertion, agentId).catch(() => {});
+          return winner.agentId;
+        }
+      } catch (cause) {
+        await deleteManagedAgent(env, assertion, agentId).catch(() => {});
+        throw cause;
+      }
+    }
+    await deleteManagedAgent(env, assertion, agentId).catch(() => {});
+    if (publicationError !== undefined) throw publicationError;
+    throw new ApiFailure(
+      409,
+      "durable_agent_busy",
+      "The account's durable agent changed during provisioning.",
+    );
   } finally {
-    await store.delete(lockKey);
+    await deleteConnectAgentLock(env.CONNECT_STATE, lockKey, lockValue).catch(() => {});
   }
+}
+
+async function publishConnectAgent(
+  namespace: Kv.durableObject.Namespace,
+  recordKey: string,
+  lockKey: string,
+  lockValue: string,
+  agentId: string,
+): Promise<boolean> {
+  const response = await namespace.get(namespace.idFromName("default")).fetch(
+    "https://do.invalid/publish-connect-agent",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        agent_id: agentId,
+        lock_key: lockKey,
+        lock_value: lockValue,
+        record_key: recordKey,
+      }),
+    },
+  );
+  const body = await response.json().catch(() => undefined) as Record<string, unknown> | undefined;
+  if (!response.ok || typeof body?.published !== "boolean") {
+    throw new Error(`Connect agent publication failed: ${response.status}`);
+  }
+  return body.published;
+}
+
+async function deleteConnectAgentLock(
+  namespace: Kv.durableObject.Namespace,
+  key: string,
+  value: string,
+): Promise<void> {
+  const response = await namespace.get(namespace.idFromName("default")).fetch(
+    `https://do.invalid/delete-if-value?key=${encodeURIComponent(key)}`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ value }),
+    },
+  );
+  if (!response.ok) throw new Error(`Connect agent lock release failed: ${response.status}`);
+  await response.body?.cancel();
 }
 
 function managedGrantAssertion(grant: GrantRecord): ManagedGrantAssertion {
@@ -1927,6 +2061,25 @@ async function createManagedAgent(env: Env, assertion: ManagedGrantAssertion): P
     throw new ApiFailure(503, "durable_agent_unavailable", "The durable Nanocodex agent could not be provisioned.");
   }
   return body.agent_id;
+}
+
+async function managedAgentExists(
+  env: Env,
+  assertion: ManagedGrantAssertion,
+  agentId: string,
+): Promise<boolean> {
+  const response = await env.ACCOUNTS.fetch(new Request(
+    `https://nanocodex.internal/v1/agents/${encodeURIComponent(agentId)}/_connect-existence`,
+    {
+      method: "GET",
+      headers: managedGrantHeaders(assertion),
+    },
+  ));
+  const status = managedAgentExistenceStatus(response);
+  await response.body?.cancel();
+  if (status === "available") return true;
+  if (status === "missing") return false;
+  throw new ApiFailure(503, "durable_agent_unavailable", "The durable Nanocodex agent could not be verified.");
 }
 
 async function deleteManagedAgent(

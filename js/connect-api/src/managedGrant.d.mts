@@ -16,3 +16,6 @@ export function managedGrantWebSocketHeaders(
   origin: string,
 ): Record<string, string>;
 export function managedGrantUpstreamMethod(method: string, resource: string): string;
+export function managedAgentExistenceStatus(
+  response: Response,
+): "available" | "missing" | "unavailable";

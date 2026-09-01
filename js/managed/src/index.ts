@@ -192,6 +192,7 @@ const MAX_IMPORT_BATCHES_PER_CREATE = 4;
 const UUID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const SESSION_ID = UUID;
+const CONNECT_SERVICE_ORIGIN = "https://nanocodex.internal";
 const ROOM_ROUTE_ID =
   /^([0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})~([A-Za-z0-9_-]{43})$/;
 const AGENT_TOKEN = /^[A-Za-z0-9_-]{43}$/;
@@ -1066,6 +1067,18 @@ export default {
       ...(routedTurnId === undefined ? {} : { turn_id: routedTurnId }),
     });
     const stub = env.NANOCODEX_SESSIONS.getByName(agentId);
+    if (resource === "_connect-existence") {
+      if (request.method !== "GET"
+        || url.origin !== CONNECT_SERVICE_ORIGIN
+        || principal.kind !== "connect_grant") {
+        return json({ error: "not_found" }, { status: 404 });
+      }
+      const existenceHeaders = new Headers(request.headers);
+      forwardPrincipalAssertions(existenceHeaders, principal);
+      return stub.fetch("https://session.internal/connect-existence", {
+        headers: existenceHeaders,
+      });
+    }
     const sessionHeaders = new Headers(request.headers);
     forwardPrincipalAssertions(sessionHeaders, principal);
     const publicOrigin = `public_origin=${encodeURIComponent(url.origin)}`;
@@ -1520,6 +1533,21 @@ export class DurableAgentSession extends DurableComputerSession {
     const url = new URL(request.url);
     const ownerAssertion = request.headers.get(SESSION_OWNER_ASSERTION);
     let turnAuthorization: TurnAuthorization = { capabilities: [] };
+    if (request.method === "GET" && url.pathname === "/connect-existence") {
+      const asserted = forwardedPrincipal(request.headers);
+      const session = this.#session();
+      if (!session || this.#deleting || this.#deleted) {
+        return json({ error: "not_found" }, { status: 404 });
+      }
+      if (!asserted
+        || asserted.ownerId !== session.owner_id
+        || asserted.organizationId !== session.organization_id
+        || asserted.teamId !== session.team_id
+        || asserted.authorizationEpoch !== session.authorization_epoch) {
+        return json({ error: "ownership_mismatch" }, { status: 409 });
+      }
+      return new Response(null, { status: 204 });
+    }
     if (ownerAssertion !== null) {
       const asserted = forwardedPrincipal(request.headers);
       const session = this.#session();
