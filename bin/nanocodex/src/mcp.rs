@@ -160,6 +160,8 @@ struct CodexOAuthEntry {
     expires_at: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     refresh_token: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    issuer: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     scopes: Vec<String>,
 }
@@ -559,6 +561,9 @@ impl CodexOAuthStore {
         if let Some(refresh_token) = entry.refresh_token.filter(|token| !token.trim().is_empty()) {
             credentials = credentials.refresh_token(refresh_token);
         }
+        if let Some(issuer) = entry.issuer.filter(|issuer| !issuer.trim().is_empty()) {
+            credentials = credentials.issuer(issuer);
+        }
         if let Some(expires_at) = entry.expires_at {
             credentials = credentials.expires_at_millis(expires_at);
         }
@@ -585,6 +590,7 @@ impl CodexOAuthStore {
                 access_token: credentials.access_token().to_owned(),
                 expires_at: credentials.expires_at(),
                 refresh_token: credentials.refresh_token_value().map(ToOwned::to_owned),
+                issuer: credentials.authorization_issuer().map(ToOwned::to_owned),
                 scopes: credentials.granted_scopes().to_vec(),
             },
         );
@@ -1161,6 +1167,7 @@ tool_timeout_sec = 9.5
                     "access_token": "new-access",
                     "expires_at": 200,
                     "refresh_token": "new-refresh",
+                    "issuer": "https://remote.example",
                     "scopes": ["mcp:tools"]
                 },
                 "other|entry": {
@@ -1181,9 +1188,14 @@ tool_timeout_sec = 9.5
             .unwrap();
         assert_eq!(loaded.client_id(), "new-client");
         assert_eq!(loaded.access_token(), "new-access");
+        assert_eq!(
+            loaded.authorization_issuer(),
+            Some("https://remote.example")
+        );
 
         let replacement = McpOAuthCredentials::new("current-client", "current-access")
             .refresh_token("current-refresh")
+            .issuer("https://remote.example")
             .expires_at_millis(300)
             .scopes(["mcp:tools"]);
         store
@@ -1195,6 +1207,10 @@ tool_timeout_sec = 9.5
         assert_eq!(entries.len(), 2);
         let key = codex_oauth_key("remote", "https://remote.example/mcp").unwrap();
         assert_eq!(entries[&key].access_token, "current-access");
+        assert_eq!(
+            entries[&key].issuer.as_deref(),
+            Some("https://remote.example")
+        );
         assert!(entries.contains_key("other|entry"));
     }
 
