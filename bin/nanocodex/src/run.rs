@@ -1,19 +1,41 @@
+use std::path::PathBuf;
+
 use clap::{Args, builder::NonEmptyStringValueParser};
 use eyre::{Result, eyre};
-use nanocodex::AgentEvents;
+use nanocodex::{AgentEvents, PromptRequest};
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 use tokio::time::{Duration, timeout};
 
-use crate::config::AgentArgs;
+use crate::config::{AgentArgs, LocalDurability};
 use crate::vm::VmArgs;
 
 const TURN_SETTLE_TIMEOUT: Duration = Duration::from_secs(5);
+const DEFAULT_LOCAL_DURABILITY_STATE_ID: &str = "root";
 
 #[derive(Args)]
 pub(crate) struct Run {
     /// Prompt submitted to the agent.
     #[arg(value_parser = NonEmptyStringValueParser::new())]
     prompt: String,
+
+    /// Stable durable operation ID for this prompt.
+    #[arg(long, value_parser = NonEmptyStringValueParser::new())]
+    request_id: Option<String>,
+
+    /// Attach the portable durability engine to a local SQLite database.
+    ///
+    /// This is a testing mode for crash, replay, fencing, and spawned-agent
+    /// durability exercises. It cannot be combined with rollouts.
+    #[arg(long, value_name = "PATH")]
+    local_durability: Option<PathBuf>,
+
+    /// Stable root state ID within the local durability database.
+    #[arg(
+        long,
+        requires = "local_durability",
+        value_parser = NonEmptyStringValueParser::new()
+    )]
+    local_durability_state_id: Option<String>,
 
     /// Submit the same prompt as sequential follow-on turns on one owned session.
     #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u16).range(1..=100))]
@@ -22,13 +44,25 @@ pub(crate) struct Run {
 
 impl Run {
     pub(crate) async fn run(self, config: AgentArgs, vm: VmArgs) -> Result<()> {
-        let configured = config.build(vm).await?;
+        self.validate()?;
+        let local_durability = self.local_durability.clone().map(|path| LocalDurability {
+            path,
+            state_id: self
+                .local_durability_state_id
+                .clone()
+                .unwrap_or_else(|| DEFAULT_LOCAL_DURABILITY_STATE_ID.to_owned()),
+        });
+        let configured = config.build(vm, local_durability).await?;
         let handle = configured.handle;
         let mut events = configured.events;
         let mut stdout = tokio::io::stdout();
         let run_result: Result<()> = async {
             for _ in 0..self.repeat {
-                let turn = handle.prompt(self.prompt.clone()).await?;
+                let mut request = PromptRequest::new(self.prompt.clone());
+                if let Some(request_id) = self.request_id.as_ref() {
+                    request = request.request_id(request_id.clone());
+                }
+                let turn = handle.prompt(request).await?;
                 let control = turn.control();
                 let completion = async {
                     let events_result = write_turn_jsonl(&mut events, &mut stdout);
@@ -106,6 +140,20 @@ impl Run {
         vm_shutdown_result?;
         shutdown_result
     }
+
+    fn validate(&self) -> Result<()> {
+        if self.request_id.is_some() && self.repeat > 1 {
+            return Err(eyre!(
+                "`--request-id` identifies one durable operation and cannot be combined with `--repeat` greater than 1"
+            ));
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn uses_local_durability(&self) -> bool {
+        self.local_durability.is_some()
+    }
 }
 
 async fn interrupt_signal() -> Result<()> {
@@ -131,7 +179,15 @@ async fn interrupt_signal() -> Result<()> {
 }
 
 pub(crate) async fn run_prompt(prompt: String, config: AgentArgs, vm: VmArgs) -> Result<()> {
-    Run { prompt, repeat: 1 }.run(config, vm).await
+    Run {
+        prompt,
+        request_id: None,
+        local_durability: None,
+        local_durability_state_id: None,
+        repeat: 1,
+    }
+    .run(config, vm)
+    .await
 }
 
 async fn write_turn_jsonl(
@@ -151,4 +207,33 @@ async fn write_turn_jsonl(
     Err(eyre!(
         "agent event stream closed before the turn emitted a terminal event"
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stable_request_id_names_exactly_one_turn() {
+        Run {
+            prompt: "test".to_owned(),
+            request_id: Some("turn-1".to_owned()),
+            local_durability: None,
+            local_durability_state_id: None,
+            repeat: 1,
+        }
+        .validate()
+        .unwrap();
+
+        let error = Run {
+            prompt: "test".to_owned(),
+            request_id: Some("turn-1".to_owned()),
+            local_durability: None,
+            local_durability_state_id: None,
+            repeat: 2,
+        }
+        .validate()
+        .unwrap_err();
+        assert!(error.to_string().contains("one durable operation"));
+    }
 }

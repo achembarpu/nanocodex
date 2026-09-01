@@ -45,6 +45,7 @@ image.workspace = true
 indicatif.workspace = true
 jsonschema.workspace = true
 nanocodex.workspace = true
+nanocodex-durability = { workspace = true, features = ["sqlite"] }
 nanocodex-browser.workspace = true
 nanocodex-observability.workspace = true
 nanocodex-subagents.workspace = true
@@ -94,6 +95,7 @@ vergen = { workspace = true, features = ["build", "git", "gitcl"] }
 [dev-dependencies]
 criterion.workspace = true
 nanocodex-tools.workspace = true
+rusqlite.workspace = true
 tokio-tungstenite.workspace = true
 
 [[bench]]
@@ -111,6 +113,10 @@ path = "tests/managed_memory.rs"
 [[test]]
 name = "login"
 path = "tests/login.rs"
+
+[[test]]
+name = "durable_run"
+path = "tests/durable_run.rs"
 
 [[bin]]
 name = "nanocodex"

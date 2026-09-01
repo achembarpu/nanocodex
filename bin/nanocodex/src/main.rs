@@ -315,6 +315,43 @@ mod tests {
     }
 
     #[test]
+    fn local_durability_testing_has_explicit_identity_and_store() {
+        let cli = Cli::try_parse_from([
+            "nanocodex",
+            "run",
+            "durable turn",
+            "--local-durability",
+            "/tmp/nanocodex-durability.sqlite",
+            "--local-durability-state-id",
+            "hammer-root",
+            "--request-id",
+            "turn-1",
+            "--rollouts",
+            "false",
+        ])
+        .unwrap();
+
+        let Some(Command::Run(command)) = cli.command else {
+            panic!("run command was not parsed");
+        };
+        assert!(command.run.uses_local_durability());
+
+        let error = Cli::try_parse_from([
+            "nanocodex",
+            "run",
+            "durable turn",
+            "--local-durability-state-id",
+            "orphaned-state",
+        ])
+        .err()
+        .unwrap();
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
+    }
+
+    #[test]
     fn hosted_connectors_have_a_focused_top_level_command() {
         let cli = Cli::try_parse_from(["nanocodex", "connect", "github"]).unwrap();
         assert!(matches!(cli.command, Some(Command::Connect(_))));

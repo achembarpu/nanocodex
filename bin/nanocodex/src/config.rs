@@ -12,7 +12,7 @@ use eyre::{Result, WrapErr, eyre};
 ))]
 use nanocodex::NanocodexBuilder;
 use nanocodex::{
-    AgentEvents, Model, Nanocodex, OpenAi, ReasoningMode, Thinking, Tools,
+    AgentEvents, DurableAgentExt as _, Model, Nanocodex, OpenAi, ReasoningMode, Thinking, Tools,
     agent::{
         rollout::{DurableSession, RolloutConfig},
         session::{SessionId, SessionSnapshot},
@@ -24,6 +24,7 @@ use nanocodex::{
     },
     tools::mcp::McpHandle,
 };
+use nanocodex_durability::{DurableSession as PortableDurableSession, SqliteStore};
 
 use crate::browser::{BrowserArgs, ConfiguredBrowser};
 use crate::login::load_managed_mcp_credential;
@@ -305,12 +306,16 @@ impl AgentArgs {
             })
     }
 
-    pub(crate) async fn build(self, vm: VmArgs) -> Result<ConfiguredAgent> {
-        self.build_inner(None, vm, false).await
+    pub(crate) async fn build(
+        self,
+        vm: VmArgs,
+        local_durability: Option<LocalDurability>,
+    ) -> Result<ConfiguredAgent> {
+        self.build_inner(None, vm, false, local_durability).await
     }
 
     pub(crate) async fn build_tui(self, vm: VmArgs) -> Result<ConfiguredAgent> {
-        self.build_inner(None, vm, true).await
+        self.build_inner(None, vm, true, None).await
     }
 
     pub(crate) async fn build_resumed_tui(
@@ -318,7 +323,7 @@ impl AgentArgs {
         session: DurableSession,
         vm: VmArgs,
     ) -> Result<ConfiguredAgent> {
-        self.build_inner(Some(session), vm, true).await
+        self.build_inner(Some(session), vm, true, None).await
     }
 
     async fn build_inner(
@@ -326,9 +331,15 @@ impl AgentArgs {
         durable: Option<DurableSession>,
         vm: VmArgs,
         tui: bool,
+        local_durability: Option<LocalDurability>,
     ) -> Result<ConfiguredAgent> {
         let thinking = self.thinking();
         let web_search = self.web_search();
+        if local_durability.is_some() && self.rollouts {
+            return Err(eyre!(
+                "local durability testing requires `--rollouts false`; portable durability and Codex-compatible rollouts cannot both own restart state"
+            ));
+        }
         let codex_home = default_codex_home()?;
         let responses_transport = self.responses_transport();
         let mut session = prepare_session_build(self.cwd, self.rollouts, &codex_home, durable)?;
@@ -468,6 +479,23 @@ impl AgentArgs {
         } else {
             builder
         };
+        let builder = if let Some(local_durability) = local_durability {
+            let store = SqliteStore::open(&local_durability.path).wrap_err_with(|| {
+                format!(
+                    "failed to open local durability database {}",
+                    local_durability.path.display()
+                )
+            })?;
+            let state = PortableDurableSession::open(store, local_durability.state_id)
+                .await
+                .wrap_err("failed to open local durability state")?;
+            builder
+                .durability(state)
+                .await
+                .wrap_err("failed to attach local durability")?
+        } else {
+            builder
+        };
         let (handle, events) = builder.build()?;
         let (child_agents, subagent_updates) =
             subagent_runtime.map_or((None, None), |(_, control, updates)| {
@@ -497,6 +525,11 @@ impl AgentArgs {
             vm: configured_vm,
         })
     }
+}
+
+pub(crate) struct LocalDurability {
+    pub(crate) path: PathBuf,
+    pub(crate) state_id: String,
 }
 
 const fn selected_subagent_tools(
