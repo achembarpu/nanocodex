@@ -21,11 +21,11 @@ export async function routeLocalConnectorCallbackReturn(
   try {
     return await backend.fetch(new Request(returned.callbackUrl, request));
   } catch (error) {
-    console.error(JSON.stringify({
+    console.error({
       type: "connector_callback.backend_failure",
       flow: returned.flow,
-      error: { name: error instanceof Error ? error.name : typeof error },
-    }));
+      error_kind: error instanceof Error ? error.name : typeof error,
+    });
     return unavailable(returned.flow);
   }
 }

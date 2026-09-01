@@ -1,0 +1,25 @@
+{
+  "name": "nanocodex-monorepo",
+  "private": true,
+  "packageManager": "pnpm@11.25.0",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "predev": "portless proxy start --port 443",
+    "dev": "turbo run dev --filter=nanocodex-web --filter=@nanocodex/connect-playground",
+    "build": "turbo run build",
+    "typecheck": "turbo run typecheck",
+    "test": "turbo run test",
+    "deploy:egress": "pnpm --filter nanocodex-egress-service deploy:broker",
+    "deploy:managed": "pnpm --filter nanocodex-managed-service deploy",
+    "deploy:connect-dialog": "turbo run build --filter=@nanocodex/connect-dialog && pnpm --filter @nanocodex/connect-dialog deploy",
+    "deploy:connect-api": "pnpm --filter @nanocodex/connect-api deploy",
+    "deploy:connect-playground": "turbo run build --filter=@nanocodex/connect-playground && pnpm --filter @nanocodex/connect-playground deploy",
+    "deploy:account": "turbo run build --filter=nanocodex-web && pnpm --filter nanocodex-web deploy"
+  },
+  "devDependencies": {
+    "portless": "0.15.6",
+    "turbo": "2.10.12"
+  }
+}

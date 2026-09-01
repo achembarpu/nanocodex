@@ -33,13 +33,11 @@ export async function routeConnectApi(
   try {
     return await env.NANOCODEX_CONNECT_API.fetch(new Request(upstreamUrl, request));
   } catch (error) {
-    console.error(JSON.stringify({
+    console.error({
       type: "connect_api.backend_failure",
       path: url.pathname,
-      error: error instanceof Error
-        ? { name: error.name }
-        : { name: typeof error },
-    }));
+      error_kind: error instanceof Error ? error.name : typeof error,
+    });
     return Response.json({ error: "connect_api_unavailable" }, {
       status: 503,
       headers: {

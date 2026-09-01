@@ -182,14 +182,15 @@ breaking stay composable without introducing a second retry owner.
 ### Durable execution is optional and Rust-owned
 
 `nanocodex-durability` adds a replace-in-place total execution state and
-recovery policy, operation deduplication, effect replay, and session
+recovery policy, operation deduplication, committed-output replay, and session
 checkpoints. It includes memory, SQLite, and Postgres stores, plus a
 host-provided store contract whose only requirement is atomic load and
 fenced compare-and-replace. Rust owns the state format and every recovery decision.
 Model calls, warmup, compaction, and tools share one effect admission result:
-execute, replay an exact output, or persist an explicit unknown outcome without
-repeating an at-most-once effect. Live attempts are fenced in-memory
-capabilities, not a second durable state machine.
+execute when no output is committed, or replay the exact committed output.
+Unfinished effects are deliberately at-least-once and may be billed or applied
+again after recovery. Live attempts are fenced in-memory capabilities, not a
+second durable state machine.
 
 The layer implements the agent's neutral execution-policy seam; the core agent
 does not depend on it. Lower-level consumers can use `DurableSession` directly

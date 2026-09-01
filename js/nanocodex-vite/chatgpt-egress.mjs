@@ -6,6 +6,11 @@ import WebSocket, { WebSocketServer } from "ws";
 
 const CHATGPT_HOST = "chatgpt.com";
 const CHATGPT_PATH_PREFIX = "/backend-api/codex/";
+const RELAY_HTTP_PATHS = new Map([
+  ["codex-web-search", "/backend-api/codex/alpha/search"],
+  ["codex-image-generation", "/backend-api/codex/images/generations"],
+  ["codex-image-edit", "/backend-api/codex/images/edits"],
+]);
 const MAX_BUFFERED_BYTES = 32 * 1024 * 1024;
 
 export async function startChatGptWorkerEgress(options = {}) {
@@ -14,6 +19,7 @@ export async function startChatGptWorkerEgress(options = {}) {
     throw new TypeError("ChatGPT development egress capability must be 43 base64url characters");
   }
   const localPrefix = `/${capability}`;
+  const relayPrefix = `/v1/${capability}`;
   const sockets = new Set();
   const upstreams = new Set();
   const downstreamServer = new WebSocketServer({
@@ -22,7 +28,13 @@ export async function startChatGptWorkerEgress(options = {}) {
     perMessageDeflate: false,
   });
   const server = createServer((request, response) => {
-    void proxyHttpRequest(request, response, options.fetchImpl ?? fetch, localPrefix);
+    void proxyHttpRequest(
+      request,
+      response,
+      options.fetchImpl ?? fetch,
+      localPrefix,
+      relayPrefix,
+    );
   });
   server.on("connection", (socket) => {
     sockets.add(socket);
@@ -34,6 +46,7 @@ export async function startChatGptWorkerEgress(options = {}) {
       head,
       openUpstream: options.openUpstream,
       localPrefix,
+      relayPrefix,
       request,
       socket,
       upstreams,
@@ -57,6 +70,7 @@ export async function startChatGptWorkerEgress(options = {}) {
   let closed = false;
   return Object.freeze({
     url: `http://127.0.0.1:${address.port}${localPrefix}/`,
+    relayUrl: `http://127.0.0.1:${address.port}${relayPrefix}`,
     async close() {
       if (closed) return;
       closed = true;
@@ -68,8 +82,8 @@ export async function startChatGptWorkerEgress(options = {}) {
   });
 }
 
-async function proxyHttpRequest(request, response, fetchImpl, localPrefix) {
-  const upstreamPath = allowedUpstreamPath(request.url, localPrefix);
+async function proxyHttpRequest(request, response, fetchImpl, localPrefix, relayPrefix) {
+  const upstreamPath = allowedUpstreamPath(request.url, localPrefix, relayPrefix, false);
   if (!safeLoopbackRequest(request) || upstreamPath === undefined) {
     response.writeHead(404, noStoreHeaders("text/plain; charset=utf-8"));
     response.end("Not found\n");
@@ -99,9 +113,18 @@ async function proxyHttpRequest(request, response, fetchImpl, localPrefix) {
   }
 }
 
-function proxyWebSocketUpgrade({ downstreamServer, head, localPrefix, openUpstream, request, socket, upstreams }) {
+function proxyWebSocketUpgrade({
+  downstreamServer,
+  head,
+  localPrefix,
+  openUpstream,
+  relayPrefix,
+  request,
+  socket,
+  upstreams,
+}) {
   socket.on("error", () => {});
-  const upstreamPath = allowedUpstreamPath(request.url, localPrefix);
+  const upstreamPath = allowedUpstreamPath(request.url, localPrefix, relayPrefix, true);
   if (!safeLoopbackRequest(request) || upstreamPath === undefined) {
     rejectUpgrade(socket, 404, "Not found");
     return;
@@ -223,13 +246,25 @@ function safeLoopbackRequest(request) {
   return address === "127.0.0.1" || address === "::1" || address === "::ffff:127.0.0.1";
 }
 
-function allowedUpstreamPath(path, localPrefix) {
+function allowedUpstreamPath(path, localPrefix, relayPrefix, websocket) {
   if (typeof path !== "string") return undefined;
   try {
     const url = new URL(path, "http://127.0.0.1");
     const expectedPrefix = `${localPrefix}${CHATGPT_PATH_PREFIX}`;
-    if (!url.pathname.startsWith(expectedPrefix)) return undefined;
-    return `${url.pathname.slice(localPrefix.length)}${url.search}`;
+    if (url.pathname.startsWith(expectedPrefix)) {
+      return `${url.pathname.slice(localPrefix.length)}${url.search}`;
+    }
+    if (websocket && url.pathname === relayPrefix && !url.search) {
+      return "/backend-api/codex/responses";
+    }
+    if (!websocket) {
+      const route = url.pathname.slice(`${relayPrefix}/http/`.length);
+      const upstream = url.pathname.startsWith(`${relayPrefix}/http/`)
+        ? RELAY_HTTP_PATHS.get(route)
+        : undefined;
+      if (upstream) return `${upstream}${url.search}`;
+    }
+    return undefined;
   } catch {
     return undefined;
   }

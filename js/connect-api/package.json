@@ -7,7 +7,7 @@
     "typecheck": "tsc --noEmit",
     "test": "node --test test/*.test.mjs",
     "dry-run": "wrangler deploy --dry-run --config wrangler.jsonc",
-    "deploy": "wrangler deploy --config wrangler.jsonc"
+    "deploy": "wrangler deploy --env=\"\" --config wrangler.jsonc"
   },
   "dependencies": {
     "accounts": "0.17.0",

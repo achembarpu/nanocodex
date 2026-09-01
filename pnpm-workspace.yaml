@@ -1,0 +1,11 @@
+packages:
+  - "js/*"
+
+overrides:
+  "@microsoft/dev-tunnels-ssh": "3.12.40"
+
+allowBuilds:
+  "@mongodb-js/zstd": true
+  esbuild: true
+  node-liblzma: false
+  workerd: true

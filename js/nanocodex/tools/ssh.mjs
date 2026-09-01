@@ -252,7 +252,38 @@ function normalizeRsaPublicKeyBlob(key) {
   // RFC 8332 changes the signature algorithm name, but the public-key blob
   // remains the RFC 4253 `ssh-rsa` encoding. The dependency otherwise writes
   // `rsa-sha2-*` into both fields, which strict OpenSSH servers reject.
-  key.getPublicKeyBytes = () => getPublicKeyBytes("ssh-rsa");
+  key.getPublicKeyBytes = async () => {
+    try {
+      return await getPublicKeyBytes("ssh-rsa");
+    } catch (error) {
+      // Node 24 cannot export the public KeyObject produced by the dependency's
+      // private-key importer as PKCS#1, although its public JWK remains valid.
+      // Encode that public material directly instead of rejecting a valid key.
+      const jwk = key.publicKey?.export?.({ format: "jwk" });
+      if (jwk?.kty !== "RSA" || typeof jwk.e !== "string" || typeof jwk.n !== "string") {
+        throw error;
+      }
+      return Buffer.concat([
+        sshLengthPrefixed(Buffer.from("ssh-rsa")),
+        sshLengthPrefixed(sshMpint(jwk.e)),
+        sshLengthPrefixed(sshMpint(jwk.n)),
+      ]);
+    }
+  };
+}
+
+function sshMpint(base64url) {
+  const value = Buffer.from(base64url, "base64url");
+  let offset = 0;
+  while (offset + 1 < value.length && value[offset] === 0) offset += 1;
+  const normalized = value.subarray(offset);
+  return normalized[0] >= 0x80 ? Buffer.concat([Buffer.from([0]), normalized]) : normalized;
+}
+
+function sshLengthPrefixed(value) {
+  const length = Buffer.allocUnsafe(4);
+  length.writeUInt32BE(value.length);
+  return Buffer.concat([length, value]);
 }
 
 async function authenticateHost(publicKey, expected, acceptUnknown) {

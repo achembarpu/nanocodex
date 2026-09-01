@@ -12,10 +12,10 @@
     "dry-run:agent": "wrangler deploy --dry-run --config wrangler.agent.jsonc",
     "deploy:agent": "wrangler deploy --config wrangler.agent.jsonc",
     "dry-run:broker": "wrangler deploy --dry-run --config wrangler.broker.jsonc",
-    "deploy:broker": "wrangler deploy --config wrangler.broker.jsonc"
+    "deploy:broker": "wrangler deploy --env=\"\" --config wrangler.broker.jsonc"
   },
   "dependencies": {
-    "nanocodex": "file:../nanocodex"
+    "nanocodex": "workspace:*"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.22.0",

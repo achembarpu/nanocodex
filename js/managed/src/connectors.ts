@@ -275,10 +275,11 @@ async function finishCallback(
 ): Promise<Response> {
   const value: unknown = await response.json().catch(() => undefined);
   if (!response.ok) {
-    console.warn("connector callback failed", {
+    console.warn({
+      type: "connector.callback_failed",
       connector,
       status: response.status,
-      error: connectorErrorCode(value),
+      error_code: connectorErrorCode(value),
     });
   }
   if (!isRecord(value) || typeof value.return_to !== "string") {

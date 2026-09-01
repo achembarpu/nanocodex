@@ -8,12 +8,15 @@ const USDC_E = "0x20C000000000000000000000b9537d11c60E8b50" as const;
 const MACHINE_USD_SWAPPER = "0xd588ED9Ae08643A450157Adaf61c3C0C1BBd0dbb" as const;
 const TIP20_CHANNEL_ESCROW = "0x4d50500000000000000000000000000000000000" as const;
 const MERCATOR_SETTLEMENT = "0xa295C42FBCC026a62304A7701f25B4c91799B0dA" as const;
-const localBrowserHostname = globalThis.location?.hostname === "playground.nanocodex.localhost"
-  ? "nanocodex.localhost"
-  : globalThis.location?.hostname.startsWith("playground-")
-      && globalThis.location.hostname.endsWith(".nanocodex.localhost")
-    ? globalThis.location.hostname.slice("playground-".length)
-    : undefined;
+const localBrowserHostname = (() => {
+  const hostname = globalThis.location?.hostname.toLowerCase();
+  if (!hostname) return undefined;
+  if (hostname === "playground.nanocodex.localhost") return "nanocodex.localhost";
+  const match = hostname.match(
+    /^([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)\.playground\.nanocodex\.localhost$/,
+  );
+  return match ? `${match[1]}.nanocodex.localhost` : undefined;
+})();
 const localBrowserApiHost = localBrowserHostname
   ? `${globalThis.location.protocol}//${localBrowserHostname}${
       globalThis.location.port ? `:${globalThis.location.port}` : ""

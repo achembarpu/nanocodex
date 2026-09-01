@@ -173,7 +173,10 @@ export class EvalCoordinator {
       }
       return error("not_found", 404);
     } catch (cause) {
-      console.error("evaluation coordinator mutation failed", cause);
+      console.error({
+        type: "evaluation.coordinator_mutation_failed",
+        error_kind: cause instanceof Error ? cause.name : typeof cause,
+      });
       return error("evaluation coordinator mutation failed", 500);
     }
   }

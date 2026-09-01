@@ -310,7 +310,7 @@ export async function handleEgress(
     if (!(error instanceof EgressFailure)) {
       const detail = { name: error instanceof Error ? error.name : typeof error };
       diagnostics?.upstreamException(detail);
-      console.error(JSON.stringify({ type: "egress.upstream_exception", ...detail }));
+      console.error({ type: "egress.upstream_exception", error_kind: detail.name });
     }
     return auditedError(problem.status, problem.code, request, url, operation.id, started,
       {
@@ -1097,10 +1097,8 @@ function auditControl(
   const connector = user?.[2] === "connectors"
     ? tail?.match(/^(github|gmail|gdrive|x)/)?.[1]
     : undefined;
-  const mcpConnectionId = user?.[2] === "mcp-connections"
-    ? tail?.match(/^([A-Za-z0-9_-]{43})/)?.[1]
-    : undefined;
-  console.log({
+  const log = status >= 500 ? console.error : status >= 400 ? console.warn : console.info;
+  log({
     type: "egress.control",
     action: status >= 500 ? "error" : status >= 400 ? "deny" : "allow",
     method: request.method,
@@ -1108,9 +1106,7 @@ function auditControl(
     status,
     duration_ms: Date.now() - started,
     ...(deploymentSha === undefined ? {} : { deployment_sha: deploymentSha }),
-    ...(user === null ? {} : { user_id: user[1] }),
     ...(connector === undefined ? {} : { connector }),
-    ...(mcpConnectionId === undefined ? {} : { mcp_connection_id: mcpConnectionId }),
   });
 }
 
@@ -1124,7 +1120,15 @@ function audit(
 ): void {
   const connector = rule === "github" || rule === "gmail" || rule === "gdrive"
     || rule === "x" || rule === "mcp";
-  console.log({
+  const log = action === "error" ? console.error : action === "deny" ? console.warn : console.info;
+  const safeDetail = {
+    ...(typeof detail.code === "string" ? { code: detail.code } : {}),
+    ...(typeof detail.status === "number" ? { status: detail.status } : {}),
+    ...(typeof detail.recovered === "boolean" ? { recovered: detail.recovered } : {}),
+    ...(typeof detail.connector === "string" ? { connector: detail.connector } : {}),
+    ...(typeof detail.deployment_sha === "string" ? { deployment_sha: detail.deployment_sha } : {}),
+  };
+  log({
     type: "egress.request",
     action,
     rule,
@@ -1132,6 +1136,6 @@ function audit(
     host: url.host,
     path: connector ? "/provider-api" : url.pathname,
     duration_ms: Date.now() - started,
-    ...detail,
+    ...safeDetail,
   });
 }

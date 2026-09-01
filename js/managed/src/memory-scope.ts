@@ -318,7 +318,7 @@ export class MemoryScope extends DurableObject<MemoryScopeEnv> {
                 : 400,
         });
       }
-      console.error("memory scope request failed", errorMessage(error));
+      console.error({ type: "memory_scope.request_failed", error_kind: errorKind(error) });
       return json({ error: "memory_scope_failed", message: errorMessage(error) }, { status: 500 });
     }
   }
@@ -485,7 +485,11 @@ export class MemoryScope extends DurableObject<MemoryScopeEnv> {
       } catch (error) {
         // SQLite remains authoritative while uploads are pending or the
         // external index is unavailable.
-        console.error("memory AI Search query failed; using local FTS", errorMessage(error));
+        console.warn({
+          type: "memory_scope.ai_search_query_failed",
+          error_kind: errorKind(error),
+          fallback: "local_fts",
+        });
       }
     }
     const results = rows.map((row) => memoryHit(row, input.query));
@@ -870,7 +874,7 @@ export class MemoryScope extends DurableObject<MemoryScopeEnv> {
   #scheduleAiOutbox(): void {
     if (this.env.HISTORY_AI_SEARCH === undefined) return;
     this.ctx.waitUntil(this.ctx.storage.setAlarm(Date.now() + 1).catch((error) => {
-      console.error("failed to schedule memory AI Search outbox", errorMessage(error));
+      console.warn({ type: "memory_scope.ai_outbox_schedule_failed", error_kind: errorKind(error) });
     }));
     if (this.#aiTask) return;
     const task = this.#drainAiOutbox();
@@ -879,7 +883,7 @@ export class MemoryScope extends DurableObject<MemoryScopeEnv> {
       if (this.#aiTask === task) this.#aiTask = undefined;
     }).catch(() => {});
     this.ctx.waitUntil(task.catch(async (error) => {
-      console.error("memory AI Search projection failed", errorMessage(error));
+      console.warn({ type: "memory_scope.ai_projection_failed", error_kind: errorKind(error) });
       await this.#scheduleNextAlarm();
     }));
   }
@@ -988,7 +992,7 @@ export class MemoryScope extends DurableObject<MemoryScopeEnv> {
           );
         } catch (error) {
           this.#deferAiOperation(row);
-          console.error("memory AI Search outbox operation failed", errorMessage(error));
+          console.warn({ type: "memory_scope.ai_outbox_operation_failed", error_kind: errorKind(error) });
         }
       }
     }
@@ -1198,6 +1202,10 @@ async function parseJsonBody<Value>(request: Request): Promise<Value> {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function errorKind(error: unknown): string {
+  return error instanceof Error ? error.name : typeof error;
 }
 
 function isAiSearchNotFound(error: unknown): boolean {

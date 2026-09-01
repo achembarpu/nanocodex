@@ -37,7 +37,6 @@ export { AgentTerminalView } from "nanocodex-terminal";
 /** Authenticated website policy around the headless Agent SDK and shared transcript view. */
 type AgentTerminalProps = Readonly<{
   authStatus: ModelSessionStatus | undefined;
-  beforeLocalTurn(): Promise<void>;
   mode: AgentTerminalMode;
   onConversationActivity(input: string): void;
   onStateChange(state: AgentTerminalState): void;
@@ -89,7 +88,6 @@ export const AgentTerminal = memo(function AgentTerminal(props: AgentTerminalPro
 const BrowserAgentTerminal = memo(function BrowserAgentTerminal({
   authStatus,
   accountMcpConnections,
-  beforeLocalTurn,
   mode,
   onConversationActivity,
   onStateChange,
@@ -131,7 +129,6 @@ const BrowserAgentTerminal = memo(function BrowserAgentTerminal({
       onStateChange={onStateChange}
       retryAgent={retryAgent}
       voice={voiceEnabled}
-      voiceOptions={{ beforeAgentTurn: beforeLocalTurn }}
       welcome={welcome}
       accessory={({ agentReady, submit }) => (
         <ArtifactDock

@@ -453,8 +453,12 @@ export function isLocalDevelopmentOrigin(value) {
   try {
     const url = new URL(value);
     const hostname = url.hostname.toLowerCase();
-    const localNanocodex = hostname === "nanocodex.localhost"
+    const rootNanocodex = hostname === "nanocodex.localhost"
       || /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.nanocodex\.localhost$/.test(hostname);
+    const localNanocodex = rootNanocodex
+      || hostname === "playground.nanocodex.localhost"
+      || /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.playground\.nanocodex\.localhost$/
+        .test(hostname);
     return url.origin === value
       && (url.protocol === "http:" || url.protocol === "https:")
       && (

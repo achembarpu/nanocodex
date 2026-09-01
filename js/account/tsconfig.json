@@ -11,7 +11,6 @@
     "forceConsistentCasingInFileNames": true,
     "module": "ESNext",
     "moduleResolution": "Bundler",
-    "preserveSymlinks": true,
     "baseUrl": ".",
     "paths": {
       "@nanocodex-connect/*": ["../connect-dialog/src/*"],

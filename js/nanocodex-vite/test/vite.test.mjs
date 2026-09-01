@@ -10,34 +10,83 @@ import WebSocket, { WebSocketServer } from "ws";
 import { readCodexSubscription } from "../codex-auth-file.mjs";
 import { createNanocodexCloudflarePlugins } from "../cloudflare-plugin.mjs";
 import { startChatGptWorkerEgress } from "../chatgpt-egress.mjs";
+import { isLocalNanocodexOrigin } from "../oauth-relay.mjs";
 
-test("one Vite plugin gives Cloudflare only exact development Worker bindings", async () => {
+test("the OAuth relay accepts canonical and high-port secure worktree origins", () => {
+  assert.equal(isLocalNanocodexOrigin("https://nanocodex.localhost"), true);
+  assert.equal(isLocalNanocodexOrigin("https://deploy-simplify.nanocodex.localhost"), true);
+  assert.equal(isLocalNanocodexOrigin("https://deploy-simplify.nanocodex.localhost:1355"), true);
+  assert.equal(isLocalNanocodexOrigin("https://deploy-simplify.nanocodex.localhost:4430.evil.test"), false);
+});
+
+test("one Vite plugin gives only the selected broker exact development bindings", async () => {
   const fixture = await authFixture();
   const sentinelName = "NANOCODEX_TEST_UNRELATED_HOST_SECRET";
   const previousSentinel = process.env[sentinelName];
   process.env[sentinelName] = "must-not-enter-workerd";
   let cloudflareOptions;
   const plugins = createNanocodexCloudflarePlugins({
-    chatGpt: { authFile: fixture.path },
-    cloudflare: { config: () => ({ vars: { APPLICATION_VAR: "kept" } }) },
+    chatGpt: {
+      authFile: fixture.path,
+      credentialBrokerWorker: "nanocodex-egress",
+    },
+    oauthRelay: true,
+    cloudflare: {
+      config: () => ({ vars: { APPLICATION_VAR: "kept" } }),
+      auxiliaryWorkers: [
+        {
+          configPath: "egress.jsonc",
+          config: () => ({ vars: { BROKER_VAR: "kept" } }),
+          devOnly: true,
+        },
+        { configPath: "managed.jsonc", devOnly: true },
+      ],
+    },
   }, (options) => {
     cloudflareOptions = options;
     return [{ name: "vite-plugin-cloudflare" }];
-  }, { buildJsPackage: async () => {} });
+  }, {
+    buildJsPackage: async () => {},
+    loadOAuthBindings: async () => ({
+      GITHUB_OAUTH_CLIENT_ID: "github-id",
+      GITHUB_OAUTH_CLIENT_SECRET: "github-secret",
+    }),
+  });
   const plugin = plugins[0];
   try {
     const config = await plugin.config({
       worker: {},
     }, { command: "serve" });
-    const customized = cloudflareOptions.config({ vars: { FROM_WRANGLER: "kept-too" } });
-    assert.equal(customized.vars.APPLICATION_VAR, "kept");
-    assert.equal(customized.vars.ENVIRONMENT, "development");
-    assert.equal(customized.vars.NANOCODEX_DEV_CHATGPT_ACCESS_TOKEN, fixture.accessToken);
-    assert.equal(customized.vars.NANOCODEX_DEV_CHATGPT_ACCOUNT_ID, "account-123");
-    assert.match(customized.vars.NANOCODEX_DEV_CHATGPT_EGRESS_URL,
-      /^http:\/\/127\.0\.0\.1:\d+\/[A-Za-z0-9_-]{43}\/$/);
-    assert.match(customized.vars.NANOCODEX_DEV_CHATGPT_SESSION_ID, /^[A-Za-z0-9_-]{43}$/);
-    assert.equal(Object.hasOwn(customized.vars, sentinelName), false);
+    const application = cloudflareOptions.config({ vars: { FROM_WRANGLER: "kept-too" } });
+    assert.deepEqual(application.vars, { APPLICATION_VAR: "kept" });
+    const broker = cloudflareOptions.auxiliaryWorkers[0].config({
+      name: "nanocodex-egress",
+      vars: { ENVIRONMENT: "development", FROM_WRANGLER: "kept-too" },
+    }, { entryWorkerConfig: {} });
+    assert.equal(broker.vars.BROKER_VAR, "kept");
+    assert.equal(broker.vars.ENVIRONMENT, "development");
+    assert.equal(broker.vars.FROM_WRANGLER, "kept-too");
+    assert.equal(broker.vars.ALLOW_INSECURE_LOOPBACK_RELAY, "true");
+    assert.equal(broker.vars.GITHUB_OAUTH_CLIENT_ID, "github-id");
+    assert.equal(broker.vars.GITHUB_OAUTH_CLIENT_SECRET, "github-secret");
+    assert.match(
+      broker.vars.CODEX_RELAY_URL,
+      /^http:\/\/127\.0\.0\.1:\d+\/v1\/[A-Za-z0-9_-]{43}$/,
+    );
+    const bootstrap = JSON.parse(broker.vars.LOCAL_CHATGPT_BOOTSTRAP);
+    assert.deepEqual(bootstrap, {
+      access_token: fixture.accessToken,
+      account_id: "account-123",
+      expires_at: fixture.expiresAt,
+      fedramp: false,
+    });
+    assert.equal(Object.hasOwn(broker.vars, "NANOCODEX_DEV_CHATGPT_ACCESS_TOKEN"), false);
+    assert.equal(Object.hasOwn(broker.vars, sentinelName), false);
+    const managed = cloudflareOptions.auxiliaryWorkers[1].config({
+      name: "nanocodex-durable-agent",
+      vars: { MANAGED_VAR: "kept" },
+    }, { entryWorkerConfig: {} });
+    assert.equal(managed, undefined);
     assert.equal(process.env[sentinelName], "must-not-enter-workerd");
     assert.equal(config.worker.plugins().filter(({ name }) => name === "nanocodex-tools").length, 1);
   } finally {
@@ -112,6 +161,13 @@ test("worker egress is loopback-only, fixed to ChatGPT, and forwards bounded HTT
     assert.equal(upstreamHttp[0].url, "https://chatgpt.com/backend-api/codex/alpha/search");
     assert.equal(upstreamHttp[0].headers.get("authorization"), "Bearer fake-access");
 
+    const relayedSearch = await fetch(`${egress.relayUrl}/http/codex-web-search`, {
+      headers: { authorization: "Bearer relay-access" },
+    });
+    assert.equal(await relayedSearch.text(), "ok");
+    assert.equal(upstreamHttp[1].url, "https://chatgpt.com/backend-api/codex/alpha/search");
+    assert.equal(upstreamHttp[1].headers.get("authorization"), "Bearer relay-access");
+
     const websocketUrl = new URL("backend-api/codex/responses", egress.url);
     websocketUrl.protocol = "ws:";
     const downstream = new WebSocket(websocketUrl, {
@@ -124,6 +180,17 @@ test("worker egress is loopback-only, fixed to ChatGPT, and forwards bounded HTT
     assert.equal(upstreamHeaders.authorization, "Bearer fake-access");
     assert.equal(upstreamHeaders["chatgpt-account-id"], "account-123");
     downstream.close();
+
+    const relayWebsocketUrl = new URL(egress.relayUrl);
+    relayWebsocketUrl.protocol = "ws:";
+    const relayedDownstream = new WebSocket(relayWebsocketUrl, {
+      headers: { authorization: "Bearer relay-access" },
+    });
+    await once(relayedDownstream, "open");
+    relayedDownstream.send("broker-relay-path");
+    const [relayedMessage] = await once(relayedDownstream, "message");
+    assert.equal(relayedMessage.toString(), "broker-relay-path");
+    relayedDownstream.close();
 
     const bypass = new URL(egress.url);
     bypass.pathname = "/backend-api/codex/alpha/search";
@@ -157,6 +224,7 @@ async function authFixture() {
   }), { mode: 0o600 });
   return {
     accessToken,
+    expiresAt: expiresAt * 1_000,
     path,
     close: () => rm(directory, { recursive: true, force: true }),
   };

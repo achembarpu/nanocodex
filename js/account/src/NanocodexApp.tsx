@@ -74,7 +74,6 @@ import type {
 import type { HarnessCommit } from "./threadRepositorySnapshot";
 import { loadWorldAssets } from "./monsterWorldRenderer";
 import { getBrowserThread } from "nanocodex/tools/browser";
-import { useDeploymentRollover } from "./useDeploymentRollover";
 import {
   prepareRepositorySurface,
   type PreparedDirectRoute,
@@ -239,7 +238,6 @@ export function NanocodexApp({ preparedRoute = {} }: NanocodexAppProps) {
 }
 
 function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
-  const deploymentRollover = useDeploymentRollover();
   const location = useLocation();
   const navigate = useNavigate();
   const [theme, setTheme] = useState<Theme>(() => {
@@ -255,6 +253,7 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
     pathname: location.pathname,
     searchParams: new URLSearchParams(location.search),
   });
+  const connectDemoHref = connectDemoUrl(window.location.origin);
   const requestedCommit = surface === "commits"
     ? commitHashFromSearch(location.search)
     : undefined;
@@ -1196,7 +1195,7 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
                     <DropdownMenuItem asChild>
                       <a
                         className="surface-navigation-menu-item"
-                        href={connectDemoUrl}
+                        href={connectDemoHref}
                         target="_blank"
                         rel="noreferrer"
                         aria-label="Connect demo (opens in a new tab)"
@@ -1315,7 +1314,7 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
                 <div className="mobile-navigation-grid">
                   {demoNavigation.map((item) => surfaceNavigationLink(item, "mobile"))}
                   <a
-                    href={connectDemoUrl}
+                    href={connectDemoHref}
                     target="_blank"
                     rel="noreferrer"
                     aria-label="Connect demo (opens in a new tab)"
@@ -1368,8 +1367,6 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
                 </h1>
                 <section className="home-demo" id="agent-demo">
                   <AgentExperience
-                    beforeLocalTurn={deploymentRollover.beforeLocalTurn}
-                    deploymentCurrent={deploymentRollover.deploymentCurrent}
                     landing={agentExperienceSurface === "home"}
                     mode={
                       surface === "agent"

@@ -28,13 +28,11 @@ export async function routeManaged(
   try {
     return await env.NANOCODEX_BACKEND.fetch(request);
   } catch (error) {
-    console.error(JSON.stringify({
+    console.error({
       type: "managed.backend_failure",
       path: url.pathname,
-      error: error instanceof Error
-        ? { name: error.name }
-        : { name: typeof error },
-    }));
+      error_kind: error instanceof Error ? error.name : typeof error,
+    });
     return json({ error: "managed_service_unavailable" }, { status: 503 });
   }
 }

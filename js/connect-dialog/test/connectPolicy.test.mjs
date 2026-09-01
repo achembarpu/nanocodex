@@ -31,8 +31,11 @@ const CLOUDFLARE_MCP = "cloudf_abcdefghijklmnopqrstuvwxyz0123456789";
 test("local development origins use the canonical localhost family", () => {
   assert.equal(isLocalDevelopmentOrigin("http://nanocodex.localhost:5173"), true);
   assert.equal(isLocalDevelopmentOrigin("http://passkey-a.nanocodex.localhost:5173"), true);
-  assert.equal(isLocalDevelopmentOrigin("http://playground-passkey-a.nanocodex.localhost:5173"), true);
+  assert.equal(isLocalDevelopmentOrigin("https://nanocodex.localhost"), true);
+  assert.equal(isLocalDevelopmentOrigin("https://passkey-a.nanocodex.localhost"), true);
+  assert.equal(isLocalDevelopmentOrigin("https://passkey-a.playground.nanocodex.localhost"), true);
   assert.equal(isLocalDevelopmentOrigin("http://nested.evil.nanocodex.localhost:5173"), false);
+  assert.equal(isLocalDevelopmentOrigin("https://nested.evil.nanocodex.localhost"), false);
   assert.equal(isLocalDevelopmentOrigin("https://nanocodex.local"), false);
   assert.equal(isLocalDevelopmentOrigin("http://nanocodex.local"), false);
   assert.equal(isLocalDevelopmentOrigin("https://notnanocodex.local"), false);

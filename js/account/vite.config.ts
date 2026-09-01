@@ -1,6 +1,5 @@
-import { cloudflare } from "@cloudflare/vite-plugin";
 import react from "@vitejs/plugin-react";
-import { nanocodex } from "nanocodex-vite";
+import { nanocodex } from "nanocodex-vite/cloudflare";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readFile, writeFile } from "node:fs/promises";
@@ -19,12 +18,19 @@ import { isConnectApiBrowserRoutePath } from "./worker/connectApiProxy.ts";
 const repositoryRoot = fileURLToPath(new URL("../..", import.meta.url));
 const connectDialogIndex = new URL("../connect-dialog/index.html", import.meta.url);
 const connectDialogRoot = fileURLToPath(new URL("../connect-dialog", import.meta.url));
-const connectPlaygroundIndex = new URL("../connect-playground/index.html", import.meta.url);
-const connectPlaygroundRoot = fileURLToPath(new URL("../connect-playground", import.meta.url));
 const repositoryRevision = execFileSync("git", ["rev-parse", "HEAD"], {
   cwd: repositoryRoot,
   encoding: "utf8",
 }).trim();
+const localPublicOrigin = process.env.PORTLESS_URL
+  ?? process.env.NANOCODEX_LOCAL_PUBLIC_ORIGIN
+  ?? "http://nanocodex.localhost:5173";
+const localServerPort = process.env.PORT ? Number(process.env.PORT) : undefined;
+
+if (localServerPort !== undefined
+  && (!Number.isSafeInteger(localServerPort) || localServerPort < 1 || localServerPort > 65_535)) {
+  throw new Error("PORT must be a valid TCP port");
+}
 
 function localConnectApplications(): Plugin {
   return {
@@ -35,15 +41,6 @@ function localConnectApplications(): Plugin {
       vite.middlewares.use(async (request, response, next) => {
         const method = request.method ?? "GET";
         const url = new URL(request.url ?? "/", "https://localhost");
-        let hostname: string | undefined;
-        try {
-          hostname = request.headers.host
-            ? new URL(`https://${request.headers.host}`).hostname
-            : undefined;
-        } catch {
-          next();
-          return;
-        }
 
         const serveDocument = async (
           index: URL,
@@ -57,49 +54,6 @@ function localConnectApplications(): Plugin {
           response.setHeader("content-type", "text/html; charset=utf-8");
           response.end(method === "HEAD" ? undefined : html);
         };
-
-        const playgroundHost = process.env.NANOCODEX_LOCAL_CONNECT_PLAYGROUND_HOST
-          ?? "playground.nanocodex.localhost";
-        if (hostname === playgroundHost) {
-          if (method !== "GET" && method !== "HEAD") {
-            response.statusCode = 405;
-            response.setHeader("allow", "GET, HEAD");
-            response.setHeader("cache-control", "no-store");
-            response.end();
-            return;
-          }
-          if (url.pathname.startsWith("/src/")) {
-            request.url = `/@fs${connectPlaygroundRoot}${url.pathname}${url.search}`;
-            next();
-            return;
-          }
-          if (url.pathname.startsWith("/connect-playground/src/")) {
-            const sourcePath = url.pathname.slice("/connect-playground".length);
-            request.url = `/@fs${connectPlaygroundRoot}${sourcePath}${url.search}`;
-            next();
-            return;
-          }
-          if (
-            url.pathname.startsWith("/@")
-            || url.pathname.startsWith("/node_modules/")
-            || url.pathname.startsWith("/__vite")
-          ) {
-            next();
-            return;
-          }
-          if (isLocalDocumentRequest(request, url.pathname === "/")) {
-            try {
-              await serveDocument(connectPlaygroundIndex, `${url.pathname}${url.search}`);
-            } catch (error) {
-              next(error as Error);
-            }
-            return;
-          }
-          response.statusCode = 404;
-          response.setHeader("cache-control", "no-store");
-          response.end(method === "HEAD" ? undefined : "Not found");
-          return;
-        }
 
         if (url.pathname === "/connect-dialog" || url.pathname.startsWith("/connect-dialog/")) {
           if (method !== "GET" && method !== "HEAD") {
@@ -119,7 +73,7 @@ function localConnectApplications(): Plugin {
             try {
               response.setHeader(
                 "content-security-policy",
-                "frame-ancestors 'self' http://nanocodex.localhost:* http://*.nanocodex.localhost:*",
+                "frame-ancestors 'self' https://nanocodex.localhost https://*.nanocodex.localhost http://nanocodex.localhost:* http://*.nanocodex.localhost:*",
               );
               await serveDocument(
                 connectDialogIndex,
@@ -199,9 +153,7 @@ function linkPreviewMetadata(): Plugin {
     transformIndexHtml: {
       order: "post",
       handler(html, context) {
-        const origin = process.env.NANOCODEX_LOCAL_PUBLIC_ORIGIN
-          ?? "http://nanocodex.localhost:5173";
-        const url = new URL(context.path, origin);
+        const url = new URL(context.path, localPublicOrigin);
         return renderLinkPreviewDocument(html, url);
       },
     },
@@ -231,22 +183,24 @@ export default defineConfig({
   // make that empty boundary explicit instead of letting a partial shim crash.
   define: {
     "process.env": "{}",
-    __NANOCODEX_DEPLOYMENT_SHA__: JSON.stringify(repositoryRevision),
   },
   plugins: [
     localConnectApplications(),
     applicationRouteFallback(),
     linkPreviewMetadata(),
     deploymentBuildAttestation(),
-    nanocodex({ chatGpt: false, oauthRelay: true }),
     react(),
-    cloudflare({
-      inspectorPort: 0,
-      auxiliaryWorkers: [
-        { configPath: "../egress/wrangler.broker.jsonc", devOnly: true },
-        { configPath: "../managed/wrangler.jsonc", devOnly: true },
-        { configPath: "../connect-api/wrangler.jsonc", devOnly: true },
-      ],
+    nanocodex({
+      chatGpt: { credentialBrokerWorker: "nanocodex-egress" },
+      oauthRelay: true,
+      cloudflare: {
+        inspectorPort: 0,
+        auxiliaryWorkers: [
+          { configPath: "../egress/wrangler.broker.jsonc", devOnly: true },
+          { configPath: "../managed/wrangler.jsonc", devOnly: true },
+          { configPath: "../connect-api/wrangler.jsonc", devOnly: true },
+        ],
+      },
     }),
   ],
   resolve: {
@@ -284,8 +238,10 @@ export default defineConfig({
     format: "es",
   },
   server: {
-    strictPort: true,
     allowedHosts: [".nanocodex.localhost"],
+    host: process.env.HOST,
+    origin: process.env.PORTLESS_URL,
+    port: localServerPort,
     // The Connect playground calls the paired application origin with its
     // account cookie, while the live artifact frame has an opaque `null`
     // origin. Reflect only the local Nanocodex development authorities and
@@ -294,7 +250,8 @@ export default defineConfig({
     cors: {
       credentials: true,
       origin: [
-        /^http:\/\/(?:[a-z0-9-]+\.)?nanocodex\.localhost(?::\d+)?$/,
+        /^https?:\/\/(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)?nanocodex\.localhost(?::\d+)?$/,
+        /^https?:\/\/(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)?playground\.nanocodex\.localhost(?::\d+)?$/,
         "null",
       ],
     },

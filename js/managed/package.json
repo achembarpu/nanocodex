@@ -9,7 +9,8 @@
   "scripts": {
     "build": "wrangler deploy --dry-run --outdir dist --config wrangler.jsonc",
     "check": "npm run typecheck && npm test && npm run build",
-    "deploy": "wrangler deploy --config wrangler.jsonc",
+    "predeploy": "npm run prepare:code-evaluator",
+    "deploy": "wrangler deploy --env=\"\" --config wrangler.jsonc",
     "prebuild": "npm run prepare:code-evaluator",
     "prepare:code-evaluator": "node scripts/prepare-code-evaluator.mjs",
     "test": "vitest run",
@@ -21,7 +22,7 @@
     "@jitl/quickjs-wasmfile-release-asyncify": "0.32.0",
     "accounts": "0.16.2",
     "isomorphic-git": "^1.41.5",
-    "nanocodex": "file:../nanocodex",
+    "nanocodex": "workspace:*",
     "quickjs-emscripten-core": "0.32.0",
     "ox": "0.14.36",
     "viem": "^2.54.0"

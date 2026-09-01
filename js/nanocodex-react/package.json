@@ -40,9 +40,9 @@
   "devDependencies": {
     "@tanstack/react-query": "^5.101.4",
     "@types/react": "^19.2.14",
-    "nanocodex": "file:../nanocodex",
+    "nanocodex": "workspace:*",
     "react": "19.2.6",
-    "react-test-renderer": "^19.2.6",
+    "react-test-renderer": "19.2.6",
     "typescript": "^5.9.3"
   },
   "engines": {

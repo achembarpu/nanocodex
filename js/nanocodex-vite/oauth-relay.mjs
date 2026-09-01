@@ -31,13 +31,14 @@ export function localMcpOAuthRelayCallbackUrl(connectionId) {
 export function isLocalNanocodexOrigin(value) {
   let url;
   try { url = new URL(value); } catch { return false; }
-  if (url.origin !== value || url.protocol !== "http:" || !url.port
-    || url.username || url.password) return false;
-  const port = Number(url.port);
-  if (!Number.isSafeInteger(port) || port < 1_024 || port > 65_535
-    || port === LOCAL_OAUTH_RELAY_PORT) return false;
+  if (url.origin !== value || url.username || url.password) return false;
   const hostname = url.hostname.toLowerCase();
-  return hostname === "nanocodex.localhost" || INSTANCE_HOST.test(hostname);
+  if (hostname !== "nanocodex.localhost" && !INSTANCE_HOST.test(hostname)) return false;
+  if (url.protocol === "https:" && !url.port) return true;
+  if ((url.protocol !== "http:" && url.protocol !== "https:") || !url.port) return false;
+  const port = Number(url.port);
+  return Number.isSafeInteger(port) && port >= 1_024 && port <= 65_535
+    && port !== LOCAL_OAUTH_RELAY_PORT;
 }
 
 export async function signLocalOAuthRelayState(

@@ -622,6 +622,39 @@ function isUniqueStringArray(value: unknown): value is string[] {
     && new Set(value).size === value.length;
 }
 
+const SAFE_OBSERVATION_FIELDS = new Set([
+  "attempt_count",
+  "auth_kind",
+  "error_code",
+  "error_kind",
+  "message_type",
+  "method",
+  "operation_kind",
+  "outcome",
+  "resource",
+  "state",
+  "status",
+  "terminal",
+  "transport",
+]);
+
+function safeObservationDetail(
+  detail: Record<string, unknown>,
+): Record<string, boolean | number | string> {
+  const safe: Record<string, boolean | number | string> = {};
+  for (const [key, value] of Object.entries(detail)) {
+    if (!SAFE_OBSERVATION_FIELDS.has(key)) continue;
+    if (typeof value === "boolean" || typeof value === "number" || typeof value === "string") {
+      safe[key] = value;
+    }
+  }
+  return safe;
+}
+
+function errorKind(error: unknown): string {
+  return error instanceof Error ? error.name : typeof error;
+}
+
 function accountConnectorProjection(
   authorization: TurnAuthorization,
 ): readonly ManagedEgressConnectorId[] | undefined {
@@ -639,15 +672,9 @@ function observeManagedPrincipal(
 ): void {
   console.info({
     type,
-    user_id: principal.userId,
-    organization_id: principal.organizationId,
-    team_id: principal.teamId,
     auth_kind: principal.kind,
-    ...(principal.connectGrant === undefined
-      ? {}
-      : { grant_id: principal.connectGrant.grantId }),
     ...(env.DEPLOYMENT_SHA === undefined ? {} : { deployment_sha: env.DEPLOYMENT_SHA }),
-    ...detail,
+    ...safeObservationDetail(detail),
   });
 }
 
@@ -1140,10 +1167,10 @@ export default {
               title,
               turnCount,
             }).catch((error) => {
-              console.error(
-                "managed agent summary update failed",
-                errorMessage(error),
-              );
+              console.warn({
+                type: "managed.agent_summary_update_failed",
+                error_kind: errorKind(error),
+              });
             }),
           );
         }
@@ -1905,7 +1932,7 @@ export class DurableAgentSession extends DurableComputerSession {
       try {
         await this.#ensureAgent();
       } catch (error) {
-        console.error("managed tool router startup failed", errorMessage(error));
+        console.error({ type: "managed.tool_router_startup_failed", error_kind: errorKind(error) });
         return json({ error: "tool_router_unavailable" }, { status: 503 });
       }
       return this.#hostedTools.upgrade(
@@ -2093,7 +2120,7 @@ export class DurableAgentSession extends DurableComputerSession {
         await this.#beginDeletion();
         await this.#deleteOwnedSession();
       } catch (error) {
-        console.error("managed session cleanup remains pending", errorMessage(error));
+        console.warn({ type: "managed.session_cleanup_pending", error_kind: errorKind(error) });
         let retryAfter = 1;
         try {
           retryAfter = Math.ceil(await this.#scheduleCleanupRetry() / 1_000);
@@ -2169,7 +2196,7 @@ export class DurableAgentSession extends DurableComputerSession {
       try {
         await this.#deleteOwnedSession();
       } catch (error) {
-        console.error("managed session alarm cleanup remains pending", errorMessage(error));
+        console.warn({ type: "managed.session_alarm_cleanup_pending", error_kind: errorKind(error) });
         await this.#scheduleCleanupRetry();
       }
       return;
@@ -2184,7 +2211,7 @@ export class DurableAgentSession extends DurableComputerSession {
       try {
         await this.#deleteOwnedSession();
       } catch (error) {
-        console.error("abandoned managed create cleanup remains pending", errorMessage(error));
+        console.error({ type: "managed.abandoned_create_cleanup_pending", error_kind: errorKind(error) });
         await this.#scheduleCleanupRetry();
       }
       return;
@@ -3589,7 +3616,7 @@ export class DurableAgentSession extends DurableComputerSession {
     const task = Promise.resolve().then(() => this.#cancelManagedTurn(id));
     this.#cancellationTasks.set(id, task);
     const observed = task.catch((error) => {
-      console.error("managed turn cancellation failed", id, errorMessage(error));
+      console.warn({ type: "managed.turn_cancellation_failed", error_kind: errorKind(error) });
     }).finally(async () => {
       if (this.#cancellationTasks.get(id) === task) this.#cancellationTasks.delete(id);
       if (!this.#deleting) await this.#scheduleNextAlarm();
@@ -3931,7 +3958,7 @@ export class DurableAgentSession extends DurableComputerSession {
   #scheduleDeletion(): void {
     const task = this.#deleteOwnedSession();
     this.ctx.waitUntil(task.catch(async (error) => {
-      console.error("managed session deletion recovery failed", errorMessage(error));
+      console.warn({ type: "managed.session_deletion_recovery_failed", error_kind: errorKind(error) });
       try { await this.#scheduleCleanupRetry(); } catch { /* Marker retains ownership. */ }
     }));
   }
@@ -4146,7 +4173,7 @@ export class DurableAgentSession extends DurableComputerSession {
       if (this.#recoveryRequested) this.#scheduleRecovery();
     }).catch(() => {});
     this.ctx.waitUntil(task.catch((error) => {
-      console.error("managed turn recovery failed", errorMessage(error));
+      console.error({ type: "managed.turn_recovery_failed", error_kind: errorKind(error) });
     }));
   }
 
@@ -4169,7 +4196,10 @@ export class DurableAgentSession extends DurableComputerSession {
         } catch (error) {
           // Cancellation failure is already projected into the durable row.
           // Keep the ordered recovery pump alive so it can retain that retry.
-          console.error("managed turn cancellation recovery failed", row.id, errorMessage(error));
+          console.warn({
+            type: "managed.turn_cancellation_recovery_failed",
+            error_kind: errorKind(error),
+          });
         }
         const cancelled = this.#managedTurn(current.id);
         if (cancelled && !isTerminalState(cancelled.state)) break;
@@ -4324,7 +4354,7 @@ export class DurableAgentSession extends DurableComputerSession {
       this.#agentConstructions.delete(construction);
     }).catch(() => {});
     this.ctx.waitUntil(shutdown.catch((error) => {
-      console.error("superseded Nanocodex agent shutdown failed", errorMessage(error));
+      console.warn({ type: "managed.superseded_agent_shutdown_failed", error_kind: errorKind(error) });
     }));
     return shutdown;
   }
@@ -4469,9 +4499,10 @@ export class DurableAgentSession extends DurableComputerSession {
           session.owner_id,
         )].sort((left, right) => left.id.localeCompare(right.id));
       } catch (error) {
-        console.warn("managed account MCP listing failed", {
-          error: errorMessage(error),
-          session_id: session.session_id,
+        console.warn({
+          type: "managed.account_mcp_listing_failed",
+          error_kind: errorKind(error),
+          fallback: "cached_or_empty",
         });
         if (this.#accountMcpConnections === undefined) {
           this.#accountMcpConnections = Object.freeze([]);
@@ -5162,11 +5193,6 @@ export class DurableAgentSession extends DurableComputerSession {
       console.info({
         type: "managed.capacity",
         reason,
-        user_id: session.owner_id,
-        organization_id: session.organization_id,
-        team_id: session.team_id,
-        agent_id: session.session_id,
-        thread_id: session.session_id,
         ...(this.env.DEPLOYMENT_SHA === undefined
           ? {}
           : { deployment_sha: this.env.DEPLOYMENT_SHA }),
@@ -5188,15 +5214,10 @@ export class DurableAgentSession extends DurableComputerSession {
       if (!session) return;
       console[level]({
         type,
-        user_id: session.owner_id,
-        organization_id: session.organization_id,
-        team_id: session.team_id,
-        agent_id: session.session_id,
-        thread_id: session.session_id,
         ...(this.env.DEPLOYMENT_SHA === undefined
           ? {}
           : { deployment_sha: this.env.DEPLOYMENT_SHA }),
-        ...detail,
+        ...safeObservationDetail(detail),
       });
     } catch {
       // Observability must never change durable-agent behavior.
@@ -5211,7 +5232,7 @@ export class DurableAgentSession extends DurableComputerSession {
       if (this.#historyProjectionTask === task) this.#historyProjectionTask = undefined;
     }).catch(() => {});
     this.ctx.waitUntil(task.catch(async (error) => {
-      console.error("managed history projection failed", errorMessage(error));
+      console.warn({ type: "managed.history_projection_failed", error_kind: errorKind(error) });
       await this.#scheduleNextAlarm();
     }));
   }
@@ -5378,7 +5399,7 @@ export class DurableAgentSession extends DurableComputerSession {
       }
       return result;
     }).catch((error) => {
-      console.warn("managed event archive seal failed", errorMessage(error));
+      console.warn({ type: "managed.event_archive_seal_failed", error_kind: errorKind(error) });
       throw error;
     });
     this.#eventArchiveTask = observed;
@@ -5412,7 +5433,7 @@ export class DurableAgentSession extends DurableComputerSession {
       }
       return result;
     }).catch((error) => {
-      console.warn("managed turn archive seal failed", errorMessage(error));
+      console.warn({ type: "managed.turn_archive_seal_failed", error_kind: errorKind(error) });
       throw error;
     });
     this.#turnArchiveTask = observed;
@@ -5583,7 +5604,7 @@ export class DurableAgentSession extends DurableComputerSession {
       }
       return result;
     }).catch((error) => {
-      console.warn("managed realtime archive seal failed", errorMessage(error));
+      console.warn({ type: "managed.realtime_archive_seal_failed", error_kind: errorKind(error) });
       throw error;
     });
     this.#realtimeArchiveTask = observed;
@@ -5638,7 +5659,7 @@ export class DurableAgentSession extends DurableComputerSession {
       await shutdown;
     } catch (error) {
       if (strict) throw error;
-      console.error("Nanocodex agent shutdown failed", errorMessage(error));
+      console.warn({ type: "managed.agent_shutdown_failed", error_kind: errorKind(error) });
     }
     this.#events?.off();
     this.#events = undefined;

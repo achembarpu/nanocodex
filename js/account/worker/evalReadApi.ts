@@ -131,7 +131,10 @@ export async function routeEvalRead(
     if (workset) return worksetDetail(env.EVALS_DB, decodeURIComponent(workset[1]));
     return json({ error: "not_found" }, 404);
   } catch (cause) {
-    console.error("evaluation read failed", cause);
+    console.error({
+      type: "evaluation.read_failed",
+      error_kind: cause instanceof Error ? cause.name : typeof cause,
+    });
     return json({ error: "evaluation API read failed" }, 500);
   }
 }

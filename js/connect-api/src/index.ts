@@ -263,10 +263,8 @@ type WorkerContext = Readonly<{
 
 type ConnectLogContext = Readonly<{
   deployment_sha?: string;
-  user_id?: string;
-  account_id?: `0x${string}`;
+  authenticated?: boolean;
   connector?: ConnectorId;
-  mcp_connection_id?: string;
 }>;
 
 type Env = Readonly<{
@@ -403,7 +401,7 @@ export default {
           return error(request, 413, "diagnostic_too_large", "Client diagnostics are limited to 256 bytes.");
         }
         const diagnostic = parseClientDiagnostic(encoded);
-        console.log({
+        console.info({
           type: "connect.client.diagnostic",
           outcome: "success",
           status: diagnostic.stage,
@@ -580,7 +578,6 @@ export default {
 
       if (request.method === "GET" && url.pathname === "/v1/connectors") {
         const identity = await brokerIdentity(env, accountAddress);
-        logContext = { ...logContext, user_id: identity.userId, account_id: accountAddress };
         return cors(Response.json({
           ...(await connectorStatuses(env, identity.userId)),
           profile: { linked: identity.linked },
@@ -589,7 +586,6 @@ export default {
 
       if (request.method === "GET" && url.pathname === "/v1/mcp-connections") {
         const identity = await brokerIdentity(env, accountAddress);
-        logContext = { ...logContext, user_id: identity.userId, account_id: accountAddress };
         return cors(Response.json({ mcp_connections: await mcpConnectionStatuses(env, identity.userId) }), request);
       }
 
@@ -599,9 +595,7 @@ export default {
         const connectionId = mcpConnectionRoute[1]!;
         logContext = {
           ...logContext,
-          user_id: identity.userId,
-          account_id: accountAddress,
-          mcp_connection_id: connectionId,
+          authenticated: true,
         };
         if (request.method === "POST") {
           const response = await startMcpConnection(
@@ -639,8 +633,7 @@ export default {
         const identity = await brokerIdentity(env, accountAddress);
         logContext = {
           ...logContext,
-          user_id: identity.userId,
-          account_id: accountAddress,
+          authenticated: true,
           connector,
         };
         if (request.method === "POST") {
@@ -681,7 +674,7 @@ export default {
         status: failure.code,
       };
       if (cause instanceof ApiFailure) {
-        if (logContext.user_id && logContext.account_id) console.warn(event);
+        if (logContext.authenticated) console.warn(event);
       } else {
         console.error(event);
       }
@@ -1365,10 +1358,6 @@ async function createConnection(
     console.info({
       type: "connect.grant.create",
       outcome: "success",
-      user_id: grant.brokerUserId,
-      account_id: grant.accountAddress,
-      grant_id: grant.id,
-      agent_id: grant.agentId,
       app_id: grant.appId,
       ...(env.DEPLOYMENT_SHA === undefined ? {} : { deployment_sha: env.DEPLOYMENT_SHA }),
       status: grant.status,
@@ -1377,10 +1366,6 @@ async function createConnection(
       console.error({
         type: "connect.grant.index",
         outcome: "failure",
-        user_id: grant.brokerUserId,
-        account_id: grant.accountAddress,
-        grant_id: grant.id,
-        agent_id: grant.agentId,
         app_id: grant.appId,
         ...(env.DEPLOYMENT_SHA === undefined ? {} : { deployment_sha: env.DEPLOYMENT_SHA }),
         status: "index_update_failed",
@@ -1394,10 +1379,6 @@ async function createConnection(
     const event = {
       type: "connect.grant.create",
       outcome: "failure",
-      user_id: grant.brokerUserId,
-      account_id: grant.accountAddress,
-      grant_id: grant.id,
-      agent_id: grant.agentId,
       app_id: grant.appId,
       ...(env.DEPLOYMENT_SHA === undefined ? {} : { deployment_sha: env.DEPLOYMENT_SHA }),
       status: failureStatus(cause),
@@ -3763,14 +3744,12 @@ function logConnectorCallback(
   const event = {
     type: "connect.connector.callback",
     outcome,
-    user_id: correlation.brokerUserId,
-    account_id: correlation.accountAddress,
     connector,
     ...(deploymentSha === undefined ? {} : { deployment_sha: deploymentSha }),
     status,
   };
-  if (outcome === "success") console.info(event);
-  else console.warn(event);
+  if (outcome === "failure") console.warn(event);
+  else console.info(event);
 }
 
 function logMcpCallback(
@@ -3782,14 +3761,11 @@ function logMcpCallback(
   const event = {
     type: "connect.mcp.callback",
     outcome,
-    user_id: correlation.brokerUserId,
-    account_id: correlation.accountAddress,
-    mcp_connection_id: correlation.connectionId,
     ...(deploymentSha === undefined ? {} : { deployment_sha: deploymentSha }),
     status,
   };
-  if (outcome === "success") console.info(event);
-  else console.warn(event);
+  if (outcome === "failure") console.warn(event);
+  else console.info(event);
 }
 
 function mcpCompletionResult(
@@ -5126,6 +5102,17 @@ function isAllowedDialogOrigin(origin: string): boolean {
   return origin === DIALOG_ORIGIN || isLocalDeviceOrigin(origin);
 }
 
+function isLocalNanocodexRootHostname(hostname: string): boolean {
+  return hostname === "nanocodex.localhost"
+    || /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.nanocodex\.localhost$/.test(hostname);
+}
+
+function isLocalNanocodexPlaygroundHostname(hostname: string): boolean {
+  return hostname === "playground.nanocodex.localhost"
+    || /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.playground\.nanocodex\.localhost$/
+      .test(hostname);
+}
+
 function isLoopbackOrigin(origin: string | null): boolean {
   if (!origin) return false;
   let url: URL;
@@ -5134,13 +5121,12 @@ function isLoopbackOrigin(origin: string | null): boolean {
     return false;
   }
   const hostname = url.hostname.toLowerCase();
-  const localNanocodex = hostname === "nanocodex.localhost"
-    || /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.nanocodex\.localhost$/.test(hostname);
+  const localNanocodex = isLocalNanocodexRootHostname(hostname)
+    || isLocalNanocodexPlaygroundHostname(hostname);
   return hostname === "localhost"
     || hostname === "127.0.0.1"
     || hostname === "[::1]"
-    || (url.protocol === "http:"
-      && Boolean(url.port)
+    || ((url.protocol === "https:" || Boolean(url.port))
       && localNanocodex);
 }
 
@@ -5177,13 +5163,10 @@ function developmentDialogOrigin(request: Request, origin: string | null): boole
 function localPlaygroundOrigin(publicOrigin: string): string | undefined {
   if (!isLocalDevelopmentOrigin(publicOrigin)) return undefined;
   const url = new URL(publicOrigin);
-  if (url.hostname === "nanocodex.localhost") {
-    url.hostname = "playground.nanocodex.localhost";
-  } else if (url.hostname.endsWith(".nanocodex.localhost")) {
-    url.hostname = `playground-${url.hostname.slice(0, -".nanocodex.localhost".length)}.nanocodex.localhost`;
-  } else {
-    return undefined;
-  }
+  if (!isLocalNanocodexRootHostname(url.hostname)) return undefined;
+  url.hostname = url.hostname === "nanocodex.localhost"
+    ? "playground.nanocodex.localhost"
+    : `${url.hostname.slice(0, -".nanocodex.localhost".length)}.playground.nanocodex.localhost`;
   return url.origin;
 }
 

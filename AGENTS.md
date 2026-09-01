@@ -1,7 +1,5 @@
 # Nanocodex development
 
-Read `PLAN.md` for the active boundary and completion matrix.
-
 - `js/nanocodex` and `js/nanocodex-react` are stable contracts. Cover changes
   with focused contract, type, package, and runtime tests.
 - `js/nanocodex-vite` owns the Vite plugin, WASM build, OAuth relay, and Cloudflare Vite
@@ -15,11 +13,15 @@ Read `PLAN.md` for the active boundary and completion matrix.
 - Product code gets almost no unit tests: keep only pure policy and important
   protocol boundaries. Require canonical browser and real service/Worker
   evidence for product behavior.
-- Develop directly from `js/account` with the standard Vite command and
-  Cloudflare plugin: `npx vite --host 127.0.0.1`. Deploy Workers directly from
-  their checked-in configs; after `vite build`, deploy `js/account` from the
-  plugin output `dist/nanocodex/wrangler.json`. Deploy dependencies first and
-  `js/account` last.
+- `pnpm dev` uses Turbo to start the complete stack through Portless at
+  `https://nanocodex.localhost`; linked worktrees get
+  `https://<branch>.nanocodex.localhost`. The paired playground is
+  `https://playground.nanocodex.localhost` or
+  `https://<branch>.playground.nanocodex.localhost`. Deploy from
+  the root with `pnpm deploy:<component>`; deploy dependencies first and
+  `pnpm deploy:account` last.
+- pnpm owns the JavaScript workspace, Turbo owns task concurrency and build
+  caching, Portless owns local names and ports, and Vite/Wrangler own runtime.
 - Do not add custom stack, deploy, test, rollout, probe, or verification wrappers.
   Keep installs, migrations, resource changes, deployment, and evidence explicit.
 - CI deployment starts independently of tests. Pull requests dry-run stateful
@@ -28,6 +30,10 @@ Read `PLAN.md` for the active boundary and completion matrix.
 - Wrangler upload success is not behavior evidence. Exercise the exact changed
   journey, inspect console/network/storage/sockets/CSP, and verify provider
   secrets never reach browser or app surfaces.
+- The product journeys are: passkey account reauthentication; two durable agent
+  turns across reload/reconnect; exact Connect approval projection; connector or
+  MCP connect/call/revoke fencing; attachment lifecycle; and cross-account
+  isolation. Test only the journeys touched by a change.
 - Preserve Cloudflare names, bindings, migrations, grants, durable state, public
   exports, and customer behavior during moves.
 - Never mix, delete, or reset concurrent work; never commit secrets, generated

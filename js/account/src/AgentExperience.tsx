@@ -23,10 +23,8 @@ import "./Home.css";
 
 /** Ephemeral homepage consumer and managed-durable Agent demo. */
 export const AgentExperience = memo(function AgentExperience({
-  beforeLocalTurn, deploymentCurrent, landing, mode,
+  landing, mode,
 }: {
-  beforeLocalTurn(): Promise<void>;
-  deploymentCurrent: boolean;
   landing?: boolean;
   mode: AgentTerminalMode;
 }) {
@@ -46,10 +44,6 @@ export const AgentExperience = memo(function AgentExperience({
   const hasCredential = credentialSource === "brokered" || credentialSource === "user";
   const voiceEnabled = authStatus?.state === "ready" && authStatus.voiceEnabled === true;
 
-  useEffect(() => {
-    if (!landing || deploymentCurrent || authStatus?.state !== "ready") return;
-    void beforeLocalTurn().catch(() => {});
-  }, [authStatus, beforeLocalTurn, deploymentCurrent, landing]);
   useEffect(() => {
     setManagedConversations([]);
     setManagedConversationId(undefined);
@@ -144,10 +138,10 @@ export const AgentExperience = memo(function AgentExperience({
       />}
       <div className="conversation-main">
         {landing
-          ? hasCredential && !activeCapabilityError && deploymentCurrent
+          ? hasCredential && !activeCapabilityError
             ? <AgentTerminal
               key={`ephemeral:${account.account?.id ?? "anonymous"}:${ephemeralThreadId}`}
-              authStatus={authStatus} beforeLocalTurn={beforeLocalTurn}
+              authStatus={authStatus}
               mode={mode} onConversationActivity={NO_CONVERSATION_ACTIVITY}
               onStateChange={setRuntimeState} source={credentialSource} threadId={ephemeralThreadId}
               voiceEnabled={voiceEnabled}

@@ -18,7 +18,22 @@ export type ProductNavigationItem = Readonly<{
   description: string;
 }>;
 
-export const connectDemoUrl = "https://nanocodex-connect-playground.gakonst.workers.dev";
+const productionConnectDemoUrl = "https://nanocodex-connect-playground.gakonst.workers.dev";
+const localAccountHost = /^(?:([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)\.)?nanocodex\.localhost$/;
+
+export function connectDemoUrl(origin: string): string {
+  let source: URL;
+  try { source = new URL(origin); } catch { return productionConnectDemoUrl; }
+  const instance = source.hostname.match(localAccountHost)?.[1];
+  if (source.hostname !== "nanocodex.localhost" && !instance) return productionConnectDemoUrl;
+  source.hostname = instance
+    ? `${instance}.playground.nanocodex.localhost`
+    : "playground.nanocodex.localhost";
+  source.pathname = "/";
+  source.search = "";
+  source.hash = "";
+  return source.href;
+}
 
 export const accountNavigation = {
   surface: "connect",

@@ -5,6 +5,8 @@ export type ConnectDialogProxyEnv = {
 const CONNECT_DIALOG_PREFIX = "/connect-dialog";
 const CONNECT_DIALOG_FRAME_ANCESTORS = [
   "'self'",
+  "https://nanocodex.localhost",
+  "https://*.nanocodex.localhost",
   "http://nanocodex.localhost:*",
   "http://*.nanocodex.localhost:*",
   "https://nanocodex-connect-playground.gakonst.workers.dev",
@@ -56,13 +58,11 @@ export async function routeConnectDialog(
     }));
     return projectResponse(upstream, url, upstreamUrl, request.method);
   } catch (error) {
-    console.error(JSON.stringify({
+    console.error({
       type: "connect_dialog.backend_failure",
       path: url.pathname,
-      error: error instanceof Error
-        ? { name: error.name }
-        : { name: typeof error },
-    }));
+      error_kind: error instanceof Error ? error.name : typeof error,
+    });
     return json({ error: "connect_dialog_unavailable" }, { status: 503 });
   }
 }

@@ -3,6 +3,9 @@ import { createNanocodexVitePlugin } from "./plugin.mjs";
 /** Internal dependency seam used by provider-free tests. Not package-exported. */
 export function createNanocodexCloudflarePlugins(options, cloudflare, integration = {}) {
   let devBindings;
+  const credentialBrokerWorker = options.chatGpt === false
+    ? undefined
+    : options.chatGpt?.credentialBrokerWorker;
   const core = createNanocodexVitePlugin(
     { chatGpt: options.chatGpt, oauthRelay: options.oauthRelay },
     {
@@ -13,10 +16,44 @@ export function createNanocodexCloudflarePlugins(options, cloudflare, integratio
       },
     },
   );
-  return [core, ...cloudflare(withDevBindings(options.cloudflare ?? {}, () => devBindings))];
+  return [
+    core,
+    ...cloudflare(withDevBindings(
+      options.cloudflare ?? {},
+      () => devBindings,
+      credentialBrokerWorker,
+    )),
+  ];
 }
 
-function withDevBindings(options, getDevBindings) {
+function withDevBindings(options, getDevBindings, credentialBrokerWorker) {
+  if (credentialBrokerWorker) {
+    return {
+      ...options,
+      auxiliaryWorkers: options.auxiliaryWorkers?.map((worker) => ({
+        ...worker,
+        config(workerConfig, context) {
+          const customized = typeof worker.config === "function"
+            ? worker.config(workerConfig, context)
+            : worker.config;
+          if (
+            workerConfig.name !== credentialBrokerWorker
+            && workerConfig.topLevelName !== credentialBrokerWorker
+          ) return customized;
+          const bindings = getDevBindings();
+          if (!bindings) return customized;
+          return {
+            ...(customized ?? {}),
+            vars: {
+              ...(workerConfig.vars ?? {}),
+              ...(customized?.vars ?? {}),
+              ...bindings,
+            },
+          };
+        },
+      })),
+    };
+  }
   const userConfig = options.config;
   return {
     ...options,
@@ -29,6 +66,7 @@ function withDevBindings(options, getDevBindings) {
       return {
         ...(customized ?? {}),
         vars: {
+          ...(workerConfig.vars ?? {}),
           ...(customized?.vars ?? {}),
           ...bindings,
         },

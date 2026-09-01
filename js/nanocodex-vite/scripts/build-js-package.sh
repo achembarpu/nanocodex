@@ -14,7 +14,7 @@ cargo build --locked -p nanocodex-wasm --target "$wasm_target" --profile wasm
 wasm_artifact="$target_dir/$wasm_target/wasm/nanocodex_wasm.wasm"
 binaryen="$repository_root/js/nanocodex/node_modules/.bin/wasm-opt"
 if [[ ! -x "$binaryen" ]]; then
-  echo "missing Binaryen; run npm ci in js/nanocodex" >&2
+  echo "missing Binaryen dependency for the nanocodex WASM build" >&2
   exit 1
 fi
 stamp_path="js/nanocodex/pkg-web/.nanocodex-bindgen-stamp"

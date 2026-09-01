@@ -3,10 +3,11 @@ const LOCAL_DEVELOPMENT_HOSTS = new Set([
   "127.0.0.1",
   "nanocodex.localhost",
 ]);
+const LOCAL_NANOCODEX_INSTANCE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.nanocodex\.localhost$/;
 
 function isLocalDevelopmentHost(hostname: string): boolean {
   return LOCAL_DEVELOPMENT_HOSTS.has(hostname)
-    || hostname.endsWith(".nanocodex.localhost");
+    || LOCAL_NANOCODEX_INSTANCE.test(hostname);
 }
 
 type CredentialClaim = Readonly<{

@@ -817,11 +817,10 @@ export class MultiplayerRoom extends DurableObject<MultiplayerRoomEnv> {
     const initialRoom = this.#readyRoom();
     if (!initialRoom) return new Response("Unknown or expired room", { status: 404 });
     if (!sameRoomOrigin(initialRoom.public_origin, request.headers.get("origin"))) {
-      console.error(JSON.stringify({
+      console.error({
         type: "multiplayer.origin_rejected",
-        expected: initialRoom.public_origin,
-        received: request.headers.get("origin"),
-      }));
+        outcome: "deny",
+      });
       return new Response("Room origin rejected", { status: 403 });
     }
     const after = parseCursor(url.searchParams.get("cursor"));

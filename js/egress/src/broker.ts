@@ -214,10 +214,10 @@ export class UserCredentialBroker extends DurableObject<BrokerEnv> {
         try {
           await this.#refreshChatGpt(credential);
         } catch (error) {
-          console.warn(JSON.stringify({
+          console.warn({
             type: "user_credential.refresh_failed",
             code: failure(error).code,
-          }));
+          });
         }
       }
       await this.#schedule();

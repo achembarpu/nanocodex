@@ -1017,7 +1017,8 @@ function connectorAudit(
   connector: ConnectorId,
   detail: Readonly<Record<string, boolean | number | string>>,
 ): void {
-  console.log({
+  const log = outcome === "error" ? console.error : outcome === "deny" ? console.warn : console.info;
+  log({
     type: "connector.audit",
     action,
     outcome,
