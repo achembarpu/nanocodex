@@ -2,7 +2,9 @@ use std::future::Future;
 
 use tokio::sync::{mpsc, oneshot};
 
-use crate::{Error, OwnedState, OwnerId, OwnerToken, StateStore, StoreError, StoreFuture};
+#[cfg(not(target_family = "wasm"))]
+use crate::Error;
+use crate::{OwnedState, OwnerId, OwnerToken, StateStore, StoreError, StoreFuture};
 
 const COMMAND_CAPACITY: usize = 64;
 
