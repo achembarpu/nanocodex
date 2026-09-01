@@ -1,6 +1,6 @@
 use nanocodex_durability::{
     Admission, BeginStep, DurableSession, Error, MemoryStore, OwnedState, OwnerId, OwnerToken,
-    ReconciledStep, RetryPolicy, StateStore, StepStatus, StoreError, StoreFuture, StoredState,
+    StateStore, StepStatus, StoreError, StoreFuture, StoredState,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::{
@@ -228,7 +228,6 @@ async fn replays_completed_operations_and_steps_after_reopen() {
                 "model-1",
                 "model",
                 &ModelInput { history: 0 },
-                RetryPolicy::Idempotent,
             )
             .await,
         Ok(BeginStep::Execute)
@@ -308,7 +307,7 @@ async fn failed_operations_replay_their_error_and_do_not_block_follow_on_work() 
 }
 
 #[tokio::test]
-async fn refuses_to_repeat_an_ambiguous_unsafe_step() {
+async fn retries_an_unfinished_step_after_reopen() {
     let store = MemoryStore::new().unwrap();
     let session = DurableSession::open(store.clone(), "session")
         .await
@@ -316,7 +315,7 @@ async fn refuses_to_repeat_an_ambiguous_unsafe_step() {
     session.admit("turn-1", &"hi").await.unwrap();
     session.begin_attempt("turn-1").await.unwrap();
     session
-        .begin_step("turn-1", "tool-1", "tool", &"charge", RetryPolicy::Never)
+        .begin_step("turn-1", "tool-1", "tool", &"charge")
         .await
         .unwrap();
 
@@ -328,22 +327,25 @@ async fn refuses_to_repeat_an_ambiguous_unsafe_step() {
     reopened.begin_attempt("turn-1").await.unwrap();
     assert!(matches!(
         reopened
-            .begin_step("turn-1", "tool-1", "tool", &"charge", RetryPolicy::Never)
+            .begin_step("turn-1", "tool-1", "tool", &"charge")
             .await,
-        Ok(BeginStep::Unknown)
+        Ok(BeginStep::Execute)
     ));
-    let ReconciledStep::Completed(output) = reopened
-        .reconcile_cancelled_step("turn-1", "tool-1", &"unknown after reopen")
-        .await
-        .unwrap()
-    else {
-        panic!("a cold pending at-most-once effect must reconcile as unknown")
-    };
-    assert_eq!(output.decode::<String>().unwrap(), "unknown after reopen");
+    assert_eq!(
+        reopened
+            .state()
+            .await
+            .unwrap()
+            .operation("turn-1")
+            .unwrap()
+            .steps["tool-1"]
+            .attempts,
+        2
+    );
 }
 
 #[tokio::test]
-async fn cancellation_reconciliation_does_not_invent_unknown_before_begin_is_observed() {
+async fn aborted_begin_caller_does_not_cancel_the_owned_store_commit() {
     let inner = MemoryStore::new().unwrap();
     let entered = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
@@ -363,31 +365,11 @@ async fn cancellation_reconciliation_does_not_invent_unknown_before_begin_is_obs
     );
     session.admit("turn-1", &"run tool").await.unwrap();
     session.begin_attempt("turn-1").await.unwrap();
-    let revision_before_absent = session.state().await.unwrap().revision();
-    assert!(matches!(
-        session
-            .reconcile_cancelled_step("turn-1", "tool-absent", &"unknown")
-            .await
-            .unwrap(),
-        ReconciledStep::NotStarted
-    ));
-    assert_eq!(
-        session.state().await.unwrap().revision(),
-        revision_before_absent,
-        "an absent step must not create a durable transition"
-    );
-
     let beginning = tokio::spawn({
         let session = Arc::clone(&session);
         async move {
             session
-                .begin_step(
-                    "turn-1",
-                    "tool-1",
-                    "tool_call",
-                    &"effect",
-                    RetryPolicy::Never,
-                )
+                .begin_step("turn-1", "tool-1", "tool_call", &"effect")
                 .await
         }
     });
@@ -396,28 +378,14 @@ async fn cancellation_reconciliation_does_not_invent_unknown_before_begin_is_obs
     assert!(beginning.await.unwrap_err().is_cancelled());
     release.notify_one();
 
-    assert!(matches!(
-        session
-            .reconcile_cancelled_step("turn-1", "tool-1", &"unknown")
-            .await
-            .unwrap(),
-        ReconciledStep::NotStarted
-    ));
-    assert!(
-        session
-            .state()
-            .await
-            .unwrap()
-            .operation("turn-1")
-            .unwrap()
-            .steps
-            .is_empty(),
-        "an unobserved execution permit must leave no durable step"
-    );
+    let state = session.state().await.unwrap();
+    let step = &state.operation("turn-1").unwrap().steps["tool-1"];
+    assert!(matches!(step.status, StepStatus::EffectPending));
+    assert_eq!(step.attempts, 1);
 }
 
 #[tokio::test]
-async fn cancellation_reconciliation_completes_an_authorized_pending_step_once_as_unknown() {
+async fn an_unfinished_step_can_execute_again_in_the_same_attempt() {
     let session = DurableSession::open(
         MemoryStore::new().unwrap(),
         "cancel-authorized-pending-step",
@@ -428,55 +396,31 @@ async fn cancellation_reconciliation_completes_an_authorized_pending_step_once_a
     session.begin_attempt("turn-1").await.unwrap();
     assert!(matches!(
         session
-            .begin_step(
-                "turn-1",
-                "tool-1",
-                "tool_call",
-                &"effect",
-                RetryPolicy::Never,
-            )
+            .begin_step("turn-1", "tool-1", "tool_call", &"effect",)
             .await
             .unwrap(),
         BeginStep::Execute
     ));
 
-    let ReconciledStep::Completed(output) = session
-        .reconcile_cancelled_step("turn-1", "tool-1", &"unknown")
-        .await
-        .unwrap()
-    else {
-        panic!("an authorized pending effect must settle as unknown")
-    };
-    assert_eq!(output.decode::<String>().unwrap(), "unknown");
-    let revision_after_completion = session.state().await.unwrap().revision();
-    let ReconciledStep::Completed(replayed) = session
-        .reconcile_cancelled_step("turn-1", "tool-1", &"different unknown")
-        .await
-        .unwrap()
-    else {
-        panic!("a settled effect must replay its first authoritative output")
-    };
-    assert_eq!(replayed.decode::<String>().unwrap(), "unknown");
-    assert_eq!(
-        session.state().await.unwrap().revision(),
-        revision_after_completion,
-        "reconciling a completed step must not append a second completion"
-    );
     assert!(matches!(
         session
-            .state()
-            .await
-            .unwrap()
-            .operation("turn-1")
-            .unwrap()
-            .steps["tool-1"]
-            .status,
-        StepStatus::Completed(_)
+            .begin_step("turn-1", "tool-1", "tool_call", &"effect")
+            .await,
+        Ok(BeginStep::Execute)
+    ));
+    let state = session.state().await.unwrap();
+    assert_eq!(
+        state.operation("turn-1").unwrap().steps["tool-1"].attempts,
+        2
+    );
+    assert!(matches!(
+        state.operation("turn-1").unwrap().steps["tool-1"].status,
+        StepStatus::EffectPending
     ));
 }
 
 #[tokio::test]
-async fn cancellation_reconciliation_does_not_overtake_a_live_begin_handoff() {
+async fn begin_waits_for_its_store_commit() {
     let entered = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
     let session = Arc::new(
@@ -499,30 +443,12 @@ async fn cancellation_reconciliation_does_not_overtake_a_live_begin_handoff() {
         let session = Arc::clone(&session);
         async move {
             session
-                .begin_step(
-                    "turn-1",
-                    "tool-1",
-                    "tool_call",
-                    &"effect",
-                    RetryPolicy::Never,
-                )
+                .begin_step("turn-1", "tool-1", "tool_call", &"effect")
                 .await
         }
     });
     entered.notified().await;
-    tokio::spawn({
-        let release = Arc::clone(&release);
-        async move {
-            tokio::task::yield_now().await;
-            release.notify_one();
-        }
-    });
-
-    let error = session
-        .reconcile_cancelled_step("turn-1", "tool-1", &"unknown")
-        .await
-        .expect_err("a live execution permit cannot be reclassified by cancellation");
-    assert!(error.to_string().contains("unresolved execution handoff"));
+    release.notify_one();
     assert!(matches!(
         beginning.await.unwrap().unwrap(),
         BeginStep::Execute
@@ -530,8 +456,9 @@ async fn cancellation_reconciliation_does_not_overtake_a_live_begin_handoff() {
 }
 
 #[tokio::test]
-async fn cancellation_reconciliation_retains_completion_committed_before_its_reply_is_observed() {
+async fn completion_committed_before_its_reply_is_observed_replays_after_reopen() {
     let inner = MemoryStore::new().unwrap();
+    let store = inner.clone();
     let entered = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
     let session = Arc::new(
@@ -551,13 +478,7 @@ async fn cancellation_reconciliation_retains_completion_committed_before_its_rep
     session.admit("turn-1", &"run tool").await.unwrap();
     session.begin_attempt("turn-1").await.unwrap();
     session
-        .begin_step(
-            "turn-1",
-            "tool-1",
-            "tool_call",
-            &"effect",
-            RetryPolicy::Never,
-        )
+        .begin_step("turn-1", "tool-1", "tool_call", &"effect")
         .await
         .unwrap();
 
@@ -573,13 +494,21 @@ async fn cancellation_reconciliation_retains_completion_committed_before_its_rep
     completing.abort();
     assert!(completing.await.unwrap_err().is_cancelled());
     release.notify_one();
-
-    let ReconciledStep::Completed(output) = session
-        .reconcile_cancelled_step("turn-1", "tool-1", &"unknown")
+    drop(session);
+    let reopened = DurableSession::open(store, "cancel-after-completion-commit")
+        .await
+        .unwrap();
+    assert!(matches!(
+        reopened.admit("turn-1", &"run tool").await,
+        Ok(Admission::Pending)
+    ));
+    reopened.begin_attempt("turn-1").await.unwrap();
+    let BeginStep::Replay(output) = reopened
+        .begin_step("turn-1", "tool-1", "tool_call", &"effect")
         .await
         .unwrap()
     else {
-        panic!("the durable real output must remain authoritative")
+        panic!("the committed real output must replay")
     };
     assert_eq!(output.decode::<String>().unwrap(), "real output");
 }
@@ -638,7 +567,7 @@ async fn rejects_every_inconsistent_store_state_shape() {
 #[tokio::test]
 async fn rejects_unknown_outer_state_fields() {
     let error = match DurableSession::open(
-        seeded_store(&[r#"{"nanocodex_durable_state":{"format":1,"operations":{},"latest_checkpoint":null,"checkpoint_effect_pending":false},"unknown":true}"#]),
+        seeded_store(&[r#"{"nanocodex_durable_state":{"format":2,"operations":{},"latest_checkpoint":null},"unknown":true}"#]),
         "unknown-outer-field",
     )
     .await
@@ -651,7 +580,7 @@ async fn rejects_unknown_outer_state_fields() {
 
 #[tokio::test]
 async fn rejects_noncanonical_checkpoint_fields() {
-    let payload = r#"{"nanocodex_durable_state":{"format":1,"operations":{},"latest_checkpoint":null,"checkpoint_effect_pending":false,"generation":1}}"#;
+    let payload = r#"{"nanocodex_durable_state":{"format":2,"operations":{},"latest_checkpoint":null,"generation":1}}"#;
     let error = match DurableSession::open(
         SeededStore {
             state: StoredState {
@@ -674,7 +603,7 @@ async fn rejects_noncanonical_checkpoint_fields() {
 async fn rejects_retry_attempt_counter_overflow_without_advancing_state() {
     let revision = u64::from(u32::MAX);
     let payload = format!(
-        r#"{{"nanocodex_durable_state":{{"format":1,"operations":{{"turn":{{"input":"\"prompt\"","status":"pending","steps":{{"model":{{"kind":"model","input":"\"retry\"","retry":"idempotent","status":"effect_pending","attempts":{}}}}},"accepted_order":1}}}},"latest_checkpoint":null,"checkpoint_effect_pending":false}}}}"#,
+        r#"{{"nanocodex_durable_state":{{"format":2,"operations":{{"turn":{{"input":"\"prompt\"","status":"pending","steps":{{"model":{{"kind":"model","input":"\"retry\"","status":"effect_pending","attempts":{}}}}},"accepted_order":1}}}},"latest_checkpoint":null}}}}"#,
         u32::MAX,
     );
     let session = DurableSession::open(
@@ -695,7 +624,7 @@ async fn rejects_retry_attempt_counter_overflow_without_advancing_state() {
     session.begin_attempt("turn").await.unwrap();
 
     let error = session
-        .begin_step("turn", "model", "model", &"retry", RetryPolicy::Idempotent)
+        .begin_step("turn", "model", "model", &"retry")
         .await
         .expect_err("attempt overflow must not silently saturate");
     assert!(matches!(error, Error::InvalidState(_)));
@@ -715,6 +644,19 @@ async fn rejects_the_deleted_journal_state_envelope() {
 }
 
 #[tokio::test]
+async fn rejects_the_previous_state_format() {
+    let payload =
+        r#"{"nanocodex_durable_state":{"format":1,"operations":{},"latest_checkpoint":null}}"#;
+    let error = match DurableSession::open(seeded_store(&[payload]), "previous-state-format").await
+    {
+        Ok(_) => panic!("the retry-only protocol must not adopt the previous state format"),
+        Err(error) => error,
+    };
+
+    assert!(matches!(error, Error::InvalidState(_)));
+}
+
+#[tokio::test]
 async fn rejects_noncanonical_transition_shape() {
     let error = match DurableSession::open(
         seeded_store(&[r#"{"operation_accepted":{"operation_id":"turn","input":"prompt"}}"#]),
@@ -731,7 +673,7 @@ async fn rejects_noncanonical_transition_shape() {
 
 #[tokio::test]
 async fn rejects_a_checkpoint_terminal_that_crosses_pending_work() {
-    let payload = r#"{"nanocodex_durable_state":{"format":1,"operations":{"turn-1":{"input":"\"first\"","status":"pending","steps":{},"accepted_order":1},"turn-2":{"input":"\"second\"","status":{"completed":{"checkpoint":"\"crossed\"","output":"\"done\""}},"steps":{},"accepted_order":2}},"latest_checkpoint":"\"crossed\"","checkpoint_effect_pending":false}}"#;
+    let payload = r#"{"nanocodex_durable_state":{"format":2,"operations":{"turn-1":{"input":"\"first\"","status":"pending","steps":{},"accepted_order":1},"turn-2":{"input":"\"second\"","status":{"completed":{"checkpoint":"\"crossed\"","output":"\"done\""}},"steps":{},"accepted_order":2}},"latest_checkpoint":"\"crossed\""}}"#;
     let error = match DurableSession::open(
         SeededStore {
             state: StoredState {
@@ -751,27 +693,34 @@ async fn rejects_a_checkpoint_terminal_that_crosses_pending_work() {
 }
 
 #[tokio::test]
-async fn rejects_a_checkpoint_effect_that_crosses_pending_work() {
-    let payload = r#"{"nanocodex_durable_state":{"format":1,"operations":{"turn":{"input":"\"prompt\"","status":"pending","steps":{},"accepted_order":1}},"latest_checkpoint":null,"checkpoint_effect_pending":true}}"#;
+async fn rejects_the_deleted_checkpoint_effect_field() {
+    let payload = r#"{"nanocodex_durable_state":{"format":2,"operations":{"turn":{"input":"\"prompt\"","status":"pending","steps":{},"accepted_order":1}},"latest_checkpoint":null,"checkpoint_effect_pending":true}}"#;
     let error =
         match DurableSession::open(seeded_store(&[payload]), "crossed-checkpoint-effect").await {
             Ok(_) => panic!("standalone checkpoint effects must not cross pending operations"),
             Err(error) => error,
         };
 
-    assert!(matches!(error, Error::InvalidState(_)));
+    assert!(matches!(error, Error::Decode { revision: 1, .. }));
 }
 
 #[tokio::test]
-async fn rejects_a_restarted_at_most_once_step() {
-    let payload = r#"{"nanocodex_durable_state":{"format":1,"operations":{"turn":{"input":"\"prompt\"","status":"pending","steps":{"tool-1":{"kind":"tool","input":"\"charge\"","retry":"never","status":"effect_pending","attempts":2}},"accepted_order":1}},"latest_checkpoint":null,"checkpoint_effect_pending":false}}"#;
-    let error =
-        match DurableSession::open(seeded_store(&[payload]), "restarted-at-most-once-step").await {
-            Ok(_) => panic!("at-most-once steps must have one committed start"),
-            Err(error) => error,
-        };
-
-    assert!(matches!(error, Error::InvalidState(_)));
+async fn reopens_a_restarted_step() {
+    let payload = r#"{"nanocodex_durable_state":{"format":2,"operations":{"turn":{"input":"\"prompt\"","status":"pending","steps":{"tool-1":{"kind":"tool","input":"\"charge\"","status":"effect_pending","attempts":2}},"accepted_order":1}},"latest_checkpoint":null}}"#;
+    let session = DurableSession::open(seeded_store(&[payload]), "restarted-step")
+        .await
+        .unwrap();
+    assert_eq!(
+        session
+            .state()
+            .await
+            .unwrap()
+            .operation("turn")
+            .unwrap()
+            .steps["tool-1"]
+            .attempts,
+        2
+    );
 }
 
 #[tokio::test]
@@ -783,7 +732,7 @@ async fn reopens_a_seeded_step_start() {
     session.admit("turn", &"prompt").await.unwrap();
     session.begin_attempt("turn").await.unwrap();
     session
-        .begin_step("turn", "tool-1", "tool", &"charge", RetryPolicy::Idempotent)
+        .begin_step("turn", "tool-1", "tool", &"charge")
         .await
         .unwrap();
     drop(session);
@@ -808,7 +757,7 @@ async fn reopens_a_seeded_step_completion() {
     session.admit("turn", &"prompt").await.unwrap();
     session.begin_attempt("turn").await.unwrap();
     session
-        .begin_step("turn", "tool-1", "tool", &"charge", RetryPolicy::Idempotent)
+        .begin_step("turn", "tool-1", "tool", &"charge")
         .await
         .unwrap();
     session

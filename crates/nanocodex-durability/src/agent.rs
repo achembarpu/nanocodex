@@ -3,17 +3,15 @@ use std::sync::{Arc, Mutex};
 use nanocodex_agent::{
     ExecutionPolicyDisposition, NanocodexBuilder, NanocodexError, Result as AgentResult,
     execution::{
-        ExecutionAdmission, ExecutionFuture, ExecutionOutput, ExecutionPolicy, ExecutionRetry,
-        ExecutionStepAdmission, ExecutionStepReconciliation,
+        ExecutionAdmission, ExecutionFuture, ExecutionOutput, ExecutionPolicy,
+        ExecutionStepAdmission,
     },
     session::SessionSnapshot,
 };
 use serde_json::value::RawValue;
 use tokio::sync::OnceCell;
 
-use crate::{
-    Admission, BeginStep, DurableSession, Error, ReconciledStep, RetryPolicy, session::DurableOwner,
-};
+use crate::{Admission, BeginStep, DurableSession, Error, session::DurableOwner};
 
 /// Fluent builder extension that attaches portable durability to an agent.
 pub trait DurableAgentExt: Sized {
@@ -166,16 +164,6 @@ impl ExecutionPolicy for DurableExecution {
         })
     }
 
-    fn fence_checkpoint_effect<'a>(&'a self) -> ExecutionFuture<'a, AgentResult<()>> {
-        Box::pin(async move {
-            self.owner()
-                .await?
-                .fence_checkpoint_effect()
-                .await
-                .map_err(agent_error)
-        })
-    }
-
     fn admit<'a>(
         &'a self,
         operation_id: String,
@@ -252,21 +240,19 @@ impl ExecutionPolicy for DurableExecution {
         step_id: String,
         kind: String,
         input_json: String,
-        retry: ExecutionRetry,
     ) -> ExecutionFuture<'a, AgentResult<ExecutionStepAdmission>> {
         Box::pin(async move {
             let input = raw(input_json)?;
             match self
                 .owner()
                 .await?
-                .begin_step(operation_id, step_id, kind, &input, map_retry(retry))
+                .begin_step(operation_id, step_id, kind, &input)
                 .await
             {
                 Ok(BeginStep::Execute) => Ok(ExecutionStepAdmission::Execute),
                 Ok(BeginStep::Replay(output)) => {
                     Ok(ExecutionStepAdmission::Replay(output.json().to_owned()))
                 }
-                Ok(BeginStep::Unknown) => Ok(ExecutionStepAdmission::Unknown),
                 Err(error) => Err(agent_error(error)),
             }
         })
@@ -285,29 +271,6 @@ impl ExecutionPolicy for DurableExecution {
                 .complete_step(operation_id, step_id, &output)
                 .await
                 .map_err(agent_error)
-        })
-    }
-
-    fn reconcile_cancelled_step<'a>(
-        &'a self,
-        operation_id: String,
-        step_id: String,
-        unknown_output_json: String,
-    ) -> ExecutionFuture<'a, AgentResult<ExecutionStepReconciliation>> {
-        Box::pin(async move {
-            let unknown_output = raw(unknown_output_json)?;
-            match self
-                .owner()
-                .await?
-                .reconcile_cancelled_step(operation_id, step_id, &unknown_output)
-                .await
-            {
-                Ok(ReconciledStep::NotStarted) => Ok(ExecutionStepReconciliation::NotStarted),
-                Ok(ReconciledStep::Completed(output)) => Ok(
-                    ExecutionStepReconciliation::Completed(output.json().to_owned()),
-                ),
-                Err(error) => Err(agent_error(error)),
-            }
         })
     }
 
@@ -368,13 +331,6 @@ fn map_admission(admission: Admission<SessionSnapshot, ExecutionOutput>) -> Exec
             error,
         },
         Admission::Cancelled => ExecutionAdmission::Cancelled,
-    }
-}
-
-const fn map_retry(retry: ExecutionRetry) -> RetryPolicy {
-    match retry {
-        ExecutionRetry::Idempotent => RetryPolicy::Idempotent,
-        ExecutionRetry::Never => RetryPolicy::Never,
     }
 }
 

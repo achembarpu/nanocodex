@@ -252,24 +252,12 @@ where
             request_prefix: &recorded_request_prefix,
         };
         if let Some(steps) = &self.execution_steps {
-            // A reopened durable step cannot prove that the provider did not
-            // observe the request. Live in-attempt retries remain client-owned.
             match steps
-                .begin::<_, WarmupExecution>(
-                    "warmup",
-                    "warmup",
-                    &recorded,
-                    crate::agent::execution::ExecutionRetry::Never,
-                )
+                .begin::<_, WarmupExecution>("warmup", "warmup", &recorded)
                 .await?
             {
                 crate::agent::ExecutionStep::Replay(output) => return Ok(output),
                 crate::agent::ExecutionStep::Execute => {}
-                crate::agent::ExecutionStep::Unknown => {
-                    return Err(NanocodexError::ProviderOutcomeUnknown {
-                        operation: "warmup",
-                    });
-                }
             }
         }
         let success = self
@@ -390,28 +378,12 @@ where
             prompt_history: &recorded_prompt_history,
         };
         let recovered = if let Some(steps) = &execution_steps {
-            // A reopened durable step cannot prove that the provider did not
-            // observe the request. Live in-attempt retries remain client-owned.
             match steps
-                .begin::<_, RecordedCompactionResult>(
-                    &step_id,
-                    "compaction",
-                    &step_input,
-                    crate::agent::execution::ExecutionRetry::Never,
-                )
+                .begin::<_, RecordedCompactionResult>(&step_id, "compaction", &step_input)
                 .await?
             {
                 crate::agent::ExecutionStep::Execute => None,
                 crate::agent::ExecutionStep::Replay(output) => Some(output),
-                crate::agent::ExecutionStep::Unknown => {
-                    let error = NanocodexError::ProviderOutcomeUnknown {
-                        operation: "compaction",
-                    };
-                    span.record("status", "failed");
-                    span.record("otel.status_code", "ERROR");
-                    span.record("duration_ns", elapsed_ns(started_at));
-                    return self.compaction_failed(after_model_call_index, started_at, error);
-                }
             }
         } else {
             None

@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use crate::{Error, Result};
 use serde::{Serialize, de::DeserializeOwned};
 
-const STATE_FORMAT: u8 = 1;
+const STATE_FORMAT: u8 = 2;
 
 /// A typed value erased only for storage in a heterogeneous state.
 ///
@@ -41,17 +41,6 @@ impl PartialEq for EncodedPayload {
 
 impl Eq for EncodedPayload {}
 
-/// Recovery policy for a durable step whose start was committed but whose
-/// completion was not.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RetryPolicy {
-    /// Never repeat the step automatically because side effects may have happened.
-    Never,
-    /// Repeating the step with the same identity is safe.
-    Idempotent,
-}
-
 /// One Rust-owned durable state entry.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
@@ -63,7 +52,7 @@ pub enum Transition {
         /// Opaque typed input encoded by the Rust consumer.
         input: EncodedPayload,
     },
-    /// A replayable step began.
+    /// An external step began.
     StepStarted {
         /// Accepted operation identity.
         operation_id: String,
@@ -73,18 +62,8 @@ pub enum Transition {
         kind: String,
         /// Opaque typed step input.
         input: EncodedPayload,
-        /// Recovery policy if completion is missing.
-        retry: RetryPolicy,
     },
-    /// A newly started at-most-once step was not observed by its executor, so
-    /// its effect boundary is removed before any external dispatch can occur.
-    StepAbandoned {
-        /// Accepted operation identity.
-        operation_id: String,
-        /// Stable step identity within the operation.
-        step_id: String,
-    },
-    /// A replayable step completed.
+    /// An external step completed with a replayable output.
     StepCompleted {
         /// Accepted operation identity.
         operation_id: String,
@@ -120,8 +99,6 @@ pub enum Transition {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         checkpoint: Option<EncodedPayload>,
     },
-    /// A retry-safe standalone checkpoint effect crossed its store fence.
-    CheckpointEffectStarted,
     /// A model-only boundary, such as explicit standalone compaction, advanced
     /// the resumable session without terminalizing an operation.
     CheckpointCommitted {
@@ -173,7 +150,7 @@ impl OperationStatus {
 #[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StepStatus {
-    /// The intent committed and the external effect has an unknown outcome.
+    /// The step started but has no committed output yet.
     EffectPending,
     /// The external effect's exact output settled durably.
     Completed(EncodedPayload),
@@ -187,8 +164,6 @@ pub struct StepState {
     pub kind: String,
     /// Original opaque step input.
     pub input: EncodedPayload,
-    /// Crash recovery policy.
-    pub retry: RetryPolicy,
     /// Current reduced status.
     pub status: StepStatus,
     /// Number of committed starts for this step.
@@ -214,7 +189,6 @@ pub struct DurableState {
     revision: u64,
     operations: BTreeMap<String, OperationState>,
     latest_checkpoint: Option<(u64, EncodedPayload)>,
-    checkpoint_effect_pending: bool,
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -223,7 +197,6 @@ pub(crate) struct DurableCheckpoint {
     format: u8,
     operations: BTreeMap<String, OperationState>,
     latest_checkpoint: Option<EncodedPayload>,
-    checkpoint_effect_pending: bool,
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -237,7 +210,6 @@ struct DurableCheckpointRef<'a> {
     format: u8,
     operations: &'a BTreeMap<String, OperationState>,
     latest_checkpoint: Option<&'a EncodedPayload>,
-    checkpoint_effect_pending: bool,
 }
 
 #[derive(serde::Serialize)]
@@ -300,20 +272,12 @@ impl DurableState {
             .map(|(_, checkpoint)| checkpoint)
     }
 
-    /// Returns whether a retry-safe standalone checkpoint effect has committed
-    /// its intent but not its settlement.
-    #[must_use]
-    pub const fn checkpoint_effect_pending(&self) -> bool {
-        self.checkpoint_effect_pending
-    }
-
     pub(crate) fn checkpoint_payload(&self) -> Result<String> {
         serde_json::to_string(&RetainedCheckpointRef {
             nanocodex_durable_state: DurableCheckpointRef {
                 format: STATE_FORMAT,
                 operations: &self.operations,
                 latest_checkpoint: self.latest_checkpoint(),
-                checkpoint_effect_pending: self.checkpoint_effect_pending,
             },
         })
         .map_err(Error::InvalidPayload)
@@ -372,11 +336,6 @@ impl DurableState {
                         "step `{step_id}` in operation `{operation_id}` has no committed start"
                     )));
                 }
-                if step.retry == RetryPolicy::Never && step.attempts != 1 {
-                    return Err(Error::InvalidState(format!(
-                        "at-most-once step `{step_id}` in operation `{operation_id}` has more than one committed start"
-                    )));
-                }
             }
             if matches!(
                 &operation.status,
@@ -394,15 +353,7 @@ impl DurableState {
             latest_checkpoint: checkpoint
                 .latest_checkpoint
                 .map(|checkpoint| (revision, checkpoint)),
-            checkpoint_effect_pending: checkpoint.checkpoint_effect_pending,
         };
-        if state.checkpoint_effect_pending
-            && let Some((pending_id, _)) = state.first_pending_operation()
-        {
-            return Err(Error::InvalidState(format!(
-                "standalone checkpoint effect crossed pending operation `{pending_id}`"
-            )));
-        }
         for (operation_id, operation) in &state.operations {
             if matches!(
                 &operation.status,
@@ -469,14 +420,13 @@ impl DurableState {
                 step_id,
                 kind,
                 input,
-                retry,
             } => {
                 ensure_nonempty(step_id, "step ID")?;
                 ensure_nonempty(kind, "step kind")?;
                 self.ensure_prior_operations_terminal(operation_id)?;
                 let operation = self.pending_operation(operation_id)?;
                 if let Some(step) = operation.steps.get(step_id) {
-                    if step.kind != *kind || step.input != *input || step.retry != *retry {
+                    if step.kind != *kind || step.input != *input {
                         return Err(Error::InvalidState(format!(
                             "step `{step_id}` in operation `{operation_id}` changed definition"
                         )));
@@ -484,11 +434,6 @@ impl DurableState {
                     if matches!(step.status, StepStatus::Completed(_)) {
                         return Err(Error::InvalidState(format!(
                             "settled step `{step_id}` in operation `{operation_id}` restarted"
-                        )));
-                    }
-                    if step.retry == RetryPolicy::Never {
-                        return Err(Error::InvalidState(format!(
-                            "at-most-once step `{step_id}` in operation `{operation_id}` restarted"
                         )));
                     }
                     if step.attempts == u32::MAX {
@@ -518,27 +463,6 @@ impl DurableState {
                             "step `{step_id}` in operation `{operation_id}` completed more than once"
                         )));
                     }
-                }
-            }
-            Transition::StepAbandoned {
-                operation_id,
-                step_id,
-            } => {
-                ensure_nonempty(step_id, "step ID")?;
-                self.ensure_prior_operations_terminal(operation_id)?;
-                let operation = self.pending_operation(operation_id)?;
-                let step = operation.steps.get(step_id).ok_or_else(|| {
-                    Error::InvalidState(format!(
-                        "step `{step_id}` in operation `{operation_id}` was abandoned before start"
-                    ))
-                })?;
-                if step.retry != RetryPolicy::Never
-                    || !matches!(step.status, StepStatus::EffectPending)
-                    || step.attempts != 1
-                {
-                    return Err(Error::InvalidState(format!(
-                        "step `{step_id}` in operation `{operation_id}` cannot be abandoned after effect authorization"
-                    )));
                 }
             }
             Transition::OperationCompleted { operation_id, .. } => {
@@ -571,7 +495,7 @@ impl DurableState {
                     )));
                 }
             }
-            Transition::CheckpointEffectStarted | Transition::CheckpointCommitted { .. } => {
+            Transition::CheckpointCommitted { .. } => {
                 if let Some((pending_id, _)) = self.first_pending_operation() {
                     return Err(Error::InvalidState(format!(
                         "standalone checkpoint effect crossed pending operation `{pending_id}`"
@@ -603,7 +527,6 @@ impl DurableState {
                 step_id,
                 kind,
                 input,
-                retry,
             } => {
                 let operation = self.pending_operation_mut(&operation_id)?;
                 if let Some(step) = operation.steps.get_mut(&step_id) {
@@ -618,7 +541,6 @@ impl DurableState {
                         StepState {
                             kind,
                             input,
-                            retry,
                             status: StepStatus::EffectPending,
                             attempts: 1,
                         },
@@ -637,14 +559,6 @@ impl DurableState {
                     ))
                 })?;
                 step.status = StepStatus::Completed(output);
-            }
-            Transition::StepAbandoned {
-                operation_id,
-                step_id,
-            } => {
-                self.pending_operation_mut(&operation_id)?
-                    .steps
-                    .remove(&step_id);
             }
             Transition::OperationCompleted {
                 operation_id,
@@ -682,12 +596,8 @@ impl DurableState {
                     self.latest_checkpoint = Some((revision, checkpoint));
                 }
             }
-            Transition::CheckpointEffectStarted => {
-                self.checkpoint_effect_pending = true;
-            }
             Transition::CheckpointCommitted { checkpoint } => {
                 self.latest_checkpoint = Some((revision, checkpoint));
-                self.checkpoint_effect_pending = false;
             }
         }
         Ok(())
@@ -739,12 +649,11 @@ impl Transition {
         match self {
             Self::OperationAccepted { operation_id, .. }
             | Self::StepStarted { operation_id, .. }
-            | Self::StepAbandoned { operation_id, .. }
             | Self::StepCompleted { operation_id, .. }
             | Self::OperationCompleted { operation_id, .. }
             | Self::OperationFailed { operation_id, .. }
             | Self::OperationCancelled { operation_id, .. } => Some(operation_id),
-            Self::CheckpointEffectStarted | Self::CheckpointCommitted { .. } => None,
+            Self::CheckpointCommitted { .. } => None,
         }
     }
 }

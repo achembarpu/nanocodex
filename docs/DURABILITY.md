@@ -56,8 +56,9 @@ There is exactly zero or one retained payload. Multiple historical batches are
 corruption and are rejected. Receipt retention is a normal state transition,
 not log-prefix compaction. Hosts never deserialize state.
 
-This is a hard cutover. The envelope is `nanocodex_durable_state`; the former
-`nanocodex_journal_state` envelope and individual event batches are rejected.
+This is a hard cutover. State format 2 uses the
+`nanocodex_durable_state` envelope; format 1, the former
+`nanocodex_journal_state` envelope, and individual event batches are rejected.
 There is no adoption, migration, or compatibility reader for old durable data.
 
 ## Provider portability
@@ -99,7 +100,7 @@ archive's stable state ID remains unchanged.
 
 Archives can contain conversation and tool state and are not encrypted by this
 API. Applications own transport encryption, access control, retention, and
-deletion. An ambiguous destination commit must be reconciled by loading the
+deletion. An unconfirmed destination commit must be reconciled by loading the
 destination; blindly resuming the source can create split-brain execution.
 
 Store results have exact meanings:
@@ -109,14 +110,14 @@ Store results have exact meanings:
 | success | Mutation committed at the returned revision | Not needed |
 | `NotCommitted` | Store guarantees no mutation occurred | Allowed |
 | `Fenced` / `Conflict` | This owner or revision is stale | Forbidden |
-| backend/transport error | Commit outcome is not proven | Forbidden; reacquire and reload |
+| backend/transport error | The commit is not proven | Forbidden; reacquire and reload |
 
 ## Total restart state
 
 Every committed revision is independently decodable. It contains all retained
 operations, each operation's full step states, the latest resumable checkpoint,
-and whether a standalone checkpoint effect is currently in its uncertain
-window. A stored revision never depends on an earlier revision.
+and committed step outputs. A stored revision never depends on an earlier
+revision.
 
 ## Operation state
 
@@ -153,27 +154,24 @@ Beginning a step returns exactly one value:
 
 | Admission | Durable evidence | Caller action |
 |---|---|---|
-| `Execute` | No prior start, or an unfinished retry-safe start | Dispatch once and commit output |
+| `Execute` | No committed output exists | Dispatch and commit output |
 | `Replay(output)` | A completed output is durable | Reuse the exact output; do not dispatch |
-| `Unknown` | An unfinished at-most-once start exists | Do not dispatch; surface the unknown outcome |
 
-`Unknown` is a durable protocol result. An interrupted unsafe tool becomes one
-structured failed tool result, is committed as that step's output, and returns
-control to the model. An interrupted provider operation returns the typed
-`ProviderOutcomeUnknown` error and terminalizes the affected turn. In both
-cases, a committed start proves authorization but not external settlement.
+There is no durable uncertainty result and no retry-safety classification.
+An unfinished provider or tool step is submitted again with the same stable
+step identity and input. This deliberately provides at-least-once execution:
+the provider may bill twice and an external tool effect may happen twice.
 
-Provider generation, warmup, and compaction are at-most-once across durable
-owner loss. Bounded transport retries belong only to the uninterrupted live
-Responses attempt. Successful dispatch settles in one replacement:
+Bounded transport retries still belong to the uninterrupted live Responses
+attempt. Durable recovery adds another submission only when no completed step
+output was committed. Successful dispatch settles in one replacement:
 `effect_pending -> completed(output)`. That replacement is the materialization
 boundary because the output and all operation state share one opaque total-state
 payload. Completed results always replay.
 
-Standalone compaction is an at-most-once checkpoint transform. It commits
-`CheckpointEffectStarted` through the current owner immediately before provider
-entry, then commits the resulting checkpoint. It cannot run while an accepted
-operation is pending.
+Standalone compaction follows the same rule. A committed resulting checkpoint
+replays; otherwise a later request runs compaction again. It cannot run while an
+accepted operation is pending.
 
 ## Checkpoints and terminals
 
@@ -194,8 +192,8 @@ state fact at the Rust boundary.
 Managed cancellation may reserve an exact not-yet-admitted turn ID. Matching
 admission consumes that reservation into `cancelling` before any model or tool
 work starts. Active cancellation commits `OperationCancelled` before the API
-reports completion. A definite `NotCommitted` may retry; any unknown store
-outcome requires owner reacquisition and loading authoritative state.
+reports completion. A definite `NotCommitted` may retry; an unconfirmed store
+commit requires owner reacquisition and loading authoritative state.
 
 ## Managed projection
 
@@ -223,12 +221,11 @@ the durable cursor is authoritative.
 |---|---|---|
 | Before acceptance commit | No operation | Caller may submit normally |
 | After acceptance, before effect start | Pending operation | New owner claims and executes |
-| After retry-safe effect start | `effect_pending` retry-safe step | Execute again with the same identity and input |
-| After unsafe effect start | Started at-most-once step | `Unknown`; never redispatch |
-| After effect returns, before settlement | `effect_pending` | Apply the configured safe/unsafe recovery rule |
+| After effect start | `effect_pending` step | Execute again with the same identity and input |
+| After effect returns, before settlement | `effect_pending` | Execute again; duplicate billing or effects are allowed |
 | After settlement | `completed(output)` | Replay exact output; never redispatch |
 | During terminal replacement with `NotCommitted` | Pending operation | Same valid owner may retry |
-| During terminal replacement with unknown outcome | Unknown store result | Reacquire, reload, then decide |
+| During an unconfirmed terminal replacement | Store result is not authoritative | Reacquire, reload, then decide |
 | After terminal commit | Terminal operation | Replay terminal; no execution |
 | After managed terminal transaction, before SSE send | Terminal row/event | Cursor replay delivers it |
 
@@ -237,8 +234,8 @@ the durable cursor is authoritative.
 1. Persist before dispatch.
 2. Never infer a commit from a transport error.
 3. Never retry on a stale owner.
-4. Never automatically repeat an unfinished at-most-once effect.
-5. Never represent uncertainty as a permanent thread-wide block.
+4. Execute every unfinished step again after recovery.
+5. Replay every completed step without dispatching it again.
 6. Never split a checkpoint from its terminal receipt.
 7. Never let managed projection override Rust effect recovery.
 8. Keep live ownership out of persistent state.

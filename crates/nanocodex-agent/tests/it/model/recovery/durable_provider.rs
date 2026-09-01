@@ -8,9 +8,8 @@ use std::{
 };
 
 use nanocodex_agent::{
-    NanocodexError,
     execution::{
-        ExecutionAdmission, ExecutionFuture, ExecutionOutput, ExecutionPolicy, ExecutionRetry,
+        ExecutionAdmission, ExecutionFuture, ExecutionOutput, ExecutionPolicy,
         ExecutionStepAdmission,
     },
     session::SessionSnapshot,
@@ -85,23 +84,24 @@ impl Service<ResponsesAttempt> for ProviderProbe {
     }
 }
 
-struct PendingProviderStep {
-    pending_kind: &'static str,
-    admissions: Mutex<Vec<(String, ExecutionRetry)>>,
+struct ProviderSteps {
+    admissions: Mutex<Vec<String>>,
 }
 
-impl PendingProviderStep {
-    const fn new(pending_kind: &'static str) -> Self {
+impl ProviderSteps {
+    const fn new() -> Self {
         Self {
-            pending_kind,
             admissions: Mutex::new(Vec::new()),
         }
     }
 
-    fn assert_recovered_at_most_once(&self) {
-        assert_eq!(
-            self.admissions.lock().unwrap().as_slice(),
-            [(self.pending_kind.to_owned(), ExecutionRetry::Never)]
+    fn assert_admitted(&self, kind: &str) {
+        assert!(
+            self.admissions
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|seen| seen == kind)
         );
     }
 
@@ -110,7 +110,7 @@ impl PendingProviderStep {
     }
 }
 
-impl ExecutionPolicy for PendingProviderStep {
+impl ExecutionPolicy for ProviderSteps {
     fn admit<'a>(
         &'a self,
         _operation_id: String,
@@ -144,15 +144,10 @@ impl ExecutionPolicy for PendingProviderStep {
         _step_id: String,
         kind: String,
         _input_json: String,
-        retry: ExecutionRetry,
     ) -> ExecutionFuture<'a, nanocodex_agent::Result<ExecutionStepAdmission>> {
         Box::pin(async move {
-            self.admissions.lock().unwrap().push((kind.clone(), retry));
-            if kind == self.pending_kind && retry == ExecutionRetry::Never {
-                Ok(ExecutionStepAdmission::Unknown)
-            } else {
-                Ok(ExecutionStepAdmission::Execute)
-            }
+            self.admissions.lock().unwrap().push(kind);
+            Ok(ExecutionStepAdmission::Execute)
         })
     }
 
@@ -192,33 +187,13 @@ impl ExecutionPolicy for PendingProviderStep {
     }
 }
 
-#[tokio::test]
-async fn execution_policy_cancellation_reconciliation_defaults_fail_closed() {
-    let policy = PendingProviderStep::new("tool_call");
-    let outcome = policy
-        .reconcile_cancelled_step(
-            "turn-1".to_owned(),
-            "tool-1".to_owned(),
-            r#"{"status":"unknown"}"#.to_owned(),
-        )
-        .await;
-
-    assert!(matches!(
-        outcome,
-        Err(NanocodexError::ExecutionPolicyCapabilityUnsupported {
-            capability: "reconcile_cancelled_step"
-        })
-    ));
-}
-
-async fn assert_pending_provider_step_is_not_repeated(
+async fn assert_provider_step_executes(
     kind: &'static str,
     transport: ResponsesTransport,
-    expected_operation: &'static str,
 ) -> Result<()> {
     let provider_calls = Arc::new(AtomicU32::new(0));
     let service_calls = Arc::clone(&provider_calls);
-    let policy = Arc::new(PendingProviderStep::new(kind));
+    let policy = Arc::new(ProviderSteps::new());
     let openai = OpenAi::builder("test-key")
         .transport(transport)
         .service(move || ProviderProbe {
@@ -232,47 +207,32 @@ async fn assert_pending_provider_step_is_not_repeated(
         .build()?;
     drop(events);
 
-    let error = agent
+    let result = agent
         .prompt("recover the interrupted provider step")
         .await?
-        .await
-        .expect_err("an EffectPending provider step must fail closed");
-    assert!(matches!(
-        error,
-        NanocodexError::ProviderOutcomeUnknown { operation }
-            if operation == expected_operation
-    ));
-    assert_eq!(
-        provider_calls.load(Ordering::Relaxed),
-        0,
-        "durable recovery must not submit the provider request again"
-    );
-    policy.assert_recovered_at_most_once();
+        .await?;
+    assert_eq!(result.final_message(), "provider was called");
+    assert!(provider_calls.load(Ordering::Relaxed) >= 1);
+    policy.assert_admitted(kind);
     agent.shutdown().await?;
     Ok(())
 }
 
 #[tokio::test]
-async fn pending_model_call_recovery_does_not_call_the_provider_again() -> Result<()> {
-    assert_pending_provider_step_is_not_repeated(
-        "model_call",
-        ResponsesTransport::Https,
-        "model call",
-    )
-    .await
+async fn model_call_admission_executes_the_provider() -> Result<()> {
+    assert_provider_step_executes("model_call", ResponsesTransport::Https).await
 }
 
 #[tokio::test]
-async fn pending_warmup_recovery_does_not_call_the_provider_again() -> Result<()> {
-    assert_pending_provider_step_is_not_repeated("warmup", ResponsesTransport::WebSocket, "warmup")
-        .await
+async fn warmup_admission_executes_the_provider() -> Result<()> {
+    assert_provider_step_executes("warmup", ResponsesTransport::WebSocket).await
 }
 
 #[tokio::test]
-async fn pending_compaction_recovery_does_not_call_the_provider_again() -> Result<()> {
+async fn compaction_admission_executes_the_provider() -> Result<()> {
     let provider_calls = Arc::new(AtomicU32::new(0));
     let service_calls = Arc::clone(&provider_calls);
-    let policy = Arc::new(PendingProviderStep::new("compaction"));
+    let policy = Arc::new(ProviderSteps::new());
     let openai = OpenAi::builder("test-key")
         .transport(ResponsesTransport::Https)
         .service(move || ProviderProbe {
@@ -298,23 +258,13 @@ async fn pending_compaction_recovery_does_not_call_the_provider_again() -> Resul
     assert_eq!(provider_calls.swap(0, Ordering::Relaxed), 1);
     policy.clear_admissions();
 
-    let error = agent
+    let result = agent
         .prompt("recover the pending compaction")
         .await?
-        .await
-        .expect_err("an EffectPending compaction must fail closed");
-    assert!(matches!(
-        error,
-        NanocodexError::ProviderOutcomeUnknown {
-            operation: "compaction"
-        }
-    ));
-    assert_eq!(
-        provider_calls.load(Ordering::Relaxed),
-        0,
-        "compaction recovery must not submit the provider request again"
-    );
-    policy.assert_recovered_at_most_once();
+        .await?;
+    assert_eq!(result.final_message(), "provider was called");
+    assert!(provider_calls.load(Ordering::Relaxed) >= 1);
+    policy.assert_admitted("compaction");
     agent.shutdown().await?;
     Ok(())
 }

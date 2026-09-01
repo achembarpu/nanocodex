@@ -78,14 +78,6 @@ pub enum NanocodexError {
         detail: &'static str,
     },
 
-    /// A durable restart lost observation of an already-dispatched provider operation.
-    #[cfg(feature = "openai")]
-    #[error("{operation} provider outcome is unknown after durable recovery")]
-    ProviderOutcomeUnknown {
-        /// Stable name of the provider operation.
-        operation: &'static str,
-    },
-
     /// The immutable request prefix could not be serialized for fingerprinting.
     #[cfg(feature = "openai")]
     #[error("failed to fingerprint the immutable prompt prefix: {0}")]

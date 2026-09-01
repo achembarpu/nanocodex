@@ -20,13 +20,13 @@ pub use memory::MemoryStore;
     doc(cfg(all(feature = "postgres", not(target_family = "wasm"))))
 )]
 pub use postgres::PostgresStore;
-pub use session::{Admission, AutomaticAdmission, BeginStep, DurableSession, ReconciledStep};
+pub use session::{Admission, AutomaticAdmission, BeginStep, DurableSession};
 #[cfg(all(feature = "sqlite", not(target_family = "wasm")))]
 #[cfg_attr(docsrs, doc(cfg(all(feature = "sqlite", not(target_family = "wasm")))))]
 pub use sqlite::SqliteStore;
 pub use state::{
-    DurableState, EncodedPayload, OperationState, OperationStatus, RetryPolicy, StepState,
-    StepStatus, Transition,
+    DurableState, EncodedPayload, OperationState, OperationStatus, StepState, StepStatus,
+    Transition,
 };
 pub use store::{
     OwnedState, OwnerId, OwnerToken, StateStore, StoreError, StoreFuture, StoredState,
@@ -53,12 +53,6 @@ pub enum Error {
     /// Retained state violated the durability state machine.
     #[error("invalid durability state: {0}")]
     InvalidState(String),
-    /// A durable restart lost observation of an already-dispatched provider operation.
-    #[error("{operation} provider outcome is unknown after durable recovery")]
-    ProviderOutcomeUnknown {
-        /// Stable name of the provider operation.
-        operation: &'static str,
-    },
     /// An operation ID was reused with different input.
     #[error("durable operation `{operation_id}` already has different input")]
     OperationConflict {

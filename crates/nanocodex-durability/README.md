@@ -64,13 +64,11 @@ contract through the Nanocodex WASM host bridge.
 
 Operations are durable accepted units of work. Steps cover every external
 effect inside an operation: model calls, warmup, automatic compaction, and
-tools. Beginning a step returns `Execute`, `Replay(output)`, or `Unknown`.
-`Unknown` means an at-most-once start committed without a completion, so the
-effect is never silently repeated. The Agent adapter commits one structured
-failed tool result for that uncertainty and continues the model loop.
-Standalone compaction uses the same owner boundary: it commits a
-`checkpoint_effect_started` fence before provider entry and commits the new
-checkpoint only after the transform completes.
+tools. Beginning a step returns `Execute` when no output is committed or
+`Replay(output)` when one is. An unfinished step executes again after recovery.
+This deliberately permits duplicate provider billing and duplicate external
+tool effects. Standalone compaction follows the same rule: a committed
+checkpoint replays, while an unfinished transform runs again.
 
 Completed tool outputs are replayed only while the recovered agent still owns
 the named tool. If a deployment removes a runtime-owned tool, recovery emits an
@@ -132,17 +130,17 @@ Hosts do not deserialize state, snapshots, model outputs, or tool results.
 Rust owns those types and all recovery decisions.
 
 Only a definite `NotCommitted` replacement may be retried on the same owner.
-`Fenced`, revision `Conflict`, and unknown `Backend` outcomes require a fresh
+`Fenced`, revision `Conflict`, and unconfirmed `Backend` failures require a fresh
 owner acquisition and loading the complete current state before deciding what
 ran.
 
 Each external effect follows an intent/effect/settlement boundary. A start
 commits `effect_pending`; settlement atomically replaces it with `completed`
-and the exact output. A crash before settlement uses the declared recovery
-policy, while a crash after settlement replays the output without invoking the
-effect again. An unfinished at-most-once effect becomes `Unknown`; an
-idempotent effect may be retried with the exact stable identity and input.
-Operation terminals atomically carry their checkpoint and replay receipt.
+and the exact output. A crash before settlement executes the effect again with
+the same stable identity and input. A crash after settlement replays the output
+without invoking the effect again. There is no per-effect retry policy or
+uncertainty state. Operation terminals atomically carry their checkpoint and
+replay receipt.
 
 Unlike a store that stages an output separately from source-ordered transcript
 placement, this store owns one opaque total state. A second materialization

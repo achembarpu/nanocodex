@@ -15,7 +15,7 @@ use nanocodex_agent::{
     ResponseError, Tools,
     events::{AgentEventKind, AgentEvents, RunStatus, RunTerminal},
     execution::{
-        ExecutionAdmission, ExecutionFuture, ExecutionOutput, ExecutionPolicy, ExecutionRetry,
+        ExecutionAdmission, ExecutionFuture, ExecutionOutput, ExecutionPolicy,
         ExecutionStepAdmission,
     },
     input::Prompt,
@@ -25,7 +25,7 @@ use serde_json::json;
 
 use nanocodex_durability::{
     DurableAgentExt, DurableSession, MemoryStore, OperationStatus, OwnedState, OwnerId, OwnerToken,
-    RetryPolicy, StateStore, StepStatus, StoreError, StoreFuture,
+    StateStore, StepStatus, StoreError, StoreFuture,
 };
 
 fn temporary_workspace(label: &str) -> Result<PathBuf> {
@@ -292,7 +292,7 @@ impl nanocodex_agent::Tool for BlockingDurableTool {
     fn definition(&self) -> nanocodex_tools::ToolDefinition {
         nanocodex_tools::ToolDefinition::function(
             "count_once",
-            "Block after crossing the durable at-most-once effect boundary.",
+            "Block until the durable operation is cancelled.",
             json!({
                 "type": "object",
                 "properties": {},
@@ -477,7 +477,6 @@ impl ExecutionPolicy for GatedCompletedPolicy {
         _step_id: String,
         _kind: String,
         _input_json: String,
-        _retry: ExecutionRetry,
     ) -> ExecutionFuture<'a, nanocodex_agent::Result<ExecutionStepAdmission>> {
         unexpected_policy()
     }
@@ -553,7 +552,6 @@ impl ExecutionPolicy for FailClosedDefaultsPolicy {
         _step_id: String,
         _kind: String,
         _input_json: String,
-        _retry: ExecutionRetry,
     ) -> ExecutionFuture<'a, nanocodex_agent::Result<ExecutionStepAdmission>> {
         unexpected_policy()
     }
@@ -787,9 +785,13 @@ impl tower::Service<nanocodex_oai_api::tower::ResponsesAttempt>
         let kind = request.kind();
         match kind {
             ResponsesAttemptKind::Compaction => {
-                self.compactions.fetch_add(1, Ordering::SeqCst);
+                let attempt = self.compactions.fetch_add(1, Ordering::SeqCst);
                 self.started.notify_one();
-                Box::pin(std::future::pending())
+                if attempt == 0 {
+                    Box::pin(std::future::pending())
+                } else {
+                    Box::pin(async move { Ok(successful_attempt(kind)) })
+                }
             }
             kind => Box::pin(async move { Ok(successful_attempt(kind)) }),
         }
@@ -1123,18 +1125,18 @@ impl tower::Service<nanocodex_oai_api::tower::ResponsesAttempt> for DurableToolS
                     });
                     assert!(
                         recovered_output
-                            .expect("recovery must include the synthetic tool result")
-                            .contains("external outcome is unknown")
+                            .expect("recovery must include the retried tool result")
+                            .contains("counted")
                     );
                     ResponsesOutput::Generation(GenerationOutput {
                         id: "durable-tool-recovered-response".to_owned(),
                         status: "completed".to_owned(),
                         end_turn: Some(true),
-                        final_message: Some("recovered without repeating the tool".to_owned()),
+                        final_message: Some("recovered after retrying the tool".to_owned()),
                         output_items: vec![ResponseItem::message(
                             MessageRole::Assistant,
                             [ContentItem::output_text(
-                                "recovered without repeating the tool",
+                                "recovered after retrying the tool",
                             )],
                         )],
                         code_calls: Vec::new(),
@@ -1466,27 +1468,9 @@ async fn execution_policy_authority_defaults_fail_closed() -> Result<()> {
         })
     ));
     assert!(matches!(
-        agent.compact().await,
-        Err(NanocodexError::ExecutionPolicyCapabilityUnsupported {
-            capability: "fence_checkpoint_effect"
-        })
-    ));
-    assert!(matches!(
         ExecutionPolicy::cancel(policy.as_ref(), "turn".to_owned(), None).await,
         Err(NanocodexError::ExecutionPolicyCapabilityUnsupported {
             capability: "cancel"
-        })
-    ));
-    assert!(matches!(
-        ExecutionPolicy::reconcile_cancelled_step(
-            policy.as_ref(),
-            "turn".to_owned(),
-            "tool".to_owned(),
-            "{}".to_owned(),
-        )
-        .await,
-        Err(NanocodexError::ExecutionPolicyCapabilityUnsupported {
-            capability: "reconcile_cancelled_step"
         })
     ));
     assert_eq!(releases.load(Ordering::SeqCst), 0);
@@ -1554,8 +1538,7 @@ async fn developer_context_during_an_active_turn_acks_only_after_durable_commit(
 }
 
 #[tokio::test]
-async fn queued_developer_context_waits_for_unknown_provider_recovery_to_terminalize() -> Result<()>
-{
+async fn queued_developer_context_waits_for_provider_retry_to_terminalize() -> Result<()> {
     let store = crate::MemoryStore::new()?;
     let failing = FailReplaceOnce {
         inner: store.clone(),
@@ -1614,18 +1597,13 @@ async fn queued_developer_context_waits_for_unknown_provider_recovery_to_termina
         .prompt(PromptRequest::new("retry before developer context").request_id("retry-turn"))
         .await?
         .result()
-        .await
-        .expect_err("a settled provider effect without a durable result must remain unknown");
-    assert!(
-        recovered
-            .to_string()
-            .contains("provider outcome is unknown after durable recovery")
-    );
+        .await?;
+    assert_eq!(recovered.final_message(), "durably replayed");
     append.await??;
     assert_eq!(
         generations.load(Ordering::SeqCst),
-        1,
-        "durable recovery must not repeat a provider effect with an unknown outcome",
+        2,
+        "durable recovery must retry a provider effect whose output was not committed",
     );
     let checkpoint = state
         .latest_checkpoint()
@@ -2111,7 +2089,7 @@ async fn independent_session_takeover_fences_standalone_compaction_before_execut
 }
 
 #[tokio::test]
-async fn cold_reopen_refuses_to_resubmit_a_pending_standalone_compaction() -> Result<()> {
+async fn cold_reopen_resubmits_a_pending_standalone_compaction() -> Result<()> {
     let store = MemoryStore::new()?;
     let compactions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let started = Arc::new(tokio::sync::Notify::new());
@@ -2170,7 +2148,6 @@ async fn cold_reopen_refuses_to_resubmit_a_pending_standalone_compaction() -> Re
         .values()
         .find(|step| step.kind == "compaction")
         .ok_or_else(|| eyre!("pending compaction has no provider step"))?;
-    assert_eq!(provider_step.retry, RetryPolicy::Never);
     assert!(matches!(provider_step.status, StepStatus::EffectPending));
     assert_eq!(provider_step.attempts, 1);
     drop(retained);
@@ -2180,19 +2157,11 @@ async fn cold_reopen_refuses_to_resubmit_a_pending_standalone_compaction() -> Re
         .durability(reopened)
         .await?
         .build()?;
-    let error = resumed
-        .compact()
-        .await
-        .expect_err("a cold pending provider effect must fail closed");
-    let detail = error.to_string();
-    assert!(
-        detail.contains("compaction provider outcome is unknown after durable recovery"),
-        "unexpected cold-recovery error: {detail}"
-    );
+    resumed.compact().await?;
     assert_eq!(
         compactions.load(Ordering::SeqCst),
-        1,
-        "cold recovery must preserve one provider call"
+        2,
+        "cold recovery must resubmit an unfinished provider call"
     );
 
     resumed.shutdown().await?;
@@ -2202,7 +2171,7 @@ async fn cold_reopen_refuses_to_resubmit_a_pending_standalone_compaction() -> Re
 }
 
 #[tokio::test]
-async fn live_replacement_refuses_to_resubmit_a_pending_standalone_compaction() -> Result<()> {
+async fn live_replacement_resubmits_a_pending_standalone_compaction() -> Result<()> {
     let store = MemoryStore::new()?;
     let compactions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let started = Arc::new(tokio::sync::Notify::new());
@@ -2235,20 +2204,12 @@ async fn live_replacement_refuses_to_resubmit_a_pending_standalone_compaction() 
     });
     started.notified().await;
     assert_eq!(compactions.load(Ordering::SeqCst), 1);
-    let replacement = agent
-        .compact()
-        .await
-        .expect_err("replacement must reconcile the pending provider effect as Unknown");
-    let detail = replacement.to_string();
-    assert!(
-        detail.contains("compaction provider outcome is unknown after durable recovery"),
-        "unexpected replacement error: {detail}"
-    );
+    agent.compact().await?;
     assert!(matches!(first.await?, Err(NanocodexError::TurnCancelled)));
     assert_eq!(
         compactions.load(Ordering::SeqCst),
-        1,
-        "same-live replacement must preserve one provider call"
+        2,
+        "same-live replacement must resubmit an unfinished provider call"
     );
 
     agent.shutdown().await?;
@@ -2499,7 +2460,7 @@ async fn active_cancel_reclaims_a_definitely_uncommitted_terminal_before_follow_
 }
 
 #[tokio::test]
-async fn active_cancel_settles_a_pending_never_retry_tool_as_unknown() -> Result<()> {
+async fn active_cancel_does_not_invent_an_outcome_for_an_unfinished_tool() -> Result<()> {
     let store = MemoryStore::new()?;
     let generations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let tool_started = Arc::new(tokio::sync::Notify::new());
@@ -2517,8 +2478,8 @@ async fn active_cancel_settles_a_pending_never_retry_tool_as_unknown() -> Result
             started: Arc::clone(&tool_started),
         })
         .build()?;
-    let workspace = temporary_workspace("active-cancel-pending-never-tool")?;
-    let state_id = "active-cancel-pending-never-tool";
+    let workspace = temporary_workspace("active-cancel-pending-tool")?;
+    let state_id = "active-cancel-pending-tool";
     let state = DurableSession::open(store.clone(), state_id).await?;
     let (agent, mut events) = Nanocodex::builder(openai)
         .workspace(&workspace)
@@ -2546,16 +2507,15 @@ async fn active_cancel_settles_a_pending_never_retry_tool_as_unknown() -> Result
     assert_eq!(
         tool_results.len(),
         1,
-        "cancellation must emit the reconciled durable result exactly once"
+        "cancellation must emit the cancelled live tool result exactly once"
     );
     let (tool_result_index, tool_result) = tool_results[0];
     let tool_result = tool_result.event.decode_payload::<serde_json::Value>()?;
     assert_eq!(tool_result["call_id"], "call-count-once");
-    assert_eq!(tool_result["status"], "failed");
-    assert_eq!(tool_result["structured_result"]["status"], "unknown");
+    assert_eq!(tool_result["status"], "cancelled");
     let emitted_duration_ns = tool_result["duration_ns"]
         .as_u64()
-        .expect("the Unknown tool result retains its elapsed duration");
+        .expect("the cancelled tool result retains its elapsed duration");
     assert!(
         emitted_duration_ns > 0,
         "active cancellation must not reset elapsed tool work"
@@ -2566,7 +2526,7 @@ async fn active_cancel_settles_a_pending_never_retry_tool_as_unknown() -> Result
         .expect("explicit cancellation emits RunError");
     assert!(
         tool_result_index < run_error_index,
-        "the authoritative tool result must precede the cancellation error"
+        "the live tool result must precede the cancellation error"
     );
     agent.shutdown().await?;
     drop((agent, events));
@@ -2582,35 +2542,16 @@ async fn active_cancel_settles_a_pending_never_retry_tool_as_unknown() -> Result
         } => checkpoint,
         status => panic!("expected terminal cancellation checkpoint, found {status:?}"),
     };
-    assert!(
-        operation
-            .steps
-            .values()
-            .all(|step| matches!(step.status, StepStatus::Completed(_))),
-        "terminal cancellation must not retain an unfinished step"
-    );
     let tool_step = operation
         .steps
         .values()
         .find(|step| step.kind == "tool_call")
-        .expect("the never-retry tool step remains retained");
-    let StepStatus::Completed(output) = &tool_step.status else {
-        unreachable!("all operation steps were asserted completed")
-    };
-    let unknown: serde_json::Value = output.decode()?;
-    assert_eq!(unknown["structured_result"]["status"], "unknown");
-    assert_eq!(unknown["structured_result"]["recovered"], true);
-    assert_eq!(unknown["structured_result"]["replayed"], false);
-    assert_eq!(unknown["duration_ns"], emitted_duration_ns);
-    let retained_work_duration_ns = unknown["work_duration_ns"]
-        .as_u64()
-        .expect("the Unknown tool result retains its execution duration");
-    assert!(retained_work_duration_ns > 0);
-    assert!(retained_work_duration_ns <= emitted_duration_ns);
-    assert!(unknown.to_string().contains("external outcome is unknown"));
+        .expect("the unfinished tool step remains retained");
+    assert!(matches!(tool_step.status, StepStatus::EffectPending));
+    assert_eq!(tool_step.attempts, 1);
     assert!(
-        checkpoint.json().contains("external outcome is unknown"),
-        "the cancelled checkpoint must contain the same Unknown tool response"
+        !checkpoint.json().contains("external outcome"),
+        "cancellation must not invent a synthetic tool outcome"
     );
 
     std::fs::remove_dir_all(workspace)?;
@@ -3192,7 +3133,7 @@ async fn exact_id_retry_reclaims_a_definitely_uncommitted_terminal_replace() -> 
 }
 
 #[tokio::test]
-async fn portable_state_continues_after_an_ambiguous_tool_without_repeating_it() -> Result<()> {
+async fn portable_state_retries_an_unfinished_tool() -> Result<()> {
     let store = crate::MemoryStore::new()?;
     let failing_store = FailReplaceOnce {
         inner: store.clone(),
@@ -3253,9 +3194,9 @@ async fn portable_state_continues_after_an_ambiguous_tool_without_repeating_it()
     let recovered = recovered_turn.result().await?;
     assert_eq!(
         recovered.final_message(),
-        "recovered without repeating the tool"
+        "recovered after retrying the tool"
     );
-    assert_eq!(tool_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(tool_calls.load(std::sync::atomic::Ordering::SeqCst), 2);
     assert_eq!(generations.load(std::sync::atomic::Ordering::SeqCst), 2);
     resumed.shutdown().await?;
     drop((resumed, resumed_events));
@@ -3275,7 +3216,7 @@ async fn portable_state_continues_after_an_ambiguous_tool_without_repeating_it()
         .await?;
     assert_eq!(
         replayed.final_message(),
-        "recovered without repeating the tool"
+        "recovered after retrying the tool"
     );
     assert_eq!(generations.load(std::sync::atomic::Ordering::SeqCst), 2);
     let next = reopened
@@ -3283,8 +3224,8 @@ async fn portable_state_continues_after_an_ambiguous_tool_without_repeating_it()
         .await?
         .result()
         .await?;
-    assert_eq!(next.final_message(), "recovered without repeating the tool");
-    assert_eq!(tool_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(next.final_message(), "recovered after retrying the tool");
+    assert_eq!(tool_calls.load(std::sync::atomic::Ordering::SeqCst), 2);
     assert_eq!(generations.load(std::sync::atomic::Ordering::SeqCst), 3);
     reopened.shutdown().await?;
     drop((reopened, reopened_events));

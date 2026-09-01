@@ -50,35 +50,12 @@ pub enum ExecutionAdmission {
     Cancelled,
 }
 
-/// Replay policy for an external effect within one execution.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ExecutionRetry {
-    /// An interrupted effect may be executed again.
-    Idempotent,
-    /// An interrupted effect has an unknown external outcome and must not be
-    /// repeated.
-    Never,
-}
-
 /// Result of beginning one externally observable execution step.
 pub enum ExecutionStepAdmission {
     /// Perform the effect.
     Execute,
     /// Reuse the exact JSON output retained by a prior attempt.
     Replay(String),
-    /// Do not repeat an interrupted at-most-once effect whose outcome is unknown.
-    /// The caller must commit an explicit unknown result before continuing.
-    Unknown,
-}
-
-/// Authoritative durable result of reconciling one step during cancellation.
-pub enum ExecutionStepReconciliation {
-    /// The effect boundary was never committed or its execution permit was
-    /// definitely not observed, so no synthetic output was retained.
-    NotStarted,
-    /// The exact retained output, whether committed by the effect itself or by
-    /// cancellation while an at-most-once effect remained pending.
-    Completed(String),
 }
 
 /// Serializable result retained at a completed agent boundary.
@@ -116,15 +93,6 @@ pub trait ExecutionPolicy: Send + Sync {
         Box::pin(async {
             Err(NanocodexError::ExecutionPolicyCapabilityUnsupported {
                 capability: "commit_checkpoint",
-            })
-        })
-    }
-
-    /// Fences a standalone checkpoint effect immediately before it begins.
-    fn fence_checkpoint_effect<'a>(&'a self) -> ExecutionFuture<'a, Result<()>> {
-        Box::pin(async {
-            Err(NanocodexError::ExecutionPolicyCapabilityUnsupported {
-                capability: "fence_checkpoint_effect",
             })
         })
     }
@@ -171,7 +139,6 @@ pub trait ExecutionPolicy: Send + Sync {
         step_id: String,
         kind: String,
         input_json: String,
-        retry: ExecutionRetry,
     ) -> ExecutionFuture<'a, Result<ExecutionStepAdmission>>;
 
     /// Commits the output of one executed effect.
@@ -181,23 +148,6 @@ pub trait ExecutionPolicy: Send + Sync {
         step_id: String,
         output_json: String,
     ) -> ExecutionFuture<'a, Result<()>>;
-
-    /// Atomically inspects and settles one at-most-once step during explicit
-    /// cancellation. Policies that durably retain `Never` steps must override
-    /// this method. The default fails closed so omission cannot falsely claim
-    /// that an authorized effect did not start.
-    fn reconcile_cancelled_step<'a>(
-        &'a self,
-        _operation_id: String,
-        _step_id: String,
-        _unknown_output_json: String,
-    ) -> ExecutionFuture<'a, Result<ExecutionStepReconciliation>> {
-        Box::pin(async {
-            Err(NanocodexError::ExecutionPolicyCapabilityUnsupported {
-                capability: "reconcile_cancelled_step",
-            })
-        })
-    }
 
     /// Atomically commits a terminal turn output and its resumable boundary.
     fn complete<'a>(
@@ -251,15 +201,6 @@ pub trait ExecutionPolicy: Send + Sync {
         })
     }
 
-    /// Fences a standalone checkpoint effect immediately before it begins.
-    fn fence_checkpoint_effect<'a>(&'a self) -> ExecutionFuture<'a, Result<()>> {
-        Box::pin(async {
-            Err(NanocodexError::ExecutionPolicyCapabilityUnsupported {
-                capability: "fence_checkpoint_effect",
-            })
-        })
-    }
-
     /// Admits a caller-identified operation.
     fn admit<'a>(
         &'a self,
@@ -295,7 +236,6 @@ pub trait ExecutionPolicy: Send + Sync {
         step_id: String,
         kind: String,
         input_json: String,
-        retry: ExecutionRetry,
     ) -> ExecutionFuture<'a, Result<ExecutionStepAdmission>>;
     /// Commits one effect output.
     fn complete_step<'a>(
@@ -304,22 +244,6 @@ pub trait ExecutionPolicy: Send + Sync {
         step_id: String,
         output_json: String,
     ) -> ExecutionFuture<'a, Result<()>>;
-    /// Atomically inspects and settles one at-most-once step during explicit
-    /// cancellation. Policies that durably retain `Never` steps must override
-    /// this method. The default fails closed so omission cannot falsely claim
-    /// that an authorized effect did not start.
-    fn reconcile_cancelled_step<'a>(
-        &'a self,
-        _operation_id: String,
-        _step_id: String,
-        _unknown_output_json: String,
-    ) -> ExecutionFuture<'a, Result<ExecutionStepReconciliation>> {
-        Box::pin(async {
-            Err(NanocodexError::ExecutionPolicyCapabilityUnsupported {
-                capability: "reconcile_cancelled_step",
-            })
-        })
-    }
     /// Commits a terminal turn and resumable boundary.
     fn complete<'a>(
         &'a self,
@@ -558,7 +482,6 @@ impl Execution {
         let Some(policy) = &self.policy else {
             return Ok((None, AdmittedExecution::Execute));
         };
-        policy.fence_checkpoint_effect().await?;
         let base_checkpoint = base_checkpoint.map(|checkpoint| {
             let mut history = checkpoint.model().snapshot_history();
             for item in &mut history {
@@ -703,12 +626,6 @@ pub(crate) struct ExecutionSteps {
 pub(crate) enum ExecutionStep<O> {
     Execute,
     Replay(O),
-    Unknown,
-}
-
-pub(crate) enum ReconciledExecutionStep<O> {
-    NotStarted,
-    Completed(O),
 }
 
 impl ExecutionSteps {
@@ -717,7 +634,6 @@ impl ExecutionSteps {
         step_id: impl Into<String>,
         kind: impl Into<String>,
         input: &I,
-        retry: ExecutionRetry,
     ) -> Result<ExecutionStep<O>>
     where
         I: Serialize + ?Sized,
@@ -730,13 +646,11 @@ impl ExecutionSteps {
                 step_id.into(),
                 kind.into(),
                 encode(input)?,
-                retry,
             )
             .await?
         {
             ExecutionStepAdmission::Execute => Ok(ExecutionStep::Execute),
             ExecutionStepAdmission::Replay(output) => Ok(ExecutionStep::Replay(decode(&output)?)),
-            ExecutionStepAdmission::Unknown => Ok(ExecutionStep::Unknown),
         }
     }
 
@@ -748,30 +662,6 @@ impl ExecutionSteps {
         self.policy
             .complete_step(self.operation_id.clone(), step_id.into(), encode(output)?)
             .await
-    }
-
-    pub(crate) async fn reconcile_cancelled<O>(
-        &self,
-        step_id: impl Into<String>,
-        unknown_output: &O,
-    ) -> Result<ReconciledExecutionStep<O>>
-    where
-        O: DeserializeOwned + Serialize,
-    {
-        match self
-            .policy
-            .reconcile_cancelled_step(
-                self.operation_id.clone(),
-                step_id.into(),
-                encode(unknown_output)?,
-            )
-            .await?
-        {
-            ExecutionStepReconciliation::NotStarted => Ok(ReconciledExecutionStep::NotStarted),
-            ExecutionStepReconciliation::Completed(output) => {
-                Ok(ReconciledExecutionStep::Completed(decode(&output)?))
-            }
-        }
     }
 }
 

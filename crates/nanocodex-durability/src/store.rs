@@ -83,7 +83,7 @@ pub enum StoreError {
     /// The host guarantees that the requested operation made no durable change.
     #[error("durability store operation was not committed: {0}")]
     NotCommitted(String),
-    /// The selected storage backend failed. Mutation outcome is unknown.
+    /// The selected storage backend failed without proving whether it committed.
     #[error("durability store failed: {0}")]
     Backend(String),
 }

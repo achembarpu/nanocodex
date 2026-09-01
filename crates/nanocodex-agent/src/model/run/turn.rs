@@ -622,44 +622,6 @@ where
     }
 
     async fn commit_cancelled_checkpoint(&mut self) -> Result<ModelCheckpoint> {
-        if let Some(steps) = self.execution_steps.clone() {
-            for call in &self.active_tool_calls {
-                if call.execution_retry != crate::agent::execution::ExecutionRetry::Never {
-                    continue;
-                }
-                let mut unknown = Self::unknown_recovered_tool_call(call);
-                let work_duration_ns = Self::completed_tool_work_duration(call);
-                unknown.duration_ns = elapsed_ns(call.started_at);
-                unknown.work_duration_ns = work_duration_ns;
-                let reconciled = steps
-                    .reconcile_cancelled(&call.execution_step_id, &unknown)
-                    .await?;
-                let crate::agent::ReconciledExecutionStep::Completed(completed) = reconciled else {
-                    continue;
-                };
-                let mut retained = call
-                    .completion
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                if retained.is_none() {
-                    if completed
-                        .structured_result
-                        .get("status")
-                        .is_some_and(|status| status == "unknown")
-                    {
-                        record_tool_span_terminal(
-                            &call.span,
-                            "failed",
-                            "ERROR",
-                            completed.duration_ns,
-                            &completed.output,
-                        );
-                    }
-                    Self::emit_completed_tool_result(&self.events, &completed)?;
-                }
-                retained.replace(completed);
-            }
-        }
         self.commit_interrupted_checkpoint()
     }
 

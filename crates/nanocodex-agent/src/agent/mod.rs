@@ -146,7 +146,7 @@ use driver::{AgentDriver, AgentOrigin, BranchSpawner, DriverShutdown};
 #[cfg(feature = "openai")]
 use execution::{Execution, ExecutionConfig};
 #[cfg(feature = "openai")]
-pub(crate) use execution::{ExecutionStep, ExecutionSteps, ReconciledExecutionStep};
+pub(crate) use execution::{ExecutionStep, ExecutionSteps};
 #[cfg(feature = "openai")]
 pub(crate) use executor::{AgentFactory, AgentSend};
 #[cfg(feature = "openai")]
