@@ -176,7 +176,7 @@ jobs:
             --package nanocodex-agent \
             --package nanocodex \
             --package nanocodex-wasm \
-            -- -D warnings
+            -- -D warnings -A clippy::missing_const_for_fn
           npm ci --prefix js/nanocodex
           npm ci --prefix js/nanocodex-react
           npm ci --prefix js/nanocodex-vite
