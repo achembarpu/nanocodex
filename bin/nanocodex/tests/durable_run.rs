@@ -151,7 +151,7 @@ async fn reopened_follow_on_turn_sends_full_committed_history_on_a_fresh_socket(
 
 #[cfg(unix)]
 #[tokio::test]
-async fn sigkill_leaves_model_effect_pending_and_exact_reopen_fails_closed() -> Result<()> {
+async fn sigkill_redispatches_only_the_uncommitted_model_effect() -> Result<()> {
     let workspace = tempfile::tempdir()?;
     let database = workspace.path().join("durability.sqlite3");
     let listener = Arc::new(TcpListener::bind("127.0.0.1:0").await?);
@@ -193,12 +193,35 @@ async fn sigkill_leaves_model_effect_pending_and_exact_reopen_fails_closed() -> 
             .ok_or_else(|| eyre!("SIGKILLed run did not retain its durable model receipt"))?,
     )?;
 
-    let reopened = run_without_provider_connection(
+    let recovery_server = tokio::spawn(serve_completed_generation(
+        Arc::clone(&listener),
+        PROMPT,
+        "resp-recovered",
+        "recovered durable answer",
+    ));
+    let reopened = run_command(durable_command(
+        &endpoint,
+        workspace.path(),
+        &database,
+        PROMPT,
+    ))
+    .await?;
+    assert_success(&reopened, "recovered durable run")?;
+    join_server(recovery_server, "recovery-generation server").await?;
+    assert_completed_model_effect(
+        &retained_payload(&database)?.ok_or_else(|| {
+            eyre!("recovered run did not retain its completed durable model receipt")
+        })?,
+        2,
+        "recovered durable answer",
+    )?;
+
+    let replay = run_without_provider_connection(
         durable_command(&endpoint, workspace.path(), &database, PROMPT),
         Arc::clone(&listener),
     )
     .await?;
-    assert_failed_closed(&reopened)?;
+    assert_success(&replay, "provider-free recovered replay")?;
     Ok(())
 }
 
@@ -262,7 +285,8 @@ async fn sigterm_commits_cancellation_and_exact_reopen_stays_provider_free() -> 
 }
 
 #[tokio::test]
-async fn second_process_fences_the_in_flight_owner_without_redispatch() -> Result<()> {
+async fn second_process_fences_the_first_owner_and_redispatches_the_uncommitted_effect()
+-> Result<()> {
     let workspace = tempfile::tempdir()?;
     let database = workspace.path().join("durability.sqlite3");
     let listener = Arc::new(TcpListener::bind("127.0.0.1:0").await?);
@@ -287,12 +311,21 @@ async fn second_process_fences_the_in_flight_owner_without_redispatch() -> Resul
     assert_real_generation(&generation, PROMPT)?;
     wait_for_pending_model_effect(&database).await?;
 
-    let replacement = run_without_provider_connection(
-        durable_command(&endpoint, workspace.path(), &database, PROMPT),
+    let replacement_server = tokio::spawn(serve_completed_generation(
         Arc::clone(&listener),
-    )
+        PROMPT,
+        "resp-replacement",
+        "replacement durable answer",
+    ));
+    let replacement = run_command(durable_command(
+        &endpoint,
+        workspace.path(),
+        &database,
+        PROMPT,
+    ))
     .await?;
-    assert_failed_closed(&replacement)?;
+    assert_success(&replacement, "replacement durable owner")?;
+    join_server(replacement_server, "replacement-generation server").await?;
     assert!(
         retained_fence(&database)? >= 2,
         "replacement process did not advance the SQLite owner fence"
@@ -313,6 +346,20 @@ async fn second_process_fences_the_in_flight_owner_without_redispatch() -> Resul
         "first owner did not report its durability fence:\n{stderr}"
     );
     join_server(server, "fencing server").await?;
+    assert_completed_model_effect(
+        &retained_payload(&database)?.ok_or_else(|| {
+            eyre!("replacement owner did not retain its completed durable model receipt")
+        })?,
+        2,
+        "replacement durable answer",
+    )?;
+
+    let replay = run_without_provider_connection(
+        durable_command(&endpoint, workspace.path(), &database, PROMPT),
+        Arc::clone(&listener),
+    )
+    .await?;
+    assert_success(&replay, "provider-free replacement replay")?;
     Ok(())
 }
 
@@ -532,11 +579,28 @@ async fn wait_for_pending_model_effect(database: &Path) -> Result<Value> {
 fn assert_pending_model_effect(payload: &Value) -> Result<()> {
     let step = &payload["nanocodex_durable_state"]["operations"][REQUEST_ID]["steps"]["model-1"];
     if step["kind"] != "model_call"
-        || step["retry"] != "never"
         || step["status"] != "effect_pending"
         || step["attempts"] != 1
+        || !step["input"].is_string()
     {
         return Err(eyre!("unexpected durable model receipt: {step}"));
+    }
+    Ok(())
+}
+
+fn assert_completed_model_effect(
+    payload: &Value,
+    expected_attempts: u64,
+    expected_answer: &str,
+) -> Result<()> {
+    let step = &payload["nanocodex_durable_state"]["operations"][REQUEST_ID]["steps"]["model-1"];
+    if step["kind"] != "model_call"
+        || step["status"].get("completed").is_none()
+        || step["attempts"] != expected_attempts
+        || !step["input"].is_string()
+        || !step["status"].to_string().contains(expected_answer)
+    {
+        return Err(eyre!("unexpected completed durable model receipt: {step}"));
     }
     Ok(())
 }
@@ -585,28 +649,6 @@ fn assert_success(output: &Output, description: &str) -> Result<()> {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     ))
-}
-
-fn assert_failed_closed(output: &Output) -> Result<()> {
-    assert!(
-        !output.status.success(),
-        "pending provider effect unexpectedly reopened successfully"
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("model call provider outcome is unknown after durable recovery"),
-        "reopen did not report the unknown provider outcome:\n{stderr}"
-    );
-    let events = jsonl_events(&output.stdout)?;
-    assert_eq!(
-        events
-            .iter()
-            .filter(|event| event["type"] == "run.failed")
-            .count(),
-        1,
-        "fail-closed reopen must emit exactly one failed terminal: {events:?}"
-    );
-    Ok(())
 }
 
 async fn join_server(server: tokio::task::JoinHandle<Result<()>>, description: &str) -> Result<()> {

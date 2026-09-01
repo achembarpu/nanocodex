@@ -385,8 +385,7 @@ async fn nanocodex2_drives_durable_replay_detach_steer_and_cancel() -> Result<()
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "manual compiled-binary server-crash recovery gate"]
-async fn cold_server_recovery_fails_pending_provider_effect_closed_without_redispatch() -> Result<()>
-{
+async fn cold_server_recovery_redispatches_only_the_uncommitted_provider_effect() -> Result<()> {
     let fixture = tempfile::tempdir()?;
     let workspace = fixture.path().join("workspace");
     let client_home = fixture.path().join("nanocodex2-home");
@@ -459,26 +458,22 @@ async fn cold_server_recovery_fails_pending_provider_effect_closed_without_redis
     )?;
     wait_for_listener(&mut restarted_server, managed_address).await?;
     wait_for_connection_reopen(&managed_sqlite, &agent_id, &turn_id, reconnect_baseline).await?;
-    let unexpected_provider = provider_listener.accept();
-    let attached = wait_output(live, "client reattached after managed server crash");
-    tokio::pin!(unexpected_provider);
-    tokio::pin!(attached);
-    let attached = timeout(PROCESS_TIMEOUT, async {
-        tokio::select! {
-            accepted = &mut unexpected_provider => {
-                let (_, peer) = accepted?;
-                Err(eyre!("automatic cold recovery redispatched the uncertain provider call from {peer}"))
-            }
-            output = &mut attached => output,
-        }
-    })
-    .await
-    .map_err(|_| eyre!("attached client did not recover after server restart"))??;
-    assert!(
-        !attached.status.success(),
-        "attached client unexpectedly recovered the uncertain provider effect"
-    );
-    assert_provider_unknown_terminal(&attached)?;
+    let (replayed_stream, _) = timeout(PROVIDER_TIMEOUT, provider_listener.accept())
+        .await
+        .map_err(|_| eyre!("cold recovery did not redispatch its uncommitted provider call"))??;
+    let mut replayed_socket = accept_async(replayed_stream).await?;
+    let replayed_generation = next_generation(&mut replayed_socket, &calls).await?;
+    assert_request_contains(&replayed_generation, SERVER_CRASH_PROMPT)?;
+    send_completed(
+        &mut replayed_socket,
+        "resp-managed-server-recovery",
+        "server crash recovery answer",
+    )
+    .await?;
+    let attached = wait_output(live, "client reattached after managed server crash").await?;
+    assert_success(&attached, "client reattached after managed server crash")?;
+    assert_final_answer(&attached, "server crash recovery answer")?;
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
 
     let mut replay_command = client.command();
     replay_command.args([
@@ -497,29 +492,22 @@ async fn cold_server_recovery_fails_pending_provider_effect_closed_without_redis
         tokio::select! {
             accepted = &mut unexpected_provider => {
                 let (_, peer) = accepted?;
-                Err(eyre!("cold recovery redispatched the uncertain provider call from {peer}"))
+                Err(eyre!("completed cold recovery redispatched provider work from {peer}"))
             }
             output = &mut replay => Ok(output?),
         }
     })
     .await
     .map_err(|_| eyre!("cold provider recovery did not settle"))??;
-    assert!(
-        !replay.status.success(),
-        "uncertain provider effect unexpectedly recovered as success"
-    );
+    assert_success(&replay, "completed cold recovery replay")?;
+    assert_final_answer(&replay, "server crash recovery answer")?;
     let turn = client
         .output(["turn", &agent_id, &turn_id], "crash-test turn state")
         .await?;
     assert_success(&turn, "crash-test turn state")?;
     let turn: Value = serde_json::from_slice(&turn.stdout)?;
-    assert_eq!(turn["state"], "failed");
-    assert!(
-        turn["error"]
-            .as_str()
-            .is_some_and(|error| error.contains("provider outcome is unknown")),
-        "cold recovery did not retain the fail-closed provider error: {turn}"
-    );
+    assert_eq!(turn["state"], "completed");
+    assert!(turn["error"].is_null());
     restarted_server.start_kill()?;
     timeout(PROCESS_TIMEOUT, restarted_server.wait())
         .await
@@ -2041,26 +2029,6 @@ fn assert_cancelled_terminal(output: &Output) -> Result<()> {
         ));
     }
     Ok(())
-}
-
-fn assert_provider_unknown_terminal(output: &Output) -> Result<()> {
-    let events = jsonl_events(&output.stdout)?;
-    let failed = events
-        .iter()
-        .any(|event| event["type"] == "run.failed" && event["payload"]["status"] == "failed");
-    let explained = events.iter().any(|event| {
-        event["type"] == "run.error"
-            && event["payload"]["message"]
-                .as_str()
-                .is_some_and(|message| message.contains("provider outcome is unknown"))
-    }) || String::from_utf8_lossy(&output.stderr)
-        .contains("provider outcome is unknown");
-    if failed && explained {
-        return Ok(());
-    }
-    Err(eyre!(
-        "attached client omitted the fail-closed provider terminal: {events:?}"
-    ))
 }
 
 fn assert_secret_absent(output: &Output, bearer: &str) -> Result<()> {
