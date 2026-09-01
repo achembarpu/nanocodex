@@ -662,8 +662,7 @@ where
                                             },
                                             session_id.as_str(),
                                             self.workspace.clone(),
-                                        )
-                                        .await;
+                                        );
                                     }
                                     Some(Command::SetThinking { thinking, result }) => {
                                         default_thinking = thinking;
@@ -892,8 +891,7 @@ where
                     },
                     session_id.as_str(),
                     self.workspace.clone(),
-                )
-                .await;
+                );
                 continue;
             };
             let execution_operation = execution_operation.map(ExecutionOperation::into_id);
@@ -1176,8 +1174,7 @@ where
                                     },
                                     session_id.as_str(),
                                     self.workspace.clone(),
-                                )
-                                .await;
+                                );
                             }
                             Some(Command::SetThinking { thinking, result }) => {
                                 default_thinking = thinking;

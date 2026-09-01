@@ -52,19 +52,6 @@ Model and thinking overrides apply only to the new child. When either is
 omitted, the child inherits the invoking agent’s current value at the spawn
 boundary.
 
-When the root is built with `nanocodex-durability`, every clean child and
-descendant automatically receives a separate durable execution state keyed by
-its stable Nanocodex session ID. Child model/tool effects, terminal receipts,
-and resumable checkpoints therefore use the same durability protocol as the
-root without sharing the root's checkpoint or owner fence. The agent crate also
-accepts a retained ID through `SpawnOptions::session_id` so an orchestrator can
-reopen the exact child state.
-
-The current `Registry` remains an in-process task-tree scheduler. Persisting and
-reconstructing its topology, statuses, and message queues is a separate
-orchestration layer; this crate-level integration establishes the durable child
-execution boundary it can target.
-
 ## Tree authority and messaging
 
 Every root session owns an isolated task tree with IDs local to that tree. The

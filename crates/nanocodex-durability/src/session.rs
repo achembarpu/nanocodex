@@ -11,8 +11,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::{
     DurableState, EncodedPayload, Error, OperationStatus, OwnerId, OwnerToken, Result, RetryPolicy,
-    StateStore, StepStatus, StoreError, StoredState, Transition, shared::SharedStore,
-    state::RetainedCheckpoint,
+    StateStore, StepStatus, StoreError, StoredState, Transition, state::RetainedCheckpoint,
 };
 
 const COMMAND_CAPACITY: usize = 64;
@@ -1202,26 +1201,16 @@ fn reduce(stored: StoredState) -> Result<DurableState> {
 /// live operation claims. Clones only enqueue commands and await typed replies.
 pub struct DurableSession {
     state_id: Arc<str>,
-    store: SharedStore,
-    terminal_receipt_limit: Option<usize>,
     commands: mpsc::Sender<Command>,
     releases: mpsc::UnboundedSender<ReleaseSignal>,
     caller_id: OwnerId,
     active_claims: AtomicUsize,
 }
 
-#[derive(Clone)]
-pub(crate) struct RelatedStates {
-    store: SharedStore,
-    terminal_receipt_limit: Option<usize>,
-}
-
 impl Clone for DurableSession {
     fn clone(&self) -> Self {
         Self {
             state_id: Arc::clone(&self.state_id),
-            store: self.store.clone(),
-            terminal_receipt_limit: self.terminal_receipt_limit,
             commands: self.commands.clone(),
             releases: self.releases.clone(),
             caller_id: OwnerId::new(),
@@ -1281,22 +1270,13 @@ impl DurableSession {
     }
 
     async fn open_inner<S>(
-        store: S,
+        mut store: S,
         state_id: String,
         terminal_receipt_limit: Option<usize>,
     ) -> Result<Self>
     where
         S: StateStore + 'static,
     {
-        let store = SharedStore::new(store)?;
-        Self::open_shared(store, state_id, terminal_receipt_limit).await
-    }
-
-    async fn open_shared(
-        mut store: SharedStore,
-        state_id: String,
-        terminal_receipt_limit: Option<usize>,
-    ) -> Result<Self> {
         if state_id.trim().is_empty() {
             return Err(Error::InvalidState(
                 "state identity must not be empty".to_owned(),
@@ -1308,7 +1288,7 @@ impl DurableSession {
         let (commands, receiver) = mpsc::channel(COMMAND_CAPACITY);
         let (releases, release_receiver) = mpsc::unbounded_channel();
         spawn_driver(Driver {
-            store: Box::new(store.clone()),
+            store: Box::new(store),
             state_id: Arc::clone(&state_id),
             state,
             terminal_receipt_limit,
@@ -1324,20 +1304,11 @@ impl DurableSession {
         })?;
         Ok(Self {
             state_id,
-            store,
-            terminal_receipt_limit,
             commands,
             releases,
             caller_id: OwnerId::new(),
             active_claims: AtomicUsize::new(0),
         })
-    }
-
-    pub(crate) fn related_states(&self) -> RelatedStates {
-        RelatedStates {
-            store: self.store.clone(),
-            terminal_receipt_limit: self.terminal_receipt_limit,
-        }
     }
 
     /// Stable host-store state identity.
@@ -1771,12 +1742,6 @@ impl DurableSession {
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |claims| {
                 claims.checked_sub(1)
             });
-    }
-}
-
-impl RelatedStates {
-    pub(crate) async fn open(&self, state_id: String) -> Result<DurableSession> {
-        DurableSession::open_shared(self.store.clone(), state_id, self.terminal_receipt_limit).await
     }
 }
 

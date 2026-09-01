@@ -4,7 +4,7 @@ use nanocodex_agent::{
     ExecutionPolicyDisposition, NanocodexBuilder, NanocodexError, Result as AgentResult,
     execution::{
         ExecutionAdmission, ExecutionFuture, ExecutionOutput, ExecutionPolicy, ExecutionRetry,
-        ExecutionStepAdmission, ExecutionStepReconciliation, SpawnedExecutionPolicy,
+        ExecutionStepAdmission, ExecutionStepReconciliation,
     },
     session::SessionSnapshot,
 };
@@ -41,9 +41,7 @@ impl<F> DurableAgentExt for NanocodexBuilder<F> {
             builder = builder.resume(restored);
         }
         let owner = Arc::new(Mutex::new(Some(owner)));
-        let related = state.related_states();
-        Ok(builder
-            .execution_policy_factory(move || {
+        Ok(builder.execution_policy_factory(move || {
             let owner = owner
                 .lock()
                 .map_err(|_| {
@@ -60,21 +58,7 @@ impl<F> DurableAgentExt for NanocodexBuilder<F> {
                 })?;
             let policy: Arc<dyn ExecutionPolicy> = Arc::new(DurableExecution { owner });
             Ok(policy)
-            })
-            .spawned_execution_policy_factory(move |context| {
-                let related = related.clone();
-                Box::pin(async move {
-                    let state = related.open(context.session_id).await.map_err(agent_error)?;
-                    let (owner, checkpoint) = state.acquire_agent().await.map_err(agent_error)?;
-                    let snapshot = checkpoint
-                        .map(|checkpoint| checkpoint.decode::<SessionSnapshot>())
-                        .transpose()
-                        .map_err(agent_error)?;
-                    let policy: Arc<dyn ExecutionPolicy> =
-                        Arc::new(DurableExecution { owner });
-                    Ok(SpawnedExecutionPolicy::new(policy, snapshot))
-                })
-            }))
+        }))
     }
 }
 

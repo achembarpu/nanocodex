@@ -98,21 +98,6 @@ operations, each operation's full step states, the latest resumable checkpoint,
 and whether a standalone checkpoint effect is currently in its uncertain
 window. A stored revision never depends on an earlier revision.
 
-Clean agents spawned from a durability-attached agent receive independent
-durable state under their stable session IDs. They share only serialized access
-to the caller's backing store; they never share an owner fence, operation set,
-or resumable checkpoint. Descendants inherit the same policy factory, so this
-holds for the complete task tree. A durable orchestrator can retain a child's
-session ID and pass it through `SpawnOptions::session_id` to reopen that exact
-child after rebuilding the parent runtime.
-
-The task-tree registry, topology, mailboxes, and presentation are not part of
-this crate's state. A higher-level durable subagent orchestrator must retain
-those facts and use the stable child session IDs when reconstructing resident
-child runtimes. Exporting one root state likewise does not implicitly export
-the independently identified child states; tree-aware export belongs at that
-higher layer.
-
 ## Operation state
 
 The durable operation state machine is intentionally small:
