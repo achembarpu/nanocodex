@@ -8,6 +8,7 @@
   },
   "scripts": {
     "dev": "portless",
+    "predev:app": "pnpm --filter nanocodex-managed-service run prepare:code-evaluator",
     "dev:app": "CLOUDFLARE_ENV=development vite",
     "sync": "node scripts/sync-nanocodex.mjs",
     "publish:repository": "node scripts/publish-repository.mjs",
