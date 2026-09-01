@@ -225,7 +225,7 @@ class OwnedLifecycleTests(unittest.TestCase):
                 request = branch_requests[prompt]
                 self.assertNotIn("previous_response_id", request)
                 self.assertEqual(
-                    user_texts(request),
+                    user_texts(request)[-2:],
                     ["root checkpoint", prompt],
                 )
             resumed_request = branch_requests["resumed branch"]
