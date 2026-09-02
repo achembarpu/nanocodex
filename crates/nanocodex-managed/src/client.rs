@@ -1,6 +1,4 @@
-use std::fmt;
-#[cfg(feature = "tools")]
-use std::sync::Arc;
+use std::{fmt, sync::Arc};
 
 use futures_util::StreamExt;
 use reqwest::{
@@ -73,8 +71,7 @@ impl ManagedClientBuilder {
 pub struct ManagedClient {
     pub(crate) http: reqwest::Client,
     pub(crate) base_url: Url,
-    #[cfg(feature = "tools")]
-    attachment_bearer: Arc<str>,
+    pub(crate) bearer: Arc<str>,
 }
 
 impl fmt::Debug for ManagedClient {
@@ -114,8 +111,7 @@ impl ManagedClient {
         validate_origin(&builder.origin)?;
         builder.origin.set_path("/");
 
-        #[cfg(feature = "tools")]
-        let attachment_bearer: Arc<str> = Arc::from(builder.api_key.expose());
+        let api_bearer: Arc<str> = Arc::from(builder.api_key.expose());
 
         let mut bearer = b"Bearer ".to_vec();
         bearer.extend_from_slice(builder.api_key.expose().as_bytes());
@@ -136,8 +132,7 @@ impl ManagedClient {
         Ok(Self {
             http,
             base_url: builder.origin,
-            #[cfg(feature = "tools")]
-            attachment_bearer,
+            bearer: api_bearer,
         })
     }
 
@@ -491,7 +486,7 @@ impl ManagedClient {
         endpoint.set_path(&format!("/v1/agents/{agent_id}/tool-host"));
         nanocodex_tools::attachment::AttachmentTarget::new(
             endpoint.as_str(),
-            self.attachment_bearer.to_string(),
+            self.bearer.to_string(),
         )
         .map_err(|error| ManagedError::Configuration(error.to_string()))
     }
@@ -641,13 +636,13 @@ pub(crate) fn validate_id(kind: &str, value: &str) -> Result<(), ManagedError> {
     Ok(())
 }
 
-fn validate_idempotency_key(value: &str) -> Result<(), ManagedError> {
+pub(crate) fn validate_idempotency_key(value: &str) -> Result<(), ManagedError> {
     if value.is_empty()
-        || value.len() > 256
+        || value.len() > 128
         || !value.bytes().all(|byte| (0x21..=0x7e).contains(&byte))
     {
         return Err(ManagedError::Configuration(
-            "managed idempotency key must be 1-256 visible ASCII characters".to_owned(),
+            "managed idempotency key must be 1-128 visible ASCII characters".to_owned(),
         ));
     }
     Ok(())

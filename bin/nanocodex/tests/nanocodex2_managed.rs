@@ -65,6 +65,7 @@ async fn run_uses_managed_lifecycle_with_the_configured_local_workspace() {
         .route("/v1/agents", post(create_agent))
         .route("/v1/agents/{agent}", get(agent_state))
         .route("/v1/agents/{agent}/tool-host", get(tool_host))
+        .route("/v1/agents/{agent}/ws", get(managed_socket))
         .route("/v1/agents/{agent}/turns", post(submit_turn))
         .route("/v1/agents/{agent}/events", get(events))
         .with_state(state.clone());
@@ -125,7 +126,7 @@ async fn run_uses_managed_lifecycle_with_the_configured_local_workspace() {
     );
     assert!(!stdout.contains(&api_key));
     assert!(!stderr.contains(&api_key));
-    assert!(state.authorized_requests.load(Ordering::SeqCst) >= 5);
+    assert!(state.authorized_requests.load(Ordering::SeqCst) >= 3);
     assert_eq!(
         std::fs::read_to_string(workspace.path().join("hosted-proof.txt")).unwrap(),
         "private-host\n",
@@ -184,7 +185,7 @@ async fn run_reports_a_created_agent_before_lifecycle_open_failure() {
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.starts_with(&format!("Managed agent: {AGENT_ID}\nError: ")));
     assert!(!stderr.contains(&api_key));
-    assert_eq!(state.authorized_requests.load(Ordering::SeqCst), 2);
+    assert_eq!(state.authorized_requests.load(Ordering::SeqCst), 1);
     server.abort();
 }
 
@@ -211,6 +212,7 @@ async fn run_keeps_the_durable_agent_when_local_tools_are_initially_unavailable(
         .route("/v1/agents", post(create_agent))
         .route("/v1/agents/{agent}", get(agent_state))
         .route("/v1/agents/{agent}/tool-host", get(tool_host))
+        .route("/v1/agents/{agent}/ws", get(managed_socket))
         .route("/v1/agents/{agent}/turns", post(submit_turn))
         .route("/v1/agents/{agent}/events", get(events))
         .with_state(state.clone());
@@ -280,6 +282,7 @@ async fn run_reconnects_the_same_local_host_after_a_ready_socket_disconnect() {
         .route("/v1/agents", post(create_agent))
         .route("/v1/agents/{agent}", get(agent_state))
         .route("/v1/agents/{agent}/tool-host", get(tool_host))
+        .route("/v1/agents/{agent}/ws", get(managed_socket))
         .route("/v1/agents/{agent}/turns", post(submit_turn))
         .route("/v1/agents/{agent}/events", get(events))
         .with_state(state.clone());
@@ -347,6 +350,7 @@ async fn run_reopens_one_durable_agent_and_falls_back_when_local_tools_are_absen
         .route("/v1/agents", post(durable_create_agent))
         .route("/v1/agents/{agent}", get(durable_agent_state))
         .route("/v1/agents/{agent}/tool-host", get(durable_tool_host))
+        .route("/v1/agents/{agent}/ws", get(durable_socket))
         .route("/v1/agents/{agent}/turns", post(durable_submit_turn))
         .route("/v1/agents/{agent}/events", get(durable_events))
         .with_state(state.clone());
@@ -445,10 +449,7 @@ async fn run_reopens_one_durable_agent_and_falls_back_when_local_tools_are_absen
     );
 
     assert_eq!(state.creates.load(Ordering::SeqCst), 1);
-    assert_eq!(
-        state.state_reads.lock().unwrap().as_slice(),
-        [AGENT_ID, AGENT_ID]
-    );
+    assert_eq!(state.state_reads.lock().unwrap().as_slice(), [AGENT_ID]);
     let cursors = state.event_cursors.lock().unwrap();
     assert_eq!(cursors.first().map(String::as_str), Some("0"));
     assert!(cursors.iter().any(|cursor| cursor == "3"), "{cursors:?}");
@@ -523,6 +524,7 @@ async fn durable_create_agent(
             "session_id": AGENT_ID,
             "events_url": format!("{}/v1/agents/{AGENT_ID}/events", state.origin),
             "websocket_url": format!("ws://unused/v1/agents/{AGENT_ID}/ws"),
+            "initial_state": agent_state_value("0"),
         }),
     )
 }
@@ -539,32 +541,33 @@ async fn durable_agent_state(
     let latest_event_cursor = {
         let mut reads = state.state_reads.lock().unwrap();
         reads.push(agent);
-        if reads.len() == 1 { "0" } else { "3" }
+        "3"
     };
-    json_response(
-        StatusCode::OK,
-        serde_json::json!({
-            "agent_id": AGENT_ID,
-            "session_id": AGENT_ID,
-            "has_snapshot": latest_event_cursor != "0",
-            "completed_turns": usize::from(latest_event_cursor != "0"),
-            "last_active": 1,
-            "active_turns": [],
-            "active_turn_details": [],
-            "agent_loaded": latest_event_cursor != "0",
-            "connected_clients": 0,
-            "capabilities": {
-                "durable_turns": true,
-                "resumable_events": true,
-                "live_steer": true,
-                "live_cancel": true,
-                "workspace": "private-hosted-tools-v1",
-                "sandbox_escalation": true
-            },
-            "latest_event_cursor": latest_event_cursor,
-            "stream_error": null
-        }),
-    )
+    json_response(StatusCode::OK, agent_state_value(latest_event_cursor))
+}
+
+fn agent_state_value(latest_event_cursor: &str) -> serde_json::Value {
+    serde_json::json!({
+        "agent_id": AGENT_ID,
+        "session_id": AGENT_ID,
+        "has_snapshot": latest_event_cursor != "0",
+        "completed_turns": usize::from(latest_event_cursor != "0"),
+        "last_active": 1,
+        "active_turns": [],
+        "active_turn_details": [],
+        "agent_loaded": latest_event_cursor != "0",
+        "connected_clients": 0,
+        "capabilities": {
+            "durable_turns": true,
+            "resumable_events": true,
+            "live_steer": true,
+            "live_cancel": true,
+            "workspace": "private-hosted-tools-v1",
+            "sandbox_escalation": true
+        },
+        "latest_event_cursor": latest_event_cursor,
+        "stream_error": null
+    })
 }
 
 async fn durable_tool_host(
@@ -589,6 +592,59 @@ async fn durable_tool_host(
     upgrade
         .on_upgrade(move |socket| serve_durable_tool_host(socket, state))
         .into_response()
+}
+
+async fn durable_socket(
+    State(state): State<DurableState>,
+    Path(agent): Path<String>,
+    Query(query): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+    upgrade: WebSocketUpgrade,
+) -> impl IntoResponse {
+    if !durable_authorized(&state, &headers) {
+        return unauthorized();
+    }
+    assert_eq!(agent, AGENT_ID);
+    let cursor = query.get("cursor").cloned().unwrap();
+    state.event_cursors.lock().unwrap().push(cursor.clone());
+    upgrade
+        .on_upgrade(move |socket| serve_durable_socket(socket, state, cursor))
+        .into_response()
+}
+
+async fn serve_durable_socket(mut socket: WebSocket, state: DurableState, cursor: String) {
+    send_ready(&mut socket, &cursor, cursor != "0").await;
+    let Some(Ok(Message::Text(prompt))) = socket.recv().await else {
+        return;
+    };
+    let prompt: serde_json::Value = serde_json::from_str(&prompt).unwrap();
+    assert_eq!(prompt["type"], "prompt");
+    let key = prompt["id"].as_str().unwrap().to_owned();
+    let input = prompt["input"].as_str().unwrap().to_owned();
+    let index = {
+        let mut submissions = state.submissions.lock().unwrap();
+        submissions.push((key.clone(), input.clone()));
+        submissions.len()
+    };
+    let (answer, first_cursor, sequence) = match (index, key.as_str(), input.as_str()) {
+        (1, "durable-turn-one", "first durable turn") => ("local turn answer", 1, 1),
+        (2, "durable-turn-two", "second durable turn") => ("cloud fallback answer", 4, 3),
+        unexpected => panic!("unexpected durable socket submission: {unexpected:?}"),
+    };
+    if index == 1 {
+        state.first_submitted.notify_one();
+    }
+    state.changed.notify_waiters();
+    send_accepted(&mut socket, &key, &input, first_cursor).await;
+    if index == 1 {
+        wait_for_durable_state(&state, || state.local_calls.load(Ordering::SeqCst) == 1).await;
+    } else {
+        wait_for_durable_state(&state, || {
+            state.tool_host_attempts.load(Ordering::SeqCst) >= 2
+        })
+        .await;
+    }
+    send_turn_messages(&mut socket, &key, answer, first_cursor + 1, sequence).await;
 }
 
 async fn serve_durable_tool_host(socket: WebSocket, state: DurableState) {
@@ -847,6 +903,138 @@ async fn tool_host(
         .into_response()
 }
 
+async fn managed_socket(
+    State(state): State<TestState>,
+    Path(agent): Path<String>,
+    Query(query): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+    upgrade: WebSocketUpgrade,
+) -> impl IntoResponse {
+    if !authorized(&state, &headers) {
+        return unauthorized();
+    }
+    assert_eq!(agent, AGENT_ID);
+    assert_eq!(query.get("cursor").map(String::as_str), Some("0"));
+    upgrade
+        .on_upgrade(move |socket| serve_managed_socket(socket, state))
+        .into_response()
+}
+
+async fn serve_managed_socket(mut socket: WebSocket, state: TestState) {
+    send_ready(&mut socket, "0", false).await;
+    let Some(Ok(Message::Text(prompt))) = socket.recv().await else {
+        return;
+    };
+    let prompt: serde_json::Value = serde_json::from_str(&prompt).unwrap();
+    assert_eq!(prompt["type"], "prompt");
+    assert_eq!(prompt["id"], state.idempotency_key);
+    assert_eq!(prompt["input"], "answer from managed");
+    let turn_id = prompt["id"].as_str().unwrap();
+    state.completed.notify_one();
+    send_accepted(&mut socket, turn_id, "answer from managed", 1).await;
+    if state.disconnect_after_ready {
+        state.tool_completed.notified().await;
+        while state.tool_host_attempts.load(Ordering::SeqCst) < 2 {
+            tokio::task::yield_now().await;
+        }
+    } else if state.expect_local_tool {
+        state.tool_completed.notified().await;
+    } else {
+        while state.tool_host_attempts.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+    }
+    send_turn_messages(&mut socket, turn_id, "managed answer", 2, 1).await;
+}
+
+async fn send_ready(socket: &mut WebSocket, cursor: &str, restored: bool) {
+    socket
+        .send(Message::Text(
+            serde_json::json!({
+                "type": "ready",
+                "session_id": AGENT_ID,
+                "restored": restored,
+                "active_turns": [],
+                "active_turn_details": [],
+                "capabilities": {},
+                "latest_event_cursor": cursor
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+}
+
+async fn send_accepted(socket: &mut WebSocket, turn_id: &str, input: &str, cursor: u64) {
+    socket
+        .send(Message::Text(
+            serde_json::json!({
+                "cursor": cursor.to_string(),
+                "turn_id": turn_id,
+                "type": "turn_accepted",
+                "id": turn_id,
+                "input": input,
+                "replayed": false
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+}
+
+async fn send_turn_messages(
+    socket: &mut WebSocket,
+    turn_id: &str,
+    answer: &str,
+    cursor: u64,
+    seq: u64,
+) {
+    let messages = [
+        serde_json::json!({
+            "cursor": cursor.to_string(),
+            "turn_id": turn_id,
+            "type": "event",
+            "event": {
+                "protocol_version": 1,
+                "request_id": format!("request-{turn_id}"),
+                "seq": seq,
+                "type": "assistant.message",
+                "payload": {"message": answer}
+            }
+        }),
+        serde_json::json!({
+            "cursor": (cursor + 1).to_string(),
+            "turn_id": turn_id,
+            "type": "event",
+            "event": {
+                "protocol_version": 1,
+                "request_id": format!("request-{turn_id}"),
+                "seq": seq + 1,
+                "type": "run.completed",
+                "payload": {"status": "completed"}
+            }
+        }),
+        serde_json::json!({
+            "cursor": (cursor + 2).to_string(),
+            "turn_id": turn_id,
+            "type": "turn_completed",
+            "id": turn_id,
+            "final_message": answer,
+            "usage": null,
+            "citations": [],
+            "usage_error": null
+        }),
+    ];
+    for message in messages {
+        socket
+            .send(Message::Text(message.to_string().into()))
+            .await
+            .unwrap();
+    }
+}
+
 async fn serve_tool_host(mut socket: WebSocket, state: TestState, disconnect_after_ready: bool) {
     let Some(Ok(Message::Text(catalog))) = socket.recv().await else {
         return;
@@ -972,15 +1160,16 @@ async fn create_agent(State(state): State<TestState>, headers: HeaderMap) -> imp
     if !authorized(&state, &headers) {
         return unauthorized();
     }
-    json_response(
-        StatusCode::CREATED,
-        serde_json::json!({
-            "agent_id": AGENT_ID,
-            "session_id": AGENT_ID,
-            "events_url": format!("{}/v1/agents/{AGENT_ID}/events", state.origin),
-            "websocket_url": format!("ws://unused/v1/agents/{AGENT_ID}/ws"),
-        }),
-    )
+    let mut receipt = serde_json::json!({
+        "agent_id": AGENT_ID,
+        "session_id": AGENT_ID,
+        "events_url": format!("{}/v1/agents/{AGENT_ID}/events", state.origin),
+        "websocket_url": format!("ws://unused/v1/agents/{AGENT_ID}/ws"),
+    });
+    if state.idempotency_key != "unused" {
+        receipt["initial_state"] = agent_state_value("0");
+    }
+    json_response(StatusCode::CREATED, receipt)
 }
 
 async fn failed_agent_state(

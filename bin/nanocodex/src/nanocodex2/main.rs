@@ -221,15 +221,19 @@ fn managed_url_from_environment() -> Result<String, ManagedError> {
 }
 
 async fn run_turn(client: &ManagedClient, command: Run) -> Result<(), ManagedError> {
-    let agent_id = match command.agent {
-        Some(agent_id) => agent_id,
+    let (agent_id, state) = match command.agent {
+        Some(agent_id) => (agent_id, None),
         None => {
-            let agent_id = client.create().await?.agent_id;
-            eprintln!("Managed agent: {agent_id}");
-            agent_id
+            let receipt = client.create().await?;
+            eprintln!("Managed agent: {}", receipt.agent_id);
+            let state = receipt.initial_state.ok_or(ManagedError::InvalidResponse(
+                "created agent receipt is missing initial state",
+            ))?;
+            (receipt.agent_id, Some(state))
         }
     };
-    let (agent, mut events, _, _) = open_workspace_agent(client, Some(agent_id)).await?;
+    let (agent, mut events, _, _) =
+        open_workspace_agent_from(client, Some(agent_id), state).await?;
     let mut request = PromptRequest::new(command.prompt);
     if let Some(request_id) = command.idempotency_key {
         request = request.request_id(request_id);
@@ -259,13 +263,6 @@ async fn new_tui(client: &ManagedClient) -> Result<(), ManagedError> {
     tui::run_new(client).await
 }
 
-async fn open_workspace_agent(
-    client: &ManagedClient,
-    agent_id: Option<String>,
-) -> Result<(Nanocodex, AgentEvents, String, std::path::PathBuf), ManagedError> {
-    open_workspace_agent_from(client, agent_id, None).await
-}
-
 async fn open_workspace_agent_from(
     client: &ManagedClient,
     agent_id: Option<String>,
@@ -284,8 +281,8 @@ async fn open_workspace_agent_from(
         None => client.create().await?.agent_id,
     };
     let backend = match state {
-        Some(state) => Managed::open_from_state(client.clone(), agent_id.clone(), state),
-        None => Managed::open(client.clone(), agent_id.clone()),
+        Some(state) => Managed::open_live_from_state(client.clone(), agent_id.clone(), state),
+        None => Managed::open_live(client.clone(), agent_id.clone()),
     };
     let (agent, events) = Nanocodex::builder(backend)
         .tools(tools)
