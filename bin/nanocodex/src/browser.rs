@@ -173,7 +173,7 @@ impl BrowserArgs {
         if let Some(executable) = launch.executable {
             builder = builder.executable(executable);
         }
-        if let Some(source) = cookie_source(launch.kind) {
+        if let Some(source) = cookie_source() {
             builder = match source {
                 CookieSource::Chromium(source) => {
                     builder.cookie_source(source.copy_all_cookies().cookie_authorization(
@@ -239,7 +239,6 @@ fn standard_host_passkey_authenticator() -> Result<HostPasskeyAuthenticator> {
 }
 
 struct BrowserLaunch {
-    kind: BrowserKind,
     executable: Option<PathBuf>,
 }
 
@@ -258,7 +257,6 @@ fn resolve_browser_launch(
     }
     if let Some(executable) = explicit_executable {
         return Ok(Some(BrowserLaunch {
-            kind: BrowserKind::Chromium,
             executable: Some(executable.to_path_buf()),
         }));
     }
@@ -266,10 +264,7 @@ fn resolve_browser_launch(
         None => {
             #[cfg(target_os = "macos")]
             {
-                Ok(Some(BrowserLaunch {
-                    kind: BrowserKind::Chromium,
-                    executable: None,
-                }))
+                Ok(Some(BrowserLaunch { executable: None }))
             }
             #[cfg(not(target_os = "macos"))]
             {
@@ -282,25 +277,16 @@ fn resolve_browser_launch(
                 .into_iter()
                 .find_map(|profile| {
                     standard_profile(profile).ok().map(|session| BrowserLaunch {
-                        kind: if profile == BrowserProfileKind::Brave {
-                            BrowserKind::Brave
-                        } else {
-                            BrowserKind::Chromium
-                        },
                         executable: Some(session.executable().to_path_buf()),
                     })
                 }))
             }
         }
-        Some(BrowserKind::Chromium) => Ok(Some(BrowserLaunch {
-            kind: BrowserKind::Chromium,
-            executable: None,
-        })),
+        Some(BrowserKind::Chromium) => Ok(Some(BrowserLaunch { executable: None })),
         Some(BrowserKind::Brave) => {
             let brave = standard_profile(BrowserProfileKind::Brave)
                 .wrap_err("failed to locate the standard Brave profile")?;
             Ok(Some(BrowserLaunch {
-                kind: BrowserKind::Brave,
                 executable: Some(brave.executable().to_path_buf()),
             }))
         }
@@ -320,25 +306,11 @@ const fn default_cookie_authorization() -> CookieAuthorizationKind {
     CookieAuthorizationKind::Background
 }
 
-fn cookie_source(target: BrowserKind) -> Option<CookieSource> {
-    let preferences = match target {
-        BrowserKind::Brave => [
-            BrowserProfileKind::Brave,
-            BrowserProfileKind::Chrome,
-            BrowserProfileKind::Chromium,
-            BrowserProfileKind::Edge,
-        ],
-        BrowserKind::Chromium => [
-            BrowserProfileKind::Chrome,
-            BrowserProfileKind::Chromium,
-            BrowserProfileKind::Brave,
-            BrowserProfileKind::Edge,
-        ],
-        BrowserKind::None => unreachable!("disabled browsers have no cookie source"),
-    };
-    preferences
-        .into_iter()
-        .find_map(|source| BraveSession::standard_cookie_for(source).ok())
+fn cookie_source() -> Option<CookieSource> {
+    // Cookie selection is independent from the disposable automation binary.
+    // Prefer Chromium-family profiles in the same order as `nanocodex cookies`,
+    // followed by non-Chromium fallbacks.
+    chromium_cookie_source(BraveSession::standard_cookie_for)
         .map(CookieSource::Chromium)
         .or_else(|| {
             FirefoxCookieSource::standard()
@@ -352,6 +324,23 @@ fn cookie_source(target: BrowserKind) -> Option<CookieSource> {
                 .ok()
                 .map(CookieSource::State)
         })
+}
+
+fn chromium_cookie_source(
+    mut standard_cookie: impl FnMut(BrowserProfileKind) -> Result<BraveSession, BraveSessionError>,
+) -> Option<BraveSession> {
+    chromium_cookie_source_preferences()
+        .into_iter()
+        .find_map(|source| standard_cookie(source).ok())
+}
+
+const fn chromium_cookie_source_preferences() -> [BrowserProfileKind; 4] {
+    [
+        BrowserProfileKind::Brave,
+        BrowserProfileKind::Chrome,
+        BrowserProfileKind::Chromium,
+        BrowserProfileKind::Edge,
+    ]
 }
 
 impl ConfiguredBrowser {
@@ -369,16 +358,48 @@ impl ConfiguredBrowser {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(not(target_os = "macos"))]
     use std::path::Path;
 
     use nanocodex::Tools;
-    use nanocodex_browser::BraveSessionError;
-    #[cfg(not(target_os = "macos"))]
-    use nanocodex_browser::{BraveSession, BrowserProfileKind};
+    use nanocodex_browser::BraveSession;
+    use nanocodex_browser::{BraveSessionError, BrowserProfileKind};
     use nanocodex_tools::runtime::ToolRuntime;
 
-    use super::{BrowserArgs, BrowserKind, resolve_browser_launch};
+    use super::{BrowserArgs, BrowserKind, chromium_cookie_source, resolve_browser_launch};
+
+    #[test]
+    fn automatic_cookie_source_prefers_the_host_brave_profile() {
+        let mut visited = Vec::new();
+        let source = chromium_cookie_source(|profile| {
+            visited.push(profile);
+            Ok(BraveSession::new("/installed/brave", "/brave/profile"))
+        })
+        .unwrap();
+
+        assert_eq!(source.executable(), Path::new("/installed/brave"));
+        assert_eq!(visited, [BrowserProfileKind::Brave]);
+    }
+
+    #[test]
+    fn automatic_cookie_source_falls_back_from_brave_to_chrome() {
+        let mut visited = Vec::new();
+        let source = chromium_cookie_source(|profile| {
+            visited.push(profile);
+            if profile == BrowserProfileKind::Chrome {
+                return Ok(BraveSession::new("/installed/chrome", "/chrome/profile"));
+            }
+            Err(BraveSessionError::StandardInstallationUnavailable {
+                browser: profile.name(),
+            })
+        })
+        .unwrap();
+
+        assert_eq!(source.executable(), Path::new("/installed/chrome"));
+        assert_eq!(
+            visited,
+            [BrowserProfileKind::Brave, BrowserProfileKind::Chrome]
+        );
+    }
 
     #[cfg(not(target_os = "macos"))]
     #[test]
@@ -394,7 +415,6 @@ mod tests {
         .unwrap()
         .unwrap();
 
-        assert_eq!(launch.kind, BrowserKind::Chromium);
         assert_eq!(
             launch.executable.as_deref(),
             Some(Path::new("/installed/chrome"))
@@ -423,7 +443,6 @@ mod tests {
         .unwrap()
         .unwrap();
 
-        assert_eq!(launch.kind, BrowserKind::Brave);
         assert_eq!(
             launch.executable.as_deref(),
             Some(Path::new("/installed/brave"))
@@ -439,7 +458,6 @@ mod tests {
         .unwrap()
         .unwrap();
 
-        assert_eq!(launch.kind, BrowserKind::Chromium);
         assert!(launch.executable.is_none());
     }
 
