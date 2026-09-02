@@ -5729,6 +5729,7 @@ version = "0.5.0"
 dependencies = [
  "axum",
  "clap",
+ "crossterm",
  "dotenvy",
  "futures-util",
  "nanocodex-agent",
@@ -5740,6 +5741,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "toml",
+ "unicode-width 0.2.0",
 ]
 
 [[package]]

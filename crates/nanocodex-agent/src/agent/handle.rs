@@ -181,6 +181,19 @@ impl Nanocodex {
         self.backend.flush().await
     }
 
+    /// Disconnects this client while allowing backend-owned durable work to continue.
+    ///
+    /// A durable remote backend closes client-local streams and attachments
+    /// without cancelling accepted turns. Backends that cannot continue after
+    /// disconnection perform an ordinary shutdown instead.
+    ///
+    /// # Errors
+    ///
+    /// Returns the backend's local resource cleanup failure.
+    pub async fn disconnect(&self) -> Result<()> {
+        self.backend.disconnect().await
+    }
+
     /// Gracefully stops this agent and waits for all owned resources to close.
     ///
     /// Shutdown globally invalidates this handle and every clone. It cancels an
@@ -189,9 +202,10 @@ impl Nanocodex {
     /// returned `Ok(())` therefore establishes a durable boundary suitable for
     /// an immediate same-process rollout resume.
     ///
-    /// Dropping the final handle retains the existing implicit cancellation
-    /// behavior, but offers no future that can join resource cleanup. Use this
-    /// method at an explicit application or session boundary.
+    /// Dropping the final handle performs backend-owned implicit cleanup but
+    /// offers no future that can join it. Local backends cancel unfinished
+    /// work; durable remote backends may instead disconnect and leave accepted
+    /// turns running. Use this method when cancellation is the explicit intent.
     ///
     /// # Errors
     ///

@@ -45,6 +45,7 @@ pub(crate) enum Command {
         BackendTurnKey,
         tokio::sync::oneshot::Sender<nanocodex_agent::Result<()>>,
     ),
+    Disconnect,
     Shutdown,
 }
 
@@ -233,6 +234,22 @@ impl LifecycleBackend for ManagedAgent {
         Box::pin(async { Ok(()) })
     }
 
+    fn disconnect(&self) -> BackendFuture<nanocodex_agent::Result<()>> {
+        let commands = self.commands.clone();
+        let shutdown = self.shutdown.clone();
+        Box::pin(async move {
+            if shutdown
+                .requested
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+                && commands.send(Command::Disconnect).await.is_err()
+            {
+                shutdown.complete(Err(NanocodexError::AgentStopped));
+            }
+            shutdown.wait().await
+        })
+    }
+
     fn shutdown(&self) -> BackendFuture<nanocodex_agent::Result<()>> {
         let commands = self.commands.clone();
         let shutdown = self.shutdown.clone();
@@ -320,7 +337,8 @@ where
                     Some(Command::Cancel(key, result)) => {
                         drop(result.send(self.cancel(key).await));
                     }
-                    Some(Command::Shutdown) | None => break self.shutdown_active().await,
+                    Some(Command::Shutdown) => break self.shutdown_active().await,
+                    Some(Command::Disconnect) | None => break Ok(()),
                 },
                 DriverInput::Event(event) => match event {
                     Ok(event) => {

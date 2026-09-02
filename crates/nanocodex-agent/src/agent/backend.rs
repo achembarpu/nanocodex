@@ -103,6 +103,14 @@ pub trait LifecycleBackend: Send + Sync + 'static {
     /// Flushes backend-owned persistence.
     fn flush(&self) -> BackendFuture<Result<()>>;
 
+    /// Disconnects local resources without requesting cancellation of durable work.
+    ///
+    /// Backends without detached durable execution fall back to ordinary
+    /// shutdown.
+    fn disconnect(&self) -> BackendFuture<Result<()>> {
+        self.shutdown()
+    }
+
     /// Idempotently shuts down local resources.
     fn shutdown(&self) -> BackendFuture<Result<()>>;
 }
