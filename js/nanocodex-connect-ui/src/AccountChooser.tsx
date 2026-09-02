@@ -59,7 +59,9 @@ export function AccountChooser({
     if (operation) return;
     const normalized = normalizedPhone(phone);
     if (!normalized) {
-      setLocalFailure("Enter a valid mobile number with its country code, like +30 697 123 4567.");
+      setLocalFailure(/^\d{6}$/.test(phone.trim())
+        ? "That looks like a verification code. First enter your mobile number; we’ll ask for the code next."
+        : "Enter a valid mobile number with its country code, like +30 697 123 4567.");
       return;
     }
     setOperation("send");
@@ -140,9 +142,11 @@ export function AccountChooser({
       <section className="sms-auth-panel" aria-labelledby={`${phoneId}-heading`}>
         <header className="wizard-intro">
           <div className="wizard-app">
-            <span>Nanocodex account</span>
-            <h1 id={`${phoneId}-heading`}>Sign in with your phone</h1>
-            <p>{description}</p>
+            <span>Nanocodex account · Step {challenge ? "2" : "1"} of 2</span>
+            <h1 id={`${phoneId}-heading`}>{challenge ? "Enter your code" : "Enter your phone number"}</h1>
+            <p>{challenge
+              ? "Use the six-digit code from the text message to finish signing in."
+              : description}</p>
           </div>
           {confirmationCode ? (
             <div className="wizard-terminal-code" role="status">
@@ -173,14 +177,17 @@ export function AccountChooser({
               disabled={unavailable}
               id={phoneId}
               inputMode="tel"
-              onChange={(event) => setPhone(event.target.value)}
+              onChange={(event) => {
+                setPhone(event.target.value);
+                setLocalFailure(undefined);
+              }}
               placeholder="+30 697 123 4567"
               required
               type="tel"
               value={phone}
             />
             <button disabled={unavailable} type="submit">
-              {operation === "send" ? "Sending…" : "Send code"}
+              {operation === "send" ? "Sending…" : "Text me a code"}
             </button>
           </div>
           <p>By continuing, you agree to receive an automated one-time account code. Message and data rates may apply.</p>
@@ -202,7 +209,10 @@ export function AccountChooser({
               id={codeId}
               inputMode="numeric"
               maxLength={6}
-              onChange={(event) => setCode(event.target.value.replace(/\D/g, "").slice(0, 6))}
+              onChange={(event) => {
+                setCode(event.target.value.replace(/\D/g, "").slice(0, 6));
+                setLocalFailure(undefined);
+              }}
               pattern="[0-9]{6}"
               placeholder="000000"
               required
