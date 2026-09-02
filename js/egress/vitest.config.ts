@@ -569,6 +569,30 @@ export default defineConfig({
               refresh_token: "chatgpt-refresh-rotated",
             });
           }
+          if (url.hostname === "rpc.tempo.xyz" && request.method === "POST") {
+            const body = await request.json() as { id?: unknown; method?: unknown; params?: unknown };
+            const call = Array.isArray(body.params) && body.params[0] && typeof body.params[0] === "object"
+              ? body.params[0] as { data?: unknown; to?: unknown }
+              : undefined;
+            const validCall = body.method === "eth_call"
+              && Array.isArray(body.params)
+              && body.params[1] === "latest"
+              && typeof call?.to === "string"
+              && call.to.toLowerCase() === "0x20c000000000000000000000f37de3740adec032"
+              && typeof call.data === "string"
+              && /^0x70a082310{24}[0-9a-f]{40}$/i.test(call.data)
+              && request.headers.get("content-type")?.startsWith("application/json") === true
+              && !request.headers.has("authorization")
+              && !request.headers.has("cookie");
+            if (!validCall) {
+              return Response.json({ jsonrpc: "2.0", id: body.id, error: { message: "unexpected method" } });
+            }
+            return Response.json({
+              jsonrpc: "2.0",
+              id: body.id,
+              result: "0x0000000000000000000000000000000000000000000000000000000000bc614e",
+            });
+          }
           if (url.hostname === "api.openai.com" || url.hostname === "chatgpt.com") {
             const authorization = request.headers.get("authorization");
             return Response.json({

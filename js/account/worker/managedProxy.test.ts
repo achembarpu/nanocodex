@@ -6,6 +6,7 @@ import { isManagedRoutePath } from "./managedProxy.ts";
 test("the account Worker exposes only the exact managed wallet routes", () => {
   for (const path of [
     "/v1/wallet",
+    "/v1/wallet/balance",
     "/v1/wallet/connect",
     "/v1/wallet/revoke-access-key",
   ]) {

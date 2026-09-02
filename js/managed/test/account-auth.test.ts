@@ -552,6 +552,15 @@ describe("managed wallet bridge", () => {
         params: [{ capabilities: { authorizeAccessKey: { scopes: [{ address: publicScopeAddress }] } } }],
       },
     });
+
+    const balanceUrl = new URL("/v1/wallet/balance", origin);
+    const anonymousBalance = await routeAccountRequest(new Request(balanceUrl), local.env, balanceUrl);
+    expect(anonymousBalance?.status).toBe(401);
+    const balance = await routeAccountRequest(new Request(balanceUrl, {
+      headers: { cookie },
+    }), local.env, balanceUrl);
+    expect(balance?.status).toBe(202);
+    expect(requests[1]?.url).toBe(`https://broker.internal/users/${USER_ID}/wallet/balance`);
   });
 
   it("forwards each wallet operation only to its authenticated user and uses the canonical address for /v1/me", async () => {

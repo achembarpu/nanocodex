@@ -43,7 +43,7 @@ describe("per-user root wallets", () => {
         method: "wallet_connect",
         params: [{ chainId: "0x1079", capabilities: { method: "login" } }],
       } as never) as { accounts?: readonly { address?: string }[] };
-      expect(derived.accounts?.[0]?.address.toLowerCase()).toBe(first.address);
+      expect(derived.accounts?.[0]?.address?.toLowerCase()).toBe(first.address);
     });
   });
 
@@ -77,6 +77,19 @@ describe("per-user root wallets", () => {
       }],
     });
     expect(JSON.stringify(result)).not.toMatch(/privateKey|private_key/);
+  });
+
+  it("reads MACH through the signer-backed SDK provider without exposing root material", async () => {
+    const wallet = await provision("wallet-balance");
+    const response = await SELF.fetch("https://broker.internal/users/wallet-balance/wallet/balance");
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      account: wallet.address,
+      balance: "12345678",
+      decimals: 6,
+      symbol: "MACH",
+      token: "0x20c000000000000000000000f37de3740adec032",
+    });
   });
 
   it("accepts the SDK base-url auth form while pinning its derived endpoints", async () => {

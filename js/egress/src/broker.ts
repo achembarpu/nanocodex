@@ -1,5 +1,8 @@
 import { DurableObject } from "cloudflare:workers";
 import { Provider, ProviderRequest, secp256k1, Storage } from "accounts";
+import { http } from "viem";
+import { Actions } from "viem/tempo";
+import { tempo } from "viem/tempo/chains";
 
 import {
   CredentialVault,
@@ -34,6 +37,8 @@ const SUBJECT_TOMBSTONE_PREFIX = "!deleted:";
 const ROOT_WALLET_PRIVATE_KEY = /^0x[0-9a-fA-F]{64}$/;
 const ROOT_WALLET_ADDRESS = /^0x[0-9a-fA-F]{40}$/;
 const TEMPO_CHAIN_ID = "0x1079";
+const TEMPO_RPC = "https://rpc.tempo.xyz";
+const MACHINE_USD = "0x20c000000000000000000000f37de3740adec032";
 const PRODUCTION_CONNECT_API_ORIGIN = "https://nanocodex-connect-api.gakonst.workers.dev";
 const MAX_WALLET_RESOURCES = 64;
 const MAX_WALLET_RESOURCE_BYTES = 512;
@@ -333,6 +338,24 @@ export class UserCredentialBroker extends DurableObject<BrokerEnv> {
           return json(publicRootWallet(await this.#ensureRootWallet()), 200);
         }
         return jsonError(405, "method_not_allowed");
+      }
+      if (url.pathname === "/v1/wallet/balance") {
+        if (request.method !== "GET") return jsonError(405, "method_not_allowed");
+        const wallet = this.#credentials.wallet;
+        if (!wallet) return jsonError(404, "wallet_not_configured");
+        const provider = rootWalletProvider(wallet);
+        const balance = await Actions.token.getBalance(provider.getClient({ chainId: tempo.id }), {
+          account: wallet.address,
+          decimals: 6,
+          token: MACHINE_USD,
+        });
+        return json({
+          account: wallet.address,
+          balance: balance.amount.toString(),
+          decimals: 6,
+          symbol: "MACH",
+          token: MACHINE_USD,
+        }, 200);
       }
       if (url.pathname === "/v1/wallet/connect") {
         if (request.method !== "POST") return jsonError(405, "method_not_allowed");
@@ -1037,7 +1060,9 @@ function randomRootPrivateKey(): `0x${string}` {
 function rootWalletProvider(wallet: RootWallet) {
   return Provider.create({
     adapter: secp256k1({ privateKey: wallet.privateKey }),
+    chains: [tempo],
     storage: Storage.memory({ key: "nanocodex-root-wallet" }),
+    transports: { [tempo.id]: http(TEMPO_RPC, { retryCount: 1, timeout: 5_000 }) },
     mpp: false,
   });
 }

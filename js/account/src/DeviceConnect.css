@@ -918,6 +918,89 @@
   opacity: 0.58;
 }
 
+.connect-wizard .wizard-connectors .tempo-wallet-card {
+  cursor: default;
+  grid-template-columns: 40px minmax(0, 1fr) auto;
+}
+
+.connect-wizard .tempo-wallet-card .connection-card-copy {
+  gap: 3px;
+}
+
+.connect-wizard .tempo-wallet-card .tempo-wallet-balance {
+  color: var(--positive);
+  font-size: 10px;
+}
+
+.connect-wizard .tempo-wallet-card code {
+  overflow: hidden;
+  color: var(--faint);
+  font-size: 8px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.connect-wizard .tempo-wallet-message {
+  color: var(--faint);
+  font-size: 9px;
+  line-height: 1.4;
+  white-space: normal;
+}
+
+.connect-wizard .tempo-wallet-message.is-error {
+  color: var(--negative);
+}
+
+.connect-wizard .tempo-wallet-message.is-success {
+  color: var(--positive);
+}
+
+.connect-wizard .tempo-wallet-card-actions {
+  display: flex;
+  align-self: stretch;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.connect-wizard .tempo-wallet-card-actions button {
+  min-height: 36px;
+  padding: 0 10px;
+  border: 1px solid var(--border-soft);
+  color: var(--text);
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  font-size: 9px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.connect-wizard .tempo-wallet-card-actions button:last-child {
+  color: var(--surface);
+  background: var(--text);
+}
+
+.connect-wizard .tempo-wallet-card-actions button:hover:not(:disabled),
+.connect-wizard .tempo-wallet-card-actions button:focus-visible {
+  border-color: var(--text);
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.connect-wizard .tempo-wallet-card-actions button:disabled {
+  cursor: default;
+  opacity: 0.48;
+}
+
+.connect-wizard .tempo-wallet-payment-status {
+  align-self: end;
+  color: var(--positive);
+  font-size: 8px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
 .connect-wizard .mcp-connections {
   display: grid;
   margin-top: 12px;
@@ -1232,6 +1315,20 @@
     white-space: normal;
     -webkit-box-orient: vertical;
     -webkit-line-clamp: 2;
+  }
+
+  .connect-wizard .wizard-connectors .tempo-wallet-card {
+    grid-template-columns: 40px minmax(0, 1fr);
+  }
+
+  .connect-wizard .tempo-wallet-card-actions {
+    grid-column: 1 / -1;
+    flex-direction: row;
+  }
+
+  .connect-wizard .tempo-wallet-card-actions button {
+    min-height: 44px;
+    flex: 1;
   }
 
   .connect-wizard .wizard-visibility > div {

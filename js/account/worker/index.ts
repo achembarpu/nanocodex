@@ -30,6 +30,7 @@ import {
 } from "./publicSecurity.ts";
 import { routeLinkPreview } from "./linkPreview.ts";
 import { routeManaged } from "./managedProxy.ts";
+import { routeAccountFunding, type AccountFundingProxyEnv } from "./accountFundingProxy.ts";
 import {
   routeChiefOfStaff,
   type ChiefOfStaffProxyEnv,
@@ -97,6 +98,7 @@ const SECURE_CHATGPT_COOKIE = "__Secure-nanocodex_chatgpt_v2";
 const GIT_SHA_PATTERN = /^[0-9a-f]{40}$/;
 
 type WorkerEnv = GitStorageEnv & ThreadGitStorageEnv & EvalStorageEnv & ChatGptEgressEnv
+  & AccountFundingProxyEnv
   & ConnectDialogProxyEnv
   & LocalConnectApiEnv
   & ConnectApiProxyEnv
@@ -140,6 +142,8 @@ export default {
     if (insecure) return insecure;
     const connectorCallbackReturn = await routeLocalConnectorCallbackReturn(request, env, url);
     if (connectorCallbackReturn != null) return connectorCallbackReturn;
+    const accountFunding = await routeAccountFunding(request, env, url);
+    if (accountFunding != null) return accountFunding;
     const localConnectApi = await routeLocalConnectApi(request, env, url);
     if (localConnectApi != null) return localConnectApi;
     const connectApi = await routeConnectApi(request, env, url);

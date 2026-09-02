@@ -365,6 +365,9 @@ importers:
       nanocodex:
         specifier: workspace:*
         version: link:../nanocodex
+      viem:
+        specifier: ^2.54.0
+        version: 2.55.19(typescript@5.9.3)(zod@4.5.4)
     devDependencies:
       '@cloudflare/vitest-pool-workers':
         specifier: ^0.22.0

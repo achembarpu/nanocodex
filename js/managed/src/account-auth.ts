@@ -391,6 +391,12 @@ export async function routeAccountRequest(
     if (!principal) return unauthorized();
     return proxyAccountWalletRequest(env, principal.userId, "");
   }
+  if (url.pathname === "/v1/wallet/balance") {
+    if (request.method !== "GET") return methodNotAllowed();
+    const principal = await authenticatePersistentAccount(request, env, url);
+    if (!principal) return unauthorized();
+    return proxyAccountWalletRequest(env, principal.userId, "/balance");
+  }
   if (url.pathname === "/v1/wallet/connect" || url.pathname === "/v1/wallet/revoke-access-key") {
     if (request.method !== "POST") return methodNotAllowed();
     const principal = await authenticatePersistentAccount(request, env, url);
@@ -1307,7 +1313,7 @@ async function readAccountWallet(
 async function proxyAccountWalletRequest(
   env: AccountAuthEnv,
   userId: string,
-  suffix: "" | "/connect" | "/revoke-access-key",
+  suffix: "" | "/balance" | "/connect" | "/revoke-access-key",
   body?: Record<string, unknown>,
 ): Promise<Response> {
   if (!env.NANOCODEX) return json({ error: "wallet_unavailable" }, { status: 503 });

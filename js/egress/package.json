@@ -16,7 +16,8 @@
   },
   "dependencies": {
     "accounts": "0.17.0",
-    "nanocodex": "workspace:*"
+    "nanocodex": "workspace:*",
+    "viem": "^2.54.0"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.22.0",
