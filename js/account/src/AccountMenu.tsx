@@ -66,6 +66,7 @@ export function AccountMenu({ inline = false }: Readonly<{ inline?: boolean }>) 
   const [newKey, setNewKey] = useState<NewApiKey | null>(null);
   const [label, setLabel] = useState("");
   const [copied, setCopied] = useState(false);
+  const [walletCopied, setWalletCopied] = useState(false);
   const [credentials, setCredentials] = useState<CredentialStatus | null>(null);
   const [credentialError, setCredentialError] = useState<string | null>(null);
   const [providerOperation, setProviderOperation] = useState<string | null>(null);
@@ -167,6 +168,7 @@ export function AccountMenu({ inline = false }: Readonly<{ inline?: boolean }>) 
       setKeys(null);
       setKeyError(null);
       setNewKey(null);
+      setWalletCopied(false);
       setCredentials(null);
       setCredentialError(null);
       return;
@@ -177,6 +179,7 @@ export function AccountMenu({ inline = false }: Readonly<{ inline?: boolean }>) 
       setKeys(null);
       setKeyError(null);
       setNewKey(null);
+      setWalletCopied(false);
       setCredentials(null);
       setCredentialError(null);
     }
@@ -280,6 +283,17 @@ export function AccountMenu({ inline = false }: Readonly<{ inline?: boolean }>) 
     }
   };
 
+  const copyWalletAddress = async () => {
+    const address = session.account?.address;
+    if (!address) return;
+    try {
+      await navigator.clipboard.writeText(address);
+      setWalletCopied(true);
+    } catch {
+      setCredentialError("Couldn’t copy the wallet address. Select and copy it manually.");
+    }
+  };
+
   const connectOpenAi = async (event: FormEvent) => {
     event.preventDefault();
     if (!openAiKey.trim() || providerOperation) return;
@@ -378,23 +392,48 @@ export function AccountMenu({ inline = false }: Readonly<{ inline?: boolean }>) 
     return (
       <div className="account-inline">
         <AccountConnectionSurface
-          description={<>Signed in as {shortIdentity(session.account.id)}. Manage the same hosted connections your Nanocodex agents can use.</>}
+          description={<>Your account wallet signs Connect approvals while its private key remains encrypted in your vault.</>}
           title="Connect"
         >
           <AccountConnectionSection
             eyebrow="Account"
-            meta={shortIdentity(session.account.id)}
-            title="SMS identity"
+            meta={session.account.address ? "Ready to sign" : "Unavailable"}
+            title="Tempo wallet"
             titleId="account-identity-heading"
           >
-            <button
-              className="wizard-sign-out"
-              disabled={session.operation !== null}
-              onClick={() => void session.signOut()}
-              type="button"
-            >
-              Sign out
-            </button>
+            {session.account.address ? (
+              <div className="account-wallet">
+                <div className="account-wallet-address">
+                  <span>Wallet address</span>
+                  <code>{session.account.address}</code>
+                </div>
+                <button
+                  aria-label="Copy wallet address"
+                  className="account-wallet-copy"
+                  onClick={() => void copyWalletAddress()}
+                  type="button"
+                >
+                  {walletCopied ? <Check aria-hidden="true" /> : <Copy aria-hidden="true" />}
+                  {walletCopied ? "Copied" : "Copy"}
+                </button>
+              </div>
+            ) : (
+              <div className="account-failure" role="alert">
+                <p>Your wallet address could not be loaded.</p>
+                <button type="button" onClick={() => void session.refresh()}>Retry</button>
+              </div>
+            )}
+            <div className="account-wallet-session">
+              <span>Account {shortIdentity(session.account.id)}</span>
+              <button
+                className="wizard-sign-out"
+                disabled={session.operation !== null}
+                onClick={() => void session.signOut()}
+                type="button"
+              >
+                Sign out
+              </button>
+            </div>
           </AccountConnectionSection>
 
           <AccountConnectionSection
