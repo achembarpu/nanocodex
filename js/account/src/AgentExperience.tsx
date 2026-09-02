@@ -147,7 +147,11 @@ export const AgentExperience = memo(function AgentExperience({
               voiceEnabled={voiceEnabled}
               welcome={HOME_TERMINAL_WELCOME}
             />
-            : <ReservedTerminal message={inactiveMessage} mode={mode} welcome={HOME_TERMINAL_WELCOME} />
+            : <ReservedTerminal
+              message={inactiveMessage}
+              mode={mode}
+              welcome={credentialSource === undefined ? undefined : HOME_TERMINAL_WELCOME}
+            />
           : hasCredential && managedConversationId
             ? <ManagedAgentTerminal
               key={managedConversationId} agentId={managedConversationId!} authStatus={authStatus}
