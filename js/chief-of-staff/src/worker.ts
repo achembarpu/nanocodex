@@ -8,7 +8,11 @@ import {
   type WhatsAppAdapter,
 } from "@chat-adapter/whatsapp";
 import { Chat, ConsoleLogger, type Message, type Thread } from "chat";
-import { NanocodexManagedGateway, requestingAccountId } from "./managed.ts";
+import {
+  NanocodexManagedGateway,
+  requestingAccountId,
+  type ManagedBackend,
+} from "./managed.ts";
 import {
   configurationReadiness,
   digest,
@@ -22,7 +26,11 @@ import {
   type WhatsAppMessageIdentity,
 } from "./protocol.ts";
 import { slackAuthorizationUrl, verifySlackInstallState } from "./slack-oauth.ts";
-import { DurableChatStateAdapter } from "./state-adapter.ts";
+import {
+  DurableChatStateAdapter,
+  SlackInstallationOwnershipError,
+  SlackOAuthStateAdapter,
+} from "./state-adapter.ts";
 import {
   readViberWebhook,
   sendViberText,
@@ -37,8 +45,7 @@ export interface Env {
   CHIEF_OF_STAFF_ACCOUNT_ORIGIN?: string;
   CHIEF_OF_STAFF_PUBLIC_ORIGIN?: string;
   CHIEF_OF_STAFF_STATE: StateNamespace;
-  NANOCODEX_API_KEY?: string;
-  NANOCODEX_BACKEND?: Fetcher;
+  NANOCODEX_BACKEND?: ManagedBackend;
   SLACK_API_URL?: string;
   SLACK_CLIENT_ID?: string;
   SLACK_CLIENT_SECRET?: string;
@@ -64,7 +71,6 @@ type WhatsAppRuntime = Readonly<{
 
 const slackRuntimes = new WeakMap<object, SlackRuntime>();
 const whatsappRuntimes = new WeakMap<object, WhatsAppRuntime>();
-const ownerIds = new WeakMap<object, Promise<string | undefined>>();
 const SLACK_STATE_OBJECT = "chat-sdk:slack";
 const WHATSAPP_STATE_OBJECT = "chat-sdk:whatsapp";
 const SLACK_TEAM_ID = /^T[A-Z0-9]+$/;
@@ -117,9 +123,6 @@ async function beginSlackInstall(request: Request, env: Env): Promise<Response> 
   }
   const requester = await requestingAccountId(env.NANOCODEX_BACKEND, request);
   if (!requester) return json({ error: "unauthorized" }, { status: 401 });
-  if (await configuredOwnerId(env) !== requester) {
-    return json({ error: "account_forbidden" }, { status: 403 });
-  }
   const redirectUri = new URL("/v1/slack/callback", env.CHIEF_OF_STAFF_PUBLIC_ORIGIN).href;
   const authorization = await slackAuthorizationUrl({
     accountId: requester,
@@ -148,11 +151,11 @@ async function finishSlackInstall(request: Request, env: Env): Promise<Response>
     url.searchParams.get("state") ?? "",
     env.SLACK_OAUTH_STATE_SECRET,
   );
-  if (!state || await configuredOwnerId(env) !== state.accountId) {
+  if (!state) {
     return json({ error: "invalid_oauth_state" }, { status: 400 });
   }
   try {
-    const runtime = slackRuntime(env);
+    const runtime = slackRuntime(env, state.accountId);
     await runtime.chat.initialize();
     const result = await runtime.slack.handleOAuthCallback(request, {
       redirectUri: new URL("/v1/slack/callback", env.CHIEF_OF_STAFF_PUBLIC_ORIGIN).href,
@@ -171,6 +174,9 @@ async function finishSlackInstall(request: Request, env: Env): Promise<Response>
     await writeInstallationMetadata(env, metadata, "PUT");
     return installationReturn(env, "installed");
   } catch (error) {
+    if (error instanceof SlackInstallationOwnershipError) {
+      return installationReturn(env, "workspace_already_installed");
+    }
     console.warn({
       type: "chief_of_staff.slack_install_failed",
       error_kind: error instanceof Error ? error.name : typeof error,
@@ -191,7 +197,7 @@ async function removeSlackInstallation(
   if (!requester) return json({ error: "unauthorized" }, { status: 401 });
   const metadata = await installationMetadata(env, teamId);
   if (!metadata) return json({ error: "not_found" }, { status: 404 });
-  if (metadata.accountId !== requester || await configuredOwnerId(env) !== requester) {
+  if (metadata.accountId !== requester) {
     return json({ error: "account_forbidden" }, { status: 403 });
   }
   const runtime = slackRuntime(env);
@@ -240,7 +246,7 @@ async function slackWebhook(
   }
   const teamId = slackTeamId(payload);
   const metadata = teamId ? await installationMetadata(env, teamId) : undefined;
-  if (!metadata || metadata.accountId !== await configuredOwnerId(env)) {
+  if (!metadata) {
     return json({ error: "workspace_forbidden" }, { status: 403 });
   }
   if (slackEventType(payload) === "app_uninstalled") {
@@ -290,10 +296,8 @@ async function viberWebhook(request: Request, env: Env): Promise<Response> {
     return json({ error: "invalid_payload" }, { status: 400 });
   }
   if (callback.kind === "ignored") return json({ status: 0 });
-  const ownerId = await configuredOwnerId(env);
-  if (!ownerId) return json({ error: "channel_unavailable" }, { status: 503 });
   const receiver = callback.kind === "message" ? callback.actorId : callback.userId;
-  const identity = viberChannelIdentity(ownerId, env.VIBER_BOT_URI, receiver);
+  const identity = viberChannelIdentity(env.VIBER_BOT_URI, receiver);
   const routeDigest = await digest(identity);
   const session = env.CHIEF_OF_STAFF_STATE.getByName(`conversation:${routeDigest}`);
   if (callback.kind === "conversation_started") {
@@ -421,10 +425,13 @@ function deliveryRequest(
   }));
 }
 
-function slackRuntime(env: Env): SlackRuntime {
-  const retained = slackRuntimes.get(env as object);
+function slackRuntime(env: Env, oauthAccountId?: string): SlackRuntime {
+  const retained = oauthAccountId === undefined ? slackRuntimes.get(env as object) : undefined;
   if (retained) return retained;
   const stateObject = env.CHIEF_OF_STAFF_STATE.getByName(SLACK_STATE_OBJECT);
+  const state = oauthAccountId === undefined
+    ? new DurableChatStateAdapter(stateObject)
+    : new SlackOAuthStateAdapter(stateObject, oauthAccountId);
   const slack = createSlackAdapter({
     agentView: true,
     apiUrl: env.SLACK_API_URL,
@@ -440,24 +447,24 @@ function slackRuntime(env: Env): SlackRuntime {
     concurrency: "concurrent",
     dedupeTtlMs: 24 * 60 * 60 * 1_000,
     logger: "warn",
-    state: new DurableChatStateAdapter(stateObject),
+    state,
     userName: "chief-of-staff",
   });
   const handle = async (thread: Thread, message: Message) => {
     await thread.subscribe();
     const teamId = messageTeamId(message.raw);
     const metadata = teamId ? await installationMetadata(env, teamId) : undefined;
-    if (!metadata || metadata.accountId !== await configuredOwnerId(env)) {
+    if (!metadata) {
       throw new Error("Slack installation owner is unavailable");
     }
-    const identity = slackMessageIdentity(message.raw, thread.id, thread.isDM, metadata.accountId);
+    const identity = slackMessageIdentity(message.raw, thread.id, thread.isDM);
     await deliverTurn(env, thread, message, identity);
   };
   chat.onDirectMessage(handle);
   chat.onNewMention(handle);
   chat.onSubscribedMessage(handle);
   const runtime = { chat, slack };
-  slackRuntimes.set(env as object, runtime);
+  if (oauthAccountId === undefined) slackRuntimes.set(env as object, runtime);
   return runtime;
 }
 
@@ -488,12 +495,9 @@ function whatsappRuntime(env: Env): WhatsAppRuntime {
   });
   const handle = async (thread: Thread, message: Message) => {
     await thread.subscribe();
-    const owner = await configuredOwnerId(env);
-    if (!owner) throw new Error("WhatsApp account owner is unavailable");
     const identity = whatsAppMessageIdentity(
       message.raw,
       thread.id,
-      owner,
       env.WHATSAPP_PHONE_NUMBER_ID!,
     );
     await deliverTurn(env, thread, message, identity);
@@ -538,23 +542,17 @@ async function readiness(request: Request, env: Env): Promise<Response> {
   const requester = await requestingAccountId(env.NANOCODEX_BACKEND, request);
   if (!requester) return json({ error: "unauthorized" }, { status: 401 });
   const config = configurationReadiness(env);
-  const owner = config.slack.configured || config.viber.configured || config.whatsapp.configured
-    ? await configuredOwnerId(env)
-    : undefined;
-  const accountMatch = owner === requester;
-  const installations = accountMatch
-    ? (await installationMetadataList(env))
-      .filter((installation) => installation.accountId === requester)
-      .map(({ accountId: _, ...installation }) => installation)
-    : [];
-  const slackReady = config.slack.configured && accountMatch && installations.length > 0;
-  const viberReady = config.viber.configured && accountMatch;
-  const whatsappConfiguredForAccount = config.whatsapp.configured && accountMatch;
+  const installations = (await installationMetadataList(env))
+    .filter((installation) => installation.accountId === requester)
+    .map(({ accountId: _, ...installation }) => installation);
+  const slackReady = config.slack.configured && installations.length > 0;
+  const viberReady = config.viber.configured;
+  const whatsappConfiguredForAccount = config.whatsapp.configured;
   const body: Readiness = {
-    accountMatch,
+    accountMatch: true,
     configured: slackReady || viberReady || whatsappConfiguredForAccount,
     installations,
-    installUrl: config.configured && accountMatch ? "/api/chief-of-staff/slack/install" : null,
+    installUrl: config.configured ? "/api/chief-of-staff/slack/install" : null,
     webhookUrl: config.webhookUrl,
     channels: [
       {
@@ -562,11 +560,9 @@ async function readiness(request: Request, env: Env): Promise<Response> {
         availability: slackReady ? "ready" : "setup_required",
         contract: "first_party",
         detail: slackReady
-          ? `${installations.length} Slack workspace${installations.length === 1 ? "" : "s"} route bot events to account-owned durable agents.`
+          ? `${installations.length} Slack workspace${installations.length === 1 ? "" : "s"} route each verified actor to an isolated durable Nanocodex account and agent.`
           : config.configured
-            ? accountMatch
-              ? "Install the Chief of Staff bot into a Slack workspace."
-              : "This deployment is bound to a different Nanocodex account."
+            ? "Install the Chief of Staff bot into a Slack workspace."
             : "The shared Slack app is not configured by the deployment operator.",
       },
       {
@@ -574,10 +570,8 @@ async function readiness(request: Request, env: Env): Promise<Response> {
         availability: whatsappConfiguredForAccount ? "configured" : "setup_required",
         contract: "first_party",
         detail: whatsappConfiguredForAccount
-          ? "The Worker is configured; signed WhatsApp messages route to account-owned durable agents."
-          : config.whatsapp.configured
-            ? "This deployment is bound to a different Nanocodex account."
-            : "Add the Meta app credentials and subscribe the shared webhook to enable WhatsApp.",
+          ? "The Worker is configured; each signed WhatsApp identity gets its own durable Nanocodex account and agent."
+          : "Add the Meta app credentials and subscribe the shared webhook to enable WhatsApp.",
         webhookUrl: config.whatsapp.webhookUrl,
       },
       {
@@ -591,9 +585,7 @@ async function readiness(request: Request, env: Env): Promise<Response> {
         availability: viberReady ? "ready" : "setup_required",
         contract: "first_party",
         detail: config.viber.configured
-          ? accountMatch
-            ? "Signed Viber callbacks route each subscriber to an account-owned durable agent."
-            : "This deployment is bound to a different Nanocodex account."
+          ? "Each signed Viber subscriber gets its own durable Nanocodex account and agent."
           : "Viber bot token, bot identity, or public origin is incomplete.",
         webhookUrl: config.viber.webhookUrl,
       },
@@ -709,16 +701,6 @@ function logViberFailure(operation: string, error: unknown): void {
     type: `chief_of_staff.viber_${operation}`,
     error_kind: error instanceof Error ? error.name : typeof error,
   });
-}
-
-function configuredOwnerId(env: Env): Promise<string | undefined> {
-  const retained = ownerIds.get(env as object);
-  if (retained) return retained;
-  const loading = env.NANOCODEX_BACKEND && env.NANOCODEX_API_KEY
-    ? new NanocodexManagedGateway(env.NANOCODEX_BACKEND, env.NANOCODEX_API_KEY).ownerId()
-    : Promise.resolve(undefined);
-  ownerIds.set(env as object, loading);
-  return loading;
 }
 
 function installationReturn(env: Env, result: string): Response {
