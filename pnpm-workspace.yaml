@@ -8,6 +8,7 @@ overrides:
 
 allowBuilds:
   "@mongodb-js/zstd": true
+  core-js-pure: false
   esbuild: true
   node-liblzma: false
   workerd: true

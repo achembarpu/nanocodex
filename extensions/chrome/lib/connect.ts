@@ -7,6 +7,8 @@ import {
 } from "nanocodex/connect";
 import type { NamedTool } from "nanocodex/host";
 import { createCleanupTool } from "./extension.ts";
+import type { CookieSyncTransport } from "./cookie-sync.ts";
+import { createAuthenticatedCookieSyncTransport } from "./cookie-sync-client.ts";
 
 const CONNECT_API = "https://nanocodex-connect-api.gakonst.workers.dev";
 const CONNECT_DIALOG = "https://nanocodex.gakonst.workers.dev/connect-dialog/";
@@ -14,6 +16,10 @@ const MANAGED_AGENT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[89ab][0-9a-f]{3}
 const CONVERSATION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 export const LEGACY_CONVERSATION_ID = "legacy";
+export const CHROME_CONNECT_RESOURCES = [
+  "urn:nanocodex:agent:run",
+  "urn:nanocodex:browser-cookies:sync",
+] as const;
 
 export const CHROME_CONNECT_TOOLS = [createCleanupTool(() => {
   throw new Error("The browser tool is available only after the approved agent attaches.");
@@ -34,7 +40,7 @@ export const CHROME_CONNECT_REQUEST = {
   tools: CHROME_CONNECT_TOOLS,
 } as const;
 
-type ConnectClient = ReturnType<typeof Client.create>;
+type ConnectClient = Client.Client;
 export type ExpectedConversation = Readonly<{ agentId: string; accountAddress?: string }>;
 const conversationClients = new Map<string, ConnectClient>();
 const agentClients = new Map<string, ConnectClient>();
@@ -97,6 +103,12 @@ export function createConnectedAgent(
   return client.agent.create({ connection, tools, signal });
 }
 
+export function cookieSyncTransport(connection: Connection): CookieSyncTransport {
+  const client = agentClients.get(connection.agentId);
+  if (!client) throw new Error("The authenticated cookie-sync session is unavailable.");
+  return createAuthenticatedCookieSyncTransport((input, init) => client.fetch(input, init));
+}
+
 export function createConversationId(): string {
   return crypto.randomUUID();
 }
@@ -110,13 +122,13 @@ function clientForConversation(conversationId: string): ConnectClient {
   const retained = conversationClients.get(conversationId);
   if (retained) return retained;
   if (conversationId === LEGACY_CONVERSATION_ID) migrateLegacyConversationSession();
-  const client = Client.create({
+  const parameters: Client.Parameters = {
     appId: "nanocodex-chrome",
     auth: {
       challenge: `${CONNECT_API}/v1/connect/auth/challenge`,
       verify: `${CONNECT_API}/v1/connect/auth`,
       logout: `${CONNECT_API}/v1/connect/auth/logout`,
-      resources: ["urn:nanocodex:agent:run"],
+      resources: CHROME_CONNECT_RESOURCES,
       returnToken: true,
     },
     dialog: Dialog.popup({
@@ -130,7 +142,8 @@ function clientForConversation(conversationId: string): ConnectClient {
       key: `nanocodex-chrome-${conversationId}`,
       name: "Nanocodex Connect API",
     }),
-  });
+  };
+  const client = Client.create(parameters);
   conversationClients.set(conversationId, client);
   return client;
 }

@@ -40,6 +40,10 @@ import { fetchResponseWithDeadline, withHardDeadline } from "./deadline";
 import { drainRuntimeForDeletion } from "./deletion-runtime";
 import { createManagedComputerRuntime } from "./computer-runtime";
 import {
+  createManagedBrowserRuntime,
+  type ManagedBrowserRuntime,
+} from "./browser-runtime";
+import {
   exactConnectorAccess,
   type ManagedEgressConnectorId,
 } from "./managed-egress";
@@ -93,6 +97,7 @@ import {
 export { MultiplayerQuota } from "./multiplayer-quota";
 export { WorkspaceServiceProxy };
 export { Sandbox } from "@cloudflare/sandbox";
+export { CodemodeRuntime } from "agents/browser";
 
 import {
   type ActiveTurn,
@@ -253,6 +258,13 @@ export interface Env extends AccountAuthEnv, ChiefOfStaffPrincipalEnv, HostPrinc
   NANOCODEX_HISTORY: R2Bucket;
   NANOCODEX_ADMIN_TOKEN: string;
   HISTORY_AI_SEARCH?: AiSearchInstance;
+  BROWSER?: import("agents/browser").BrowserBinding;
+  LOADER?: WorkerLoader;
+  MANAGED_BROWSER_PROVIDER?: string;
+  MANAGED_BROWSER_KEEP_ALIVE_MS?: string;
+  MANAGED_BROWSER_TOOL_TIMEOUT_MS?: string;
+  BROWSERBASE_API_KEY?: string;
+  BROWSERBASE_PROJECT_ID?: string;
   AGENT_IDLE_TIMEOUT_MS?: string;
   MANAGED_MULTIPLAYER_IO_TIMEOUT_MS?: string;
   MANAGED_OWNERSHIP_IO_TIMEOUT_MS?: string;
@@ -1415,6 +1427,7 @@ export class DurableAgentSession extends DurableComputerSession {
   #agentConstruction?: AgentConstructionOwnership;
   readonly #agentConstructions = new Set<AgentConstructionOwnership>();
   #agentShutdownPromise?: Promise<void>;
+  #managedBrowserRuntimePromise?: Promise<ManagedBrowserRuntime>;
   #events?: EventWatcher;
   readonly #eventLog: DurableEventLog<StreamMessage>;
   readonly #eventArchive: ManagedEventArchive<StreamMessage>;
@@ -2402,6 +2415,13 @@ export class DurableAgentSession extends DurableComputerSession {
     }
     while (this.#realtimeArchive.needsSeal()) {
       if (!(await this.#sealRealtimeArchive(false)).sealed) break;
+    }
+    if (this.#managedBrowserRuntimePromise) {
+      await this.#managedBrowserRuntimePromise
+        .then((runtime) => runtime.expireAndSweep())
+        .catch((error) => {
+          console.warn({ type: "managed.browser_sweep_failed", error_kind: errorKind(error) });
+        });
     }
     await this.#shutdownAgent();
     if (this.#recoverableTurnCount() > 0) this.#scheduleRecovery();
@@ -4270,6 +4290,7 @@ export class DurableAgentSession extends DurableComputerSession {
     const shutdown = this.#agentShutdownPromise;
     const turns = [...this.#turns.values()];
     const inFlight = [...this.#inFlight];
+    const browserRuntime = this.#managedBrowserRuntimePromise;
     if (this.#durabilityImportTask) inFlight.push(this.#durabilityImportTask.promise);
 
     this.#runtimeOwnershipGeneration += 1;
@@ -4277,6 +4298,7 @@ export class DurableAgentSession extends DurableComputerSession {
     this.#agentPromise = undefined;
     this.#agentConstruction = undefined;
     this.#agentShutdownPromise = undefined;
+    this.#managedBrowserRuntimePromise = undefined;
     this.#events?.off();
     this.#events = undefined;
     this.#turns.clear();
@@ -4306,6 +4328,7 @@ export class DurableAgentSession extends DurableComputerSession {
         await Promise.all([
           agent?.session.shutdown(),
           constructionShutdown,
+          browserRuntime?.then((runtime) => runtime.close()),
         ]);
       },
       inFlight,
@@ -4624,12 +4647,31 @@ export class DurableAgentSession extends DurableComputerSession {
     }
   }
 
+  #managedBrowserRuntime(session: SessionRow): Promise<ManagedBrowserRuntime> {
+    let runtime = this.#managedBrowserRuntimePromise;
+    if (!runtime) {
+      runtime = createManagedBrowserRuntime({
+        ctx: this.ctx,
+        env: this.env,
+        sessionId: session.session_id,
+      });
+      this.#managedBrowserRuntimePromise = runtime;
+      void runtime.catch(() => {
+        if (this.#managedBrowserRuntimePromise === runtime) {
+          this.#managedBrowserRuntimePromise = undefined;
+        }
+      });
+    }
+    return runtime;
+  }
+
   async #createAgent(): Promise<CloudflareAgent.Agent> {
     const constructionStartedAt = performance.now();
     const session = this.#session();
     if (!session) throw new Error("session is not initialized");
     const multiplayer = session.runtime_profile === "multiplayer";
     if (!multiplayer) await this.#ensureCredentialBinding(session);
+    const browserRuntime = multiplayer ? undefined : await this.#managedBrowserRuntime(session);
     const workspace = await getWorkspace(this);
     // Shared-room members can all admit turns. Never attach the room owner's
     // connector capability to that shared tool runtime: provider destinations
@@ -4678,6 +4720,7 @@ export class DurableAgentSession extends DurableComputerSession {
     };
     const cloudTools: NamedTool[] = [
       computer.tool,
+      ...(browserRuntime?.tools ?? []),
       ...(multiplayer ? [] : [{
         name: "accountInfo",
         description: "Report account authentication, safe Vault references, stablecoin balances, and app authorization boundaries. Vault references may show usernames, addresses, phone numbers, and card last four, but never passwords or complete card data.",
@@ -4790,6 +4833,7 @@ export class DurableAgentSession extends DurableComputerSession {
             "Private host tools are deferred. Use tool_search when discovery is needed, and call returned tools from Code Mode.",
             "For every matching tool name, an attached private host is authoritative. When no matching private tool is attached, the managed cloud tool is used instead.",
             "The private and cloud workspaces are not synchronized. Never imply that a file created in one exists in the other.",
+            "The browser_execute tool is the managed remote browser. Reuse its retained session when continuity matters. Never inspect, return, or persist cookies, authorization material, CDP connection URLs, provider URLs, or Live View URLs. If a login, MFA, CAPTCHA, or other human-only gate appears, stop and ask the user to complete it outside the model-visible browser tool; do not bypass or evade the gate.",
             "Your /workspace filesystem is durable Cloudflare Computer storage backed by this agent's Durable Object.",
             "Use accountInfo only when the user asks about account state or an operation fails because its authorization is unclear. Do not call accountInfo before an explicit gh, git, curl, or other shell command. Those commands use transparent authenticated egress when the current grant permits it. accountInfo is a tool, not a shell command.",
             "When accountInfo lists multiple connectorAccounts for a service, choose the appropriate connection by label and pass its exact id as X-Nanocodex-Connector-Connection on that provider request. Never invent a connection id. The egress proxy validates it against the active grant.",

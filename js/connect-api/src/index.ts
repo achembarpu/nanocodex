@@ -47,9 +47,20 @@ import {
 } from "./managedGrant.mts";
 import {
   appToolCatalogDigestFromResources,
+  BROWSER_COOKIE_SYNC_RESOURCE,
   CHROME_EXTENSION_APP_ID,
   isChromeExtensionGrantResources,
+  parseCliBrowserCookieSyncResource,
 } from "./appToolPolicy.mts";
+import {
+  browserCookieBrokerPath,
+  projectBrowserCookieBrokerError,
+  projectBrowserCookieJarList,
+  projectBrowserCookieJarMaterialization,
+  projectBrowserCookieJarMetadata,
+  projectBrowserCookieJarNames,
+  type BrowserCookieBinding,
+} from "./browserCookieEgress.mjs";
 import {
   applyConnectorConnectionSelector,
   completeConnectorConnectionSnapshot,
@@ -236,6 +247,10 @@ const MAX_DEVICE_REGISTER_BYTES = 64 * 1024;
 const MAX_CONNECTION_REQUEST_BYTES = 128 * 1024;
 const MAX_CHATGPT_IMPORT_BODY_BYTES = 64 * 1024;
 const MAX_HOST_PRINCIPAL_BODY_BYTES = 16 * 1024;
+const MAX_BROWSER_COOKIE_JAR_BODY_BYTES = 256 * 1024;
+const MAX_BROWSER_COOKIE_BINDING_BODY_BYTES = 8 * 1024;
+const MAX_BROWSER_COOKIE_JAR_RESPONSE_BYTES = 256 * 1024;
+const MAX_BROWSER_COOKIES_PER_JAR = 300;
 const EGRESS_SUBJECT = /^[A-Za-z0-9_-]{43,128}$/;
 const CONNECTOR_METHODS = new Set(["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"]);
 const CONNECTOR_REQUEST_HEADERS = new Set([
@@ -654,6 +669,9 @@ export default {
       const managedMemoryResponse = await handleManagedMemoryRoute(request, env, url);
       if (managedMemoryResponse) return cors(managedMemoryResponse, request);
 
+      const browserCookieResponse = await handleBrowserCookieJarRoute(request, env, url);
+      if (browserCookieResponse) return cors(browserCookieResponse, request);
+
       const grantResponse = await handleGrantRoute(request, env, store, url);
       if (grantResponse) return cors(grantResponse, request);
 
@@ -848,6 +866,289 @@ export default {
     }
   },
 };
+
+async function handleBrowserCookieJarRoute(
+  request: Request,
+  env: Env,
+  url: URL,
+): Promise<Response | undefined> {
+  const root = url.pathname === "/v1/browser-cookie-jars";
+  const materialize = url.pathname.match(
+    /^\/v1\/browser-cookie-jars\/([A-Za-z0-9_-]{22,64})\/materialize$/,
+  );
+  const names = url.pathname.match(
+    /^\/v1\/browser-cookie-jars\/([A-Za-z0-9_-]{22,64})\/names$/,
+  );
+  const item = url.pathname.match(/^\/v1\/browser-cookie-jars\/([A-Za-z0-9_-]{22,64})$/);
+  if (!root && !materialize && !names && !item) {
+    if (url.pathname.startsWith("/v1/browser-cookie-jars/")) {
+      throw new ApiFailure(400, "invalid_browser_cookie_jar_id", "The browser cookie jar id is invalid.");
+    }
+    return undefined;
+  }
+  const operation = root && request.method === "GET" ? "list"
+    : item && request.method === "PUT" ? "upsert"
+      : materialize && request.method === "POST" ? "materialize"
+        : names && request.method === "POST" ? "names"
+          : item && request.method === "DELETE" ? "delete"
+            : undefined;
+  if (!operation) {
+    throw new ApiFailure(405, "method_not_allowed", "Unsupported browser cookie jar operation.");
+  }
+
+  const { grant } = await authenticatedGrant(request, env);
+  requireGrantAppOrigin(request, grant);
+  if (grant.status !== "active") {
+    throw new ApiFailure(403, "grant_inactive", "The Connect grant is not active.");
+  }
+  remainingGrantTtl(grant);
+  const grantedOrigin = browserCookieGrantOrigin(grant);
+
+  if (operation === "list") {
+    const binding = browserCookieQueryBinding(url);
+    requireBrowserCookieGrantOrigin(grantedOrigin, binding.origin);
+    const response = await browserCookieBrokerFetch(
+      env,
+      grant.brokerUserId,
+      undefined,
+      false,
+      { method: "GET", redirect: "manual", signal: request.signal },
+    );
+    return browserCookieJsonResponse(
+      response,
+      (value) => projectBrowserCookieJarList(value, binding),
+      MAX_BROWSER_COOKIE_JAR_RESPONSE_BYTES,
+    );
+  }
+  if (url.search) {
+    throw new ApiFailure(400, "invalid_browser_cookie_request", "Browser cookie jar mutations do not accept query parameters.");
+  }
+  requireJsonContentType(request);
+  const jarId = (materialize?.[1] ?? names?.[1] ?? item?.[1])!;
+  const parsed = operation === "upsert"
+    ? browserCookieUpsert(await boundedJson(request, MAX_BROWSER_COOKIE_JAR_BODY_BYTES, "browser cookie jar"))
+    : operation === "materialize" || operation === "names"
+      ? browserCookieBindingBody(await boundedJson(request, MAX_BROWSER_COOKIE_BINDING_BODY_BYTES, "browser cookie jar binding"))
+      : browserCookieDelete(await boundedJson(request, MAX_BROWSER_COOKIE_BINDING_BODY_BYTES, "browser cookie jar delete"));
+  requireBrowserCookieGrantOrigin(grantedOrigin, parsed.binding.origin);
+  const response = await browserCookieBrokerFetch(
+    env,
+    grant.brokerUserId,
+    jarId,
+    operation === "materialize" ? "materialize" : operation === "names" ? "names" : false,
+    {
+      method: operation === "upsert" ? "PUT"
+        : operation === "materialize" || operation === "names" ? "POST" : "DELETE",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(parsed.body),
+      redirect: "manual",
+      signal: request.signal,
+    },
+  );
+  if (operation === "delete" && response.status === 204) {
+    await response.body?.cancel();
+    return new Response(null, { status: 204 });
+  }
+  return browserCookieJsonResponse(
+    response,
+    operation === "upsert"
+      ? (value) => {
+        const metadata = projectBrowserCookieJarMetadata(value);
+        if (metadata.id !== jarId
+          || metadata.origin !== parsed.binding.origin
+          || metadata.profile_id !== parsed.binding.profile_id
+          || metadata.store_id !== parsed.binding.store_id) {
+          throw new TypeError("browser cookie jar binding mismatch");
+        }
+        return metadata;
+      }
+      : operation === "materialize"
+        ? (value) => projectBrowserCookieJarMaterialization(value, jarId, parsed.binding)
+        : operation === "names"
+          ? (value) => projectBrowserCookieJarNames(value, jarId, parsed.binding)
+        : () => { throw new TypeError("browser cookie jar delete returned a body"); },
+    operation === "materialize" || operation === "names"
+      ? MAX_BROWSER_COOKIE_JAR_RESPONSE_BYTES
+      : MAX_BROKER_BODY_BYTES,
+  );
+}
+
+function browserCookieGrantOrigin(grant: GrantRecord): string | undefined {
+  if (grant.appId === CHROME_EXTENSION_APP_ID && isChromeExtensionOrigin(grant.appOrigin)) {
+    if (grant.capabilities.includes(BROWSER_COOKIE_SYNC_RESOURCE)) return undefined;
+    throw new ApiFailure(
+      403,
+      "browser_cookie_sync_not_granted",
+      "This Chrome extension grant does not include browser cookie sync.",
+    );
+  }
+  if (grant.appId === CLI_APP_ID && grant.appOrigin === CLI_APP_ORIGIN) {
+    const origins = grant.capabilities.flatMap((capability) => {
+      const origin = parseCliBrowserCookieSyncResource(capability);
+      return origin ? [origin] : [];
+    });
+    if (origins.length === 1) return origins[0];
+    throw new ApiFailure(
+      403,
+      "browser_cookie_sync_not_granted",
+      "This Nanocodex CLI grant does not include one exact browser cookie origin.",
+    );
+  }
+  throw new ApiFailure(
+    403,
+    "browser_cookie_sync_app_denied",
+    "Browser cookie sync is available only to an authorized Chrome extension or Nanocodex CLI.",
+  );
+}
+
+function requireBrowserCookieGrantOrigin(grantedOrigin: string | undefined, requestedOrigin: string): void {
+  if (grantedOrigin !== undefined && grantedOrigin !== requestedOrigin) {
+    throw new ApiFailure(
+      403,
+      "browser_cookie_sync_origin_denied",
+      "The requested browser cookie origin was not approved for this CLI grant.",
+    );
+  }
+}
+
+function browserCookieQueryBinding(url: URL): BrowserCookieBinding {
+  const expected = ["origin", "profile_id", "store_id"];
+  const keys = [...url.searchParams.keys()];
+  if (keys.length !== expected.length
+    || expected.some((key) => url.searchParams.getAll(key).length !== 1)
+    || keys.some((key) => !expected.includes(key))) {
+    throw new ApiFailure(400, "invalid_browser_cookie_binding", "An exact origin, profile, and cookie store are required.");
+  }
+  return browserCookieBindingFields({
+    origin: url.searchParams.get("origin"),
+    profile_id: url.searchParams.get("profile_id"),
+    store_id: url.searchParams.get("store_id"),
+  });
+}
+
+function browserCookieBindingBody(
+  value: Record<string, unknown>,
+): { body: BrowserCookieBinding; binding: BrowserCookieBinding } {
+  if (!hasExactObjectKeys(value, ["origin", "profile_id", "store_id"])) {
+    throw new ApiFailure(400, "invalid_browser_cookie_binding", "An exact origin, profile, and cookie store are required.");
+  }
+  const binding = browserCookieBindingFields(value);
+  return { body: binding, binding };
+}
+
+function browserCookieUpsert(
+  value: Record<string, unknown>,
+): { body: Record<string, unknown>; binding: BrowserCookieBinding } {
+  if (!hasExactObjectKeys(value, [
+    "schema_version", "origin", "profile_id", "store_id", "revision", "cookies",
+  ]) || value.schema_version !== 1 || !nonnegativeSafeInteger(value.revision)
+    || !Array.isArray(value.cookies) || value.cookies.length > MAX_BROWSER_COOKIES_PER_JAR) {
+    throw new ApiFailure(400, "invalid_browser_cookie_jar", "The browser cookie jar is invalid.");
+  }
+  const binding = browserCookieBindingFields(value);
+  if (value.cookies.some((cookie) => !isRecord(cookie)
+    || cookie.storeId !== binding.store_id
+    || "incognito" in cookie || "profileId" in cookie || "profile_id" in cookie
+    || "accountId" in cookie || "account_id" in cookie || "userId" in cookie || "user_id" in cookie)) {
+    throw new ApiFailure(400, "browser_cookie_profile_mismatch", "A cookie does not belong to this browser profile and store.");
+  }
+  return {
+    binding,
+    body: {
+      schema_version: 1,
+      ...binding,
+      revision: value.revision,
+      cookies: value.cookies,
+    },
+  };
+}
+
+function browserCookieDelete(
+  value: Record<string, unknown>,
+): { body: Record<string, unknown>; binding: BrowserCookieBinding } {
+  if (!hasExactObjectKeys(value, ["origin", "profile_id", "store_id", "revision"])
+    || !nonnegativeSafeInteger(value.revision)) {
+    throw new ApiFailure(400, "invalid_browser_cookie_jar_delete", "The browser cookie jar delete request is invalid.");
+  }
+  const binding = browserCookieBindingFields(value);
+  return { binding, body: { ...binding, revision: value.revision } };
+}
+
+function browserCookieBindingFields(value: Record<string, unknown>): BrowserCookieBinding {
+  let origin: string;
+  try {
+    origin = requiredOrigin(value.origin, "origin");
+    if (new URL(origin).hostname.includes("*")) throw new Error("wildcard origin");
+  } catch {
+    throw new ApiFailure(400, "invalid_browser_cookie_origin", "The requested tab origin must be one exact canonical origin.");
+  }
+  let profileId: string;
+  let storeId: string;
+  try {
+    profileId = boundedIdentifier(value.profile_id, "profile_id", 128);
+    storeId = boundedIdentifier(value.store_id, "store_id", 128);
+  } catch {
+    throw new ApiFailure(400, "invalid_browser_cookie_binding", "The browser profile and cookie store are invalid.");
+  }
+  return { origin, profile_id: profileId, store_id: storeId };
+}
+
+function requireJsonContentType(request: Request): void {
+  if (request.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() !== "application/json") {
+    throw new ApiFailure(415, "invalid_content_type", "Browser cookie jar requests require application/json.");
+  }
+}
+
+function hasExactObjectKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
+  const keys = new Set(expected);
+  return Object.keys(value).length === keys.size && Object.keys(value).every((key) => keys.has(key));
+}
+
+function nonnegativeSafeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+function browserCookieBrokerFetch(
+  env: Env,
+  brokerUserId: string,
+  jarId: string | undefined,
+  projection: false | "materialize" | "names",
+  init: RequestInit,
+): Promise<Response> {
+  return brokerFetch(env, browserCookieBrokerPath(brokerUserId, jarId, projection), init);
+}
+
+async function browserCookieJsonResponse(
+  response: Response,
+  project: (value: unknown) => Record<string, unknown>,
+  limit: number,
+): Promise<Response> {
+  if (response.status >= 300 && response.status < 400) {
+    await response.body?.cancel();
+    throw new ApiFailure(502, "browser_cookie_broker_redirect", "The browser cookie broker returned an unexpected redirect.");
+  }
+  if (!(response.headers.get("content-type") ?? "").toLowerCase().includes("application/json")) {
+    await response.body?.cancel();
+    throw new ApiFailure(502, "browser_cookie_broker_invalid", "The browser cookie broker returned an invalid response.");
+  }
+  const text = await boundedResponseText(response, limit);
+  let value: unknown;
+  try { value = JSON.parse(text); } catch {
+    throw new ApiFailure(502, "browser_cookie_broker_invalid", "The browser cookie broker returned an invalid response.");
+  }
+  if (!response.ok) {
+    let projected;
+    try { projected = projectBrowserCookieBrokerError(value); } catch {
+      throw new ApiFailure(502, "browser_cookie_broker_failed", "The browser cookie broker rejected the operation.");
+    }
+    return Response.json(projected, { status: response.status });
+  }
+  try {
+    return Response.json(project(value), { status: response.status });
+  } catch {
+    throw new ApiFailure(502, "browser_cookie_broker_invalid", "The browser cookie broker returned an invalid response.");
+  }
+}
 
 async function handleManagedMemoryRoute(
   request: Request,
@@ -5442,12 +5743,17 @@ function approvedAgentConversationId(resources: readonly string[]): string | und
 
 function approvedHostedCapabilities(resources: readonly string[]): string[] {
   const approved = new Set(resources);
+  const cliBrowserCookieCapabilities = resources.filter((resource) => (
+    parseCliBrowserCookieSyncResource(resource) !== undefined
+  ));
   return [
     ...(approved.has("urn:nanocodex:capability:mercator:boost") ? ["mercator.boost"] : []),
     ...(approved.has("urn:nanocodex:mpp:machusd:spend") ? ["mpp.mach"] : []),
     ...(approved.has(HOSTED_HISTORY_RESOURCE) ? ["history:read"] : []),
     ...(approved.has(HOSTED_MEMORY_READ_RESOURCE) ? ["memory:read"] : []),
     ...(approved.has(HOSTED_MEMORY_WRITE_RESOURCE) ? ["memory:write"] : []),
+    ...(approved.has(BROWSER_COOKIE_SYNC_RESOURCE) ? [BROWSER_COOKIE_SYNC_RESOURCE] : []),
+    ...cliBrowserCookieCapabilities,
   ];
 }
 

@@ -75,9 +75,9 @@ pub(crate) struct BrowserArgs {
 
     /// Copy cookies from a standard desktop browser profile into the private session.
     ///
-    /// macOS defaults to `none` so an unattended private browser never opens
-    /// the login Keychain. Other platforms default to `all`. Pass a browser
-    /// name to select its profile or `none` to start with an empty cookie jar.
+    /// Defaults to `all`, importing the selected desktop profile through a
+    /// short-lived isolated broker. Pass a browser name to select its profile
+    /// or `none` to start with an empty cookie jar.
     #[arg(
         long,
         env = "NANOCODEX_BROWSER_COOKIES",
@@ -86,8 +86,7 @@ pub(crate) struct BrowserArgs {
         default_missing_value = "all",
         require_equals = true
     )]
-    #[cfg_attr(target_os = "macos", arg(default_value = "none"))]
-    #[cfg_attr(not(target_os = "macos"), arg(default_value = "all"))]
+    #[arg(default_value = "all")]
     cookies: Option<CookieSourceKind>,
 
     /// Permit a visible temporary browser when macOS must authorize cookie decryption.
@@ -97,9 +96,10 @@ pub(crate) struct BrowserArgs {
     #[arg(
         long = "cookie-auth",
         env = "NANOCODEX_BROWSER_COOKIE_AUTH",
-        value_enum,
-        default_value = "background"
+        value_enum
     )]
+    #[cfg_attr(target_os = "macos", arg(default_value = "interactive"))]
+    #[cfg_attr(not(target_os = "macos"), arg(default_value = "background"))]
     cookie_authorization: CookieAuthorizationKind,
 
     /// Select passkeys owned by Nanocodex or interactively use the macOS host authenticator.
@@ -125,7 +125,7 @@ impl Default for BrowserArgs {
         Self {
             browser: None,
             cookies: Some(default_cookie_source()),
-            cookie_authorization: CookieAuthorizationKind::Background,
+            cookie_authorization: default_cookie_authorization(),
             passkeys: PasskeyKind::Virtual,
             browser_executable: None,
         }
@@ -183,11 +183,6 @@ impl BrowserArgs {
             if self.browser_executable.is_some() {
                 return Err(eyre!("--browser-executable requires an enabled browser"));
             }
-            if self.cookie_authorization == CookieAuthorizationKind::Interactive {
-                return Err(eyre!(
-                    "--cookie-auth=interactive requires an enabled browser"
-                ));
-            }
             if self.passkeys == PasskeyKind::Host {
                 return Err(eyre!("--passkeys=host requires an enabled browser"));
             }
@@ -232,17 +227,8 @@ impl BrowserArgs {
                         },
                     ))
                 }
-                CookieSource::State(state) => {
-                    if self.cookie_authorization == CookieAuthorizationKind::Interactive {
-                        return Err(eyre!(
-                            "--cookie-auth=interactive requires a Chromium-family cookie source"
-                        ));
-                    }
-                    builder.storage_state(state)
-                }
+                CookieSource::State(state) => builder.storage_state(state),
             };
-        } else if self.cookie_authorization == CookieAuthorizationKind::Interactive {
-            return Err(eyre!("--cookie-auth=interactive requires browser cookies"));
         }
         let browser = builder
             .build()
@@ -364,14 +350,18 @@ fn resolve_browser_launch(
     }
 }
 
-#[cfg(target_os = "macos")]
 const fn default_cookie_source() -> CookieSourceKind {
-    CookieSourceKind::None
+    CookieSourceKind::All
+}
+
+#[cfg(target_os = "macos")]
+const fn default_cookie_authorization() -> CookieAuthorizationKind {
+    CookieAuthorizationKind::Interactive
 }
 
 #[cfg(not(target_os = "macos"))]
-const fn default_cookie_source() -> CookieSourceKind {
-    CookieSourceKind::All
+const fn default_cookie_authorization() -> CookieAuthorizationKind {
+    CookieAuthorizationKind::Background
 }
 
 fn cookie_source(source: CookieSourceKind, target: BrowserKind) -> Result<CookieSource> {
@@ -581,7 +571,7 @@ mod tests {
         let disabled = BrowserArgs {
             browser: Some(super::BrowserKind::None),
             cookies: Some(super::CookieSourceKind::None),
-            cookie_authorization: super::CookieAuthorizationKind::Background,
+            cookie_authorization: super::CookieAuthorizationKind::Interactive,
             passkeys: super::PasskeyKind::None,
             browser_executable: None,
         }

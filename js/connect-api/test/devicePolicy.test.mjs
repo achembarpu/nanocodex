@@ -10,6 +10,7 @@ import {
   managedMemoryCapability,
   requestedConnectorsSatisfied,
 } from "../src/devicePolicy.mts";
+import { formatCliBrowserCookieSyncResource } from "../src/appToolPolicy.mts";
 
 const publicKey = "0x048318535b54105d4a7aae60c08fc45f9687181b4fdfc625bd1a753fa7397fed753547f11ca8696646f2f3acb08e31016afac23e630c5d11f59f61fef57b0d2aa5";
 const keyAddress = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266";
@@ -84,6 +85,24 @@ test("CLI durability portability must be an exact signed resource", () => {
     ...base,
     "urn:nanocodex:agent:durability:portability:export",
   ])), /resources/);
+});
+
+test("CLI cookie sync device authorization selects one exact canonical origin", () => {
+  const cookieResource = formatCliBrowserCookieSyncResource("https://example.com");
+  const resources = [...base, cookieResource];
+  assert.deepEqual(parseCliRegisterBody(registration(resources)).resources, resources);
+  assert.throws(() => parseCliRegisterBody(registration([
+    ...resources,
+    formatCliBrowserCookieSyncResource("https://other.example"),
+  ])), /one canonical origin/);
+  for (const invalid of [
+    "urn:nanocodex:browser-cookies:sync",
+    "urn:nanocodex:browser-cookies:local-sync:https%3A%2F%2FEXAMPLE.com",
+    "urn:nanocodex:browser-cookies:local-sync:https%3A%2F%2Fexample.com%2F",
+    "urn:nanocodex:browser-cookies:local-sync:http%3A%2F%2Fexample.com",
+  ]) {
+    assert.throws(() => parseCliRegisterBody(registration([...base, invalid])), /resources|canonical origin/);
+  }
 });
 
 test("CLI connector focus is signed, singular, and part of the granted connector set", () => {

@@ -31,8 +31,6 @@ use tokio::{
 };
 use tracing::warn;
 
-use crate::trace_serialized;
-
 use super::{
     BrowserError, BrowserNetworkBodyKind, BrowserNetworkContext, BrowserNetworkRequest,
     BrowserWebSocketDirection, Diagnostics, NetworkSource, apply_response, finish_request,
@@ -237,7 +235,6 @@ async fn run(
                         break;
                     }
                 };
-                trace_devtools_message(&message);
                 match message {
                     Message::Response(response) => {
                         if response.id == attach_call {
@@ -336,38 +333,6 @@ async fn run(
             }
         }
     }
-}
-
-fn trace_devtools_message(message: &Message<CdpEventMessage>) {
-    if !tracing::enabled!(target: "nanocodex_browser", tracing::Level::INFO) {
-        return;
-    }
-    let value = match message {
-        Message::Response(response) => serde_json::json!({
-            "id": response.id,
-            "result": response.result,
-            "error": response.error,
-        }),
-        Message::Event(event) => {
-            let params = match event.params.clone().into_json() {
-                Ok(params) => params,
-                Err(error) => {
-                    tracing::warn!(
-                        target: "nanocodex_browser",
-                        %error,
-                        "failed to serialize raw DevTools event"
-                    );
-                    return;
-                }
-            };
-            serde_json::json!({
-                "method": event.method,
-                "sessionId": event.session_id,
-                "params": params,
-            })
-        }
-    };
-    trace_serialized("devtools.message.received", &value);
 }
 
 fn configure_page(

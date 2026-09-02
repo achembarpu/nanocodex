@@ -6,6 +6,24 @@ import {
   type EncryptedEnvelope,
 } from "./credential-vault";
 import {
+  BROWSER_COOKIE_JAR_ID,
+  browserCookieJarMetadata,
+  type BrowserCookieJarMetadata,
+  type BrowserCookieJarV1,
+  MAX_BROWSER_COOKIE_JAR_BODY_BYTES,
+  MAX_BROWSER_COOKIE_JARS,
+  publicBrowserCookieJar,
+  publicBrowserCookieJarNames,
+  publicBrowserCookieJarMetadata,
+  sameBrowserCookieJarBinding,
+  sameBrowserCookieJarMetadata,
+  validateBrowserCookieJarBinding,
+  validateBrowserCookieJarDelete,
+  validateBrowserCookieJarUpsert,
+  validateStoredBrowserCookieJar,
+  validateStoredBrowserCookieJarMetadata,
+} from "./browser-cookie-jar";
+import {
   type BrokeredSshIdentity,
   validateSshIdentity,
   validSshIdentityReference,
@@ -26,6 +44,7 @@ const MAX_VAULT_ENTRIES = 100;
 const MAX_VAULT_BODY_BYTES = 12 * 1024;
 const VAULT_ID = /^[A-Za-z0-9_-]{22,64}$/;
 const VAULT_ENTRY_KEY_PREFIX = "vault-entry:";
+const BROWSER_COOKIE_JAR_KEY_PREFIX = "browser-cookie-jar:";
 const SUBJECT = /^[A-Za-z0-9_-]{43,128}$/;
 const USER_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const SUBJECT_DIRECTORY_PREFIX = "agent-subject-v1:";
@@ -117,6 +136,7 @@ type CredentialState = {
   login?: PendingLogin;
   ssh?: Record<string, BrokeredSshIdentity>;
   vault?: Record<string, VaultEntryMetadata>;
+  browserCookieJars?: Record<string, BrowserCookieJarMetadata>;
 };
 type StoredRow = { envelope: EncryptedEnvelope };
 
@@ -308,6 +328,138 @@ export class UserCredentialBroker extends DurableObject<BrokerEnv> {
       }
       if (request.method === "GET" && url.pathname === "/v1/status") {
         return json(this.#publicStatus(), 200);
+      }
+      if (url.pathname === "/v1/browser-cookie-jars") {
+        if (request.method !== "GET") return jsonError(405, "method_not_allowed");
+        if (await hasRequestPayload(request)) return jsonError(400, "invalid_request");
+        return json({
+          browser_cookie_jars: Object.values(this.#credentials.browserCookieJars ?? {})
+            .sort((left, right) => right.updatedAt - left.updatedAt
+              || compareText(left.id, right.id))
+            .map(publicBrowserCookieJarMetadata),
+        }, 200);
+      }
+      const browserCookieJarMatch = url.pathname.match(
+        /^\/v1\/browser-cookie-jars\/([A-Za-z0-9_-]{22,64})(?:\/(materialize|names))?$/,
+      );
+      if (browserCookieJarMatch) {
+        const id = browserCookieJarMatch[1]!;
+        const projection = browserCookieJarMatch[2];
+        if (!BROWSER_COOKIE_JAR_ID.test(id)) {
+          return jsonError(400, "invalid_browser_cookie_jar_id");
+        }
+        if (request.method === "PUT" && !projection) {
+          if (!isJsonContentType(request.headers.get("content-type"))) {
+            return jsonError(415, "invalid_content_type");
+          }
+          const upsert = validateBrowserCookieJarUpsert(
+            await readJson(request, MAX_BROWSER_COOKIE_JAR_BODY_BYTES),
+          );
+          if (!upsert) return jsonError(400, "invalid_browser_cookie_jar");
+          const current = this.#credentials.browserCookieJars?.[id];
+          if (current && !sameBrowserCookieJarBinding(current, upsert)) {
+            return jsonError(409, "browser_cookie_jar_binding_conflict");
+          }
+          if ((current?.revision ?? 0) !== upsert.revision) {
+            return jsonError(409, "browser_cookie_jar_revision_conflict");
+          }
+          if (!current
+            && Object.keys(this.#credentials.browserCookieJars ?? {}).length
+              >= MAX_BROWSER_COOKIE_JARS) {
+            return jsonError(409, "browser_cookie_jar_limit_reached");
+          }
+          if (upsert.revision >= Number.MAX_SAFE_INTEGER) {
+            return jsonError(409, "browser_cookie_jar_revision_conflict");
+          }
+          const jar: BrowserCookieJarV1 = {
+            schemaVersion: 1,
+            id,
+            origin: upsert.origin,
+            profileId: upsert.profileId,
+            storeId: upsert.storeId,
+            revision: upsert.revision + 1,
+            updatedAt: Date.now(),
+            cookies: upsert.cookies,
+          };
+          const metadata = browserCookieJarMetadata(jar);
+          const next: CredentialState = {
+            ...this.#credentials,
+            browserCookieJars: {
+              ...this.#credentials.browserCookieJars,
+              [id]: metadata,
+            },
+          };
+          const [stateEnvelope, jarEnvelope] = await Promise.all([
+            this.#vault.seal(next),
+            this.#browserCookieJarVault(id).seal(jar),
+          ]);
+          await this.#state.storage.transaction(async (transaction) => {
+            await transaction.put(STATE_KEY, { envelope: stateEnvelope } satisfies StoredRow);
+            await transaction.put(browserCookieJarStorageKey(id), {
+              envelope: jarEnvelope,
+            } satisfies StoredRow);
+          });
+          this.#credentials = next;
+          return json(publicBrowserCookieJarMetadata(metadata), current ? 200 : 201);
+        }
+        if (request.method === "POST" && projection) {
+          if (!isJsonContentType(request.headers.get("content-type"))) {
+            return jsonError(415, "invalid_content_type");
+          }
+          const binding = validateBrowserCookieJarBinding(await readJson(request, 8 * 1024));
+          if (!binding) return jsonError(400, "invalid_browser_cookie_jar_binding");
+          const metadata = this.#credentials.browserCookieJars?.[id];
+          if (!metadata) return jsonError(404, "browser_cookie_jar_not_found");
+          if (!sameBrowserCookieJarBinding(metadata, binding)) {
+            return jsonError(409, "browser_cookie_jar_binding_conflict");
+          }
+          const row = await this.#state.storage.get<StoredRow>(browserCookieJarStorageKey(id));
+          if (!row) return jsonError(404, "browser_cookie_jar_not_found");
+          const opened = await this.#browserCookieJarVault(id).open<unknown>(row.envelope);
+          const jar = validateStoredBrowserCookieJar(id, opened.value);
+          if (!jar || !sameBrowserCookieJarMetadata(metadata, browserCookieJarMetadata(jar))) {
+            return jsonError(503, "browser_cookie_jar_invalid");
+          }
+          if (opened.reseal) {
+            await this.#state.storage.put(browserCookieJarStorageKey(id), {
+              envelope: await this.#browserCookieJarVault(id).seal(jar),
+            } satisfies StoredRow);
+          }
+          return json(
+            projection === "names"
+              ? publicBrowserCookieJarNames(jar)
+              : publicBrowserCookieJar(jar),
+            200,
+          );
+        }
+        if (request.method === "DELETE" && !projection) {
+          if (!isJsonContentType(request.headers.get("content-type"))) {
+            return jsonError(415, "invalid_content_type");
+          }
+          const deletion = validateBrowserCookieJarDelete(await readJson(request, 8 * 1024));
+          if (!deletion) return jsonError(400, "invalid_browser_cookie_jar_delete");
+          const current = this.#credentials.browserCookieJars?.[id];
+          if (!current) return new Response(null, { status: 204, headers: noStoreHeaders() });
+          if (!sameBrowserCookieJarBinding(current, deletion)) {
+            return jsonError(409, "browser_cookie_jar_binding_conflict");
+          }
+          if (current.revision !== deletion.revision) {
+            return jsonError(409, "browser_cookie_jar_revision_conflict");
+          }
+          const jars = { ...this.#credentials.browserCookieJars };
+          delete jars[id];
+          const next: CredentialState = { ...this.#credentials };
+          if (Object.keys(jars).length) next.browserCookieJars = jars;
+          else delete next.browserCookieJars;
+          const stateEnvelope = await this.#vault.seal(next);
+          await this.#state.storage.transaction(async (transaction) => {
+            await transaction.put(STATE_KEY, { envelope: stateEnvelope } satisfies StoredRow);
+            await transaction.delete(browserCookieJarStorageKey(id));
+          });
+          this.#credentials = next;
+          return new Response(null, { status: 204, headers: noStoreHeaders() });
+        }
+        return jsonError(405, "method_not_allowed");
       }
       const vaultMatch = url.pathname.match(
         /^\/v1\/vault\/(login|card|address|phone)(?:\/([A-Za-z0-9_-]{22,64}))?$/,
@@ -828,6 +980,13 @@ export class UserCredentialBroker extends DurableObject<BrokerEnv> {
     );
   }
 
+  #browserCookieJarVault(id: string): CredentialVault {
+    return new CredentialVault(
+      this.#env,
+      `user/${this.#state.id.toString()}/browser-cookie-jar/${id}`,
+    );
+  }
+
   async #persistAndSchedule(): Promise<void> {
     const row = {
       envelope: await this.#vault.seal(this.#credentials),
@@ -883,6 +1042,26 @@ export class UserCredentialBroker extends DurableObject<BrokerEnv> {
       restored.vault = Object.fromEntries(retainedVault.map((entry) => [entry.id, entry]));
     } else {
       delete restored.vault;
+    }
+    const validBrowserCookieJars = Object.entries(
+      isRecord(restored.browserCookieJars) ? restored.browserCookieJars : {},
+    ).flatMap(([id, value]) => {
+      const metadata = validateStoredBrowserCookieJarMetadata(id, value);
+      if (metadata) return [metadata];
+      changed = true;
+      return [];
+    }).sort((left, right) => right.updatedAt - left.updatedAt
+      || compareText(left.id, right.id));
+    if (restored.browserCookieJars !== undefined
+      && !isRecord(restored.browserCookieJars)) changed = true;
+    if (validBrowserCookieJars.length > MAX_BROWSER_COOKIE_JARS) changed = true;
+    const retainedBrowserCookieJars = validBrowserCookieJars.slice(0, MAX_BROWSER_COOKIE_JARS);
+    if (retainedBrowserCookieJars.length) {
+      restored.browserCookieJars = Object.fromEntries(
+        retainedBrowserCookieJars.map((entry) => [entry.id, entry]),
+      );
+    } else {
+      delete restored.browserCookieJars;
     }
     this.#credentials = restored;
     const chatgpt = restored.chatgpt;
@@ -1362,6 +1541,10 @@ function vaultEntryStorageKey(id: string): string {
   return `${VAULT_ENTRY_KEY_PREFIX}${id}`;
 }
 
+function browserCookieJarStorageKey(id: string): string {
+  return `${BROWSER_COOKIE_JAR_KEY_PREFIX}${id}`;
+}
+
 function publicVaultEntry(entry: VaultEntry | VaultEntryMetadata): Readonly<{
   id: string;
   kind: VaultKind;
@@ -1501,7 +1684,10 @@ async function readJson(request: Request, limit: number): Promise<Record<string,
   try {
     const value: unknown = JSON.parse(await readBoundedText(request, limit));
     return isRecord(value) ? value : undefined;
-  } catch { return undefined; }
+  } catch (error) {
+    if (error instanceof BrokerFailure) throw error;
+    return undefined;
+  }
 }
 
 async function readBoundedText(message: Request | Response, limit: number): Promise<string> {

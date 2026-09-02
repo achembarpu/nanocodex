@@ -23,6 +23,16 @@ import {
   removePersistedRecipe,
   removePreview,
 } from "../lib/page";
+import {
+  assertCookieJarFence,
+  cookieRemovalDetails,
+  cookieSetDetails,
+  createCookieJar,
+  validateCookieJar,
+  type BrowserCookieJarV1,
+  type CookieCaptureHandle,
+  type CookieRestoreConfirmation,
+} from "../lib/cookie-sync";
 
 const REGISTRATION_ID = "nanocodex-site-recipes-v1";
 const RUNNER_FILE = "content-scripts/recipe-runner.js";
@@ -32,6 +42,7 @@ const SELECTION_PREFIX = "page-selection:";
 const SELECTION_SET_PREFIX = "page-selection-set:";
 const SELECTION_MAX_AGE_MS = 5 * 60 * 1000;
 const TAB_PAGE_SIZE = 50;
+const COOKIE_CONFIRMATION_MAX_AGE_MS = 60 * 1000;
 
 interface SelectedTab {
   document_id: string;
@@ -67,11 +78,29 @@ interface Lease {
   preview?: SiteRecipe;
 }
 
+interface HeldCookieJar {
+  captured_at_ms: number;
+  capture_id: string;
+  jar: BrowserCookieJarV1;
+  lease_id: string;
+  owner_document_id: string;
+}
+
+interface CookieRestoreChallenge {
+  capture_id: string;
+  confirmation_id: string;
+  created_at_ms: number;
+  lease_id: string;
+  owner_document_id: string;
+}
+
 const activeRequests = new Set<string>();
 const cancelledRequests = new Set<string>();
 const invalidatedLeases = new Set<string>();
 const leaseQueues = new Map<string, Promise<unknown>>();
 let recipeQueue: Promise<unknown> = Promise.resolve();
+const heldCookieJars = new Map<string, HeldCookieJar>();
+const cookieRestoreChallenges = new Map<string, CookieRestoreChallenge>();
 
 export default defineBackground(() => {
   void chrome.storage.local.setAccessLevel({ accessLevel: "TRUSTED_CONTEXTS" });
@@ -179,6 +208,46 @@ async function handleRuntimeMessage(value: unknown, sender: chrome.runtime.Messa
       return listRecipes();
     case "recipe.forget":
       return serializeRecipes(() => forgetRecipe(requiredString(message, "origin")));
+    case "cookie.capture": {
+      const leaseId = requiredString(message, "lease_id");
+      return serializeLease(leaseId, () => captureCookies(leaseId, ownerDocumentId!));
+    }
+    case "cookie.sync.export": {
+      const leaseId = requiredString(message, "lease_id");
+      return serializeLease(leaseId, () => exportCookieCapture(
+        requiredString(message, "capture_id"),
+        leaseId,
+        ownerDocumentId!,
+      ));
+    }
+    case "cookie.capture.release":
+      releaseCookieCapture(
+        requiredString(message, "capture_id"),
+        requiredString(message, "lease_id"),
+        ownerDocumentId!,
+      );
+      return {};
+    case "cookie.restore.stage": {
+      const leaseId = requiredString(message, "lease_id");
+      return serializeLease(leaseId, () => stageCookieRestore(message.jar, leaseId, ownerDocumentId!));
+    }
+    case "cookie.restore.prepare": {
+      const leaseId = requiredString(message, "lease_id");
+      return serializeLease(leaseId, () => prepareCookieRestore(
+        requiredString(message, "capture_id"),
+        leaseId,
+        ownerDocumentId!,
+      ));
+    }
+    case "cookie.restore.cancel":
+      cancelCookieRestore(requiredString(message, "confirmation_id"), ownerDocumentId!);
+      return {};
+    case "cookie.restore.apply": {
+      const confirmationId = requiredString(message, "confirmation_id");
+      const challenge = requireCookieRestoreChallenge(confirmationId, ownerDocumentId!);
+      if (message.confirmed !== true) throw new Error("Cookie restore requires explicit destructive confirmation.");
+      return serializeLease(challenge.lease_id, () => applyCookieRestore(confirmationId, ownerDocumentId!));
+    }
     case "recipe.for_document":
       return recipeForDocument(requiredString(message, "url"), sender);
     default:
@@ -205,6 +274,257 @@ async function listRecipes(): Promise<StoredSiteRecipe[]> {
     }
   }
   return recipes.sort((left, right) => right.updated_at_ms - left.updated_at_ms);
+}
+
+async function captureCookies(leaseId: string, ownerDocumentId: string): Promise<CookieCaptureHandle> {
+  await requireCookiesPermission();
+  const { current, storeId } = await requireActiveCookieLease(leaseId, ownerDocumentId);
+  const cookies = await chrome.cookies.getAll({ url: current.claim.url, storeId });
+  const exact = await requireActiveCookieLease(leaseId, ownerDocumentId);
+  if (exact.storeId !== storeId) throw new Error("The active tab changed browser stores during cookie capture.");
+  const jar = createCookieJar({
+    origin: current.claim.origin,
+    profile_id: await browserInstanceId(),
+    store_id: storeId,
+  }, cookies);
+  const captureId = crypto.randomUUID();
+  purgeCookieStateForLease(leaseId);
+  const held: HeldCookieJar = {
+    captured_at_ms: Date.now(),
+    capture_id: captureId,
+    jar,
+    lease_id: leaseId,
+    owner_document_id: ownerDocumentId,
+  };
+  heldCookieJars.set(captureId, held);
+  return {
+    capture_id: captureId,
+    lease_id: leaseId,
+    origin: jar.origin,
+    profile_id: jar.profile_id,
+    store_id: jar.store_id,
+    cookie_count: jar.cookies.length,
+    captured_at_ms: held.captured_at_ms,
+  };
+}
+
+async function exportCookieCapture(
+  captureId: string,
+  leaseId: string,
+  ownerDocumentId: string,
+): Promise<{ jar_id: string; jar: BrowserCookieJarV1 }> {
+  const held = requireHeldCookieJar(captureId, leaseId, ownerDocumentId);
+  const { current, storeId } = await requireActiveCookieLease(leaseId, ownerDocumentId);
+  assertCookieJarFence(held.jar, {
+    origin: current.claim.origin,
+    profile_id: await browserInstanceId(),
+    store_id: storeId,
+  });
+  return { jar_id: held.capture_id, jar: held.jar };
+}
+
+function releaseCookieCapture(captureId: string, leaseId: string, ownerDocumentId: string): void {
+  requireHeldCookieJar(captureId, leaseId, ownerDocumentId);
+  heldCookieJars.delete(captureId);
+}
+
+async function stageCookieRestore(
+  value: unknown,
+  leaseId: string,
+  ownerDocumentId: string,
+): Promise<CookieCaptureHandle> {
+  const jar = validateCookieJar(value);
+  assertSupportedCookiePartitions(jar);
+  const { current, storeId } = await requireActiveCookieLease(leaseId, ownerDocumentId);
+  assertCookieJarFence(jar, {
+    origin: current.claim.origin,
+    profile_id: await browserInstanceId(),
+    store_id: storeId,
+  });
+  const captureId = crypto.randomUUID();
+  purgeCookieStateForLease(leaseId);
+  const held: HeldCookieJar = {
+    captured_at_ms: Date.now(),
+    capture_id: captureId,
+    jar,
+    lease_id: leaseId,
+    owner_document_id: ownerDocumentId,
+  };
+  heldCookieJars.set(captureId, held);
+  return {
+    capture_id: captureId,
+    lease_id: leaseId,
+    origin: jar.origin,
+    profile_id: jar.profile_id,
+    store_id: jar.store_id,
+    cookie_count: jar.cookies.length,
+    captured_at_ms: held.captured_at_ms,
+  };
+}
+
+async function prepareCookieRestore(
+  captureId: string,
+  leaseId: string,
+  ownerDocumentId: string,
+): Promise<CookieRestoreConfirmation> {
+  await requireCookiesPermission();
+  cleanupExpiredCookieChallenges();
+  const held = requireHeldCookieJar(captureId, leaseId, ownerDocumentId);
+  const { current, storeId } = await requireActiveCookieLease(leaseId, ownerDocumentId);
+  assertCookieJarFence(held.jar, {
+    origin: current.claim.origin,
+    profile_id: await browserInstanceId(),
+    store_id: storeId,
+  });
+  const confirmationId = crypto.randomUUID();
+  cookieRestoreChallenges.set(confirmationId, {
+    capture_id: captureId,
+    confirmation_id: confirmationId,
+    created_at_ms: Date.now(),
+    lease_id: leaseId,
+    owner_document_id: ownerDocumentId,
+  });
+  return {
+    confirmation_id: confirmationId,
+    origin: held.jar.origin,
+    cookie_count: held.jar.cookies.length,
+  };
+}
+
+function cancelCookieRestore(confirmationId: string, ownerDocumentId: string): void {
+  const challenge = cookieRestoreChallenges.get(confirmationId);
+  if (challenge?.owner_document_id === ownerDocumentId) {
+    cookieRestoreChallenges.delete(confirmationId);
+    const held = heldCookieJars.get(challenge.capture_id);
+    if (held?.owner_document_id === ownerDocumentId && held.lease_id === challenge.lease_id) {
+      heldCookieJars.delete(challenge.capture_id);
+    }
+  }
+}
+
+async function applyCookieRestore(
+  confirmationId: string,
+  ownerDocumentId: string,
+): Promise<{ origin: string; cookie_count: number }> {
+  await requireCookiesPermission();
+  const challenge = requireCookieRestoreChallenge(confirmationId, ownerDocumentId);
+  cookieRestoreChallenges.delete(confirmationId);
+  const held = requireHeldCookieJar(challenge.capture_id, challenge.lease_id, ownerDocumentId);
+  assertSupportedCookiePartitions(held.jar);
+  const { current, storeId } = await requireActiveCookieLease(challenge.lease_id, ownerDocumentId);
+  const fence = {
+    origin: current.claim.origin,
+    profile_id: await browserInstanceId(),
+    store_id: storeId,
+  };
+  assertCookieJarFence(held.jar, fence);
+
+  const currentCookies = await chrome.cookies.getAll({ url: current.claim.url, storeId });
+  const backup = createCookieJar(fence, currentCookies);
+  await requireActiveCookieLease(challenge.lease_id, ownerDocumentId);
+  try {
+    await replaceCookiesForOrigin(backup, held.jar, current.claim.url);
+  } catch (cause) {
+    try {
+      const partial = createCookieJar(fence, await chrome.cookies.getAll({ url: current.claim.url, storeId }));
+      await replaceCookiesForOrigin(partial, backup, current.claim.url);
+    } catch {
+      throw new Error(`Cookie restore failed and the previous site cookies could not be fully recovered. ${errorMessage(cause)}`);
+    }
+    throw cause;
+  }
+  await requireActiveCookieLease(challenge.lease_id, ownerDocumentId);
+  heldCookieJars.delete(held.capture_id);
+  return { origin: held.jar.origin, cookie_count: held.jar.cookies.length };
+}
+
+async function replaceCookiesForOrigin(
+  existing: BrowserCookieJarV1,
+  replacement: BrowserCookieJarV1,
+  leasedUrl: string,
+): Promise<void> {
+  assertCookieJarFence(replacement, existing);
+  for (const cookie of existing.cookies) {
+    await chrome.cookies.remove(cookieRemovalDetails(cookie, existing.origin));
+  }
+  for (const cookie of replacement.cookies) {
+    const restored = await chrome.cookies.set(cookieSetDetails(cookie, replacement.origin));
+    if (!restored) throw new Error("Chrome rejected a cookie during restore.");
+  }
+  const url = new URL(leasedUrl);
+  if (url.origin !== replacement.origin) throw new Error("The leased origin changed during cookie restore.");
+}
+
+async function requireCookiesPermission(): Promise<void> {
+  if (!await chrome.permissions.contains({ permissions: ["cookies"] })) {
+    throw new Error("Cookie access was not granted from the side panel.");
+  }
+}
+
+async function requireActiveCookieLease(
+  leaseId: string,
+  ownerDocumentId: string,
+): Promise<{ current: Lease; storeId: string }> {
+  const current = await requireLease(leaseId, ownerDocumentId);
+  await assertLeaseDocument(current);
+  const tab = await chrome.tabs.get(current.claim.tab_id);
+  if (tab.incognito) throw new Error("Cookie sync is unavailable in incognito windows.");
+  if (!tab.active || tab.windowId !== current.claim.window_id || !tab.url
+    || normalizeOrigin(tab.url) !== current.claim.origin || !/^https?:\/\//.test(tab.url)) {
+    throw new Error("Cookie sync requires the exact currently leased active HTTP(S) tab.");
+  }
+  const stores = (await chrome.cookies.getAllCookieStores())
+    .filter((store) => store.tabIds.includes(current.claim.tab_id));
+  if (stores.length !== 1 || !stores[0]?.id) throw new Error("The active tab's cookie store is unavailable.");
+  await assertLeaseDocument(current);
+  return { current, storeId: stores[0].id };
+}
+
+function requireHeldCookieJar(captureId: string, leaseId: string, ownerDocumentId: string): HeldCookieJar {
+  const held = heldCookieJars.get(captureId);
+  if (!held || held.lease_id !== leaseId || held.owner_document_id !== ownerDocumentId) {
+    throw new Error("The in-memory cookie capture expired. Capture this site again.");
+  }
+  return held;
+}
+
+function requireCookieRestoreChallenge(
+  confirmationId: string,
+  ownerDocumentId: string,
+): CookieRestoreChallenge {
+  cleanupExpiredCookieChallenges();
+  const challenge = cookieRestoreChallenges.get(confirmationId);
+  if (!challenge || challenge.owner_document_id !== ownerDocumentId) {
+    throw new Error("The cookie restore confirmation expired.");
+  }
+  return challenge;
+}
+
+function cleanupExpiredCookieChallenges(): void {
+  const now = Date.now();
+  for (const [id, challenge] of cookieRestoreChallenges) {
+    if (now - challenge.created_at_ms > COOKIE_CONFIRMATION_MAX_AGE_MS) cookieRestoreChallenges.delete(id);
+  }
+}
+
+function purgeCookieStateForLease(leaseId: string): void {
+  for (const [id, held] of heldCookieJars) {
+    if (held.lease_id === leaseId) heldCookieJars.delete(id);
+  }
+  for (const [id, challenge] of cookieRestoreChallenges) {
+    if (challenge.lease_id === leaseId) cookieRestoreChallenges.delete(id);
+  }
+}
+
+function assertSupportedCookiePartitions(jar: BrowserCookieJarV1): void {
+  const partitioned = jar.cookies.filter((cookie) => cookie.partitionKey);
+  if (partitioned.length === 0) return;
+  const match = /(?:Chrome|Chromium)\/(\d+)/.exec(navigator.userAgent);
+  const major = match ? Number(match[1]) : 0;
+  if (major < 119) throw new Error("This Chrome version cannot restore partitioned cookies.");
+  if (major < 130 && partitioned.some((cookie) => cookie.partitionKey?.hasCrossSiteAncestor !== undefined)) {
+    throw new Error("This Chrome version cannot preserve the cookie partition ancestor state.");
+  }
 }
 
 async function forgetRecipe(originValue: string): Promise<{ forgotten: boolean }> {
@@ -564,7 +884,10 @@ async function releaseLease(leaseId: string, ownerDocumentId?: string): Promise<
   await serializeLease(leaseId, async () => {
     const stored = await chrome.storage.session.get(leaseStorageKey(leaseId));
     const current = stored[leaseStorageKey(leaseId)] as Lease | undefined;
-    if (!current || current.id !== leaseId) return;
+    if (!current || current.id !== leaseId) {
+      purgeCookieStateForLease(leaseId);
+      return;
+    }
     if (ownerDocumentId && current.owner_document_id !== ownerDocumentId) {
       throw new Error("The selected-page lease expired.");
     }
@@ -574,6 +897,7 @@ async function releaseLease(leaseId: string, ownerDocumentId?: string): Promise<
       if (!invalidatedLeases.has(leaseId)) throw error;
     }
     await chrome.storage.session.remove(leaseStorageKey(leaseId));
+    purgeCookieStateForLease(leaseId);
   });
 }
 
@@ -613,6 +937,7 @@ async function interruptTab(tabId: number, reason: string): Promise<void> {
   for (const current of interrupted) {
     invalidatedLeases.add(current.id);
     await chrome.storage.session.remove(leaseStorageKey(current.id));
+    purgeCookieStateForLease(current.id);
     const message: PageInterrupted = { type: "page.interrupted", lease_id: current.id, reason };
     void chrome.runtime.sendMessage(message).catch(() => {});
   }

@@ -90,7 +90,8 @@ pub use ios::{
 };
 pub use native::{BrowserBuildError, BrowserError};
 pub use session::{
-    BraveSession, BraveSessionError, BrowserCookieAuthorization, BrowserProfileKind,
+    BraveSession, BraveSessionError, BrowserCookieAuthorization, BrowserOriginCookieCapture,
+    BrowserProfileCookie, BrowserProfileCookiePartitionKey, BrowserProfileKind,
 };
 
 const TOOL_DESCRIPTION: &str = r#"Control one server-managed browser session.
@@ -2741,14 +2742,12 @@ impl BrowserRecording {
             state.current_url.clone_from(url);
         }
         let result = recording_result(sequence, &action, &state.current_url);
-        trace_serialized("recording.action.input", &action);
         info!(
             target: "nanocodex_browser",
             sequence,
-            action = ?action,
+            action = ?action_name,
             "recorded no-op browser action"
         );
-        trace_serialized("recording.action.result", &result);
         state
             .actions
             .push(RecordedBrowserAction { sequence, action });
@@ -3908,8 +3907,7 @@ impl Browser {
     /// Captures credential-bearing cookies and storage for currently open
     /// origins at the harness boundary.
     ///
-    /// Enabled browser tracing records the complete returned state. Protect
-    /// that backend with the same access and retention policy as a cookie jar.
+    /// INFO tracing records only cookie and origin counts, never values.
     ///
     /// # Errors
     ///
@@ -3920,7 +3918,7 @@ impl Browser {
 
     /// Replaces cookies and installs per-origin storage before future
     /// navigations. This method is deliberately absent from the browser tool.
-    /// Enabled browser tracing records the complete input state.
+    /// INFO tracing records only cookie and origin counts, never values.
     ///
     /// # Errors
     ///

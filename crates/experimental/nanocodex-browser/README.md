@@ -223,12 +223,15 @@ discovery with a fresh temporary profile. On macOS this selects a dedicated
 chrome-headless-shell or Chrome for Testing installation, not the user's Brave
 or Chrome application. `--browser=brave` remains an explicit request to launch
 the standard Brave application with a private profile. Cookie import defaults
-to `none` on macOS so unattended startup never opens the login Keychain, and
-to `all` on other platforms. `all` auto-detects the source; `brave`, `chrome`,
+to `all` on every platform. `all` auto-detects the source; `brave`, `chrome`,
 `chromium`, `edge`, `firefox`, and `safari` select it explicitly. When
 requested on macOS, Chromium-family cookie decryption may briefly use the
 source browser's Keychain identity, but that bounded broker exits before the
-long-lived automation session starts.
+long-lived automation session starts. macOS first attempts background
+decryption and automatically opens the isolated interactive broker only when
+the populated cookie store exports no usable cookies.
+Chromium-family discovery follows the profile recorded as last used, then
+falls back only to standard profiles that actually contain a cookie database.
 
 The CLI's virtual platform authenticator persists testing passkeys across
 browser and Nanocodex restarts in `$NANOCODEX_DIR/browser/passkeys.json`, or
@@ -279,14 +282,32 @@ remains runtime-only in `ALL_TOOLS`. Selecting `all` deliberately gives the
 agent authenticated access to every site represented in the selected profile.
 
 On macOS, if a populated Chromium-family store cannot be decrypted in the
-background, rerun with `--cookie-auth=interactive`. Nanocodex first tries the
-invisible broker, then opens one visible window backed only by a fresh copied
+background, Nanocodex opens one visible window backed only by a fresh copied
 temporary profile. Approve the Keychain prompt within two minutes; the broker
 exports the cookies and closes before the dedicated automation browser starts.
-The ordinary source profile and its tabs are never opened or controlled.
+The ordinary source profile and its tabs are never opened or controlled. Pass
+`--cookie-auth=background` to suppress that interactive fallback.
 
 ```console
-nanocodex --cookies=brave --cookie-auth=interactive
+nanocodex --cookies=brave --cookie-auth=background
+```
+
+Harnesses can export a lossless, exact-origin cookie snapshot without exposing
+it to the browser tool. The returned values retain session, host-only,
+expiration, SameSite, and supported partition metadata. Opaque partitions fail
+closed instead of being flattened.
+
+```rust,no_run
+# use nanocodex_browser::BraveSession;
+# use url::Url;
+# async fn capture() -> Result<(), Box<dyn std::error::Error>> {
+let source = BraveSession::standard()?;
+let capture = source
+    .capture_origin_cookies(Url::parse("https://example.com")?)
+    .await?;
+assert_eq!(capture.origin.as_str(), "https://example.com/");
+# Ok(())
+# }
 ```
 
 ## Current boundaries
@@ -305,7 +326,9 @@ nanocodex --cookies=brave --cookie-auth=interactive
   warmup schema bytes. The contract is not capability-filtered after discovery.
 - Lighthouse, CrUX, and video require caller-supplied external tooling or
   credentials. Brave profile transfer remains harness-owned and intentionally
-  absent from the model-callable schema.
+  absent from the model-callable schema. INFO tracing retains only safe
+  configuration and count metadata, not cookie values, browser storage values,
+  configured header values, raw network events, or action payloads/results.
 - Cloned browser handles share one session and serialized action stream. Call
   `Browser::close` or `BrowserVm::shutdown` when deterministic cleanup matters.
 - The crate consumes `nanocodex-vm` unconditionally today, so local-only builds

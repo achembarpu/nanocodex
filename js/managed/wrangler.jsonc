@@ -33,6 +33,14 @@
       "entrypoint": "ChiefOfStaffEgress"
     }
   ],
+  "browser": {
+    "binding": "BROWSER"
+  },
+  "worker_loaders": [
+    {
+      "binding": "LOADER"
+    }
+  ],
   "r2_buckets": [
     {
       "binding": "NANOCODEX_HISTORY",
@@ -109,7 +117,8 @@
     }
   ],
   "vars": {
-    "AGENT_IDLE_TIMEOUT_MS": "30000"
+    "AGENT_IDLE_TIMEOUT_MS": "30000",
+    "MANAGED_BROWSER_PROVIDER": "cloudflare"
   },
   "env": {
     "development": {
@@ -122,6 +131,13 @@
           "entrypoint": "ChiefOfStaffEgress",
           "remote": false
         }
+      ],
+      "browser": {
+        "binding": "BROWSER",
+        "remote": true
+      },
+      "worker_loaders": [
+        { "binding": "LOADER" }
       ],
       "r2_buckets": [
         { "binding": "NANOCODEX_HISTORY", "bucket_name": "nanocodex-managed-history" }
@@ -141,6 +157,7 @@
       },
       "vars": {
         "AGENT_IDLE_TIMEOUT_MS": "1000",
+        "MANAGED_BROWSER_PROVIDER": "cloudflare",
         "NANOCODEX_ADMIN_TOKEN": "nanocodex-local-room-signing-key",
         "NANOCODEX_LOCAL_WEBAUTHN_HMAC_KEY": "nanocodex-local-passkey-portability-v1",
         "NANOCODEX_LOCAL_OAUTH_RELAY_HMAC_KEY": "nanocodex-local-oauth-relay-hmac-v1-only"

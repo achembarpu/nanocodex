@@ -11,6 +11,13 @@ import {
   validateVaultEntryPayload,
 } from "./broker";
 import {
+  BROWSER_COOKIE_JAR_ID,
+  MAX_BROWSER_COOKIE_JAR_BODY_BYTES,
+  validateBrowserCookieJarBinding,
+  validateBrowserCookieJarDelete,
+  validateBrowserCookieJarUpsert,
+} from "./browser-cookie-jar";
+import {
   UserConnectorBroker,
   type ConnectorBrokerEnv,
 } from "./connector-broker";
@@ -940,6 +947,88 @@ async function handleControl(request: Request, url: URL, env: EgressEnv): Promis
         body: forwardedBody,
       }),
     });
+  }
+
+  const browserCookieJarMatch = url.pathname.match(
+    /^\/users\/([A-Za-z0-9][A-Za-z0-9._:-]{0,127})\/credentials\/browser-cookie-jars(?:\/([A-Za-z0-9_-]{22,64})(?:\/(materialize|names))?)?$/,
+  );
+  if (browserCookieJarMatch) {
+    const userId = browserCookieJarMatch[1]!;
+    const id = browserCookieJarMatch[2];
+    const projection = browserCookieJarMatch[3];
+    if (!id) {
+      if (request.method !== "GET") return jsonError(405, "method_not_allowed");
+      if (await hasRequestPayload(request)) return jsonError(400, "invalid_request");
+      return userBroker(env, userId).fetch("https://credentials.internal/v1/browser-cookie-jars");
+    }
+    if (!BROWSER_COOKIE_JAR_ID.test(id)) {
+      return jsonError(400, "invalid_browser_cookie_jar_id");
+    }
+    const target = `https://credentials.internal/v1/browser-cookie-jars/${id}${
+      projection ? `/${projection}` : ""
+    }`;
+    if (request.method === "PUT" && !projection) {
+      if (!isJsonContentType(request.headers.get("content-type"))) {
+        return jsonError(415, "invalid_content_type");
+      }
+      let value: unknown;
+      try { value = JSON.parse(await readBoundedText(request, MAX_BROWSER_COOKIE_JAR_BODY_BYTES)); }
+      catch (error) {
+        return error instanceof EgressFailure
+          ? jsonError(error.status, error.code)
+          : jsonError(400, "invalid_browser_cookie_jar");
+      }
+      const upsert = validateBrowserCookieJarUpsert(value);
+      if (!upsert) return jsonError(400, "invalid_browser_cookie_jar");
+      return userBroker(env, userId).fetch(target, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          schema_version: 1,
+          origin: upsert.origin,
+          profile_id: upsert.profileId,
+          store_id: upsert.storeId,
+          revision: upsert.revision,
+          cookies: upsert.cookies,
+        }),
+      });
+    }
+    if (request.method === "POST" && projection) {
+      if (!isJsonContentType(request.headers.get("content-type"))) {
+        return jsonError(415, "invalid_content_type");
+      }
+      const value = await readJson(request, 8 * 1024);
+      const binding = validateBrowserCookieJarBinding(value);
+      if (!binding) return jsonError(400, "invalid_browser_cookie_jar_binding");
+      return userBroker(env, userId).fetch(target, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          origin: binding.origin,
+          profile_id: binding.profileId,
+          store_id: binding.storeId,
+        }),
+      });
+    }
+    if (request.method === "DELETE" && !projection) {
+      if (!isJsonContentType(request.headers.get("content-type"))) {
+        return jsonError(415, "invalid_content_type");
+      }
+      const value = await readJson(request, 8 * 1024);
+      const deletion = validateBrowserCookieJarDelete(value);
+      if (!deletion) return jsonError(400, "invalid_browser_cookie_jar_delete");
+      return userBroker(env, userId).fetch(target, {
+        method: "DELETE",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          origin: deletion.origin,
+          profile_id: deletion.profileId,
+          store_id: deletion.storeId,
+          revision: deletion.revision,
+        }),
+      });
+    }
+    return jsonError(405, "method_not_allowed");
   }
 
   const connectorMatch = url.pathname.match(

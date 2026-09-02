@@ -96,8 +96,9 @@ use crate::{
     BrowserEgressPolicy, BrowserElementContext, BrowserElementReference, BrowserFrame, BrowserGate,
     BrowserHttpHeader, BrowserImageArtifact, BrowserNetworkBodyKind, BrowserNetworkCallFrame,
     BrowserNetworkContext, BrowserNetworkInitiator, BrowserNetworkRequest, BrowserNetworkTiming,
-    BrowserOriginStorage, BrowserPageError, BrowserPageState, BrowserPasskeyMode,
-    BrowserPostActionSnapshot, BrowserReactEvent, BrowserReactStatus, BrowserStorageState,
+    BrowserOriginCookieCapture, BrowserOriginStorage, BrowserPageError, BrowserPageState,
+    BrowserPasskeyMode, BrowserPostActionSnapshot, BrowserProfileCookie,
+    BrowserProfileCookiePartitionKey, BrowserReactEvent, BrowserReactStatus, BrowserStorageState,
     BrowserTab, BrowserTarget, BrowserTargetIndex, BrowserWebSocketDirection,
     BrowserWebSocketMessage, HostPasskeyAuthenticator, MAX_VIEWPORT_DIMENSION, ReactDiagnostics,
     VirtualAuthenticator, VirtualCredential,
@@ -107,7 +108,7 @@ use crate::{
         BrowserMobileFindingSeverity, BrowserMobileState, BrowserOrientation, BrowserPermission,
         BrowserReducedMotion, BrowserViewport,
     },
-    session::cookie_applies_to,
+    session::{ProfileCookieSnapshot, cookie_applies_to},
     trace_serialized,
 };
 use credential_store::VirtualCredentialStore;
@@ -924,14 +925,11 @@ fn browser_context_trace_value(context: &BrowserContext) -> serde_json::Value {
             })
         })
         .collect::<Vec<_>>();
-    let extra_headers = context
+    let extra_header_names = context
         .extra_headers
         .iter()
-        .map(|(name, value)| serde_json::json!({ "name": name, "value": value }))
+        .map(|(name, _)| name)
         .collect::<Vec<_>>();
-    let http_credentials = context.http_credentials.as_ref().map(
-        |(username, password)| serde_json::json!({ "username": username, "password": password }),
-    );
     let network = context.network.map(|network| {
         serde_json::json!({
             "offline": network.offline,
@@ -951,9 +949,9 @@ fn browser_context_trace_value(context: &BrowserContext) -> serde_json::Value {
         "reducedMotion": context.reduced_motion.map(|value| format!("{value:?}")),
         "geolocation": geolocation,
         "permissions": permissions,
-        "extraHeaders": extra_headers,
-        "httpCredentials": http_credentials,
-        "initScripts": context.init_scripts,
+        "extraHeaderNames": extra_header_names,
+        "httpCredentialsConfigured": context.http_credentials.is_some(),
+        "initScriptCount": context.init_scripts.len(),
         "cpuThrottleRate": context.cpu_throttle_rate,
         "network": network,
     })
@@ -967,15 +965,15 @@ fn trace_browser_configuration(owner: &NativeBrowser) {
             "allowLoopback": policy.allow_loopback,
         })
     });
-    let crux_client = owner.crux_client.as_ref().map(|client| {
+    let storage_state = owner.storage_state.as_ref().map(|state| {
         serde_json::json!({
-            "apiKey": client.api_key,
-            "endpoint": client.endpoint,
+            "cookieCount": state.cookies.len(),
+            "origins": state.origins.iter().map(|origin| &origin.origin).collect::<Vec<_>>(),
         })
     });
     let value = serde_json::json!({
         "executable": owner.executable,
-        "cdpEndpoint": owner.cdp_endpoint,
+        "cdpEndpointConfigured": owner.cdp_endpoint.is_some(),
         "persistentProfile": owner.persistent_profile,
         "braveSession": owner.brave_session.as_ref().map(BraveSession::trace_value),
         "launchBraveExecutable": owner.launch_brave_executable,
@@ -991,11 +989,11 @@ fn trace_browser_configuration(owner: &NativeBrowser) {
         "egressPolicy": egress_policy,
         "fileRoot": owner.file_root,
         "context": browser_context_trace_value(&owner.context),
-        "storageState": owner.storage_state,
+        "storageState": storage_state,
         "afterAction": format!("{:?}", owner.after_action),
         "ffmpegExecutable": owner.ffmpeg_executable,
         "lighthouseExecutable": owner.lighthouse_executable,
-        "cruxClient": crux_client,
+        "cruxClientConfigured": owner.crux_client.is_some(),
     });
     trace_serialized("session.configuration", &value);
 }
@@ -1044,9 +1042,6 @@ impl Session {
         } else {
             None
         };
-        if let Some(cookies) = &imported_cookies {
-            trace_serialized("session.imported_brave_cookies", cookies);
-        }
         if opens_brave_profile && let Some(brave_session) = brave_session {
             brave_session.prepare(&profile).await?;
         }
@@ -2392,19 +2387,86 @@ async fn export_profile_cookies(
     runtime_dir: &Path,
     brave_session: &BraveSession,
 ) -> Result<Vec<CookieParam>, BrowserError> {
-    let (source_cookie_count, cookies) = export_profile_cookies_once(
+    let (snapshot, cookies) = export_profile_cookie_values(runtime_dir, brave_session).await?;
+    finish_profile_cookie_export(brave_session, snapshot.cookie_count, cookies)
+}
+
+pub(crate) async fn capture_profile_origin_cookies(
+    brave_session: &BraveSession,
+    origin: Url,
+) -> Result<BrowserOriginCookieCapture, BrowserError> {
+    let scoped = brave_session.scoped_to_origin(origin.clone())?;
+    let runtime_dir = tempfile::Builder::new()
+        .prefix("nanocodex-cookie-capture-")
+        .tempdir()?;
+    let (snapshot, cookies) = export_profile_cookie_values(runtime_dir.path(), &scoped).await?;
+    if snapshot.cookie_count > 0 && cookies.is_empty() {
+        return Err(BrowserError::ProfileCookieExportUnavailable {
+            source_cookie_count: snapshot.cookie_count,
+        });
+    }
+
+    let cookies = captured_profile_cookies(cookies, &origin, &snapshot)?;
+    Ok(BrowserOriginCookieCapture { origin, cookies })
+}
+
+fn captured_profile_cookies(
+    cookies: Vec<Cookie>,
+    origin: &Url,
+    snapshot: &ProfileCookieSnapshot,
+) -> Result<Vec<BrowserProfileCookie>, BrowserError> {
+    let unsupported_partitions = cookies
+        .iter()
+        .filter(|cookie| cookie.partition_key_opaque == Some(true))
+        .count();
+    if unsupported_partitions > 0 {
+        return Err(BrowserError::UnsupportedProfileCookiePartitions {
+            count: unsupported_partitions,
+        });
+    }
+    let mut cookies = cookies
+        .into_iter()
+        .filter(|cookie| {
+            cookie_applies_to(
+                &cookie.domain,
+                origin.host_str().expect("capture origin was validated"),
+            ) && (!cookie.secure || origin.scheme() == "https")
+        })
+        .map(|cookie| {
+            let partition = cookie.partition_key.as_ref();
+            let was_session = snapshot.was_session(
+                &cookie.name,
+                &cookie.domain,
+                &cookie.path,
+                partition.map(|partition| partition.top_level_site.as_str()),
+                partition.map(|partition| partition.has_cross_site_ancestor),
+            );
+            profile_cookie(cookie, was_session)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    cookies.sort_unstable_by(|left, right| {
+        (&left.domain, &left.path, &left.name).cmp(&(&right.domain, &right.path, &right.name))
+    });
+    Ok(cookies)
+}
+
+async fn export_profile_cookie_values(
+    runtime_dir: &Path,
+    brave_session: &BraveSession,
+) -> Result<(ProfileCookieSnapshot, Vec<Cookie>), BrowserError> {
+    let (snapshot, cookies) = export_profile_cookies_once(
         runtime_dir,
         brave_session,
         CookieBrokerPresentation::Background,
     )
     .await?;
-    if source_cookie_count > 0
+    if snapshot.cookie_count > 0
         && cookies.is_empty()
         && brave_session.cookie_authorization_policy() == BrowserCookieAuthorization::Interactive
     {
         warn!(
             target: "nanocodex_browser",
-            source_cookie_count,
+            source_cookie_count = snapshot.cookie_count,
             timeout_seconds = COOKIE_AUTHORIZATION_TIMEOUT.as_secs(),
             "opening a visible temporary browser for cookie authorization"
         );
@@ -2414,9 +2476,9 @@ async fn export_profile_cookies(
             CookieBrokerPresentation::Interactive,
         )
         .await?;
-        return finish_profile_cookie_export(brave_session, interactive_source_count, cookies);
+        return Ok((interactive_source_count, cookies));
     }
-    finish_profile_cookie_export(brave_session, source_cookie_count, cookies)
+    Ok((snapshot, cookies))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2429,11 +2491,11 @@ async fn export_profile_cookies_once(
     runtime_dir: &Path,
     brave_session: &BraveSession,
     presentation: CookieBrokerPresentation,
-) -> Result<(i64, Vec<Cookie>), BrowserError> {
+) -> Result<(ProfileCookieSnapshot, Vec<Cookie>), BrowserError> {
     let broker_profile = tempfile::Builder::new()
         .prefix("brave-cookie-broker-")
         .tempdir_in(runtime_dir)?;
-    let source_cookie_count = brave_session.prepare(broker_profile.path()).await?;
+    let snapshot = brave_session.prepare(broker_profile.path()).await?;
 
     #[cfg(target_os = "macos")]
     if presentation == CookieBrokerPresentation::Interactive {
@@ -2442,7 +2504,7 @@ async fn export_profile_cookies_once(
             brave_session.executable(),
         )
         .await?;
-        return Ok((source_cookie_count, cookies));
+        return Ok((snapshot, cookies));
     }
 
     let config = BrowserConfig::builder().user_data_dir(broker_profile.path());
@@ -2488,7 +2550,7 @@ async fn export_profile_cookies_once(
     let cookies = exported?;
     shutdown?;
 
-    Ok((source_cookie_count, cookies))
+    Ok((snapshot, cookies))
 }
 
 #[cfg(target_os = "macos")]
@@ -2744,6 +2806,48 @@ fn cookie_param(cookie: Cookie) -> Option<CookieParam> {
         same_party: None,
         source_scheme: Some(source_scheme),
         source_port: Some(source_port),
+        partition_key,
+    })
+}
+
+fn profile_cookie(cookie: Cookie, was_session: bool) -> Result<BrowserProfileCookie, BrowserError> {
+    let partition_key = cookie
+        .partition_key
+        .map(|partition| {
+            let top_level_site = Url::parse(&partition.top_level_site)
+                .ok()
+                .filter(|url| {
+                    matches!(url.scheme(), "http" | "https")
+                        && url.origin().ascii_serialization() == partition.top_level_site
+                })
+                .ok_or(BrowserError::UnsupportedProfileCookiePartitions { count: 1 })?;
+            Ok::<_, BrowserError>(BrowserProfileCookiePartitionKey {
+                top_level_site: top_level_site.origin().ascii_serialization(),
+                has_cross_site_ancestor: partition.has_cross_site_ancestor,
+            })
+        })
+        .transpose()?;
+    let session = cookie.session || was_session;
+    let expires_epoch_seconds =
+        (!session && cookie.expires.is_finite() && cookie.expires > 0.0).then_some(cookie.expires);
+    if !session && expires_epoch_seconds.is_none() {
+        return Err(BrowserError::InvalidProfileCookieExpiration);
+    }
+    Ok(BrowserProfileCookie {
+        host_only: !cookie.domain.starts_with('.'),
+        name: cookie.name,
+        value: cookie.value,
+        domain: cookie.domain,
+        path: cookie.path,
+        secure: cookie.secure,
+        http_only: cookie.http_only,
+        same_site: cookie.same_site.map(|same_site| match same_site {
+            CookieSameSite::Strict => BrowserCookieSameSite::Strict,
+            CookieSameSite::Lax => BrowserCookieSameSite::Lax,
+            CookieSameSite::None => BrowserCookieSameSite::None,
+        }),
+        session,
+        expires_epoch_seconds,
         partition_key,
     })
 }
@@ -3400,7 +3504,6 @@ impl NativeBrowser {
             browser.action = ?action_name,
         );
         async {
-            trace_serialized("action.input", &action);
             if state.closed {
                 return Err(BrowserError::Closed);
             }
@@ -3521,7 +3624,6 @@ impl NativeBrowser {
                     return Err(error);
                 }
             };
-            trace_serialized("action.result", &result);
             info!(
                 target: "nanocodex_browser",
                 sequence,
@@ -3563,7 +3665,12 @@ impl NativeBrowser {
                 .ok_or(BrowserError::SessionUnavailable)?
                 .storage_state()
                 .await?;
-            trace_serialized("storage_state.result", &storage_state);
+            info!(
+                target: "nanocodex_browser",
+                browser_cookie_count = storage_state.cookies.len(),
+                browser_storage_origin_count = storage_state.origins.len(),
+                "captured browser storage state"
+            );
             Ok(storage_state)
         }
         .instrument(span)
@@ -3576,7 +3683,12 @@ impl NativeBrowser {
     ) -> Result<(), BrowserError> {
         let span = info_span!(target: "nanocodex_browser", "browser.restore_storage_state");
         async {
-            trace_serialized("storage_state.input", &storage_state);
+            info!(
+                target: "nanocodex_browser",
+                browser_cookie_count = storage_state.cookies.len(),
+                browser_storage_origin_count = storage_state.origins.len(),
+                "restoring browser storage state"
+            );
             let mut state = self.state.lock().await;
             if state.closed {
                 return Err(BrowserError::Closed);
@@ -6064,7 +6176,6 @@ async fn start_diagnostics(
     let console_diagnostics = Arc::clone(&diagnostics);
     let console = tokio::spawn(async move {
         while let Some(event) = console_events.next().await {
-            trace_serialized("devtools.Runtime.consoleAPICalled", event.as_ref());
             let entry = BrowserConsoleEntry {
                 sequence: 0,
                 level: event.r#type.as_ref().to_owned(),
@@ -6087,7 +6198,6 @@ async fn start_diagnostics(
     let error_diagnostics = Arc::clone(&diagnostics);
     let errors = tokio::spawn(async move {
         while let Some(event) = error_events.next().await {
-            trace_serialized("devtools.Runtime.exceptionThrown", event.as_ref());
             let details = &event.exception_details;
             let error = BrowserPageError {
                 sequence: 0,
@@ -6112,7 +6222,6 @@ async fn start_diagnostics(
     let request_diagnostics = Arc::clone(&diagnostics);
     let requests = tokio::spawn(async move {
         while let Some(event) = request_events.next().await {
-            trace_serialized("devtools.Network.requestWillBeSent", event.as_ref());
             let id = event.request_id.as_ref().to_owned();
             let timestamp = *event.timestamp.inner();
             let Ok(mut diagnostics) = request_diagnostics.lock() else {
@@ -6168,7 +6277,6 @@ async fn start_diagnostics(
     let response_diagnostics = Arc::clone(&diagnostics);
     let responses = tokio::spawn(async move {
         while let Some(event) = response_events.next().await {
-            trace_serialized("devtools.Network.responseReceived", event.as_ref());
             let id = event.request_id.as_ref();
             let Ok(mut diagnostics) = response_diagnostics.lock() else {
                 break;
@@ -6181,7 +6289,6 @@ async fn start_diagnostics(
     let finished_diagnostics = Arc::clone(&diagnostics);
     let finished = tokio::spawn(async move {
         while let Some(event) = finished_events.next().await {
-            trace_serialized("devtools.Network.loadingFinished", event.as_ref());
             let id = event.request_id.as_ref();
             let Ok(mut diagnostics) = finished_diagnostics.lock() else {
                 break;
@@ -6198,7 +6305,6 @@ async fn start_diagnostics(
     let failed_diagnostics = Arc::clone(&diagnostics);
     let failures = tokio::spawn(async move {
         while let Some(event) = failed_events.next().await {
-            trace_serialized("devtools.Network.loadingFailed", event.as_ref());
             let id = event.request_id.as_ref();
             let Ok(mut diagnostics) = failed_diagnostics.lock() else {
                 break;
@@ -6216,7 +6322,6 @@ async fn start_diagnostics(
     let web_socket_created_diagnostics = Arc::clone(&diagnostics);
     let web_socket_created = tokio::spawn(async move {
         while let Some(event) = web_socket_created_events.next().await {
-            trace_serialized("devtools.Network.webSocketCreated", event.as_ref());
             let id = event.request_id.as_ref().to_owned();
             let Ok(mut diagnostics) = web_socket_created_diagnostics.lock() else {
                 break;
@@ -6267,10 +6372,6 @@ async fn start_diagnostics(
     let web_socket_request_diagnostics = Arc::clone(&diagnostics);
     let web_socket_requests = tokio::spawn(async move {
         while let Some(event) = web_socket_request_events.next().await {
-            trace_serialized(
-                "devtools.Network.webSocketWillSendHandshakeRequest",
-                event.as_ref(),
-            );
             let id = event.request_id.as_ref().to_owned();
             let timestamp = *event.timestamp.inner();
             let Ok(mut diagnostics) = web_socket_request_diagnostics.lock() else {
@@ -6326,10 +6427,6 @@ async fn start_diagnostics(
     let web_socket_response_diagnostics = Arc::clone(&diagnostics);
     let web_socket_responses = tokio::spawn(async move {
         while let Some(event) = web_socket_response_events.next().await {
-            trace_serialized(
-                "devtools.Network.webSocketHandshakeResponseReceived",
-                event.as_ref(),
-            );
             let id = event.request_id.as_ref();
             let Ok(mut diagnostics) = web_socket_response_diagnostics.lock() else {
                 break;
@@ -6346,7 +6443,6 @@ async fn start_diagnostics(
     let web_socket_sent_diagnostics = Arc::clone(&diagnostics);
     let web_socket_sent = tokio::spawn(async move {
         while let Some(event) = web_socket_sent_events.next().await {
-            trace_serialized("devtools.Network.webSocketFrameSent", event.as_ref());
             let Ok(mut diagnostics) = web_socket_sent_diagnostics.lock() else {
                 break;
             };
@@ -6364,7 +6460,6 @@ async fn start_diagnostics(
     let web_socket_received_diagnostics = Arc::clone(&diagnostics);
     let web_socket_received = tokio::spawn(async move {
         while let Some(event) = web_socket_received_events.next().await {
-            trace_serialized("devtools.Network.webSocketFrameReceived", event.as_ref());
             let Ok(mut diagnostics) = web_socket_received_diagnostics.lock() else {
                 break;
             };
@@ -6381,7 +6476,6 @@ async fn start_diagnostics(
     let web_socket_error_diagnostics = Arc::clone(&diagnostics);
     let web_socket_errors = tokio::spawn(async move {
         while let Some(event) = web_socket_error_events.next().await {
-            trace_serialized("devtools.Network.webSocketFrameError", event.as_ref());
             let Ok(mut diagnostics) = web_socket_error_diagnostics.lock() else {
                 break;
             };
@@ -6396,7 +6490,6 @@ async fn start_diagnostics(
     let web_socket_closed_diagnostics = diagnostics;
     let web_socket_closed = tokio::spawn(async move {
         while let Some(event) = web_socket_closed_events.next().await {
-            trace_serialized("devtools.Network.webSocketClosed", event.as_ref());
             let Ok(mut diagnostics) = web_socket_closed_diagnostics.lock() else {
                 break;
             };
@@ -6411,7 +6504,6 @@ async fn start_diagnostics(
         .await?;
     let dialogs = tokio::spawn(async move {
         while let Some(event) = dialog_events.next().await {
-            trace_serialized("devtools.Page.javascriptDialogOpening", event.as_ref());
             let kind = match event.r#type.as_ref() {
                 "alert" => BrowserDialogKind::Alert,
                 "confirm" => BrowserDialogKind::Confirm,
@@ -6470,7 +6562,6 @@ async fn start_download_diagnostics(
     let started_page = page.clone();
     let started = tokio::spawn(async move {
         while let Some(event) = started_events.next().await {
-            trace_serialized("devtools.Browser.downloadWillBegin", event.as_ref());
             let cancel = {
                 let Ok(mut diagnostics) = started_diagnostics.lock() else {
                     break;
@@ -6489,7 +6580,6 @@ async fn start_download_diagnostics(
     let progress_page = page.clone();
     let progress = tokio::spawn(async move {
         while let Some(event) = progress_events.next().await {
-            trace_serialized("devtools.Browser.downloadProgress", event.as_ref());
             let cancel = {
                 let Ok(mut diagnostics) = diagnostics.lock() else {
                     break;
@@ -7525,6 +7615,12 @@ pub enum BrowserError {
     )]
     ProfileCookieExportUnavailable { source_cookie_count: i64 },
     #[error(
+        "the source profile contains {count} cookies with unsupported opaque or malformed partition keys"
+    )]
+    UnsupportedProfileCookiePartitions { count: usize },
+    #[error("the source profile contains a persistent cookie with an invalid expiration")]
+    InvalidProfileCookieExpiration,
+    #[error(
         "interactive source-profile cookie authorization did not complete within {seconds} seconds"
     )]
     ProfileCookieAuthorizationTimedOut { seconds: u64 },
@@ -8176,7 +8272,8 @@ mod tests {
     use std::time::Duration;
 
     use chromiumoxide::cdp::browser_protocol::network::{
-        Cookie, CookieParam, CookiePriority, CookieSourceScheme, TimeSinceEpoch,
+        Cookie, CookieParam, CookiePartitionKey, CookiePriority, CookieSameSite,
+        CookieSourceScheme, TimeSinceEpoch,
     };
     use futures_util::StreamExt;
     use tokio::{io::AsyncReadExt, net::TcpListener};
@@ -8186,10 +8283,11 @@ mod tests {
     use super::{
         BrowserConfig, Chromium, Diagnostics, GateSignals, MAX_ACTION_INPUT_BYTES,
         MAX_CONSOLE_ENTRIES, MAX_DIAGNOSTIC_TEXT_BYTES, MAX_NETWORK_REQUESTS, NetworkSource,
-        allowed_cookie_params, build_config, classify_gate, close_chromium, cookie_param,
-        diagnostic_limit, profile_launch_config, resolve_extension_directory, session_stopped,
-        trace_browser_configuration, validate_url,
+        allowed_cookie_params, build_config, captured_profile_cookies, classify_gate,
+        close_chromium, cookie_param, diagnostic_limit, profile_cookie, profile_launch_config,
+        resolve_extension_directory, session_stopped, trace_browser_configuration, validate_url,
     };
+    use crate::session::ProfileCookieSnapshot;
     use crate::{
         BraveSession, Browser, BrowserAction, BrowserActionResult, BrowserConsoleEntry,
         BrowserContext, BrowserCookie, BrowserCruxClient, BrowserError, BrowserGate,
@@ -8225,7 +8323,7 @@ mod tests {
     }
 
     #[test]
-    fn full_fidelity_trace_retains_credential_bearing_configuration() {
+    fn info_trace_omits_credential_bearing_configuration() {
         let storage_state = BrowserStorageState {
             cookies: vec![BrowserCookie {
                 name: "session".to_owned(),
@@ -8277,8 +8375,99 @@ mod tests {
             "storage-secret",
             "crux-secret",
         ] {
-            assert!(logs.contains(expected), "trace omitted {expected}: {logs}");
+            assert!(!logs.contains(expected), "trace exposed {expected}: {logs}");
         }
+        assert!(
+            logs.contains("x-private"),
+            "trace omitted safe header name: {logs}"
+        );
+        assert!(
+            logs.contains("cookieCount"),
+            "trace omitted safe storage count: {logs}"
+        );
+    }
+
+    #[test]
+    fn lossless_profile_cookie_capture_preserves_supported_metadata() {
+        let mut cookie = test_cookie(".example.com", false, Some(false));
+        cookie.same_site = Some(CookieSameSite::Lax);
+        cookie.partition_key = Some(CookiePartitionKey::new("https://top.example", true));
+        let origin = url::Url::parse("https://console.example.com").unwrap();
+
+        let captured =
+            captured_profile_cookies(vec![cookie], &origin, &ProfileCookieSnapshot::default())
+                .unwrap();
+
+        assert_eq!(captured.len(), 1);
+        let cookie = &captured[0];
+        assert_eq!(cookie.name, "session");
+        assert_eq!(cookie.value, "secret");
+        assert_eq!(cookie.domain, ".example.com");
+        assert_eq!(cookie.path, "/console");
+        assert!(!cookie.host_only);
+        assert!(cookie.secure);
+        assert!(cookie.http_only);
+        assert!(!cookie.session);
+        assert_eq!(cookie.expires_epoch_seconds, Some(1_900_000_000.0));
+        assert_eq!(cookie.same_site, Some(crate::BrowserCookieSameSite::Lax));
+        let partition = cookie.partition_key.as_ref().unwrap();
+        assert_eq!(partition.top_level_site, "https://top.example");
+        assert!(partition.has_cross_site_ancestor);
+        assert!(!format!("{cookie:?}").contains("secret"));
+    }
+
+    #[test]
+    fn profile_cookie_capture_rejects_opaque_partitions_without_flattening() {
+        let origin = url::Url::parse("https://example.com").unwrap();
+        let error = captured_profile_cookies(
+            vec![test_cookie("example.com", true, Some(true))],
+            &origin,
+            &ProfileCookieSnapshot::default(),
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            BrowserError::UnsupportedProfileCookiePartitions { count: 1 }
+        ));
+    }
+
+    #[test]
+    fn profile_cookie_capture_filters_domain_and_scheme_for_exact_origin() {
+        let mut parent = test_cookie(".example.com", true, None);
+        parent.name = "parent".to_owned();
+        parent.secure = false;
+        let mut sibling = test_cookie("admin.example.com", true, None);
+        sibling.name = "sibling".to_owned();
+        sibling.secure = false;
+        let mut insecure = test_cookie("console.example.com", true, None);
+        insecure.name = "secure".to_owned();
+        let origin = url::Url::parse("http://console.example.com").unwrap();
+
+        let captured = captured_profile_cookies(
+            vec![parent, sibling, insecure],
+            &origin,
+            &ProfileCookieSnapshot::default(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            captured
+                .iter()
+                .map(|cookie| cookie.name.as_str())
+                .collect::<Vec<_>>(),
+            ["parent"]
+        );
+    }
+
+    #[test]
+    fn profile_cookie_capture_restores_original_session_semantics() {
+        let rewritten = test_cookie("example.com", false, None);
+
+        let captured = profile_cookie(rewritten, true).unwrap();
+
+        assert!(captured.session);
+        assert_eq!(captured.expires_epoch_seconds, None);
     }
 
     #[test]

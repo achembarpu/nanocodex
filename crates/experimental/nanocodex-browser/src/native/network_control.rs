@@ -20,7 +20,7 @@ use tokio::task::JoinHandle;
 use tracing::warn;
 use url::{Host, Url};
 
-use crate::{BrowserEgressPolicy, BrowserPageError, BrowserRouteResponse, trace_serialized};
+use crate::{BrowserEgressPolicy, BrowserPageError, BrowserRouteResponse};
 
 use super::{BrowserError, Diagnostics};
 
@@ -214,7 +214,6 @@ pub(super) async fn start(
     let page = page.clone();
     Ok(tokio::spawn(async move {
         while let Some(event) = requests.next().await {
-            trace_serialized("devtools.Fetch.requestPaused", event.as_ref());
             let decision = controls.decide(&event.request.url);
             let result = match decision {
                 RequestDecision::Continue => page
