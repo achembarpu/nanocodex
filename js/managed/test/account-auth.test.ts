@@ -171,6 +171,45 @@ describe("account provisioning", () => {
 });
 
 describe("SMS OTP authentication", () => {
+  it("uses a fixed Verify code only in the explicit development environment", async () => {
+    const local = portableEnv();
+    local.env.NANOCODEX_OTP_HMAC_KEY = "test-sms-otp-hmac-key-with-at-least-thirty-two-bytes";
+    local.env.ENVIRONMENT = "development";
+    local.env.NANOCODEX_MOCK_TWILIO_VERIFY_CODE = "123456";
+    const origin = "https://nanocodex.example";
+    const started = await beginSmsOtp(local.env, origin, "+14155550120");
+    expect(started.response.status).toBe(202);
+
+    const rejected = await completeSmsOtp(
+      local.env,
+      origin,
+      "+14155550120",
+      started.challengeId,
+      "000000",
+    );
+    expect(rejected.status).toBe(400);
+    await expect(rejected.json()).resolves.toEqual({
+      error: "invalid_or_expired_otp",
+    });
+
+    const approved = await completeSmsOtp(
+      local.env,
+      origin,
+      "+14155550120",
+      started.challengeId,
+      "123456",
+    );
+    expect(approved.status).toBe(200);
+    expect(approved.headers.get("set-cookie")).toMatch(/^nanocodex_account=s_/);
+
+    const production = portableEnv();
+    production.env.NANOCODEX_OTP_HMAC_KEY = local.env.NANOCODEX_OTP_HMAC_KEY;
+    production.env.ENVIRONMENT = "production";
+    production.env.NANOCODEX_MOCK_TWILIO_VERIFY_CODE = "123456";
+    const unavailable = await beginSmsOtp(production.env, origin, "+14155550121");
+    expect(unavailable.response.status).toBe(503);
+  });
+
   it("creates and restores one persistent account without exposing the phone number", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-09-02T12:00:00Z"));

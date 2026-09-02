@@ -63,6 +63,11 @@ Verify Service configured for SMS with six-digit codes. Provide its
 `TWILIO_AUTH_TOKEN` is accepted as a fallback credential pair when an API key
 is not configured.
 
+The checked-in `development` Wrangler environment uses `123456` as a local
+Verify fixture and does not contact Twilio. The fixture is active only when
+`ENVIRONMENT` is exactly `development`; production ignores the fixture value
+and still requires a valid Verify Service and credentials.
+
 Twilio Verify generates, delivers, and checks each code, automatically upgrading
 eligible SMS requests to RCS. Nanocodex retains a five-minute opaque local
 challenge so a successful verification can be bound to the initiating browser,

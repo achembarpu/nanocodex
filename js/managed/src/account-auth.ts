@@ -62,6 +62,8 @@ export function isUserId(value: unknown): value is string {
 export const NonceStorage = Kv.NonceStorage;
 
 export interface AccountAuthEnv {
+  ENVIRONMENT?: string;
+  NANOCODEX_MOCK_TWILIO_VERIFY_CODE?: string;
   NANOCODEX_AUTH: DurableObjectNamespace;
   NANOCODEX_USERS: DurableObjectNamespace<UserAccount>;
   NANOCODEX_API_KEYS: DurableObjectNamespace<ApiKeyRecord>;
@@ -2318,6 +2320,9 @@ function twilioVerifyRequest(
 }
 
 async function startTwilioSmsVerification(env: AccountAuthEnv, to: string): Promise<string> {
+  if (developmentTwilioVerifyCode(env)) {
+    return "VE00000000000000000000000000000000";
+  }
   const request = twilioVerifyRequest(env, "Verifications", { Channel: "sms", To: to });
   return fetchResponseWithDeadline(
     { fetch: (input: RequestInfo | URL, init?: RequestInit) => fetch(input, init) },
@@ -2347,6 +2352,8 @@ async function checkTwilioSmsVerification(
   verificationSid: string,
   code: string,
 ): Promise<boolean> {
+  const mockCode = developmentTwilioVerifyCode(env);
+  if (mockCode) return code === mockCode;
   const request = twilioVerifyRequest(env, "VerificationCheck", {
     Code: code,
     VerificationSid: verificationSid,
@@ -2368,6 +2375,15 @@ async function checkTwilioSmsVerification(
     },
     { retryable: true },
   );
+}
+
+function developmentTwilioVerifyCode(env: AccountAuthEnv): string | undefined {
+  const code = env.NANOCODEX_MOCK_TWILIO_VERIFY_CODE;
+  return env.ENVIRONMENT?.trim().toLowerCase() === "development"
+    && typeof code === "string"
+    && /^[0-9]{6}$/.test(code)
+    ? code
+    : undefined;
 }
 
 async function accountAddressForRequest(

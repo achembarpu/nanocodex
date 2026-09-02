@@ -18,6 +18,7 @@ import {
   managedMemoryCapability,
 } from "./devicePolicy.mts";
 import {
+  allowsHeadlessConnectAuth,
   connectAuthOrigin,
   deviceVerificationUrl,
   isLocalDevelopmentOrigin as isLocalDeviceOrigin,
@@ -478,7 +479,7 @@ export default {
       }
 
       if (url.pathname.startsWith("/v1/connect/auth")) {
-        requireDialogOrigin(request);
+        requireConnectAuthOrigin(request);
         const auth = createAuth(
           env,
           store,
@@ -5881,6 +5882,14 @@ async function scopedAppId(app: CallerApp): Promise<string> {
 
 function requireDialogOrigin(request: Request): void {
   requiredDialogOrigin(request);
+}
+
+function requireConnectAuthOrigin(request: Request): void {
+  if (allowsHeadlessConnectAuth(
+    new URL(request.url).origin,
+    request.headers.get("origin"),
+  )) return;
+  requireDialogOrigin(request);
 }
 
 function requiredDialogOrigin(request: Request): string {
