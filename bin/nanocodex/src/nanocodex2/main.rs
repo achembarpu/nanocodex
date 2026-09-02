@@ -221,19 +221,12 @@ fn managed_url_from_environment() -> Result<String, ManagedError> {
 }
 
 async fn run_turn(client: &ManagedClient, command: Run) -> Result<(), ManagedError> {
-    let (agent_id, state) = match command.agent {
-        Some(agent_id) => (agent_id, None),
-        None => {
-            let receipt = client.create().await?;
-            eprintln!("Managed agent: {}", receipt.agent_id);
-            let state = receipt.initial_state.ok_or(ManagedError::InvalidResponse(
-                "created agent receipt is missing initial state",
-            ))?;
-            (receipt.agent_id, Some(state))
-        }
-    };
-    let (agent, mut events, _, _) =
-        open_workspace_agent_from(client, Some(agent_id), state).await?;
+    let created = command.agent.is_none();
+    let (agent, mut events, agent_id, _) =
+        open_workspace_agent_from(client, command.agent, None).await?;
+    if created {
+        eprintln!("Managed agent: {agent_id}");
+    }
     let mut request = PromptRequest::new(command.prompt);
     if let Some(request_id) = command.idempotency_key {
         request = request.request_id(request_id);
@@ -276,19 +269,24 @@ async fn open_workspace_agent_from(
         .add(WorkspaceTools::new(&workspace))
         .build()
         .map_err(|error| ManagedError::Configuration(error.to_string()))?;
-    let agent_id = match agent_id {
-        Some(agent_id) => agent_id,
-        None => client.create().await?.agent_id,
-    };
-    let backend = match state {
-        Some(state) => Managed::open_live_from_state(client.clone(), agent_id.clone(), state),
-        None => Managed::open_live(client.clone(), agent_id.clone()),
+    let backend = match (agent_id, state) {
+        (None, None) => Managed::create_live(client.clone()),
+        (Some(agent_id), Some(state)) => {
+            Managed::open_live_from_state(client.clone(), agent_id, state)
+        }
+        (Some(agent_id), None) => Managed::open_live(client.clone(), agent_id),
+        (None, Some(_)) => {
+            return Err(ManagedError::Configuration(
+                "managed state requires an agent identifier".to_owned(),
+            ));
+        }
     };
     let (agent, events) = Nanocodex::builder(backend)
         .tools(tools)
         .build()
         .await
         .map_err(agent_error)?;
+    let agent_id = agent.agent_id().to_owned();
     Ok((agent, events, agent_id, workspace))
 }
 

@@ -62,7 +62,7 @@ async fn run_uses_managed_lifecycle_with_the_configured_local_workspace() {
         catalogs: Arc::new(Mutex::new(Vec::new())),
     };
     let app = Router::new()
-        .route("/v1/agents", post(create_agent))
+        .route("/v1/agents/live", get(create_live_socket))
         .route("/v1/agents/{agent}", get(agent_state))
         .route("/v1/agents/{agent}/tool-host", get(tool_host))
         .route("/v1/agents/{agent}/ws", get(managed_socket))
@@ -126,7 +126,7 @@ async fn run_uses_managed_lifecycle_with_the_configured_local_workspace() {
     );
     assert!(!stdout.contains(&api_key));
     assert!(!stderr.contains(&api_key));
-    assert!(state.authorized_requests.load(Ordering::SeqCst) >= 3);
+    assert!(state.authorized_requests.load(Ordering::SeqCst) >= 2);
     assert_eq!(
         std::fs::read_to_string(workspace.path().join("hosted-proof.txt")).unwrap(),
         "private-host\n",
@@ -138,7 +138,7 @@ async fn run_uses_managed_lifecycle_with_the_configured_local_workspace() {
 }
 
 #[tokio::test]
-async fn run_reports_a_created_agent_before_lifecycle_open_failure() {
+async fn run_rejects_a_malformed_create_live_ready_frame() {
     let api_key = format!("ncx_live_{}_{}", "1".repeat(12), "2".repeat(43));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -157,8 +157,7 @@ async fn run_reports_a_created_agent_before_lifecycle_open_failure() {
         catalogs: Arc::new(Mutex::new(Vec::new())),
     };
     let app = Router::new()
-        .route("/v1/agents", post(create_agent))
-        .route("/v1/agents/{agent}", get(failed_agent_state))
+        .route("/v1/agents/live", get(failed_create_live_socket))
         .with_state(state.clone());
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let workspace = tempfile::tempdir().unwrap();
@@ -183,7 +182,7 @@ async fn run_reports_a_created_agent_before_lifecycle_open_failure() {
     assert!(!output.status.success());
     assert!(output.stdout.is_empty());
     let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(stderr.starts_with(&format!("Managed agent: {AGENT_ID}\nError: ")));
+    assert!(stderr.starts_with("Error: "));
     assert!(!stderr.contains(&api_key));
     assert_eq!(state.authorized_requests.load(Ordering::SeqCst), 1);
     server.abort();
@@ -209,7 +208,7 @@ async fn run_keeps_the_durable_agent_when_local_tools_are_initially_unavailable(
         catalogs: Arc::new(Mutex::new(Vec::new())),
     };
     let app = Router::new()
-        .route("/v1/agents", post(create_agent))
+        .route("/v1/agents/live", get(create_live_socket))
         .route("/v1/agents/{agent}", get(agent_state))
         .route("/v1/agents/{agent}/tool-host", get(tool_host))
         .route("/v1/agents/{agent}/ws", get(managed_socket))
@@ -279,7 +278,7 @@ async fn run_reconnects_the_same_local_host_after_a_ready_socket_disconnect() {
         catalogs: Arc::new(Mutex::new(Vec::new())),
     };
     let app = Router::new()
-        .route("/v1/agents", post(create_agent))
+        .route("/v1/agents/live", get(create_live_socket))
         .route("/v1/agents/{agent}", get(agent_state))
         .route("/v1/agents/{agent}/tool-host", get(tool_host))
         .route("/v1/agents/{agent}/ws", get(managed_socket))
@@ -347,7 +346,7 @@ async fn run_reopens_one_durable_agent_and_falls_back_when_local_tools_are_absen
         tool_completed: Arc::new(tokio::sync::Notify::new()),
     };
     let app = Router::new()
-        .route("/v1/agents", post(durable_create_agent))
+        .route("/v1/agents/live", get(durable_create_live_socket))
         .route("/v1/agents/{agent}", get(durable_agent_state))
         .route("/v1/agents/{agent}/tool-host", get(durable_tool_host))
         .route("/v1/agents/{agent}/ws", get(durable_socket))
@@ -509,24 +508,19 @@ struct DurableState {
     tool_completed: Arc<tokio::sync::Notify>,
 }
 
-async fn durable_create_agent(
+async fn durable_create_live_socket(
     State(state): State<DurableState>,
     headers: HeaderMap,
+    upgrade: WebSocketUpgrade,
 ) -> impl IntoResponse {
     if !durable_authorized(&state, &headers) {
         return unauthorized();
     }
     state.creates.fetch_add(1, Ordering::SeqCst);
-    json_response(
-        StatusCode::CREATED,
-        serde_json::json!({
-            "agent_id": AGENT_ID,
-            "session_id": AGENT_ID,
-            "events_url": format!("{}/v1/agents/{AGENT_ID}/events", state.origin),
-            "websocket_url": format!("ws://unused/v1/agents/{AGENT_ID}/ws"),
-            "initial_state": agent_state_value("0"),
-        }),
-    )
+    state.event_cursors.lock().unwrap().push("0".to_owned());
+    upgrade
+        .on_upgrade(move |socket| serve_durable_socket(socket, state, "0".to_owned()))
+        .into_response()
 }
 
 async fn durable_agent_state(
@@ -920,6 +914,56 @@ async fn managed_socket(
         .into_response()
 }
 
+async fn create_live_socket(
+    State(state): State<TestState>,
+    headers: HeaderMap,
+    upgrade: WebSocketUpgrade,
+) -> impl IntoResponse {
+    if !authorized(&state, &headers) {
+        return unauthorized();
+    }
+    upgrade
+        .on_upgrade(move |mut socket| async move {
+            if state.disconnect_after_ready {
+                send_ready(&mut socket, "0", false).await;
+                drop(socket.send(Message::Close(None)).await);
+            } else {
+                serve_managed_socket(socket, state).await;
+            }
+        })
+        .into_response()
+}
+
+async fn failed_create_live_socket(
+    State(state): State<TestState>,
+    headers: HeaderMap,
+    upgrade: WebSocketUpgrade,
+) -> impl IntoResponse {
+    if !authorized(&state, &headers) {
+        return unauthorized();
+    }
+    upgrade
+        .on_upgrade(|mut socket| async move {
+            socket
+                .send(Message::Text(
+                    serde_json::json!({
+                        "type": "ready",
+                        "session_id": "wrong-agent",
+                        "restored": false,
+                        "active_turns": [],
+                        "active_turn_details": [],
+                        "capabilities": agent_capabilities(),
+                        "latest_event_cursor": "not-a-cursor"
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .unwrap();
+        })
+        .into_response()
+}
+
 async fn serve_managed_socket(mut socket: WebSocket, state: TestState) {
     send_ready(&mut socket, "0", false).await;
     let Some(Ok(Message::Text(prompt))) = socket.recv().await else {
@@ -956,7 +1000,7 @@ async fn send_ready(socket: &mut WebSocket, cursor: &str, restored: bool) {
                 "restored": restored,
                 "active_turns": [],
                 "active_turn_details": [],
-                "capabilities": {},
+                "capabilities": agent_capabilities(),
                 "latest_event_cursor": cursor
             })
             .to_string()
@@ -964,6 +1008,17 @@ async fn send_ready(socket: &mut WebSocket, cursor: &str, restored: bool) {
         ))
         .await
         .unwrap();
+}
+
+fn agent_capabilities() -> serde_json::Value {
+    serde_json::json!({
+        "durable_turns": true,
+        "resumable_events": true,
+        "live_steer": true,
+        "live_cancel": true,
+        "workspace": "cloudflare-computer",
+        "sandbox_escalation": false
+    })
 }
 
 async fn send_accepted(socket: &mut WebSocket, turn_id: &str, input: &str, cursor: u64) {
@@ -1154,35 +1209,6 @@ async fn serve_until_drain(socket: &mut WebSocket) {
             kind => panic!("unexpected executor frame after result: {kind:?}"),
         }
     }
-}
-
-async fn create_agent(State(state): State<TestState>, headers: HeaderMap) -> impl IntoResponse {
-    if !authorized(&state, &headers) {
-        return unauthorized();
-    }
-    let mut receipt = serde_json::json!({
-        "agent_id": AGENT_ID,
-        "session_id": AGENT_ID,
-        "events_url": format!("{}/v1/agents/{AGENT_ID}/events", state.origin),
-        "websocket_url": format!("ws://unused/v1/agents/{AGENT_ID}/ws"),
-    });
-    if state.idempotency_key != "unused" {
-        receipt["initial_state"] = agent_state_value("0");
-    }
-    json_response(StatusCode::CREATED, receipt)
-}
-
-async fn failed_agent_state(
-    State(state): State<TestState>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
-    if !authorized(&state, &headers) {
-        return unauthorized();
-    }
-    json_response(
-        StatusCode::INTERNAL_SERVER_ERROR,
-        serde_json::json!({ "error": "state unavailable after create" }),
-    )
 }
 
 async fn submit_turn(

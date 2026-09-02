@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -9,8 +9,9 @@ use tokio_tungstenite::{
 };
 
 use crate::{
-    EventCursor, ManagedClient, ManagedError, ManagedEvent, ManagedEventData, ManagedEventFuture,
-    ManagedEventSource, PromptInput, TurnState, TurnView,
+    ActiveTurn, AgentCapabilities, AgentReceipt, AgentState, EventCursor, ManagedClient,
+    ManagedError, ManagedEvent, ManagedEventData, ManagedEventFuture, ManagedEventSource,
+    PromptInput, TurnState, TurnView,
     client::{agent_path, validate_id, validate_idempotency_key},
 };
 
@@ -30,6 +31,7 @@ pub(crate) struct ManagedSocket {
     commands: mpsc::Sender<Command>,
 }
 
+#[derive(Debug)]
 pub(crate) struct ManagedSocketEvents {
     cursor: EventCursor,
     events: mpsc::Receiver<Result<ManagedEvent, ManagedError>>,
@@ -67,10 +69,54 @@ struct ReadyMessage {
     #[serde(rename = "type")]
     kind: String,
     session_id: String,
+    restored: bool,
+    active_turns: Vec<String>,
+    active_turn_details: Vec<ActiveTurn>,
+    capabilities: AgentCapabilities,
     latest_event_cursor: String,
 }
 
 impl ManagedSocket {
+    pub(crate) async fn create(
+        client: ManagedClient,
+    ) -> Result<(AgentReceipt, Self, ManagedSocketEvents), ManagedError> {
+        let mut endpoint = client.url("v1/agents/live")?;
+        set_websocket_scheme(&mut endpoint)?;
+        let (connected, ready) = connect_endpoint(&client, endpoint.clone(), None, "0").await?;
+        let agent_id = ready.session_id.clone();
+        validate_id("agent", &agent_id)?;
+        let cursor = EventCursor::parse(ready.latest_event_cursor.clone())?;
+        let events_url = client
+            .url(&format!("{}/events", agent_path(&agent_id)))?
+            .to_string();
+        let receipt = AgentReceipt {
+            agent_id: agent_id.clone(),
+            session_id: agent_id.clone(),
+            events_url,
+            websocket_url: endpoint.to_string(),
+            initial_state: Some(AgentState {
+                agent_id: agent_id.clone(),
+                session_id: agent_id.clone(),
+                has_snapshot: ready.restored,
+                completed_turns: 0,
+                last_active: SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs_f64()
+                    * 1_000.0,
+                active_turns: ready.active_turns,
+                active_turn_details: ready.active_turn_details,
+                agent_loaded: false,
+                connected_clients: 1,
+                capabilities: ready.capabilities,
+                latest_event_cursor: ready.latest_event_cursor,
+                stream_error: None,
+            }),
+        };
+        let (socket, events) = Self::start(client, agent_id, cursor, connected);
+        Ok((receipt, socket, events))
+    }
+
     pub(crate) async fn open(
         client: ManagedClient,
         agent_id: String,
@@ -78,6 +124,15 @@ impl ManagedSocket {
     ) -> Result<(Self, ManagedSocketEvents), ManagedError> {
         validate_id("agent", &agent_id)?;
         let connected = connect(&client, &agent_id, cursor.as_str()).await?;
+        Ok(Self::start(client, agent_id, cursor, connected))
+    }
+
+    fn start(
+        client: ManagedClient,
+        agent_id: String,
+        cursor: EventCursor,
+        connected: ConnectedSocket,
+    ) -> (Self, ManagedSocketEvents) {
         let (commands, command_rx) = mpsc::channel(1);
         let (event_tx, events) = mpsc::channel(EVENT_CAPACITY);
         tokio::spawn(run(
@@ -88,7 +143,7 @@ impl ManagedSocket {
             command_rx,
             event_tx,
         ));
-        Ok((Self { commands }, ManagedSocketEvents { cursor, events }))
+        (Self { commands }, ManagedSocketEvents { cursor, events })
     }
 
     pub(crate) async fn submit(
@@ -106,6 +161,12 @@ impl ManagedSocket {
         receiver
             .await
             .map_err(|_| live_error("managed WebSocket stopped during submission"))?
+    }
+}
+
+impl ManagedSocketEvents {
+    pub(crate) const fn cursor(&self) -> &EventCursor {
+        &self.cursor
     }
 }
 
@@ -362,14 +423,28 @@ async fn connect(
     cursor: &str,
 ) -> Result<ConnectedSocket, ManagedError> {
     let mut endpoint = client.url(&format!("{}/ws", agent_path(agent_id)))?;
+    set_websocket_scheme(&mut endpoint)?;
+    endpoint.query_pairs_mut().append_pair("cursor", cursor);
+    let (connected, _) = connect_endpoint(client, endpoint, Some(agent_id), cursor).await?;
+    Ok(connected)
+}
+
+fn set_websocket_scheme(endpoint: &mut url::Url) -> Result<(), ManagedError> {
     endpoint
         .set_scheme(match endpoint.scheme() {
             "http" => "ws",
             "https" => "wss",
             _ => return Err(live_error("managed WebSocket origin is not HTTP(S)")),
         })
-        .map_err(|_| live_error("failed to derive managed WebSocket endpoint"))?;
-    endpoint.query_pairs_mut().append_pair("cursor", cursor);
+        .map_err(|_| live_error("failed to derive managed WebSocket endpoint"))
+}
+
+async fn connect_endpoint(
+    client: &ManagedClient,
+    endpoint: url::Url,
+    expected_agent_id: Option<&str>,
+    cursor: &str,
+) -> Result<(ConnectedSocket, ReadyMessage), ManagedError> {
     let mut request = endpoint
         .as_str()
         .into_client_request()
@@ -392,7 +467,7 @@ async fn connect(
             if ready.kind != "ready" {
                 return Err(live_error("managed WebSocket did not begin with ready"));
             }
-            if ready.session_id != agent_id {
+            if expected_agent_id.is_some_and(|agent_id| ready.session_id != agent_id) {
                 return Err(live_error(
                     "managed WebSocket ready session does not match agent",
                 ));
@@ -403,10 +478,13 @@ async fn connect(
                     "managed WebSocket ready cursor is behind request",
                 ));
             }
-            Ok(ConnectedSocket {
-                socket,
-                replay_through: ready.latest_event_cursor,
-            })
+            Ok((
+                ConnectedSocket {
+                    socket,
+                    replay_through: ready.latest_event_cursor.clone(),
+                },
+                ready,
+            ))
         }
         _ => Err(live_error("managed WebSocket closed before ready")),
     }

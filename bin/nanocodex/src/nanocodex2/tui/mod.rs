@@ -219,52 +219,36 @@ async fn connect_agent(
     client: ManagedClient,
     agent_id: Option<String>,
 ) -> Result<ConnectedAgent, ConnectionFailure> {
-    let (agent_id, created, initial_state) = match agent_id {
-        Some(agent_id) => (agent_id, false, None),
-        None => {
-            let receipt = client.create().await.map_err(|error| ConnectionFailure {
-                error,
-                retry: RetryTarget::Create,
-            })?;
-            (receipt.agent_id, true, receipt.initial_state)
+    let (opened, history, retry) = match agent_id {
+        None => (
+            super::open_workspace_agent_from(&client, None, None).await,
+            None,
+            RetryTarget::Create,
+        ),
+        Some(agent_id) => {
+            let state = client
+                .state(&agent_id)
+                .await
+                .map_err(|error| ConnectionFailure {
+                    error,
+                    retry: RetryTarget::Agent(agent_id.clone()),
+                })?;
+            let cursor =
+                EventCursor::parse(state.latest_event_cursor.clone()).map_err(|error| {
+                    ConnectionFailure {
+                        error,
+                        retry: RetryTarget::Agent(agent_id.clone()),
+                    }
+                })?;
+            let opening =
+                super::open_workspace_agent_from(&client, Some(agent_id.clone()), Some(state));
+            let history = load_event_history(&client, &agent_id, &cursor);
+            let (opened, history) = tokio::join!(opening, history);
+            (opened, Some(history), RetryTarget::Agent(agent_id))
         }
     };
-    let state = match (created, initial_state) {
-        (_, Some(state)) => state,
-        (true, None) => {
-            return Err(ConnectionFailure {
-                error: ManagedError::InvalidResponse(
-                    "created agent receipt is missing initial state",
-                ),
-                retry: RetryTarget::Create,
-            });
-        }
-        (false, None) => client
-            .state(&agent_id)
-            .await
-            .map_err(|error| ConnectionFailure {
-                error,
-                retry: RetryTarget::Agent(agent_id.clone()),
-            })?,
-    };
-    let cursor = EventCursor::parse(state.latest_event_cursor.clone()).map_err(|error| {
-        ConnectionFailure {
-            error,
-            retry: RetryTarget::Agent(agent_id.clone()),
-        }
-    })?;
-    let opening = super::open_workspace_agent_from(&client, Some(agent_id.clone()), Some(state));
-    let (opened, history) = if created {
-        (opening.await, None)
-    } else {
-        let history = load_event_history(&client, &agent_id, &cursor);
-        let (opened, history) = tokio::join!(opening, history);
-        (opened, Some(history))
-    };
-    let (agent, events, agent_id, workspace) = opened.map_err(|error| ConnectionFailure {
-        error,
-        retry: RetryTarget::Agent(agent_id),
-    })?;
+    let (agent, events, agent_id, workspace) =
+        opened.map_err(|error| ConnectionFailure { error, retry })?;
     let (history, warning) = match history {
         None => (Vec::new(), None),
         Some(Ok(history)) => (history, None),

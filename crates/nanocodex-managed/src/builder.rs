@@ -98,8 +98,15 @@ pub enum ManagedResponse {
 #[derive(Clone, Debug)]
 pub struct ManagedService {
     client: ManagedClient,
-    socket: Arc<tokio::sync::Mutex<Option<(String, ManagedSocket)>>>,
+    socket: Arc<tokio::sync::Mutex<Option<ManagedLiveSocket>>>,
     transport: ManagedTransport,
+}
+
+#[derive(Debug)]
+struct ManagedLiveSocket {
+    agent_id: String,
+    socket: ManagedSocket,
+    events: Option<crate::websocket::ManagedSocketEvents>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -133,7 +140,18 @@ impl Service<ManagedRequest> for ManagedService {
         let transport = self.transport;
         Box::pin(async move {
             match request {
-                ManagedRequest::Create => client.create().await.map(ManagedResponse::Created),
+                ManagedRequest::Create => match transport {
+                    ManagedTransport::Http => client.create().await.map(ManagedResponse::Created),
+                    ManagedTransport::WebSocket => {
+                        let (receipt, live, events) = ManagedSocket::create(client.clone()).await?;
+                        *socket.lock().await = Some(ManagedLiveSocket {
+                            agent_id: receipt.agent_id.clone(),
+                            socket: live,
+                            events: Some(events),
+                        });
+                        Ok(ManagedResponse::Created(receipt))
+                    }
+                },
                 ManagedRequest::State { agent_id } => {
                     client.state(&agent_id).await.map(ManagedResponse::State)
                 }
@@ -144,9 +162,37 @@ impl Service<ManagedRequest> for ManagedService {
                         Ok(ManagedResponse::Events(ManagedEvents::new(events)))
                     }
                     ManagedTransport::WebSocket => {
+                        {
+                            let mut socket = socket.lock().await;
+                            if let Some(live) =
+                                socket.as_mut().filter(|live| live.agent_id == agent_id)
+                            {
+                                let events = live.events.as_ref().ok_or_else(|| {
+                                    ManagedError::Configuration(
+                                        "managed create WebSocket events were already consumed"
+                                            .to_owned(),
+                                    )
+                                })?;
+                                if events.cursor().as_str() != cursor.as_str() {
+                                    return Err(ManagedError::Configuration(
+                                        "managed create WebSocket cursor does not match ready state"
+                                            .to_owned(),
+                                    ));
+                                }
+                                let events = live
+                                    .events
+                                    .take()
+                                    .expect("managed create WebSocket events were just observed");
+                                return Ok(ManagedResponse::Events(ManagedEvents::new(events)));
+                            }
+                        }
                         let (live, events) =
                             ManagedSocket::open(client.clone(), agent_id.clone(), cursor).await?;
-                        *socket.lock().await = Some((agent_id, live));
+                        *socket.lock().await = Some(ManagedLiveSocket {
+                            agent_id,
+                            socket: live,
+                            events: None,
+                        });
                         Ok(ManagedResponse::Events(ManagedEvents::new(events)))
                     }
                 },
@@ -165,8 +211,8 @@ impl Service<ManagedRequest> for ManagedService {
                         .lock()
                         .await
                         .as_ref()
-                        .filter(|(live_agent_id, _)| live_agent_id == &agent_id)
-                        .map(|(_, live)| live.clone());
+                        .filter(|live| live.agent_id == agent_id)
+                        .map(|live| live.socket.clone());
                     let live = live.ok_or_else(|| {
                         ManagedError::Configuration(
                             "managed WebSocket is not open for this agent".to_owned(),

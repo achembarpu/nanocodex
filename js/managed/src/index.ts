@@ -224,6 +224,7 @@ const DEFAULT_OWNERSHIP_IO_TIMEOUT_MS = 10_000;
 const DEFAULT_MULTIPLAYER_IO_TIMEOUT_MS = 10_000;
 const MAX_CLEANUP_RETRY_MS = 60_000;
 const SESSION_OWNER_ASSERTION = "x-nanocodex-owner-id";
+const SESSION_CREATE_ID_ASSERTION = "x-nanocodex-create-session-id";
 // ManagedTurnArchive owns the long-lived API projection. The portable Rust
 // state keeps a bounded exact-replay window so cutovers do not call the model.
 const MANAGED_TERMINAL_RECEIPT_RETENTION = 512;
@@ -272,6 +273,16 @@ type SessionRow = {
   completed_turns: number;
   last_active: number;
   stream_error: string | null;
+};
+
+type SessionInitialization = {
+  session_id?: unknown;
+  owner_id?: unknown;
+  organization_id?: unknown;
+  team_id?: unknown;
+  authorization_epoch?: unknown;
+  public_origin?: unknown;
+  runtime_profile?: unknown;
 };
 
 type DeviceHostAttachment = {
@@ -757,6 +768,43 @@ async function managedFetch(
     }
     const history = await routeHistoryRequest(request, env, url);
     if (history) return history;
+    if (request.method === "GET" && url.pathname === "/v1/agents/live") {
+      if (url.search !== ""
+        || request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
+        return new Response("Expected WebSocket upgrade", { status: 426 });
+      }
+      const creationStartedAt = performance.now();
+      const principal = trustedAgentPrincipal ?? await authenticate(request, env, url);
+      if (!principal) return json({ error: "unauthorized" }, { status: 401 });
+      if (!principal.capabilities.includes("agents:read")
+        || !principal.capabilities.includes("agents:write")
+        || !principal.capabilities.includes("tools:use")) {
+        return json({ error: "forbidden" }, { status: 403 });
+      }
+      if (principal.connectGrant
+        && !principal.connectGrant.connectors.includes("chatgpt")) {
+        return json({ error: "connector_forbidden" }, { status: 403 });
+      }
+      if (principal.kind !== "api_key" && request.headers.get("origin") !== url.origin) {
+        return json({ error: "forbidden_origin" }, { status: 403 });
+      }
+      const agentId = uuidV7();
+      const headers = new Headers(request.headers);
+      forwardPrincipalAssertions(headers, principal);
+      headers.set(SESSION_CREATE_ID_ASSERTION, agentId);
+      const stub = env.NANOCODEX_SESSIONS.getByName(agentId);
+      const response = await stub.fetch(
+        `https://session.internal/create-live?public_origin=${encodeURIComponent(url.origin)}`,
+        new Request(request, { headers }),
+      );
+      observeManagedPrincipal(env, "managed.agent.live_created", principal, {
+        agent_id: agentId,
+        thread_id: agentId,
+        outcome: response.status === 101 ? "success" : "failure",
+        create_ms: roundMilliseconds(performance.now() - creationStartedAt),
+      });
+      return response;
+    }
     if (request.method === "POST" && url.pathname === "/v1/rooms") {
       const principal = await authenticate(request, env, url);
       if (!principal) return json({ error: "unauthorized" }, { status: 401 });
@@ -1672,18 +1720,21 @@ export class DurableAgentSession extends DurableComputerSession {
     this.#deleted = this.#initializationOwnership()?.state === "deleted";
     this.#streamError = this.#session()?.stream_error ?? undefined;
     this.ctx.blockConcurrencyWhile(async () => {
-      const [deleting, credentialBinding, deletionGeneration, durabilityExported, durabilityImportState] = await Promise.all([
-        this.ctx.storage.get<boolean>(SESSION_DELETING_KEY),
-        this.ctx.storage.get<CredentialBindingOwnership>(CREDENTIAL_BINDING_KEY),
-        this.ctx.storage.get<number>(SESSION_DELETION_GENERATION_KEY),
-        this.ctx.storage.get<boolean>(DURABILITY_EXPORTED_KEY),
-        this.ctx.storage.get<"pending" | "complete">(DURABILITY_IMPORT_STATE_KEY),
+      const retained = await this.ctx.storage.get([
+        SESSION_DELETING_KEY,
+        CREDENTIAL_BINDING_KEY,
+        SESSION_DELETION_GENERATION_KEY,
+        DURABILITY_EXPORTED_KEY,
+        DURABILITY_IMPORT_STATE_KEY,
       ]);
-      this.#deleting = deleting === true;
-      this.#credentialBinding = credentialBinding;
-      this.#deletionGeneration = deletionGeneration ?? 0;
-      this.#durabilityExported = durabilityExported === true;
-      this.#durabilityImportState = durabilityImportState;
+      this.#deleting = retained.get(SESSION_DELETING_KEY) === true;
+      this.#credentialBinding = retained.get(CREDENTIAL_BINDING_KEY) as
+        CredentialBindingOwnership | undefined;
+      this.#deletionGeneration =
+        (retained.get(SESSION_DELETION_GENERATION_KEY) as number | undefined) ?? 0;
+      this.#durabilityExported = retained.get(DURABILITY_EXPORTED_KEY) === true;
+      this.#durabilityImportState = retained.get(DURABILITY_IMPORT_STATE_KEY) as
+        "pending" | "complete" | undefined;
       // Durable state and SSE replay are immediately usable after eviction.
       // Re-admission or deletion may load external resources, so neither sits
       // on the object's request-readiness boundary.
@@ -1718,6 +1769,9 @@ export class DurableAgentSession extends DurableComputerSession {
         return json({ error: "ownership_mismatch" }, { status: 409 });
       }
       return new Response(null, { status: 204 });
+    }
+    if (request.method === "GET" && url.pathname === "/create-live") {
+      return this.#createLive(request, url);
     }
     if (ownerAssertion !== null) {
       const asserted = forwardedPrincipal(request.headers);
@@ -1975,137 +2029,13 @@ export class DurableAgentSession extends DurableComputerSession {
       const body = await request.text();
       if (this.#deleting || this.#deleted) return new Response(null, { status: 409 });
       if (body.length > 2048) return new Response(null, { status: 400 });
-      let initialization: {
-        session_id?: unknown;
-        owner_id?: unknown;
-        organization_id?: unknown;
-        team_id?: unknown;
-        authorization_epoch?: unknown;
-        public_origin?: unknown;
-        runtime_profile?: unknown;
-      };
+      let initialization: SessionInitialization;
       try {
-        initialization = JSON.parse(body) as typeof initialization;
+        initialization = JSON.parse(body) as SessionInitialization;
       } catch {
         return new Response(null, { status: 400 });
       }
-      const sessionId = initialization.session_id;
-      const ownerId = initialization.owner_id;
-      const organizationId = initialization.organization_id;
-      const teamId = initialization.team_id;
-      const authorizationEpoch = initialization.authorization_epoch;
-      const publicOrigin = initialization.public_origin;
-      const runtimeProfile = initialization.runtime_profile ?? "managed";
-      const managedCoordinates = runtimeProfile === "managed"
-        && typeof organizationId === "string" && isUserId(organizationId)
-        && typeof teamId === "string" && isUserId(teamId)
-        && Number.isSafeInteger(authorizationEpoch) && Number(authorizationEpoch) >= 1;
-      const multiplayerCoordinates = runtimeProfile === "multiplayer"
-        && organizationId === undefined && teamId === undefined
-        && authorizationEpoch === undefined;
-      if (typeof sessionId !== "string"
-        || !SESSION_ID.test(sessionId)
-        || !isUserId(ownerId)
-        || typeof publicOrigin !== "string"
-        || !validPublicOrigin(publicOrigin)
-        || (!managedCoordinates && !multiplayerCoordinates)) {
-        return new Response(null, { status: 400 });
-      }
-      const credentialBinding = this.#credentialBinding;
-      if (runtimeProfile === "managed" && (!credentialBinding
-        || credentialBinding.owner_id !== ownerId
-        || credentialBinding.session_id !== sessionId
-        || credentialBinding.subject !== this.ctx.id.toString())) {
-        return new Response(null, { status: 409 });
-      }
-      const storedOrganizationId = managedCoordinates ? organizationId : "";
-      const storedTeamId = managedCoordinates ? teamId : "";
-      const storedAuthorizationEpoch = managedCoordinates ? Number(authorizationEpoch) : 0;
-      const current = this.#session();
-      const currentId = current?.session_id;
-      if (currentId && currentId !== sessionId) return new Response(null, { status: 409 });
-      if (current && current.owner_id !== ownerId) return new Response(null, { status: 409 });
-      if (current && (current.organization_id !== storedOrganizationId
-        || current.team_id !== storedTeamId
-        || current.authorization_epoch !== storedAuthorizationEpoch)) {
-        return new Response(null, { status: 409 });
-      }
-      if (current && current.runtime_profile !== runtimeProfile) return new Response(null, { status: 409 });
-      let event: DurableEvent<StreamMessage> | undefined;
-      try {
-        this.ctx.storage.transactionSync(() => {
-          const ownership = this.#initializationOwnership();
-          if (this.#deleting || this.#deleted || ownership?.state === "deleted") {
-            throw new ManagedRequestError(
-              409,
-              "agent_deleting",
-              "the agent is being deleted or was already deleted",
-            );
-          }
-          if (ownership && (ownership.session_id !== sessionId
-            || ownership.owner_id !== ownerId
-            || ownership.runtime_profile !== runtimeProfile)) {
-            throw new ManagedRequestError(
-              409,
-              "agent_initialized",
-              "the one-shot initialization ownership belongs to another session",
-            );
-          }
-          if (!ownership) {
-            this.ctx.storage.sql.exec(
-              `INSERT INTO session_initialization_ownership (
-                 singleton, session_id, owner_id, runtime_profile, state
-               ) VALUES (1, ?, ?, ?, 'active')`,
-              sessionId,
-              ownerId,
-              runtimeProfile,
-            );
-          }
-          const retained = this.#session();
-          if (retained && (retained.session_id !== sessionId
-            || retained.owner_id !== ownerId
-            || retained.runtime_profile !== runtimeProfile)) {
-            throw new ManagedRequestError(
-              409,
-              "agent_initialized",
-              "the agent is already initialized with different ownership",
-            );
-          }
-          if (retained) {
-            this.ctx.storage.sql.exec(
-              "UPDATE session_state SET public_origin = ? WHERE singleton = 1",
-              publicOrigin,
-            );
-            return;
-          }
-          this.ctx.storage.sql.exec(
-            `INSERT INTO session_state
-               (singleton, session_id, owner_id, organization_id, team_id, authorization_epoch,
-                public_origin, runtime_profile, last_active)
-             VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)`,
-            sessionId,
-            ownerId,
-            storedOrganizationId,
-            storedTeamId,
-            storedAuthorizationEpoch,
-            publicOrigin,
-            runtimeProfile,
-            Date.now(),
-          );
-          event = this.#eventLog.append({
-            type: "agent_created",
-            agent_id: sessionId,
-            capabilities: this.#capabilities(),
-          }, null, true);
-        });
-      } catch (error) {
-        if (error instanceof ManagedRequestError) {
-          return new Response(null, { status: error.status });
-        }
-        throw error;
-      }
-      if (event) this.#publish(event);
-      return new Response(null, { status: 204 });
+      return this.#initializeSession(initialization);
     }
     if (this.#durabilityImportState === "pending"
       && !(request.method === "DELETE" && url.pathname === "/session")) {
@@ -2462,6 +2392,179 @@ export class DurableAgentSession extends DurableComputerSession {
     await this.#shutdownAgent();
     if (this.#recoverableTurnCount() > 0) this.#scheduleRecovery();
     else await this.#scheduleNextAlarm();
+  }
+
+  async #createLive(request: Request, url: URL): Promise<Response> {
+    if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
+      return new Response("Expected WebSocket upgrade", { status: 426 });
+    }
+    if (this.#deleting || this.#deleted || this.#sessionId() || this.#credentialBinding) {
+      return json({ error: "agent_initialized" }, { status: 409 });
+    }
+    const asserted = forwardedPrincipal(request.headers);
+    const sessionId = request.headers.get(SESSION_CREATE_ID_ASSERTION);
+    const publicOrigin = url.searchParams.get("public_origin");
+    if (!asserted
+      || typeof sessionId !== "string"
+      || !SESSION_ID.test(sessionId)
+      || typeof publicOrigin !== "string"
+      || !validPublicOrigin(publicOrigin)) {
+      return json({ error: "invalid_request" }, { status: 400 });
+    }
+    const credentialBinding: CredentialBindingOwnership = {
+      cleanup_at: Date.now(),
+      owner_id: asserted.ownerId,
+      session_id: sessionId,
+      state: "active",
+      subject: this.ctx.id.toString(),
+    };
+    await this.ctx.storage.put(CREDENTIAL_BINDING_KEY, credentialBinding);
+    this.#credentialBinding = credentialBinding;
+    const initialized = this.#initializeSession({
+      session_id: sessionId,
+      owner_id: asserted.ownerId,
+      organization_id: asserted.organizationId,
+      team_id: asserted.teamId,
+      authorization_epoch: asserted.authorizationEpoch,
+      public_origin: publicOrigin,
+    });
+    if (!initialized.ok) return initialized;
+
+    const registration = this.#track(attachAgent(
+      this.env,
+      asserted.ownerId,
+      sessionId,
+      this.#ownershipIoTimeoutMs(),
+    ));
+    this.ctx.waitUntil(registration.catch((error) => {
+      console.warn({
+        type: "managed.agent_live_registration_pending",
+        error_kind: errorKind(error),
+      });
+    }));
+    return this.#upgrade(asserted.authorization, null);
+  }
+
+  #initializeSession(initialization: SessionInitialization): Response {
+    const sessionId = initialization.session_id;
+    const ownerId = initialization.owner_id;
+    const organizationId = initialization.organization_id;
+    const teamId = initialization.team_id;
+    const authorizationEpoch = initialization.authorization_epoch;
+    const publicOrigin = initialization.public_origin;
+    const runtimeProfile = initialization.runtime_profile ?? "managed";
+    const managedCoordinates = runtimeProfile === "managed"
+      && typeof organizationId === "string" && isUserId(organizationId)
+      && typeof teamId === "string" && isUserId(teamId)
+      && Number.isSafeInteger(authorizationEpoch) && Number(authorizationEpoch) >= 1;
+    const multiplayerCoordinates = runtimeProfile === "multiplayer"
+      && organizationId === undefined && teamId === undefined
+      && authorizationEpoch === undefined;
+    if (typeof sessionId !== "string"
+      || !SESSION_ID.test(sessionId)
+      || !isUserId(ownerId)
+      || typeof publicOrigin !== "string"
+      || !validPublicOrigin(publicOrigin)
+      || (!managedCoordinates && !multiplayerCoordinates)) {
+      return new Response(null, { status: 400 });
+    }
+    const credentialBinding = this.#credentialBinding;
+    if (runtimeProfile === "managed" && (!credentialBinding
+      || credentialBinding.owner_id !== ownerId
+      || credentialBinding.session_id !== sessionId
+      || credentialBinding.subject !== this.ctx.id.toString())) {
+      return new Response(null, { status: 409 });
+    }
+    const storedOrganizationId = managedCoordinates ? organizationId : "";
+    const storedTeamId = managedCoordinates ? teamId : "";
+    const storedAuthorizationEpoch = managedCoordinates ? Number(authorizationEpoch) : 0;
+    const current = this.#session();
+    const currentId = current?.session_id;
+    if (currentId && currentId !== sessionId) return new Response(null, { status: 409 });
+    if (current && current.owner_id !== ownerId) return new Response(null, { status: 409 });
+    if (current && (current.organization_id !== storedOrganizationId
+      || current.team_id !== storedTeamId
+      || current.authorization_epoch !== storedAuthorizationEpoch)) {
+      return new Response(null, { status: 409 });
+    }
+    if (current && current.runtime_profile !== runtimeProfile) {
+      return new Response(null, { status: 409 });
+    }
+    let event: DurableEvent<StreamMessage> | undefined;
+    try {
+      this.ctx.storage.transactionSync(() => {
+        const ownership = this.#initializationOwnership();
+        if (this.#deleting || this.#deleted || ownership?.state === "deleted") {
+          throw new ManagedRequestError(
+            409,
+            "agent_deleting",
+            "the agent is being deleted or was already deleted",
+          );
+        }
+        if (ownership && (ownership.session_id !== sessionId
+          || ownership.owner_id !== ownerId
+          || ownership.runtime_profile !== runtimeProfile)) {
+          throw new ManagedRequestError(
+            409,
+            "agent_initialized",
+            "the one-shot initialization ownership belongs to another session",
+          );
+        }
+        if (!ownership) {
+          this.ctx.storage.sql.exec(
+            `INSERT INTO session_initialization_ownership (
+               singleton, session_id, owner_id, runtime_profile, state
+             ) VALUES (1, ?, ?, ?, 'active')`,
+            sessionId,
+            ownerId,
+            runtimeProfile,
+          );
+        }
+        const retained = this.#session();
+        if (retained && (retained.session_id !== sessionId
+          || retained.owner_id !== ownerId
+          || retained.runtime_profile !== runtimeProfile)) {
+          throw new ManagedRequestError(
+            409,
+            "agent_initialized",
+            "the agent is already initialized with different ownership",
+          );
+        }
+        if (retained) {
+          this.ctx.storage.sql.exec(
+            "UPDATE session_state SET public_origin = ? WHERE singleton = 1",
+            publicOrigin,
+          );
+          return;
+        }
+        this.ctx.storage.sql.exec(
+          `INSERT INTO session_state
+             (singleton, session_id, owner_id, organization_id, team_id, authorization_epoch,
+              public_origin, runtime_profile, last_active)
+           VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          sessionId,
+          ownerId,
+          storedOrganizationId,
+          storedTeamId,
+          storedAuthorizationEpoch,
+          publicOrigin,
+          runtimeProfile,
+          Date.now(),
+        );
+        event = this.#eventLog.append({
+          type: "agent_created",
+          agent_id: sessionId,
+          capabilities: this.#capabilities(),
+        }, null, true);
+      });
+    } catch (error) {
+      if (error instanceof ManagedRequestError) {
+        return new Response(null, { status: error.status });
+      }
+      throw error;
+    }
+    if (event) this.#publish(event);
+    return new Response(null, { status: 204 });
   }
 
   #upgrade(authorization: TurnAuthorization, requestedCursor: string | null): Response {
