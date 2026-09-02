@@ -392,50 +392,20 @@ export function AccountMenu({ inline = false }: Readonly<{ inline?: boolean }>) 
     return (
       <div className="account-inline">
         <AccountConnectionSurface
-          description={<>Your account wallet signs Connect approvals while its private key remains encrypted in your vault.</>}
+          description={<>Manage the hosted connections your Nanocodex agents can use.</>}
+          footer={<div className="account-wallet-session">
+            <span>Account {shortIdentity(session.account.id)}</span>
+            <button
+              className="wizard-sign-out"
+              disabled={session.operation !== null}
+              onClick={() => void session.signOut()}
+              type="button"
+            >
+              Sign out
+            </button>
+          </div>}
           title="Connect"
         >
-          <AccountConnectionSection
-            eyebrow="Account"
-            meta={session.account.address ? "Ready to sign" : "Unavailable"}
-            title="Tempo wallet"
-            titleId="account-identity-heading"
-          >
-            {session.account.address ? (
-              <div className="account-wallet">
-                <div className="account-wallet-address">
-                  <span>Wallet address</span>
-                  <code>{session.account.address}</code>
-                </div>
-                <button
-                  aria-label="Copy wallet address"
-                  className="account-wallet-copy"
-                  onClick={() => void copyWalletAddress()}
-                  type="button"
-                >
-                  {walletCopied ? <Check aria-hidden="true" /> : <Copy aria-hidden="true" />}
-                  {walletCopied ? "Copied" : "Copy"}
-                </button>
-              </div>
-            ) : (
-              <div className="account-failure" role="alert">
-                <p>Your wallet address could not be loaded.</p>
-                <button type="button" onClick={() => void session.refresh()}>Retry</button>
-              </div>
-            )}
-            <div className="account-wallet-session">
-              <span>Account {shortIdentity(session.account.id)}</span>
-              <button
-                className="wizard-sign-out"
-                disabled={session.operation !== null}
-                onClick={() => void session.signOut()}
-                type="button"
-              >
-                Sign out
-              </button>
-            </div>
-          </AccountConnectionSection>
-
           <AccountConnectionSection
             eyebrow="Service"
             meta="Available to your agents"
@@ -486,6 +456,15 @@ export function AccountMenu({ inline = false }: Readonly<{ inline?: boolean }>) 
               presentation="wizard"
               refreshSession={refreshSession}
             >
+              <AccountConnectionCard
+                action={walletCopied ? "Copied" : "Copy"}
+                connected={Boolean(session.account.address)}
+                detail={session.account.address ?? "Wallet unavailable"}
+                disabled={!session.account.address}
+                logo={<ConnectionLogo id="tempo" />}
+                onClick={() => void copyWalletAddress()}
+                title="Tempo Wallet"
+              />
               {credentials ? (
                 <>
                   <AccountConnectionCard

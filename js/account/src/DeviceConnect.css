@@ -1052,25 +1052,6 @@
   font-size: 8px;
 }
 
-.connect-wizard .account-wallet {
-  display: grid;
-  min-width: 0;
-  align-items: center;
-  margin-top: 14px;
-  padding: 16px;
-  border: 1px solid var(--border-soft);
-  background: color-mix(in srgb, var(--positive) 3%, transparent);
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 16px;
-}
-
-.connect-wizard .account-wallet-address {
-  display: grid;
-  min-width: 0;
-  gap: 6px;
-}
-
-.connect-wizard .account-wallet-address span,
 .connect-wizard .account-wallet-session > span {
   color: var(--muted);
   font-size: 8px;
@@ -1078,45 +1059,11 @@
   text-transform: uppercase;
 }
 
-.connect-wizard .account-wallet-address code {
-  overflow: hidden;
-  color: var(--text);
-  font-size: 12px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.connect-wizard .account-wallet-copy {
-  display: inline-flex;
-  min-width: 88px;
-  min-height: 38px;
-  align-items: center;
-  justify-content: center;
-  padding: 0 12px;
-  border: 1px solid var(--border-strong);
-  background: transparent;
-  color: var(--text);
-  cursor: pointer;
-  font-size: 9px;
-  gap: 7px;
-}
-
-.connect-wizard .account-wallet-copy:hover,
-.connect-wizard .account-wallet-copy:focus-visible {
-  border-color: var(--text);
-  outline: none;
-}
-
-.connect-wizard .account-wallet-copy svg {
-  width: 12px;
-  height: 12px;
-}
-
 .connect-wizard .account-wallet-session {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-top: 10px;
+  padding: 16px 0 48px;
   gap: 12px;
 }
 
@@ -1240,20 +1187,6 @@
     margin-right: 16px;
     margin-left: 16px;
     padding-top: 28px;
-  }
-
-  .connect-wizard .account-wallet {
-    grid-template-columns: 1fr;
-  }
-
-  .connect-wizard .account-wallet-address code {
-    overflow-wrap: anywhere;
-    white-space: normal;
-  }
-
-  .connect-wizard .account-wallet-copy {
-    width: 100%;
-    min-height: 44px;
   }
 
   .connect-wizard .sms-auth-panel {

@@ -13,6 +13,7 @@ export type ConnectionLogoId =
   | "gcontacts"
   | "mcp"
   | "slack"
+  | "tempo"
   | "x";
 
 export function ConnectionLogo({ id }: Readonly<{ id: ConnectionLogoId }>) {
@@ -73,6 +74,9 @@ export function ConnectionLogo({ id }: Readonly<{ id: ConnectionLogoId }>) {
   }
   if (id === "slack") {
     return <span className="connector-logo connector-logo-slack" aria-hidden="true">S</span>;
+  }
+  if (id === "tempo") {
+    return <span className="connector-logo connector-logo-tempo" aria-hidden="true">T</span>;
   }
   return <span className="connector-logo connector-logo-x" aria-hidden="true">X</span>;
 }

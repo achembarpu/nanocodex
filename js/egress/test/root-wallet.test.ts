@@ -1,5 +1,6 @@
 import { env } from "cloudflare:workers";
 import { runInDurableObject, SELF } from "cloudflare:test";
+import { Provider, secp256k1, Storage } from "accounts";
 import { describe, expect, it } from "vitest";
 
 import type { UserCredentialBroker } from "../src/broker";
@@ -33,6 +34,16 @@ describe("per-user root wallets", () => {
       const opened = await vault.open<{ wallet?: { address: string; privateKey: string } }>(row!.envelope);
       expect(opened.value.wallet?.address).toBe(first.address);
       expect(opened.value.wallet?.privateKey).toMatch(/^0x[0-9a-f]{64}$/i);
+      const provider = Provider.create({
+        adapter: secp256k1({ privateKey: opened.value.wallet!.privateKey as `0x${string}` }),
+        storage: Storage.memory({ key: "root-wallet-vault-proof" }),
+        mpp: false,
+      });
+      const derived = await provider.request({
+        method: "wallet_connect",
+        params: [{ chainId: "0x1079", capabilities: { method: "login" } }],
+      } as never) as { accounts?: readonly { address?: string }[] };
+      expect(derived.accounts?.[0]?.address.toLowerCase()).toBe(first.address);
     });
   });
 
