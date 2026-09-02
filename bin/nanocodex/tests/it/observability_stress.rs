@@ -172,7 +172,6 @@ fn subagent_stress_command(
     command
         .arg("run")
         .arg("--browser=none")
-        .arg("--cookies=none")
         .arg("--api-key")
         .arg(API_KEY_SENTINEL)
         .arg("--websocket-url")
@@ -287,7 +286,6 @@ fn stress_command(
     command
         .arg("run")
         .arg("--browser=none")
-        .arg("--cookies=none")
         .arg("--api-key")
         .arg(API_KEY_SENTINEL)
         .arg("--websocket-url")

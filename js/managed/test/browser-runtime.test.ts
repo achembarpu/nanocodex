@@ -84,6 +84,29 @@ describe("managed browser deployment policy", () => {
 });
 
 describe("Browserbase session factory", () => {
+  it("stops reading chunked responses at the byte limit", async () => {
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        controller.enqueue(new Uint8Array(64 * 1024));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const factory = new BrowserbaseSessionFactory({
+      apiKey: API_KEY,
+      projectId: "project-a",
+      fetch: vi.fn(async () => new Response(body, {
+        status: 201,
+        headers: { "content-type": "application/json" },
+      })) as typeof globalThis.fetch,
+    });
+
+    await expect(factory.create(60_000)).rejects.toThrow("response exceeded the size limit");
+    expect(cancelled).toBe(true);
+  });
+
   it("creates, checks, connects, and releases without projecting signed material", async () => {
     const calls: Array<{ url: string; init: RequestInit }> = [];
     const websocketResponse = new Response(null, { status: 200 });
@@ -181,6 +204,8 @@ describe("AI SDK browser tool adapter", () => {
     expect(browserCdpMethodAllowed("DOM.getDocument")).toBe(true);
     expect(browserCdpMethodAllowed("Network.getAllCookies")).toBe(false);
     expect(browserCdpMethodAllowed("Storage.setCookies")).toBe(false);
+    expect(browserCdpMethodAllowed("Network.setExtraHTTPHeaders")).toBe(false);
+    expect(browserCdpMethodAllowed("Fetch.enable")).toBe(false);
     expect(browserCdpMethodAllowed("Runtime.evaluate")).toBe(false);
     expect(browserCdpMethodAllowed("Runtime.callFunctionOn")).toBe(false);
     expect(browserToolInputAllowed({ code: "return cdp.send({ method: 'Page.navigate' })" })).toBe(true);

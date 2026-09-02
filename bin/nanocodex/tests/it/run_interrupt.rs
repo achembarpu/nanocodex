@@ -23,7 +23,6 @@ async fn assert_signal_after_completion(signal_name: &str) -> Result<()> {
         .env_remove("OPENAI_API_KEY")
         .arg("run")
         .arg("--browser=none")
-        .arg("--cookies=none")
         .arg("--api-key")
         .arg("test-key")
         .arg("--websocket-url")

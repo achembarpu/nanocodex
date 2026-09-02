@@ -38,6 +38,30 @@ const BROWSERBASE_API_ORIGIN = "https://api.browserbase.com";
 const DEFAULT_KEEP_ALIVE_MS = 10 * 60_000;
 const DEFAULT_TOOL_TIMEOUT_MS = 30_000;
 const MAX_BROWSERBASE_RESPONSE_BYTES = 256 * 1024;
+const MODEL_SAFE_CDP_METHODS = new Set([
+  "Target.getTargets",
+  "Target.createTarget",
+  "Target.closeTarget",
+  "Target.attachToTarget",
+  "Page.enable",
+  "Page.navigate",
+  "Page.reload",
+  "Page.stopLoading",
+  "Page.captureScreenshot",
+  "Page.getLayoutMetrics",
+  "DOM.enable",
+  "DOM.getDocument",
+  "DOM.querySelector",
+  "DOM.querySelectorAll",
+  "DOM.getOuterHTML",
+  "DOM.getAttributes",
+  "DOM.getBoxModel",
+  "DOM.focus",
+  "DOM.scrollIntoView",
+  "Input.dispatchMouseEvent",
+  "Input.dispatchKeyEvent",
+  "Input.insertText",
+]);
 
 const BROWSERBASE_CDP_PROTOCOL = Object.freeze({
   version: { major: "1", minor: "3" },
@@ -296,10 +320,21 @@ export class CredentialSafeBrowserBinding implements BrowserBinding {
 }
 
 export function browserCdpMethodAllowed(method: string): boolean {
-  const normalized = method.toLowerCase();
-  return !normalized.includes("cookie")
-    && normalized !== "runtime.evaluate"
-    && normalized !== "runtime.callfunctionon";
+  return MODEL_SAFE_CDP_METHODS.has(method);
+}
+
+function browserCdpCommandAllowed(method: string, params: unknown): boolean {
+  if (!browserCdpMethodAllowed(method)) return false;
+  if (method !== "Page.navigate" && method !== "Target.createTarget") return true;
+  if (!params || typeof params !== "object" || Array.isArray(params)) return false;
+  const url = (params as Record<string, unknown>).url;
+  if (typeof url !== "string") return false;
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === "https:" || parsed.protocol === "http:";
+  } catch {
+    return false;
+  }
 }
 
 export function managedBrowserProvider(value: string | undefined): ManagedBrowserProvider {
@@ -545,7 +580,7 @@ function credentialSafeWebSocketResponse(
       server.close(1008, "Invalid CDP command");
       return;
     }
-    if (!browserCdpMethodAllowed(record.method)) {
+    if (!browserCdpCommandAllowed(record.method, record.params)) {
       server.send(JSON.stringify({
         id: record.id,
         error: { code: -32_000, message: "CDP method blocked by browser credential policy" },
@@ -628,14 +663,40 @@ async function readBoundedJson(response: Response): Promise<unknown> {
     try { await response.body?.cancel(); } catch { /* Ignore cleanup failure. */ }
     throw new Error("Browserbase response exceeded the size limit");
   }
-  const text = await response.text();
-  if (text.length > MAX_BROWSERBASE_RESPONSE_BYTES) {
-    throw new Error("Browserbase response exceeded the size limit");
-  }
+  const text = await readBoundedResponseText(response, MAX_BROWSERBASE_RESPONSE_BYTES);
   try {
     return JSON.parse(text) as unknown;
   } catch {
     throw new Error("Browserbase returned invalid JSON");
+  }
+}
+
+async function readBoundedResponseText(response: Response, limit: number): Promise<string> {
+  if (response.body === null) return "";
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: false });
+  const parts: string[] = [];
+  let bytes = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      bytes += value.byteLength;
+      if (bytes > limit) {
+        await reader.cancel("response size limit exceeded");
+        throw new Error("Browserbase response exceeded the size limit");
+      }
+      parts.push(decoder.decode(value, { stream: true }));
+    }
+    parts.push(decoder.decode());
+    return parts.join("");
+  } catch (error) {
+    if (error instanceof Error && error.message === "Browserbase response exceeded the size limit") {
+      throw error;
+    }
+    throw new Error("Browserbase returned invalid UTF-8");
+  } finally {
+    reader.releaseLock();
   }
 }
 

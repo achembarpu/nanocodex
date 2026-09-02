@@ -17,20 +17,6 @@ enum BrowserKind {
     None,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
-enum CookieSourceKind {
-    #[value(alias = "auto", alias = "true")]
-    All,
-    Brave,
-    Chrome,
-    Chromium,
-    Edge,
-    Firefox,
-    Safari,
-    #[value(alias = "false", alias = "off")]
-    None,
-}
-
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
 enum CookieAuthorizationKind {
     #[default]
@@ -73,22 +59,6 @@ pub(crate) struct BrowserArgs {
     )]
     browser: Option<BrowserKind>,
 
-    /// Copy cookies from a standard desktop browser profile into the private session.
-    ///
-    /// Defaults to `all`, importing the selected desktop profile through a
-    /// short-lived isolated broker. Pass a browser name to select its profile
-    /// or `none` to start with an empty cookie jar.
-    #[arg(
-        long,
-        env = "NANOCODEX_BROWSER_COOKIES",
-        value_enum,
-        num_args = 0..=1,
-        default_missing_value = "all",
-        require_equals = true
-    )]
-    #[arg(default_value = "all")]
-    cookies: Option<CookieSourceKind>,
-
     /// Permit a visible temporary browser when macOS must authorize cookie decryption.
     ///
     /// `interactive` retries a failed background import with a copied temporary
@@ -124,7 +94,6 @@ impl Default for BrowserArgs {
     fn default() -> Self {
         Self {
             browser: None,
-            cookies: Some(default_cookie_source()),
             cookie_authorization: default_cookie_authorization(),
             passkeys: PasskeyKind::Virtual,
             browser_executable: None,
@@ -139,7 +108,6 @@ pub(crate) struct ConfiguredBrowser {
 impl BrowserArgs {
     pub(crate) fn disable(&mut self) {
         self.browser = Some(BrowserKind::None);
-        self.cookies = Some(CookieSourceKind::None);
         self.cookie_authorization = CookieAuthorizationKind::Background;
         self.passkeys = PasskeyKind::None;
         self.browser_executable = None;
@@ -152,7 +120,7 @@ impl BrowserArgs {
 
     #[cfg(test)]
     pub(crate) const fn copies_all_cookies(&self) -> bool {
-        matches!(self.cookies, Some(CookieSourceKind::All))
+        !matches!(self.browser, Some(BrowserKind::None))
     }
 
     #[cfg(test)]
@@ -175,11 +143,6 @@ impl BrowserArgs {
 
     pub(crate) fn configure(&self, workspace: &Path) -> Result<Option<ConfiguredBrowser>> {
         if self.browser == Some(BrowserKind::None) {
-            if self.cookies.is_some_and(|source| {
-                !matches!(source, CookieSourceKind::All | CookieSourceKind::None)
-            }) {
-                return Err(eyre!("--cookies requires an enabled browser"));
-            }
             if self.browser_executable.is_some() {
                 return Err(eyre!("--browser-executable requires an enabled browser"));
             }
@@ -210,11 +173,8 @@ impl BrowserArgs {
         if let Some(executable) = launch.executable {
             builder = builder.executable(executable);
         }
-        if let Some(source) = self
-            .cookies
-            .filter(|source| *source != CookieSourceKind::None)
-        {
-            builder = match cookie_source(source, launch.kind)? {
+        if let Some(source) = cookie_source(launch.kind) {
+            builder = match source {
                 CookieSource::Chromium(source) => {
                     builder.cookie_source(source.copy_all_cookies().cookie_authorization(
                         match self.cookie_authorization {
@@ -350,10 +310,6 @@ fn resolve_browser_launch(
     }
 }
 
-const fn default_cookie_source() -> CookieSourceKind {
-    CookieSourceKind::All
-}
-
 #[cfg(target_os = "macos")]
 const fn default_cookie_authorization() -> CookieAuthorizationKind {
     CookieAuthorizationKind::Interactive
@@ -364,36 +320,7 @@ const fn default_cookie_authorization() -> CookieAuthorizationKind {
     CookieAuthorizationKind::Background
 }
 
-fn cookie_source(source: CookieSourceKind, target: BrowserKind) -> Result<CookieSource> {
-    match source {
-        CookieSourceKind::Firefox => {
-            return FirefoxCookieSource::standard()
-                .and_then(|source| source.load())
-                .map(CookieSource::State)
-                .wrap_err("failed to load the standard Firefox cookie profile");
-        }
-        CookieSourceKind::Safari => {
-            return SafariCookieSource::standard()
-                .and_then(|source| source.load())
-                .map(CookieSource::State)
-                .wrap_err("failed to load the standard Safari cookie profile");
-        }
-        _ => {}
-    }
-    let explicit = match source {
-        CookieSourceKind::All => None,
-        CookieSourceKind::Brave => Some(BrowserProfileKind::Brave),
-        CookieSourceKind::Chrome => Some(BrowserProfileKind::Chrome),
-        CookieSourceKind::Chromium => Some(BrowserProfileKind::Chromium),
-        CookieSourceKind::Edge => Some(BrowserProfileKind::Edge),
-        CookieSourceKind::Firefox | CookieSourceKind::Safari | CookieSourceKind::None => None,
-    };
-    if let Some(source) = explicit {
-        return BraveSession::standard_for(source)
-            .map(CookieSource::Chromium)
-            .wrap_err_with(|| format!("failed to locate the standard {} profile", source.name()));
-    }
-
+fn cookie_source(target: BrowserKind) -> Option<CookieSource> {
     let preferences = match target {
         BrowserKind::Brave => [
             BrowserProfileKind::Brave,
@@ -411,7 +338,7 @@ fn cookie_source(source: CookieSourceKind, target: BrowserKind) -> Result<Cookie
     };
     preferences
         .into_iter()
-        .find_map(|source| BraveSession::standard_for(source).ok())
+        .find_map(|source| BraveSession::standard_cookie_for(source).ok())
         .map(CookieSource::Chromium)
         .or_else(|| {
             FirefoxCookieSource::standard()
@@ -425,7 +352,6 @@ fn cookie_source(source: CookieSourceKind, target: BrowserKind) -> Result<Cookie
                 .ok()
                 .map(CookieSource::State)
         })
-        .ok_or_else(|| eyre!("failed to locate an installed browser cookie profile"))
 }
 
 impl ConfiguredBrowser {
@@ -541,7 +467,6 @@ mod tests {
             .model_specs("browser-tui-test");
         let browser = BrowserArgs {
             browser: Some(super::BrowserKind::Chromium),
-            cookies: None,
             cookie_authorization: super::CookieAuthorizationKind::Background,
             passkeys: super::PasskeyKind::Virtual,
             browser_executable: None,
@@ -570,7 +495,6 @@ mod tests {
         let workspace = tempfile::tempdir().unwrap();
         let disabled = BrowserArgs {
             browser: Some(super::BrowserKind::None),
-            cookies: Some(super::CookieSourceKind::None),
             cookie_authorization: super::CookieAuthorizationKind::Interactive,
             passkeys: super::PasskeyKind::None,
             browser_executable: None,
@@ -579,21 +503,8 @@ mod tests {
         .unwrap();
         assert!(disabled.is_none());
 
-        let cookies = BrowserArgs {
-            browser: Some(super::BrowserKind::None),
-            cookies: Some(super::CookieSourceKind::Chrome),
-            cookie_authorization: super::CookieAuthorizationKind::Background,
-            passkeys: super::PasskeyKind::None,
-            browser_executable: None,
-        }
-        .configure(workspace.path())
-        .err()
-        .unwrap();
-        assert_eq!(cookies.to_string(), "--cookies requires an enabled browser");
-
         let executable = BrowserArgs {
             browser: Some(super::BrowserKind::None),
-            cookies: Some(super::CookieSourceKind::All),
             cookie_authorization: super::CookieAuthorizationKind::Background,
             passkeys: super::PasskeyKind::None,
             browser_executable: Some("/tmp/chromium".into()),

@@ -167,10 +167,9 @@ impl BraveSession {
     /// # Errors
     ///
     /// Returns an error when the platform has no standard location, the home
-    /// directory is unavailable, Brave is not installed there, or no standard
-    /// profile contains a cookie database.
+    /// directory is unavailable, or Brave is not installed there.
     pub fn standard() -> Result<Self, BraveSessionError> {
-        Self::standard_for(BrowserProfileKind::Brave)
+        Self::standard_cookie_for(BrowserProfileKind::Brave)
     }
 
     /// Locates a standard Chromium-family installation and user-data directory.
@@ -178,8 +177,7 @@ impl BraveSession {
     /// # Errors
     ///
     /// Returns an error when the platform has no standard location, the home
-    /// directory is unavailable, the selected browser is not installed, or no
-    /// standard profile contains a cookie database.
+    /// directory is unavailable, or the selected browser is not installed.
     pub fn standard_for(browser: BrowserProfileKind) -> Result<Self, BraveSessionError> {
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
@@ -245,12 +243,27 @@ impl BraveSession {
 
             let mut session = Self::new(executable, user_data_dir);
             session.validate_paths()?;
-            session.profile_directory = discover_cookie_profile(&session.user_data_dir)
-                .ok_or_else(|| BraveSessionError::CookiesUnavailable {
-                    profile: session.user_data_dir.clone(),
-                })?;
+            if let Some(profile_directory) = discover_cookie_profile(&session.user_data_dir) {
+                session.profile_directory = profile_directory;
+            }
             Ok(session)
         }
+    }
+
+    /// Locates an installed Chromium-family browser with a usable cookie profile.
+    ///
+    /// Unlike [`Self::standard_for`], this rejects installations that do not yet
+    /// contain a cookie database. Browser launch and host-passkey discovery must
+    /// use `standard_for` so they do not depend on unrelated cookie state.
+    pub fn standard_cookie_for(browser: BrowserProfileKind) -> Result<Self, BraveSessionError> {
+        let mut session = Self::standard_for(browser)?;
+        session.profile_directory =
+            discover_cookie_profile(&session.user_data_dir).ok_or_else(|| {
+                BraveSessionError::CookiesUnavailable {
+                    profile: session.user_data_dir.clone(),
+                }
+            })?;
+        Ok(session)
     }
 
     /// Creates a profile session from explicit executable and user-data paths.
@@ -272,6 +285,12 @@ impl BraveSession {
     pub fn profile_directory(mut self, directory: impl Into<PathBuf>) -> Self {
         self.profile_directory = directory.into();
         self
+    }
+
+    /// Returns the selected single-component profile directory.
+    #[must_use]
+    pub fn selected_profile_directory(&self) -> &Path {
+        &self.profile_directory
     }
 
     /// Allows cookies applicable to one exact HTTP(S) origin to enter the

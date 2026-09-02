@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
-    fs,
+    fs::{self, OpenOptions},
     io::{Read, Write},
     path::Path,
     time::Duration,
@@ -9,6 +9,7 @@ use std::{
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use clap::{Args, Subcommand, ValueEnum};
 use eyre::{Result, WrapErr, bail, ensure};
+use fs2::FileExt as _;
 use futures_util::StreamExt;
 use nanocodex_browser::{
     BraveSession, BrowserCookieAuthorization, BrowserCookieSameSite, BrowserOriginCookieCapture,
@@ -31,6 +32,7 @@ const MAX_COOKIE_COUNT: usize = 300;
 const MAX_REQUEST_BYTES: usize = 256 * 1024;
 const MAX_RESPONSE_BYTES: usize = 256 * 1024;
 const PROFILE_STATE_BYTES: u64 = 16 * 1024;
+const PROFILE_STATE_LOCK: &str = "browser-cookie-profiles.lock";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Args)]
@@ -53,10 +55,6 @@ struct List {
     #[arg(value_parser = canonical_browser_cookie_origin)]
     origin: String,
 
-    /// Local Chromium-family browser profile associated with the cookie jar.
-    #[arg(long, value_enum, default_value_t = CookieSource::Brave)]
-    cookies: CookieSource,
-
     /// Read the live local profile, its encrypted Vault snapshot, or compare both.
     #[arg(long = "from", value_enum, default_value_t = CookieLocation::Local)]
     location: CookieLocation,
@@ -73,17 +71,13 @@ struct Sync {
     #[arg(value_parser = canonical_browser_cookie_origin)]
     origin: String,
 
-    /// Local Chromium-family browser profile to read.
-    #[arg(long, value_enum, default_value_t = CookieSource::Brave)]
-    cookies: CookieSource,
-
     /// How the temporary cookie broker may request local credential access.
     #[cfg_attr(target_os = "macos", arg(long, value_enum, default_value_t = CookieAuth::Interactive))]
     #[cfg_attr(not(target_os = "macos"), arg(long, value_enum, default_value_t = CookieAuth::Background))]
     cookie_auth: CookieAuth,
 }
 
-#[derive(Clone, Copy, Debug, ValueEnum)]
+#[derive(Clone, Copy, Debug)]
 enum CookieSource {
     Brave,
     Chrome,
@@ -109,6 +103,8 @@ impl CookieLocation {
 }
 
 impl CookieSource {
+    const ALL: [Self; 4] = [Self::Brave, Self::Chrome, Self::Chromium, Self::Edge];
+
     const fn profile_kind(self) -> BrowserProfileKind {
         match self {
             Self::Brave => BrowserProfileKind::Brave,
@@ -159,20 +155,6 @@ impl Cookies {
 impl List {
     async fn run(self) -> Result<()> {
         let codex_home = default_codex_home()?;
-        let store_id = self.cookies.store_id();
-        let profile_id = if self.location.includes_vault() {
-            Some(
-                existing_local_profile_id(&codex_home, self.cookies.key())?.ok_or_else(|| {
-                    eyre::eyre!(
-                        "no Vault browser identity is registered for {}; run `nanocodex cookies sync {}` first",
-                        self.cookies.profile_kind().name(),
-                        self.origin
-                    )
-                })?,
-            )
-        } else {
-            None
-        };
         let credential = if self.location.includes_vault() {
             Some(
                 load_browser_cookie_sync_credential(&codex_home, &self.origin)
@@ -187,37 +169,58 @@ impl List {
         } else {
             None
         };
-
-        let local = if self.location.includes_local() {
-            let capture =
-                capture_local_cookies(&self.origin, self.cookies, self.cookie_auth).await?;
-            Some(cookie_name_list(&project_cookies(capture, &store_id)?))
-        } else {
-            None
-        };
-
-        let vault = if let Some(credential) = credential {
-            Some(
-                fetch_vault_cookie_names(
-                    &credential,
-                    &self.origin,
-                    profile_id
-                        .as_deref()
-                        .expect("Vault source has a profile id"),
-                    &store_id,
-                )
-                .await?,
-            )
-        } else {
-            None
-        };
-
-        print_cookie_names(
-            self.cookies.profile_kind().name(),
-            &self.origin,
-            local.as_ref(),
-            vault.as_ref(),
-        )
+        let sessions = detected_cookie_sessions(self.cookie_auth)?;
+        let mut reports = Vec::new();
+        for (source, session) in sessions {
+            let store_id = source.store_id();
+            let profile_key = local_profile_key(source, &session)?;
+            let profile_id = if self.location.includes_vault() {
+                existing_local_profile_id(&codex_home, &profile_key)?
+            } else {
+                None
+            };
+            let local = if self.location.includes_local() {
+                match capture_local_cookies(&self.origin, source, session).await {
+                    Ok(capture) => Some(cookie_name_list(&project_cookies(capture, &store_id)?)),
+                    Err(_) => {
+                        eprintln!(
+                            "Skipped {} because its cookie store could not be read.",
+                            source.profile_kind().name()
+                        );
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+            let vault = match (credential.as_ref(), profile_id.as_deref()) {
+                (Some(credential), Some(profile_id)) => Some(
+                    fetch_vault_cookie_names(credential, &self.origin, profile_id, &store_id)
+                        .await?,
+                ),
+                (Some(_), None) => Some(empty_vault_cookie_names()),
+                (None, _) => None,
+            };
+            if local.is_some() || vault.is_some() {
+                reports.push((source, local, vault));
+            }
+        }
+        ensure!(
+            !reports.is_empty(),
+            "none of the detected browser cookie stores could be read"
+        );
+        for (index, (source, local, vault)) in reports.iter().enumerate() {
+            if index > 0 {
+                println!();
+            }
+            print_cookie_names(
+                source.profile_kind().name(),
+                &self.origin,
+                local.as_ref(),
+                vault.as_ref(),
+            )?;
+        }
+        Ok(())
     }
 }
 
@@ -232,103 +235,143 @@ impl Sync {
                     self.origin
                 )
             })?;
-        let capture = capture_local_cookies(&self.origin, self.cookies, self.cookie_auth).await?;
-        let profile_id = local_profile_id(&codex_home, self.cookies.key())?;
-        let store_id = self.cookies.store_id();
-        let cookies = project_cookies(capture, &store_id)?;
-        let client = http_client()?;
-        let mut list_url = credential.origin().join(COOKIE_JARS_PATH)?;
-        list_url
-            .query_pairs_mut()
-            .append_pair("origin", &self.origin)
-            .append_pair("profile_id", &profile_id)
-            .append_pair("store_id", &store_id);
-        let listed = client
-            .get(list_url.clone())
-            .bearer_auth(credential.bearer_token())
-            .header("origin", APP_ORIGIN)
-            .header("x-nanocodex-app-id", APP_ID)
-            .send()
-            .await
-            .wrap_err("failed to list browser cookie jars")?;
-        require_response_url(&listed, &list_url)?;
-        ensure_success(&listed, "list browser cookie jars")?;
-        let listed: BrowserCookieJarList = response_json(listed).await?;
-        ensure!(
-            listed.browser_cookie_jars.len() <= 1,
-            "Vault returned multiple cookie jars for the same origin and local profile"
-        );
-        let (jar_id, revision) = match listed.browser_cookie_jars.into_iter().next() {
-            Some(metadata) => {
-                metadata.validate(&self.origin, &profile_id, &store_id)?;
-                (metadata.id, metadata.revision)
-            }
-            None => (random_opaque_id(), 0),
-        };
-        let request = BrowserCookieJarUpsert {
-            schema_version: 1,
-            origin: &self.origin,
-            profile_id: &profile_id,
-            store_id: &store_id,
-            revision,
-            cookies: &cookies,
-        };
-        let encoded = serde_json::to_vec(&request).wrap_err("failed to encode cookie jar")?;
-        ensure!(
-            encoded.len() <= MAX_REQUEST_BYTES,
-            "cookie jar is {} bytes, above the {}-byte Vault limit",
-            encoded.len(),
-            MAX_REQUEST_BYTES
-        );
-        let item_url = credential
-            .origin()
-            .join(&format!("{COOKIE_JARS_PATH}/{jar_id}"))?;
-        let saved = client
-            .put(item_url.clone())
-            .bearer_auth(credential.bearer_token())
-            .header("origin", APP_ORIGIN)
-            .header("x-nanocodex-app-id", APP_ID)
-            .header("content-type", "application/json")
-            .body(encoded)
-            .send()
-            .await
-            .wrap_err("failed to upload browser cookie jar")?;
-        require_response_url(&saved, &item_url)?;
-        if saved.status() == StatusCode::CONFLICT {
-            let code = response_json::<VaultConflict>(saved)
-                .await
-                .ok()
-                .map(|conflict| conflict.error);
-            match code.as_deref() {
-                Some("browser_cookie_jar_limit_reached") => {
-                    bail!("Vault already contains the maximum number of browser cookie jars")
+        let mut prepared = Vec::new();
+        for (source, session) in detected_cookie_sessions(self.cookie_auth)? {
+            let profile_key = local_profile_key(source, &session)?;
+            let store_id = source.store_id();
+            let capture = match capture_local_cookies(&self.origin, source, session).await {
+                Ok(capture) => capture,
+                Err(_) => {
+                    eprintln!(
+                        "Skipped {} because its cookie store could not be read.",
+                        source.profile_kind().name()
+                    );
+                    continue;
                 }
-                Some("browser_cookie_jar_binding_conflict") => {
-                    bail!("Vault cookie jar identity is already bound to another profile")
-                }
-                _ => bail!("Vault cookie jar changed concurrently; rerun the sync command"),
-            }
+            };
+            let cookies = project_cookies(capture, &store_id)?;
+            prepared.push((source, profile_key, store_id, cookies));
         }
-        ensure_success(&saved, "upload browser cookie jar")?;
-        let saved: BrowserCookieJarMetadata = response_json(saved).await?;
-        saved.validate(&self.origin, &profile_id, &store_id)?;
         ensure!(
-            saved.id == jar_id,
-            "Vault returned another cookie jar identity"
+            !prepared.is_empty(),
+            "none of the detected browser cookie stores could be read"
         );
-        ensure!(
-            saved.cookie_count == cookies.len(),
-            "Vault returned a different cookie count"
-        );
-        println!(
-            "Synced {} {} cookies for {} to Vault (revision {}).",
-            cookies.len(),
-            self.cookies.profile_kind().name(),
-            self.origin,
-            saved.revision
-        );
+        for (source, profile_key, store_id, cookies) in prepared {
+            let profile_id = local_profile_id(&codex_home, &profile_key)?;
+            sync_vault_cookie_jar(
+                &credential,
+                &self.origin,
+                source,
+                &profile_id,
+                &store_id,
+                &cookies,
+            )
+            .await?;
+        }
         Ok(())
     }
+}
+
+async fn sync_vault_cookie_jar(
+    credential: &ScopedManagedCredential,
+    origin: &str,
+    source: CookieSource,
+    profile_id: &str,
+    store_id: &str,
+    cookies: &[BrowserCookieWire],
+) -> Result<()> {
+    let client = http_client()?;
+    let mut list_url = credential.origin().join(COOKIE_JARS_PATH)?;
+    list_url
+        .query_pairs_mut()
+        .append_pair("origin", origin)
+        .append_pair("profile_id", profile_id)
+        .append_pair("store_id", store_id);
+    let listed = client
+        .get(list_url.clone())
+        .bearer_auth(credential.bearer_token())
+        .header("origin", APP_ORIGIN)
+        .header("x-nanocodex-app-id", APP_ID)
+        .send()
+        .await
+        .wrap_err("failed to list browser cookie jars")?;
+    require_response_url(&listed, &list_url)?;
+    ensure_success(&listed, "list browser cookie jars")?;
+    let listed: BrowserCookieJarList = response_json(listed).await?;
+    ensure!(
+        listed.browser_cookie_jars.len() <= 1,
+        "Vault returned multiple cookie jars for the same origin and local profile"
+    );
+    let (jar_id, revision) = match listed.browser_cookie_jars.into_iter().next() {
+        Some(metadata) => {
+            metadata.validate(origin, profile_id, store_id)?;
+            (metadata.id, metadata.revision)
+        }
+        None => (random_opaque_id(), 0),
+    };
+    let request = BrowserCookieJarUpsert {
+        schema_version: 1,
+        origin,
+        profile_id,
+        store_id,
+        revision,
+        cookies: &cookies,
+    };
+    let encoded = serde_json::to_vec(&request).wrap_err("failed to encode cookie jar")?;
+    ensure!(
+        encoded.len() <= MAX_REQUEST_BYTES,
+        "cookie jar is {} bytes, above the {}-byte Vault limit",
+        encoded.len(),
+        MAX_REQUEST_BYTES
+    );
+    let item_url = credential
+        .origin()
+        .join(&format!("{COOKIE_JARS_PATH}/{jar_id}"))?;
+    let saved = client
+        .put(item_url.clone())
+        .bearer_auth(credential.bearer_token())
+        .header("origin", APP_ORIGIN)
+        .header("x-nanocodex-app-id", APP_ID)
+        .header("content-type", "application/json")
+        .body(encoded)
+        .send()
+        .await
+        .wrap_err("failed to upload browser cookie jar")?;
+    require_response_url(&saved, &item_url)?;
+    if saved.status() == StatusCode::CONFLICT {
+        let code = response_json::<VaultConflict>(saved)
+            .await
+            .ok()
+            .map(|conflict| conflict.error);
+        match code.as_deref() {
+            Some("browser_cookie_jar_limit_reached") => {
+                bail!("Vault already contains the maximum number of browser cookie jars")
+            }
+            Some("browser_cookie_jar_binding_conflict") => {
+                bail!("Vault cookie jar identity is already bound to another profile")
+            }
+            _ => bail!("Vault cookie jar changed concurrently; rerun the sync command"),
+        }
+    }
+    ensure_success(&saved, "upload browser cookie jar")?;
+    let saved: BrowserCookieJarMetadata = response_json(saved).await?;
+    saved.validate(origin, profile_id, store_id)?;
+    ensure!(
+        saved.id == jar_id,
+        "Vault returned another cookie jar identity"
+    );
+    ensure!(
+        saved.cookie_count == cookies.len(),
+        "Vault returned a different cookie count"
+    );
+    println!(
+        "Synced {} {} cookies for {} to Vault (revision {}).",
+        cookies.len(),
+        source.profile_kind().name(),
+        origin,
+        saved.revision
+    );
+    Ok(())
 }
 
 #[derive(Serialize)]
@@ -368,13 +411,43 @@ struct BrowserCookiePartitionWire {
     has_cross_site_ancestor: Option<bool>,
 }
 
+fn local_cookie_session(source: CookieSource, authorization: CookieAuth) -> Result<BraveSession> {
+    Ok(BraveSession::standard_cookie_for(source.profile_kind())?
+        .cookie_authorization(authorization.into()))
+}
+
+fn detected_cookie_sessions(
+    authorization: CookieAuth,
+) -> Result<Vec<(CookieSource, BraveSession)>> {
+    let sessions = CookieSource::ALL
+        .into_iter()
+        .filter_map(|source| {
+            local_cookie_session(source, authorization)
+                .ok()
+                .map(|session| (source, session))
+        })
+        .collect::<Vec<_>>();
+    ensure!(
+        !sessions.is_empty(),
+        "no installed Brave, Chrome, Chromium, or Edge profile with cookies was found"
+    );
+    Ok(sessions)
+}
+
+fn local_profile_key(source: CookieSource, session: &BraveSession) -> Result<String> {
+    let directory = session
+        .selected_profile_directory()
+        .to_str()
+        .ok_or_else(|| eyre::eyre!("browser profile directory is not valid UTF-8"))?;
+    Ok(format!("{}:{directory}", source.key()))
+}
+
 async fn capture_local_cookies(
     origin: &str,
     source: CookieSource,
-    authorization: CookieAuth,
+    session: BraveSession,
 ) -> Result<BrowserOriginCookieCapture> {
-    BraveSession::standard_for(source.profile_kind())?
-        .cookie_authorization(authorization.into())
+    session
         .capture_origin_cookies(Url::parse(origin)?)
         .await
         .wrap_err_with(|| {
@@ -463,6 +536,17 @@ struct VaultCookieNames {
     jar_present: bool,
     revision: Option<u64>,
     list: CookieNameList,
+}
+
+fn empty_vault_cookie_names() -> VaultCookieNames {
+    VaultCookieNames {
+        jar_present: false,
+        revision: None,
+        list: CookieNameList {
+            cookie_count: 0,
+            names: BTreeSet::new(),
+        },
+    }
 }
 
 #[derive(Serialize)]
@@ -812,12 +896,14 @@ struct BrowserProfileState {
     profiles: BTreeMap<String, String>,
 }
 
-fn local_profile_id(codex_home: &Path, source: &str) -> Result<String> {
+fn local_profile_id(codex_home: &Path, profile_key: &str) -> Result<String> {
+    fs::create_dir_all(codex_home)?;
+    let _lock = lock_browser_profile_state(codex_home, false)?;
     let mut state = read_browser_profile_state(codex_home)?.unwrap_or(BrowserProfileState {
         version: 1,
         profiles: BTreeMap::new(),
     });
-    if let Some(profile_id) = state.profiles.get(source) {
+    if let Some(profile_id) = state.profiles.get(profile_key) {
         ensure!(
             valid_profile_id(profile_id),
             "stored browser profile identity is invalid"
@@ -825,8 +911,9 @@ fn local_profile_id(codex_home: &Path, source: &str) -> Result<String> {
         return Ok(profile_id.clone());
     }
     let profile_id = format!("local-{}", uuid::Uuid::new_v4());
-    state.profiles.insert(source.to_owned(), profile_id.clone());
-    fs::create_dir_all(codex_home)?;
+    state
+        .profiles
+        .insert(profile_key.to_owned(), profile_id.clone());
     let path = codex_home.join("browser-cookie-profiles.json");
     let encoded = serde_json::to_vec(&state)?;
     let mut temporary = tempfile::NamedTempFile::new_in(codex_home)?;
@@ -840,11 +927,13 @@ fn local_profile_id(codex_home: &Path, source: &str) -> Result<String> {
     Ok(profile_id)
 }
 
-fn existing_local_profile_id(codex_home: &Path, source: &str) -> Result<Option<String>> {
+fn existing_local_profile_id(codex_home: &Path, profile_key: &str) -> Result<Option<String>> {
+    fs::create_dir_all(codex_home)?;
+    let _lock = lock_browser_profile_state(codex_home, true)?;
     let Some(state) = read_browser_profile_state(codex_home)? else {
         return Ok(None);
     };
-    let Some(profile_id) = state.profiles.get(source) else {
+    let Some(profile_id) = state.profiles.get(profile_key) else {
         return Ok(None);
     };
     ensure!(
@@ -852,6 +941,38 @@ fn existing_local_profile_id(codex_home: &Path, source: &str) -> Result<Option<S
         "stored browser profile identity is invalid"
     );
     Ok(Some(profile_id.clone()))
+}
+
+fn lock_browser_profile_state(codex_home: &Path, shared: bool) -> Result<fs::File> {
+    let path = codex_home.join(PROFILE_STATE_LOCK);
+    if let Ok(metadata) = fs::symlink_metadata(&path) {
+        ensure!(
+            !metadata.file_type().is_symlink(),
+            "browser cookie profile lock must not be a symbolic link"
+        );
+    }
+    let file = match OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(&path)
+    {
+        Ok(file) => {
+            set_private_file(&file, &path)?;
+            file
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            OpenOptions::new().read(true).write(true).open(&path)?
+        }
+        Err(error) => return Err(error.into()),
+    };
+    ensure_private_file(&file, &path)?;
+    if shared {
+        fs2::FileExt::lock_shared(&file)?;
+    } else {
+        file.lock_exclusive()?;
+    }
+    Ok(file)
 }
 
 fn read_browser_profile_state(codex_home: &Path) -> Result<Option<BrowserProfileState>> {
@@ -1048,10 +1169,12 @@ mod tests {
     #[test]
     fn profile_identity_is_stable_opaque_and_private() {
         let directory = tempfile::tempdir().unwrap();
-        let first = local_profile_id(directory.path(), "brave").unwrap();
-        let second = local_profile_id(directory.path(), "brave").unwrap();
-        let chrome = local_profile_id(directory.path(), "chrome").unwrap();
+        let first = local_profile_id(directory.path(), "brave:Default").unwrap();
+        let second = local_profile_id(directory.path(), "brave:Default").unwrap();
+        let other_profile = local_profile_id(directory.path(), "brave:Profile 1").unwrap();
+        let chrome = local_profile_id(directory.path(), "chrome:Default").unwrap();
         assert_eq!(first, second);
+        assert_ne!(first, other_profile);
         assert_ne!(first, chrome);
         assert!(valid_profile_id(&first));
         assert!(!first.contains(&directory.path().display().to_string()));

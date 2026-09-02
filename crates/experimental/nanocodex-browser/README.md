@@ -259,17 +259,17 @@ passkey modes are mutually exclusive.
 nanocodex --passkeys=host
 ```
 
-Pass `none` to either option to disable the browser or cookie-copy default:
+Cookie-source selection is automatic and has no CLI flag. Nanocodex probes the
+installed Brave, Chrome, Chromium, and Edge profiles for a usable cookie store,
+then falls back to Firefox and Safari. It imports the first compatible source
+for the private local browser. Disable the browser itself when a run must not
+receive host cookies:
 
 ```console
 nanocodex
-nanocodex --browser=none --cookies=none
-nanocodex --cookies=none
-nanocodex --browser=chromium --cookies=all
-nanocodex --browser --cookies=chrome
-nanocodex --browser=brave --cookies=edge
-nanocodex --browser --cookies=firefox
-nanocodex --browser --cookies=safari
+nanocodex --browser=none
+nanocodex --browser=chromium
+nanocodex --browser=brave
 ```
 
 Chromium-family sources use their own executable as a short-lived decryption
@@ -278,7 +278,7 @@ binary-cookie decoder may require granting the Nanocodex process macOS access
 to Safari's sandboxed profile. Source profiles are never mutated, and cookie
 values remain outside the model-callable browser schema. The `exec` contract
 advertises `tools.browser` with a compact summary; its complete action guidance
-remains runtime-only in `ALL_TOOLS`. Selecting `all` deliberately gives the
+remains runtime-only in `ALL_TOOLS`. Automatic import deliberately gives the
 agent authenticated access to every site represented in the selected profile.
 
 On macOS, if a populated Chromium-family store cannot be decrypted in the
@@ -289,7 +289,7 @@ The ordinary source profile and its tabs are never opened or controlled. Pass
 `--cookie-auth=background` to suppress that interactive fallback.
 
 ```console
-nanocodex --cookies=brave --cookie-auth=background
+nanocodex --cookie-auth=background
 ```
 
 Harnesses can export a lossless, exact-origin cookie snapshot without exposing
