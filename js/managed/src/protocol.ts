@@ -34,7 +34,7 @@ export type AgentCapabilities = Readonly<{
 }>;
 
 export type ServerMessage = (
-  | { type: "ready"; session_id: string; restored: boolean; active_turns: string[]; active_turn_details: ActiveTurn[]; capabilities: AgentCapabilities }
+  | { type: "ready"; session_id: string; restored: boolean; active_turns: string[]; active_turn_details: ActiveTurn[]; capabilities: AgentCapabilities; latest_event_cursor: string }
   | { type: "agent_created"; agent_id: string; capabilities: AgentCapabilities }
   | { type: "turn_accepted"; id: string; input: PromptInput; replayed: boolean }
   | { type: "turn_cancelling"; id: string; error?: string; retry_at?: number }
@@ -47,7 +47,7 @@ export type ServerMessage = (
   | { type: "status"; active_turns: string[]; active_turn_details: ActiveTurn[]; agent_loaded: boolean; connected_clients: number }
   | { type: "pong"; nonce?: string }
   | { type: "error"; code: string; message: string }
-) & { cursor?: string; turn_id?: string | null };
+) & { cursor?: string; created_at?: number; turn_id?: string | null };
 
 const TURN_ID = /^[A-Za-z0-9._:-]{1,128}$/;
 const IMAGE_DETAILS = new Set(["auto", "low", "high", "original"]);

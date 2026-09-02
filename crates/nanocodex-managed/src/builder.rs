@@ -1,6 +1,7 @@
 use std::{
     future::Future,
     pin::Pin,
+    sync::Arc,
     task::{Context, Poll},
 };
 
@@ -18,6 +19,7 @@ use crate::{
     AgentReceipt, AgentState, EventCursor, ManagedClient, ManagedError, ManagedEvents, PromptInput,
     TurnAction, TurnView,
     driver::{ManagedAgent, ManagedDriver},
+    websocket::ManagedSocket,
 };
 
 /// One owned operation accepted by a managed Tower service.
@@ -96,11 +98,30 @@ pub enum ManagedResponse {
 #[derive(Clone, Debug)]
 pub struct ManagedService {
     client: ManagedClient,
+    socket: Arc<tokio::sync::Mutex<Option<ManagedLiveSocket>>>,
+    transport: ManagedTransport,
+}
+
+#[derive(Debug)]
+struct ManagedLiveSocket {
+    agent_id: String,
+    socket: ManagedSocket,
+    events: Option<crate::websocket::ManagedSocketEvents>,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ManagedTransport {
+    Http,
+    WebSocket,
 }
 
 impl ManagedService {
-    const fn new(client: ManagedClient) -> Self {
-        Self { client }
+    fn new(client: ManagedClient, transport: ManagedTransport) -> Self {
+        Self {
+            client,
+            socket: Arc::new(tokio::sync::Mutex::new(None)),
+            transport,
+        }
     }
 }
 
@@ -115,25 +136,92 @@ impl Service<ManagedRequest> for ManagedService {
 
     fn call(&mut self, request: ManagedRequest) -> Self::Future {
         let client = self.client.clone();
+        let socket = Arc::clone(&self.socket);
+        let transport = self.transport;
         Box::pin(async move {
             match request {
-                ManagedRequest::Create => client.create().await.map(ManagedResponse::Created),
+                ManagedRequest::Create => match transport {
+                    ManagedTransport::Http => client.create().await.map(ManagedResponse::Created),
+                    ManagedTransport::WebSocket => {
+                        let (receipt, live, events) = ManagedSocket::create(client.clone()).await?;
+                        *socket.lock().await = Some(ManagedLiveSocket {
+                            agent_id: receipt.agent_id.clone(),
+                            socket: live,
+                            events: Some(events),
+                        });
+                        Ok(ManagedResponse::Created(receipt))
+                    }
+                },
                 ManagedRequest::State { agent_id } => {
                     client.state(&agent_id).await.map(ManagedResponse::State)
                 }
-                ManagedRequest::Events { agent_id, cursor } => {
-                    let mut events = client.events(&agent_id, cursor)?;
-                    events.open().await?;
-                    Ok(ManagedResponse::Events(ManagedEvents::new(events)))
-                }
+                ManagedRequest::Events { agent_id, cursor } => match transport {
+                    ManagedTransport::Http => {
+                        let mut events = client.events(&agent_id, cursor)?;
+                        events.open().await?;
+                        Ok(ManagedResponse::Events(ManagedEvents::new(events)))
+                    }
+                    ManagedTransport::WebSocket => {
+                        {
+                            let mut socket = socket.lock().await;
+                            if let Some(live) =
+                                socket.as_mut().filter(|live| live.agent_id == agent_id)
+                            {
+                                let events = live.events.as_ref().ok_or_else(|| {
+                                    ManagedError::Configuration(
+                                        "managed create WebSocket events were already consumed"
+                                            .to_owned(),
+                                    )
+                                })?;
+                                if events.cursor().as_str() != cursor.as_str() {
+                                    return Err(ManagedError::Configuration(
+                                        "managed create WebSocket cursor does not match ready state"
+                                            .to_owned(),
+                                    ));
+                                }
+                                let events = live
+                                    .events
+                                    .take()
+                                    .expect("managed create WebSocket events were just observed");
+                                return Ok(ManagedResponse::Events(ManagedEvents::new(events)));
+                            }
+                        }
+                        let (live, events) =
+                            ManagedSocket::open(client.clone(), agent_id.clone(), cursor).await?;
+                        *socket.lock().await = Some(ManagedLiveSocket {
+                            agent_id,
+                            socket: live,
+                            events: None,
+                        });
+                        Ok(ManagedResponse::Events(ManagedEvents::new(events)))
+                    }
+                },
                 ManagedRequest::Submit {
                     agent_id,
                     idempotency_key,
                     input,
-                } => client
-                    .submit(&agent_id, None, &idempotency_key, &input)
-                    .await
-                    .map(ManagedResponse::Submitted),
+                } => {
+                    if matches!(transport, ManagedTransport::Http) {
+                        return client
+                            .submit(&agent_id, None, &idempotency_key, &input)
+                            .await
+                            .map(ManagedResponse::Submitted);
+                    }
+                    let live = socket
+                        .lock()
+                        .await
+                        .as_ref()
+                        .filter(|live| live.agent_id == agent_id)
+                        .map(|live| live.socket.clone());
+                    let live = live.ok_or_else(|| {
+                        ManagedError::Configuration(
+                            "managed WebSocket is not open for this agent".to_owned(),
+                        )
+                    })?;
+                    live.submit(idempotency_key, input)
+                        .await
+                        .map(ManagedResponse::Submitted)
+                }
                 ManagedRequest::Steer {
                     agent_id,
                     turn_id,
@@ -172,9 +260,18 @@ enum ManagedOperation {
 impl Managed<ManagedService> {
     /// Selects creation of a new account-owned managed agent.
     #[must_use]
-    pub const fn create(client: ManagedClient) -> Self {
+    pub fn create(client: ManagedClient) -> Self {
         Self {
-            service: ManagedService::new(client),
+            service: ManagedService::new(client, ManagedTransport::Http),
+            operation: ManagedOperation::Create,
+        }
+    }
+
+    /// Selects creation over the resumable managed WebSocket transport.
+    #[must_use]
+    pub fn create_live(client: ManagedClient) -> Self {
+        Self {
+            service: ManagedService::new(client, ManagedTransport::WebSocket),
             operation: ManagedOperation::Create,
         }
     }
@@ -183,7 +280,16 @@ impl Managed<ManagedService> {
     #[must_use]
     pub fn open(client: ManagedClient, agent_id: impl Into<String>) -> Self {
         Self {
-            service: ManagedService::new(client),
+            service: ManagedService::new(client, ManagedTransport::Http),
+            operation: ManagedOperation::Open(agent_id.into()),
+        }
+    }
+
+    /// Opens an existing agent over the resumable managed WebSocket transport.
+    #[must_use]
+    pub fn open_live(client: ManagedClient, agent_id: impl Into<String>) -> Self {
+        Self {
+            service: ManagedService::new(client, ManagedTransport::WebSocket),
             operation: ManagedOperation::Open(agent_id.into()),
         }
     }
@@ -200,7 +306,20 @@ impl Managed<ManagedService> {
         state: AgentState,
     ) -> Self {
         Self {
-            service: ManagedService::new(client),
+            service: ManagedService::new(client, ManagedTransport::Http),
+            operation: ManagedOperation::OpenFromState(agent_id.into(), state),
+        }
+    }
+
+    /// Opens an existing agent from validated state over the resumable WebSocket transport.
+    #[must_use]
+    pub fn open_live_from_state(
+        client: ManagedClient,
+        agent_id: impl Into<String>,
+        state: AgentState,
+    ) -> Self {
+        Self {
+            service: ManagedService::new(client, ManagedTransport::WebSocket),
             operation: ManagedOperation::OpenFromState(agent_id.into(), state),
         }
     }
@@ -285,9 +404,11 @@ impl<S> ManagedBuilder<S> {
         let (agent_id, expected_session_id, supplied_state) = match self.managed.operation {
             ManagedOperation::Create => {
                 match call(&mut self.managed.service, ManagedRequest::Create).await? {
-                    ManagedResponse::Created(receipt) => {
-                        (receipt.agent_id, Some(receipt.session_id), None)
-                    }
+                    ManagedResponse::Created(receipt) => (
+                        receipt.agent_id,
+                        Some(receipt.session_id),
+                        receipt.initial_state,
+                    ),
                     _ => return Err(unexpected_response()),
                 }
             }

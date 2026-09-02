@@ -12,6 +12,7 @@ mod driver;
 mod error;
 mod sse;
 mod types;
+mod websocket;
 
 #[cfg(feature = "tools")]
 mod attachment;

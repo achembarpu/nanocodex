@@ -132,12 +132,7 @@ import {
   unbindAgentCredential,
 } from "./credentials";
 import { routeBrowserEgress } from "./browser-egress";
-import {
-  accountInfo,
-  projectAccountInfo,
-  type AccountInfo,
-  withInitialAccountInfo,
-} from "./account-info";
+import { accountInfo } from "./account-info";
 import { accountConnectorsTool } from "./account-connectors-tool";
 import { routeConnectorRequest } from "./connectors";
 import {
@@ -197,6 +192,8 @@ export { MemoryScope } from "./memory-scope";
 export { ApiKeyRecord, NonceStorage, Organization, UserAccount } from "./account-auth";
 
 const MAX_CLIENT_MESSAGE_BYTES = 1024 * 1024;
+const MAX_CLIENT_REPLAY_BYTES = 8 * 1024 * 1024;
+const MAX_CLIENT_REPLAY_EVENTS = 256;
 const MAX_ACTIVE_TURNS = 16;
 const MAX_PRE_ADMISSION_CANCELLATIONS = 64;
 const MAX_CLIENT_CONNECTIONS = 64;
@@ -232,6 +229,7 @@ const DEFAULT_OWNERSHIP_IO_TIMEOUT_MS = 10_000;
 const DEFAULT_MULTIPLAYER_IO_TIMEOUT_MS = 10_000;
 const MAX_CLEANUP_RETRY_MS = 60_000;
 const SESSION_OWNER_ASSERTION = "x-nanocodex-owner-id";
+const SESSION_CREATE_ID_ASSERTION = "x-nanocodex-create-session-id";
 // ManagedTurnArchive owns the long-lived API projection. The portable Rust
 // state keeps a bounded exact-replay window so cutovers do not call the model.
 const MANAGED_TERMINAL_RECEIPT_RETENTION = 512;
@@ -289,6 +287,16 @@ type SessionRow = {
   stream_error: string | null;
 };
 
+type SessionInitialization = {
+  session_id?: unknown;
+  owner_id?: unknown;
+  organization_id?: unknown;
+  team_id?: unknown;
+  authorization_epoch?: unknown;
+  public_origin?: unknown;
+  runtime_profile?: unknown;
+};
+
 type DeviceHostAttachment = {
   kind: "device-host";
   sessionId: string;
@@ -328,11 +336,6 @@ type SessionStatusRow = {
   last_active: number;
   stream_error: string | null;
 };
-
-type InitialAccountContext = Readonly<{
-  turn_id: string;
-  account: AccountInfo;
-}>;
 
 type ManagedTurnState =
   | "accepted"
@@ -420,6 +423,7 @@ type TurnAuthorization = Readonly<{
 type SessionSocketAttachment = Readonly<{
   sessionId: string;
   authorization: TurnAuthorization;
+  replayAfter: string | null;
 }>;
 
 type HistoryProjectionOutboxRow = {
@@ -653,10 +657,16 @@ function isUniqueStringArray(value: unknown): value is string[] {
 }
 
 const SAFE_OBSERVATION_FIELDS = new Set([
+  "account_mcp_refresh_ms",
   "attempt_count",
   "auth_kind",
+  "auth_ms",
+  "commit_ms",
+  "create_ms",
+  "credential_prepare_ms",
   "error_code",
   "error_kind",
+  "initialization_ms",
   "message_type",
   "method",
   "operation_kind",
@@ -683,6 +693,10 @@ function safeObservationDetail(
 
 function errorKind(error: unknown): string {
   return error instanceof Error ? error.name : typeof error;
+}
+
+function roundMilliseconds(value: number): number {
+  return Math.round(value * 100) / 100;
 }
 
 function accountConnectorProjection(
@@ -766,6 +780,43 @@ async function managedFetch(
     }
     const history = await routeHistoryRequest(request, env, url);
     if (history) return history;
+    if (request.method === "GET" && url.pathname === "/v1/agents/live") {
+      if (url.search !== ""
+        || request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
+        return new Response("Expected WebSocket upgrade", { status: 426 });
+      }
+      const creationStartedAt = performance.now();
+      const principal = trustedAgentPrincipal ?? await authenticate(request, env, url);
+      if (!principal) return json({ error: "unauthorized" }, { status: 401 });
+      if (!principal.capabilities.includes("agents:read")
+        || !principal.capabilities.includes("agents:write")
+        || !principal.capabilities.includes("tools:use")) {
+        return json({ error: "forbidden" }, { status: 403 });
+      }
+      if (principal.connectGrant
+        && !principal.connectGrant.connectors.includes("chatgpt")) {
+        return json({ error: "connector_forbidden" }, { status: 403 });
+      }
+      if (principal.kind !== "api_key" && request.headers.get("origin") !== url.origin) {
+        return json({ error: "forbidden_origin" }, { status: 403 });
+      }
+      const agentId = uuidV7();
+      const headers = new Headers(request.headers);
+      forwardPrincipalAssertions(headers, principal);
+      headers.set(SESSION_CREATE_ID_ASSERTION, agentId);
+      const stub = env.NANOCODEX_SESSIONS.getByName(agentId);
+      const response = await stub.fetch(
+        `https://session.internal/create-live?public_origin=${encodeURIComponent(url.origin)}`,
+        new Request(request, { headers }),
+      );
+      observeManagedPrincipal(env, "managed.agent.live_created", principal, {
+        agent_id: agentId,
+        thread_id: agentId,
+        outcome: response.status === 101 ? "success" : "failure",
+        create_ms: roundMilliseconds(performance.now() - creationStartedAt),
+      });
+      return response;
+    }
     if (request.method === "POST" && url.pathname === "/v1/rooms") {
       const principal = await authenticate(request, env, url);
       if (!principal) return json({ error: "unauthorized" }, { status: 401 });
@@ -840,8 +891,10 @@ async function managedFetch(
     }
     if (request.method === "POST" && url.pathname === "/v1/agents") {
       if (url.search !== "") return json({ error: "invalid_request" }, { status: 400 });
+      const creationStartedAt = performance.now();
       const principal = trustedAgentPrincipal ?? await authenticate(request, env, url);
       if (!principal) return json({ error: "unauthorized" }, { status: 401 });
+      const authenticatedAt = performance.now();
       observeManagedPrincipal(env, "managed.agent.create_requested", principal, {
         method: request.method,
       });
@@ -903,6 +956,7 @@ async function managedFetch(
       const stub = env.NANOCODEX_SESSIONS.getByName(agentId);
       const ownershipTimeoutMs = managedOwnershipTimeoutMs(env);
       let prepared: Response;
+      const credentialPreparationStartedAt = performance.now();
       try {
         prepared = await fetchCreateStage(stub, "https://session.internal/credential-binding", {
           method: "PUT",
@@ -932,6 +986,7 @@ async function managedFetch(
         }
         return json({ error: "agent cleanup initialization failed" }, { status: 503 });
       }
+      const credentialPreparedAt = performance.now();
       const retainedImport = durabilityArchive === undefined
         ? undefined
         : await prepared.json<DurabilityImportReceipt>();
@@ -965,6 +1020,7 @@ async function managedFetch(
         }
       }
       const memory = env.NANOCODEX_MEMORY.getByName(principal.organizationId);
+      const initializationStartedAt = performance.now();
       const [credentialBinding, initialization, memoryInitialization] = await Promise.allSettled([
         fetchCreateStage(
           stub,
@@ -996,6 +1052,7 @@ async function managedFetch(
       if (memoryInitialization.status === "fulfilled") {
         await memoryInitialization.value.body?.cancel();
       }
+      const initializedAt = performance.now();
       const credentialUnavailable = credentialBinding.status === "rejected"
         || !credentialBinding.value.ok;
       if (credentialUnavailable
@@ -1043,6 +1100,7 @@ async function managedFetch(
         }
       }
       let committed: Response | undefined;
+      const commitStartedAt = performance.now();
       try {
         committed = await fetchCreateStage(
           stub,
@@ -1058,6 +1116,7 @@ async function managedFetch(
         if (requestKey === null) await requestSessionCleanup(stub, ownershipTimeoutMs);
         return json({ error: "agent cleanup commit failed" }, { status: 503 });
       }
+      const committedAt = performance.now();
       const importedSession = durabilityImport?.turn_archive_adoption?.session
         ?? retainedImport?.adoption?.session;
       if (importedSession && importedSession.accepted_turns > 0) {
@@ -1076,10 +1135,22 @@ async function managedFetch(
       const routeBase = "/v1/agents";
       const websocketUrl = new URL(`${routeBase}/${agentId}/ws`, url);
       websocketUrl.protocol = websocketUrl.protocol === "https:" ? "wss:" : "ws:";
+      ctx.waitUntil(stub.prewarm({
+        capabilities: principal.capabilities,
+        ...(principal.connectGrant === undefined
+          ? {}
+          : { connectGrant: principal.connectGrant }),
+      }));
       observeManagedPrincipal(env, "managed.agent.created", principal, {
         agent_id: agentId,
         thread_id: agentId,
         outcome: "success",
+        auth_ms: roundMilliseconds(authenticatedAt - creationStartedAt),
+        credential_prepare_ms:
+          roundMilliseconds(credentialPreparedAt - credentialPreparationStartedAt),
+        initialization_ms: roundMilliseconds(initializedAt - initializationStartedAt),
+        commit_ms: roundMilliseconds(committedAt - commitStartedAt),
+        create_ms: roundMilliseconds(performance.now() - creationStartedAt),
       });
       return json({
         agent_id: agentId,
@@ -1087,6 +1158,22 @@ async function managedFetch(
         durability_id: durabilityStateId ?? agentId,
         events_url: new URL(`${routeBase}/${agentId}/events`, url).href,
         websocket_url: websocketUrl.href,
+        ...(durabilityImport === undefined && retainedImport === undefined ? {
+          initial_state: {
+            agent_id: agentId,
+            session_id: agentId,
+            has_snapshot: false,
+            completed_turns: 0,
+            last_active: Date.now(),
+            active_turns: [],
+            active_turn_details: [],
+            agent_loaded: false,
+            connected_clients: 0,
+            capabilities: AGENT_CAPABILITIES,
+            latest_event_cursor: "1",
+            stream_error: null,
+          },
+        } : {}),
       }, {
         status: 201,
       });
@@ -1127,11 +1214,14 @@ async function managedFetch(
       if (request.method !== "GET" || request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
         return new Response("Expected WebSocket upgrade", { status: 426 });
       }
-      if (principal.kind === "api_key" && resource !== "tool-host") {
+      if (principal.kind === "api_key" && resource === "device-host") {
         return json({ error: "forbidden" }, { status: 403 });
       }
       if (!principal.capabilities.includes("agents:write")
         || !principal.capabilities.includes("tools:use")) {
+        return json({ error: "forbidden" }, { status: 403 });
+      }
+      if (resource === "ws" && !principal.capabilities.includes("agents:read")) {
         return json({ error: "forbidden" }, { status: 403 });
       }
       if ((resource === "ws" || resource === "tool-host")
@@ -1142,8 +1232,18 @@ async function managedFetch(
       if (principal.kind !== "api_key" && request.headers.get("origin") !== url.origin) {
         return json({ error: "forbidden_origin" }, { status: 403 });
       }
+      const socketQuery = new URLSearchParams({ public_origin: url.origin });
+      if (resource === "ws") {
+        const keys = [...url.searchParams.keys()];
+        if (keys.some((key) => key !== "cursor")
+          || url.searchParams.getAll("cursor").length > 1) {
+          return json({ error: "invalid_request" }, { status: 400 });
+        }
+        const cursor = url.searchParams.get("cursor");
+        if (cursor !== null) socketQuery.set("cursor", cursor);
+      }
       return stub.fetch(
-        `https://session.internal/${resource === "ws" ? "socket" : resource}?${publicOrigin}`,
+        `https://session.internal/${resource === "ws" ? "socket" : resource}?${socketQuery}`,
         new Request(request, { headers: sessionHeaders }),
       );
     }
@@ -1444,7 +1544,6 @@ export class DurableAgentSession extends DurableComputerSession {
   readonly #pendingTurnIds = new Set<string>();
   readonly #turnInputs = new Map<string, PromptInput>();
   readonly #admissionTasks = new Map<string, Promise<ManagedTurnRow>>();
-  #initialAccountContextTask?: Promise<InitialAccountContext | undefined>;
   #accountMcpConnections?: readonly ManagedAccountMcpConnection[];
   #accountMcpRefreshTask?: Promise<void>;
   readonly #cancellationTasks = new Map<string, Promise<void>>();
@@ -1634,18 +1733,21 @@ export class DurableAgentSession extends DurableComputerSession {
     this.#deleted = this.#initializationOwnership()?.state === "deleted";
     this.#streamError = this.#session()?.stream_error ?? undefined;
     this.ctx.blockConcurrencyWhile(async () => {
-      const [deleting, credentialBinding, deletionGeneration, durabilityExported, durabilityImportState] = await Promise.all([
-        this.ctx.storage.get<boolean>(SESSION_DELETING_KEY),
-        this.ctx.storage.get<CredentialBindingOwnership>(CREDENTIAL_BINDING_KEY),
-        this.ctx.storage.get<number>(SESSION_DELETION_GENERATION_KEY),
-        this.ctx.storage.get<boolean>(DURABILITY_EXPORTED_KEY),
-        this.ctx.storage.get<"pending" | "complete">(DURABILITY_IMPORT_STATE_KEY),
+      const retained = await this.ctx.storage.get([
+        SESSION_DELETING_KEY,
+        CREDENTIAL_BINDING_KEY,
+        SESSION_DELETION_GENERATION_KEY,
+        DURABILITY_EXPORTED_KEY,
+        DURABILITY_IMPORT_STATE_KEY,
       ]);
-      this.#deleting = deleting === true;
-      this.#credentialBinding = credentialBinding;
-      this.#deletionGeneration = deletionGeneration ?? 0;
-      this.#durabilityExported = durabilityExported === true;
-      this.#durabilityImportState = durabilityImportState;
+      this.#deleting = retained.get(SESSION_DELETING_KEY) === true;
+      this.#credentialBinding = retained.get(CREDENTIAL_BINDING_KEY) as
+        CredentialBindingOwnership | undefined;
+      this.#deletionGeneration =
+        (retained.get(SESSION_DELETION_GENERATION_KEY) as number | undefined) ?? 0;
+      this.#durabilityExported = retained.get(DURABILITY_EXPORTED_KEY) === true;
+      this.#durabilityImportState = retained.get(DURABILITY_IMPORT_STATE_KEY) as
+        "pending" | "complete" | undefined;
       // Durable state and SSE replay are immediately usable after eviction.
       // Re-admission or deletion may load external resources, so neither sits
       // on the object's request-readiness boundary.
@@ -1653,8 +1755,13 @@ export class DurableAgentSession extends DurableComputerSession {
       else {
         this.#scheduleRecovery();
         this.#scheduleHistoryProjection();
+        this.#resumeClientReplays();
       }
     });
+  }
+
+  prewarm(authorization: TurnAuthorization): void {
+    this.#prewarmAgent(parseTurnAuthorization(JSON.stringify(authorization)));
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -1675,6 +1782,9 @@ export class DurableAgentSession extends DurableComputerSession {
         return json({ error: "ownership_mismatch" }, { status: 409 });
       }
       return new Response(null, { status: 204 });
+    }
+    if (request.method === "GET" && url.pathname === "/create-live") {
+      return this.#createLive(request, url);
     }
     if (ownerAssertion !== null) {
       const asserted = forwardedPrincipal(request.headers);
@@ -1932,137 +2042,13 @@ export class DurableAgentSession extends DurableComputerSession {
       const body = await request.text();
       if (this.#deleting || this.#deleted) return new Response(null, { status: 409 });
       if (body.length > 2048) return new Response(null, { status: 400 });
-      let initialization: {
-        session_id?: unknown;
-        owner_id?: unknown;
-        organization_id?: unknown;
-        team_id?: unknown;
-        authorization_epoch?: unknown;
-        public_origin?: unknown;
-        runtime_profile?: unknown;
-      };
+      let initialization: SessionInitialization;
       try {
-        initialization = JSON.parse(body) as typeof initialization;
+        initialization = JSON.parse(body) as SessionInitialization;
       } catch {
         return new Response(null, { status: 400 });
       }
-      const sessionId = initialization.session_id;
-      const ownerId = initialization.owner_id;
-      const organizationId = initialization.organization_id;
-      const teamId = initialization.team_id;
-      const authorizationEpoch = initialization.authorization_epoch;
-      const publicOrigin = initialization.public_origin;
-      const runtimeProfile = initialization.runtime_profile ?? "managed";
-      const managedCoordinates = runtimeProfile === "managed"
-        && typeof organizationId === "string" && isUserId(organizationId)
-        && typeof teamId === "string" && isUserId(teamId)
-        && Number.isSafeInteger(authorizationEpoch) && Number(authorizationEpoch) >= 1;
-      const multiplayerCoordinates = runtimeProfile === "multiplayer"
-        && organizationId === undefined && teamId === undefined
-        && authorizationEpoch === undefined;
-      if (typeof sessionId !== "string"
-        || !SESSION_ID.test(sessionId)
-        || !isUserId(ownerId)
-        || typeof publicOrigin !== "string"
-        || !validPublicOrigin(publicOrigin)
-        || (!managedCoordinates && !multiplayerCoordinates)) {
-        return new Response(null, { status: 400 });
-      }
-      const credentialBinding = this.#credentialBinding;
-      if (runtimeProfile === "managed" && (!credentialBinding
-        || credentialBinding.owner_id !== ownerId
-        || credentialBinding.session_id !== sessionId
-        || credentialBinding.subject !== this.ctx.id.toString())) {
-        return new Response(null, { status: 409 });
-      }
-      const storedOrganizationId = managedCoordinates ? organizationId : "";
-      const storedTeamId = managedCoordinates ? teamId : "";
-      const storedAuthorizationEpoch = managedCoordinates ? Number(authorizationEpoch) : 0;
-      const current = this.#session();
-      const currentId = current?.session_id;
-      if (currentId && currentId !== sessionId) return new Response(null, { status: 409 });
-      if (current && current.owner_id !== ownerId) return new Response(null, { status: 409 });
-      if (current && (current.organization_id !== storedOrganizationId
-        || current.team_id !== storedTeamId
-        || current.authorization_epoch !== storedAuthorizationEpoch)) {
-        return new Response(null, { status: 409 });
-      }
-      if (current && current.runtime_profile !== runtimeProfile) return new Response(null, { status: 409 });
-      let event: DurableEvent<StreamMessage> | undefined;
-      try {
-        this.ctx.storage.transactionSync(() => {
-          const ownership = this.#initializationOwnership();
-          if (this.#deleting || this.#deleted || ownership?.state === "deleted") {
-            throw new ManagedRequestError(
-              409,
-              "agent_deleting",
-              "the agent is being deleted or was already deleted",
-            );
-          }
-          if (ownership && (ownership.session_id !== sessionId
-            || ownership.owner_id !== ownerId
-            || ownership.runtime_profile !== runtimeProfile)) {
-            throw new ManagedRequestError(
-              409,
-              "agent_initialized",
-              "the one-shot initialization ownership belongs to another session",
-            );
-          }
-          if (!ownership) {
-            this.ctx.storage.sql.exec(
-              `INSERT INTO session_initialization_ownership (
-                 singleton, session_id, owner_id, runtime_profile, state
-               ) VALUES (1, ?, ?, ?, 'active')`,
-              sessionId,
-              ownerId,
-              runtimeProfile,
-            );
-          }
-          const retained = this.#session();
-          if (retained && (retained.session_id !== sessionId
-            || retained.owner_id !== ownerId
-            || retained.runtime_profile !== runtimeProfile)) {
-            throw new ManagedRequestError(
-              409,
-              "agent_initialized",
-              "the agent is already initialized with different ownership",
-            );
-          }
-          if (retained) {
-            this.ctx.storage.sql.exec(
-              "UPDATE session_state SET public_origin = ? WHERE singleton = 1",
-              publicOrigin,
-            );
-            return;
-          }
-          this.ctx.storage.sql.exec(
-            `INSERT INTO session_state
-               (singleton, session_id, owner_id, organization_id, team_id, authorization_epoch,
-                public_origin, runtime_profile, last_active)
-             VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)`,
-            sessionId,
-            ownerId,
-            storedOrganizationId,
-            storedTeamId,
-            storedAuthorizationEpoch,
-            publicOrigin,
-            runtimeProfile,
-            Date.now(),
-          );
-          event = this.#eventLog.append({
-            type: "agent_created",
-            agent_id: sessionId,
-            capabilities: this.#capabilities(),
-          }, null, true);
-        });
-      } catch (error) {
-        if (error instanceof ManagedRequestError) {
-          return new Response(null, { status: error.status });
-        }
-        throw error;
-      }
-      if (event) this.#publish(event);
-      return new Response(null, { status: 204 });
+      return this.#initializeSession(initialization);
     }
     if (this.#durabilityImportState === "pending"
       && !(request.method === "DELETE" && url.pathname === "/session")) {
@@ -2072,7 +2058,7 @@ export class DurableAgentSession extends DurableComputerSession {
       });
     }
     if (request.method === "GET" && url.pathname === "/socket")
-      return this.#upgrade(turnAuthorization);
+      return this.#upgrade(turnAuthorization, url.searchParams.get("cursor"));
     if (request.method === "GET" && url.pathname === "/tool-host") {
       if (ownerAssertion === null) return json({ error: "not_found" }, { status: 404 });
       if (this.#deleting) return new Response("Agent is being deleted", { status: 409 });
@@ -2428,7 +2414,180 @@ export class DurableAgentSession extends DurableComputerSession {
     else await this.#scheduleNextAlarm();
   }
 
-  #upgrade(authorization: TurnAuthorization): Response {
+  async #createLive(request: Request, url: URL): Promise<Response> {
+    if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
+      return new Response("Expected WebSocket upgrade", { status: 426 });
+    }
+    if (this.#deleting || this.#deleted || this.#sessionId() || this.#credentialBinding) {
+      return json({ error: "agent_initialized" }, { status: 409 });
+    }
+    const asserted = forwardedPrincipal(request.headers);
+    const sessionId = request.headers.get(SESSION_CREATE_ID_ASSERTION);
+    const publicOrigin = url.searchParams.get("public_origin");
+    if (!asserted
+      || typeof sessionId !== "string"
+      || !SESSION_ID.test(sessionId)
+      || typeof publicOrigin !== "string"
+      || !validPublicOrigin(publicOrigin)) {
+      return json({ error: "invalid_request" }, { status: 400 });
+    }
+    const credentialBinding: CredentialBindingOwnership = {
+      cleanup_at: Date.now(),
+      owner_id: asserted.ownerId,
+      session_id: sessionId,
+      state: "active",
+      subject: this.ctx.id.toString(),
+    };
+    await this.ctx.storage.put(CREDENTIAL_BINDING_KEY, credentialBinding);
+    this.#credentialBinding = credentialBinding;
+    const initialized = this.#initializeSession({
+      session_id: sessionId,
+      owner_id: asserted.ownerId,
+      organization_id: asserted.organizationId,
+      team_id: asserted.teamId,
+      authorization_epoch: asserted.authorizationEpoch,
+      public_origin: publicOrigin,
+    });
+    if (!initialized.ok) return initialized;
+
+    const registration = this.#track(attachAgent(
+      this.env,
+      asserted.ownerId,
+      sessionId,
+      this.#ownershipIoTimeoutMs(),
+    ));
+    this.ctx.waitUntil(registration.catch((error) => {
+      console.warn({
+        type: "managed.agent_live_registration_pending",
+        error_kind: errorKind(error),
+      });
+    }));
+    return this.#upgrade(asserted.authorization, null);
+  }
+
+  #initializeSession(initialization: SessionInitialization): Response {
+    const sessionId = initialization.session_id;
+    const ownerId = initialization.owner_id;
+    const organizationId = initialization.organization_id;
+    const teamId = initialization.team_id;
+    const authorizationEpoch = initialization.authorization_epoch;
+    const publicOrigin = initialization.public_origin;
+    const runtimeProfile = initialization.runtime_profile ?? "managed";
+    const managedCoordinates = runtimeProfile === "managed"
+      && typeof organizationId === "string" && isUserId(organizationId)
+      && typeof teamId === "string" && isUserId(teamId)
+      && Number.isSafeInteger(authorizationEpoch) && Number(authorizationEpoch) >= 1;
+    const multiplayerCoordinates = runtimeProfile === "multiplayer"
+      && organizationId === undefined && teamId === undefined
+      && authorizationEpoch === undefined;
+    if (typeof sessionId !== "string"
+      || !SESSION_ID.test(sessionId)
+      || !isUserId(ownerId)
+      || typeof publicOrigin !== "string"
+      || !validPublicOrigin(publicOrigin)
+      || (!managedCoordinates && !multiplayerCoordinates)) {
+      return new Response(null, { status: 400 });
+    }
+    const credentialBinding = this.#credentialBinding;
+    if (runtimeProfile === "managed" && (!credentialBinding
+      || credentialBinding.owner_id !== ownerId
+      || credentialBinding.session_id !== sessionId
+      || credentialBinding.subject !== this.ctx.id.toString())) {
+      return new Response(null, { status: 409 });
+    }
+    const storedOrganizationId = managedCoordinates ? organizationId : "";
+    const storedTeamId = managedCoordinates ? teamId : "";
+    const storedAuthorizationEpoch = managedCoordinates ? Number(authorizationEpoch) : 0;
+    const current = this.#session();
+    const currentId = current?.session_id;
+    if (currentId && currentId !== sessionId) return new Response(null, { status: 409 });
+    if (current && current.owner_id !== ownerId) return new Response(null, { status: 409 });
+    if (current && (current.organization_id !== storedOrganizationId
+      || current.team_id !== storedTeamId
+      || current.authorization_epoch !== storedAuthorizationEpoch)) {
+      return new Response(null, { status: 409 });
+    }
+    if (current && current.runtime_profile !== runtimeProfile) {
+      return new Response(null, { status: 409 });
+    }
+    let event: DurableEvent<StreamMessage> | undefined;
+    try {
+      this.ctx.storage.transactionSync(() => {
+        const ownership = this.#initializationOwnership();
+        if (this.#deleting || this.#deleted || ownership?.state === "deleted") {
+          throw new ManagedRequestError(
+            409,
+            "agent_deleting",
+            "the agent is being deleted or was already deleted",
+          );
+        }
+        if (ownership && (ownership.session_id !== sessionId
+          || ownership.owner_id !== ownerId
+          || ownership.runtime_profile !== runtimeProfile)) {
+          throw new ManagedRequestError(
+            409,
+            "agent_initialized",
+            "the one-shot initialization ownership belongs to another session",
+          );
+        }
+        if (!ownership) {
+          this.ctx.storage.sql.exec(
+            `INSERT INTO session_initialization_ownership (
+               singleton, session_id, owner_id, runtime_profile, state
+             ) VALUES (1, ?, ?, ?, 'active')`,
+            sessionId,
+            ownerId,
+            runtimeProfile,
+          );
+        }
+        const retained = this.#session();
+        if (retained && (retained.session_id !== sessionId
+          || retained.owner_id !== ownerId
+          || retained.runtime_profile !== runtimeProfile)) {
+          throw new ManagedRequestError(
+            409,
+            "agent_initialized",
+            "the agent is already initialized with different ownership",
+          );
+        }
+        if (retained) {
+          this.ctx.storage.sql.exec(
+            "UPDATE session_state SET public_origin = ? WHERE singleton = 1",
+            publicOrigin,
+          );
+          return;
+        }
+        this.ctx.storage.sql.exec(
+          `INSERT INTO session_state
+             (singleton, session_id, owner_id, organization_id, team_id, authorization_epoch,
+              public_origin, runtime_profile, last_active)
+           VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          sessionId,
+          ownerId,
+          storedOrganizationId,
+          storedTeamId,
+          storedAuthorizationEpoch,
+          publicOrigin,
+          runtimeProfile,
+          Date.now(),
+        );
+        event = this.#eventLog.append({
+          type: "agent_created",
+          agent_id: sessionId,
+          capabilities: this.#capabilities(),
+        }, null, true);
+      });
+    } catch (error) {
+      if (error instanceof ManagedRequestError) {
+        return new Response(null, { status: error.status });
+      }
+      throw error;
+    }
+    if (event) this.#publish(event);
+    return new Response(null, { status: 204 });
+  }
+
+  #upgrade(authorization: TurnAuthorization, requestedCursor: string | null): Response {
     if (this.#deleting) return new Response("Agent is being deleted", { status: 409 });
     if (this.#durabilityExported) {
       return new Response("Agent durability state was exported", { status: 409 });
@@ -2442,11 +2601,20 @@ export class DurableAgentSession extends DurableComputerSession {
     if (this.ctx.getWebSockets("client").length >= MAX_CLIENT_CONNECTIONS) {
       return new Response("Session client limit reached", { status: 429 });
     }
+    const latestCursor = this.#eventArchive.latestCursor(this.#eventLog);
+    const cursor = requestedCursor === null || requestedCursor === "latest"
+      ? latestCursor
+      : parseCursor(requestedCursor);
+    if (cursor === undefined) return json({ error: "invalid_cursor" }, { status: 400 });
+    if (BigInt(cursor) > BigInt(latestCursor)) {
+      return json({ error: "cursor_ahead", latest_cursor: latestCursor }, { status: 409 });
+    }
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair);
     server.serializeAttachment({
       sessionId: session.session_id,
       authorization,
+      replayAfter: cursor === latestCursor ? null : cursor,
     } satisfies SessionSocketAttachment);
     this.ctx.acceptWebSocket(server, ["client"]);
     this.#send(server, {
@@ -2456,9 +2624,75 @@ export class DurableAgentSession extends DurableComputerSession {
       active_turns: this.#activeTurnIds(),
       active_turn_details: this.#activeTurnDetails(),
       capabilities: this.#capabilities(),
+      latest_event_cursor: latestCursor,
     });
+    if (cursor !== latestCursor) void this.#replayClientSocket(server, cursor);
     this.#prewarmAgent(authorization);
     return new Response(null, { status: 101, webSocket: client });
+  }
+
+  async #replayClientSocket(socket: WebSocket, after: string): Promise<void> {
+    const page = this.#eventArchive.pageReader(this.#eventLog);
+    let cursor = after;
+    let replayBytes = 0;
+    let replayEvents = 0;
+    try {
+      while (socket.readyState === WebSocket.OPEN) {
+        const events = await page(
+          cursor,
+          Math.min(MAX_HISTORY_PAGE_SIZE, MAX_CLIENT_REPLAY_EVENTS - replayEvents),
+        );
+        for (const event of events) {
+          const message: ServerMessage = {
+            ...event.message,
+            cursor: event.cursor,
+            created_at: event.created_at,
+            ...(event.turn_id === null ? {} : { turn_id: event.turn_id }),
+          };
+          const encoded = JSON.stringify(message);
+          const bytes = encoder.encode(encoded).byteLength;
+          if (replayEvents > 0 && replayBytes + bytes > MAX_CLIENT_REPLAY_BYTES) {
+            closeSocket(socket, 1013, "durable replay continuation required");
+            return;
+          }
+          if (!this.#sendEncoded(socket, encoded)) return;
+          cursor = event.cursor;
+          replayBytes += bytes;
+          replayEvents += 1;
+          socket.serializeAttachment({
+            ...(socket.deserializeAttachment() as SessionSocketAttachment),
+            replayAfter: cursor,
+          } satisfies SessionSocketAttachment);
+        }
+        if (replayEvents >= MAX_CLIENT_REPLAY_EVENTS) {
+          closeSocket(socket, 1013, "durable replay continuation required");
+          return;
+        }
+        if (events.length > 0) continue;
+        socket.serializeAttachment({
+          ...(socket.deserializeAttachment() as SessionSocketAttachment),
+          replayAfter: null,
+        } satisfies SessionSocketAttachment);
+        return;
+      }
+    } catch (error) {
+      console.warn({ type: "managed.websocket_replay_failed", error_kind: errorKind(error) });
+      this.#send(socket, {
+        type: "error",
+        code: "event_replay_failed",
+        message: "durable event replay failed",
+      });
+      closeSocket(socket, 1011, "durable event replay failed");
+    }
+  }
+
+  #resumeClientReplays(): void {
+    for (const socket of this.ctx.getWebSockets("client")) {
+      const attachment = socket.deserializeAttachment() as Partial<SessionSocketAttachment> | null;
+      if (typeof attachment?.replayAfter === "string") {
+        void this.#replayClientSocket(socket, attachment.replayAfter);
+      }
+    }
   }
 
   #prewarmAgent(authorization: TurnAuthorization): void {
@@ -2482,9 +2716,11 @@ export class DurableAgentSession extends DurableComputerSession {
       })
       .finally(() => {
         if (this.#agentPrewarmTask === prewarm) this.#agentPrewarmTask = undefined;
-      });
+    });
     this.#agentPrewarmTask = prewarm;
-    this.ctx.waitUntil(prewarm);
+    // Durable Objects stay active while this task owns pending I/O; unlike a
+    // Worker ExecutionContext, DurableObjectState.waitUntil does not extend
+    // the object's lifetime.
   }
 
   #upgradeDeviceHost(): Response {
@@ -2825,11 +3061,16 @@ export class DurableAgentSession extends DurableComputerSession {
         command.id,
         command.input,
         requestHash,
-        null,
+        command.id,
         true,
         attachment?.authorization ?? { capabilities: [] },
       );
-      if (!submission.created) this.#send(socket, messageForManagedTurn(submission.row));
+      if (!submission.created) {
+        this.#send(socket, {
+          ...messageForManagedTurn(submission.row),
+          turn_id: submission.row.id,
+        });
+      }
     } catch (error) {
       const failure = managedHttpError(error);
       this.#send(socket, { type: "error", code: failure.code, message: failure.message });
@@ -3894,11 +4135,7 @@ export class DurableAgentSession extends DurableComputerSession {
       if (this.#deleting || this.#agent !== agent) throw retryableError("agent became unavailable during admission");
       let dispatchInputJson = this.#managedDispatchInput(row);
       if (dispatchInputJson === undefined) {
-        const initialAccountContext = await this.#initialAccountContext();
-        const accountInput = initialAccountContext?.turn_id === row.id
-          ? withInitialAccountInfo(input, initialAccountContext.account)
-          : input;
-        dispatchInputJson = JSON.stringify(accountInput);
+        dispatchInputJson = JSON.stringify(input);
       }
       const dispatchable = this.#managedTurn(row.id);
       if (!dispatchable || isTerminalState(dispatchable.state)) {
@@ -4280,7 +4517,6 @@ export class DurableAgentSession extends DurableComputerSession {
     this.#assertDeletionGeneration(generation);
     this.#credentialBinding = undefined;
     this.#durabilityImportState = undefined;
-    this.#initialAccountContextTask = undefined;
     this.#deleting = false;
   }
 
@@ -4426,8 +4662,11 @@ export class DurableAgentSession extends DurableComputerSession {
     if (this.#durabilityExported) throw new Error("durability state was exported");
     if (this.#deleting || this.#deleted) throw retryableError("agent is being deleted");
     const session = this.#session();
+    let accountMcpRefreshMs = 0;
     if (session?.runtime_profile === "managed") {
+      const refreshStartedAt = performance.now();
       await this.#refreshAccountMcpConnections(session);
+      accountMcpRefreshMs = roundMilliseconds(performance.now() - refreshStartedAt);
     }
     if (this.#durabilityExported) throw new Error("durability state was exported");
     if (this.#deleting || this.#deleted) throw retryableError("agent is being deleted");
@@ -4462,7 +4701,7 @@ export class DurableAgentSession extends DurableComputerSession {
       promise: undefined as unknown as Promise<CloudflareAgent.Agent>,
       publication: undefined as unknown as Promise<CloudflareAgent.Agent>,
     };
-    construction.promise = this.#createAgent();
+    construction.promise = this.#createAgent(accountMcpRefreshMs);
     this.#agentConstruction = construction;
     this.#agentConstructions.add(construction);
     const publication = this.#publishAgentConstruction(construction);
@@ -4561,48 +4800,6 @@ export class DurableAgentSession extends DurableComputerSession {
     return shutdown;
   }
 
-  #initialAccountContext(): Promise<InitialAccountContext | undefined> {
-    return this.#initialAccountContextTask ??= this.#loadInitialAccountContext();
-  }
-
-  async #loadInitialAccountContext(): Promise<InitialAccountContext | undefined> {
-    const session = this.#session();
-    if (!session || session.runtime_profile === "multiplayer") return undefined;
-    const first = this.ctx.storage.sql.exec<{ id: string; authorization_json: string }>(
-      `SELECT id, authorization_json
-       FROM managed_turns ORDER BY created_at, id LIMIT 1`,
-    ).toArray()[0];
-    if (!first) return undefined;
-    let allowedConnectors: readonly ManagedEgressConnectorId[] | undefined = [];
-    let allowedConnections: ConnectorConnectionSelection | undefined;
-    try {
-      const authorization = parseTurnAuthorization(first.authorization_json);
-      allowedConnectors = accountConnectorProjection(authorization);
-      allowedConnections = accountConnectionProjection(authorization);
-    } catch { /* Malformed authorization fails closed. */ }
-    const retained = await this.ctx.storage.get<InitialAccountContext>(
-      INITIAL_ACCOUNT_CONTEXT_KEY,
-    );
-    if (retained) {
-      return {
-        ...retained,
-        account: projectAccountInfo(retained.account, allowedConnectors, allowedConnections),
-      };
-    }
-    const prepared = {
-      turn_id: first.id,
-      account: await accountInfo(
-        this.env.NANOCODEX,
-        session.owner_id,
-        true,
-        allowedConnectors,
-        allowedConnections,
-      ),
-    } satisfies InitialAccountContext;
-    await this.ctx.storage.put(INITIAL_ACCOUNT_CONTEXT_KEY, prepared);
-    return prepared;
-  }
-
   async #refreshAccountMcpConnections(session: SessionRow): Promise<void> {
     const current = this.#accountMcpRefreshTask;
     if (current) return current;
@@ -4665,14 +4862,21 @@ export class DurableAgentSession extends DurableComputerSession {
     return runtime;
   }
 
-  async #createAgent(): Promise<CloudflareAgent.Agent> {
+  async #createAgent(accountMcpRefreshMs: number): Promise<CloudflareAgent.Agent> {
     const constructionStartedAt = performance.now();
+    let phaseStartedAt = constructionStartedAt;
     const session = this.#session();
     if (!session) throw new Error("session is not initialized");
     const multiplayer = session.runtime_profile === "multiplayer";
     if (!multiplayer) await this.#ensureCredentialBinding(session);
+    const credentialBindingMs = performance.now() - phaseStartedAt;
+    phaseStartedAt = performance.now();
     const browserRuntime = multiplayer ? undefined : await this.#managedBrowserRuntime(session);
+    const browserRuntimeMs = performance.now() - phaseStartedAt;
+    phaseStartedAt = performance.now();
     const workspace = await getWorkspace(this);
+    const workspaceMs = performance.now() - phaseStartedAt;
+    phaseStartedAt = performance.now();
     // Shared-room members can all admit turns. Never attach the room owner's
     // connector capability to that shared tool runtime: provider destinations
     // fail closed without a subject, while ordinary public HTTP remains usable.
@@ -4685,6 +4889,7 @@ export class DurableAgentSession extends DurableComputerSession {
       ),
       sshIdentityAllowed: (reference) => this.#activeTurnSshIdentityAllowed(reference),
     });
+    const computerRuntimeMs = performance.now() - phaseStartedAt;
     const currentAccountInfo = () => {
       const authorization = this.#activeTurnAuthorization();
       return accountInfo(
@@ -4697,11 +4902,13 @@ export class DurableAgentSession extends DurableComputerSession {
     };
     const internalRuntime = Symbol.for("nanocodex.cloudflare.internalRuntime");
     const hostedProvider = multiplayer ? undefined : this.#hostedTools.provider();
+    const codeEvaluatorStartedAt = performance.now();
     const hostedRuntime = hostedProvider === undefined ? undefined : {
       codeEvaluator: await managedCodeEvaluator(),
       toolMode: "code" as const,
       toolProviders: [hostedProvider],
     };
+    const codeEvaluatorMs = performance.now() - codeEvaluatorStartedAt;
     const accountMcpConnections = this.#accountMcpConnections ?? [];
     const accountMcpProviders = new Map(accountMcpConnections.map((connection) => [
       managedAccountMcpServerName(connection),
@@ -4801,7 +5008,10 @@ export class DurableAgentSession extends DurableComputerSession {
     ];
     let preparedTools: Tools | undefined;
     let agent: CloudflareAgent.Agent;
+    let managedToolsMs = 0;
+    let cloudflareAgentMs = 0;
     try {
+      phaseStartedAt = performance.now();
       preparedTools = multiplayer
         ? undefined
         : await createDefaultManagedTools(
@@ -4809,6 +5019,7 @@ export class DurableAgentSession extends DurableComputerSession {
             managedMcp,
             (serverName) => accountMcpProviders.get(serverName),
           );
+      managedToolsMs = performance.now() - phaseStartedAt;
       let durabilityId = session.session_id;
       try {
         durabilityId = this.ctx.storage.sql.exec<{ state_id: string }>(
@@ -4848,7 +5059,9 @@ export class DurableAgentSession extends DurableComputerSession {
       if (hostedRuntime !== undefined) {
         Object.defineProperty(agentOptions, internalRuntime, { value: hostedRuntime });
       }
+      phaseStartedAt = performance.now();
       agent = await CloudflareAgent.create(this, agentOptions);
+      cloudflareAgentMs = performance.now() - phaseStartedAt;
     } catch (error) {
       let cleanupError: unknown;
       try {
@@ -4866,7 +5079,17 @@ export class DurableAgentSession extends DurableComputerSession {
       throw error;
     }
     this.#logCapacity("agent_constructed", {
-      construction_ms: Math.round((performance.now() - constructionStartedAt) * 100) / 100,
+      account_mcp_refresh_ms: accountMcpRefreshMs,
+      credential_binding_ms: roundMilliseconds(credentialBindingMs),
+      browser_runtime_ms: roundMilliseconds(browserRuntimeMs),
+      workspace_ms: roundMilliseconds(workspaceMs),
+      computer_runtime_ms: roundMilliseconds(computerRuntimeMs),
+      code_evaluator_ms: roundMilliseconds(codeEvaluatorMs),
+      managed_tools_ms: roundMilliseconds(managedToolsMs),
+      cloudflare_agent_ms: roundMilliseconds(cloudflareAgentMs),
+      construction_ms: roundMilliseconds(performance.now() - constructionStartedAt),
+      runtime_ready_ms:
+        roundMilliseconds(performance.now() - constructionStartedAt + accountMcpRefreshMs),
     });
     return agent;
   }
@@ -5485,6 +5708,7 @@ export class DurableAgentSession extends DurableComputerSession {
     this.#broadcast({
       ...event.message,
       cursor: event.cursor,
+      created_at: event.created_at,
       ...(event.turn_id === null ? {} : { turn_id: event.turn_id }),
     });
     if (this.#eventArchive.needsSeal(this.#eventLog)) {
@@ -6169,16 +6393,26 @@ export class DurableAgentSession extends DurableComputerSession {
   }
 
   #broadcastEncoded(encoded: string): void {
-    for (const socket of this.ctx.getWebSockets("client")) this.#sendEncoded(socket, encoded);
+    for (const socket of this.ctx.getWebSockets("client")) {
+      const attachment = socket.deserializeAttachment() as Partial<SessionSocketAttachment> | null;
+      if (attachment?.replayAfter !== undefined && attachment.replayAfter !== null) continue;
+      this.#sendEncoded(socket, encoded);
+    }
   }
 
-  #send(socket: WebSocket, message: ServerMessage): void {
-    this.#sendEncoded(socket, JSON.stringify(message));
+  #send(socket: WebSocket, message: ServerMessage): boolean {
+    return this.#sendEncoded(socket, JSON.stringify(message));
   }
 
-  #sendEncoded(socket: WebSocket, encoded: string): void {
-    if (socket.readyState !== WebSocket.OPEN) return;
-    try { socket.send(encoded); } catch { closeSocket(socket, 1011, "send failed"); }
+  #sendEncoded(socket: WebSocket, encoded: string): boolean {
+    if (socket.readyState !== WebSocket.OPEN) return false;
+    try {
+      socket.send(encoded);
+      return true;
+    } catch {
+      closeSocket(socket, 1011, "send failed");
+      return false;
+    }
   }
 }
 
@@ -6298,7 +6532,12 @@ function messageForManagedTurn(row: ManagedTurnRow): ServerMessage {
   }
   const input = JSON.parse(row.input_json) as PromptInput;
   if (row.state === "accepted" && row.retry_at !== null) {
-    return { type: "turn_retryable", id: row.id, error: row.error ?? "turn will be retried" };
+    return {
+      type: "turn_retryable",
+      id: row.id,
+      error: row.error ?? "turn will be retried",
+      ...(row.accepted_cursor === null ? {} : { cursor: row.accepted_cursor }),
+    };
   }
   if (row.state === "cancelling") {
     return {
@@ -6306,6 +6545,7 @@ function messageForManagedTurn(row: ManagedTurnRow): ServerMessage {
       id: row.id,
       ...(row.error === null ? {} : { error: row.error }),
       ...(row.retry_at === null ? {} : { retry_at: row.retry_at }),
+      ...(row.accepted_cursor === null ? {} : { cursor: row.accepted_cursor }),
     };
   }
   return {

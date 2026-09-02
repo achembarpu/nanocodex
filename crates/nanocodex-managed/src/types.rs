@@ -54,6 +54,9 @@ pub struct AgentReceipt {
     pub events_url: String,
     /// Managed live endpoint.
     pub websocket_url: String,
+    /// Initial durable state when the service can return it atomically with creation.
+    #[serde(default)]
+    pub initial_state: Option<AgentState>,
 }
 
 /// Account-owned managed agents and their available summaries.
