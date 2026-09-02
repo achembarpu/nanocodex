@@ -1,4 +1,4 @@
-import { Provider, Storage, webAuthn } from "accounts";
+import { dialog, Provider, Storage, webAuthn } from "accounts";
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { Dialog } from "nanocodex/connect";
 
@@ -7,7 +7,6 @@ import {
   type AccountSelection,
   type StoredPasskey,
 } from "./AccountChooser.js";
-import { PasskeyAccountChooser } from "./PasskeyAccountChooser.js";
 import {
   AccountConnectionCard,
   AccountConnectionGrid,
@@ -500,8 +499,7 @@ export function ConnectOnboarding({
       }
       const selectedMode = selectedAccount?.mode ?? accountMode;
       const hostedAuthorization = activeRequest.type === "walletConnect"
-        && (selectedAccount?.authentication === "sms_otp"
-          || selectedMode === "register"
+        && (selectedMode === "register"
           || authenticatedSavedAccount)
         && walletConnectContext(activeRequest).resources.includes(hostedAuthorizationResource)
         && !walletConnectContext(activeRequest).resources.includes("urn:nanocodex:mpp:machusd:spend");
@@ -1202,9 +1200,7 @@ export function ConnectOnboarding({
         <span className="wordmark">nanocodex/connect</span>
           <span className="secure-label"><span aria-hidden="true" /> {hostPrincipalRequest
             ? "host identity"
-            : connectionRequest?.auth.resources.includes(hostedAuthorizationResource)
-              ? "SMS OTP"
-              : "passkey"}</span>
+            : "SMS OTP + Tempo Wallet"}</span>
       </header> : null}
 
       {request.type === "walletConnect" ? (
@@ -1223,8 +1219,8 @@ export function ConnectOnboarding({
                 setWizardAccount(account);
                 void approve(
                   account,
-                  account.authentication === "sms_otp"
-                    || (wizard
+                  account.authentication !== "sms_otp"
+                    && (wizard
                       && account.current === true
                         && browserAccountState !== "reauthentication"
                         && browserAccountState?.persistent === true),
@@ -1277,7 +1273,7 @@ export function ConnectOnboarding({
           <div className="dialog-actions">
             <button type="button" disabled={ceremonyActive} onClick={reject}>Cancel</button>
             <button type="button" disabled={ceremonyActive} onClick={() => void approve()}>
-              Revoke with passkey
+              Revoke in Tempo Wallet
             </button>
           </div>
         </>
@@ -1296,7 +1292,7 @@ function RevocationApproval({ request }: Readonly<{ request: WalletRequest }>) {
         <h1 id="revocation-heading">Revoke agent access</h1>
       </section>
       <section className="detail-section" aria-labelledby="revocation-details">
-        <SectionHeading id="revocation-details" label="Revocation" value="One passkey" />
+        <SectionHeading id="revocation-details" label="Revocation" value="Tempo Wallet" />
         <div className="permission-rows">
           <PermissionRow label="Account" value={shortAddress(params.address)} />
           <PermissionRow label="Access key" value={shortAddress(params.accessKeyAddress)} />
@@ -1441,27 +1437,17 @@ function ConnectionWizard({
       request={request}
       requester={requester}
     />;
-    return hostedAuthorization ? (
+    return (
       <AccountChooser
         authOrigin={nanocodexOriginFor(request.apiUrl)}
         confirmationCode={confirmationCode}
         description={reauthenticationRequired
-          ? `Your session expired. Sign in by SMS before approving ${requester}.`
-          : `Sign in by SMS to choose the Nanocodex account that will approve ${requester}.`}
+          ? `Your session expired. Sign in by SMS, then connect your Tempo Wallet to approve ${requester}.`
+          : `Sign in by SMS, then connect your Tempo Wallet to approve ${requester}.`}
         disabled={disabled}
         onCancel={onCancel}
         onChooseAccount={onChooseAccount}
         requestContext={requestContext}
-      />
-    ) : (
-      <PasskeyAccountChooser
-        confirmationCode={confirmationCode}
-        description={`Confirm with a passkey before approving ${requester}.`}
-        disabled={disabled}
-        onCancel={onCancel}
-        onChooseAccount={onChooseAccount}
-        requestContext={requestContext}
-        storedPasskeys={storedPasskeys}
       />
     );
   }
@@ -2040,16 +2026,12 @@ async function clearPortableCredential(apiUrl: string): Promise<void> {
 
 function createProvider(browserLocal: boolean) {
   return Provider.create({
-    adapter: webAuthn(browserLocal
-      ? {
+    adapter: browserLocal
+      ? webAuthn({
           name: "Nanocodex",
           rdns: "xyz.paradigm.nanocodex",
-        }
-      : {
-          auth: "/webauthn",
-          name: "Nanocodex",
-          rdns: "xyz.paradigm.nanocodex",
-        }),
+        })
+      : dialog({ name: "Tempo Wallet", rdns: "xyz.tempo" }),
     mpp: false,
     storage: Storage.idb({ key: "nanocodex" }),
   });

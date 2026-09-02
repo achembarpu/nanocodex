@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   authenticate,
@@ -6,7 +6,6 @@ import {
   routeAccountRequest,
   type AccountAuthEnv,
 } from "../src/account-auth";
-import { routeAccountLinkRequest } from "../src/account-links";
 import { routeConnectorRequest } from "../src/connectors";
 import { routeCredentialRequest } from "../src/credentials";
 
@@ -24,6 +23,14 @@ const CONNECT_GRANT_ID = `0x${"a".repeat(64)}`;
 const CONNECT_MCP_ID = "m".repeat(43);
 const CONNECTOR_CONNECTION_ID = "n".repeat(43);
 const APP_TOOL_CATALOG_DIGEST = `0x${"c".repeat(64)}`;
+const TWILIO_ACCOUNT_SID = `AC${"d".repeat(32)}`;
+const TWILIO_API_KEY_SID = `SK${"e".repeat(32)}`;
+const TWILIO_API_KEY_SECRET = "test-twilio-api-key-secret";
+const TWILIO_VERIFY_SERVICE_SID = `VA${"f".repeat(32)}`;
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 describe("Connect grant assertions", () => {
   it("projects the trusted assertion to the exact live capability and tool slice", async () => {
@@ -170,47 +177,55 @@ describe("SMS OTP authentication", () => {
     try {
       const local = portableEnv();
       local.env.NANOCODEX_OTP_HMAC_KEY = "test-sms-otp-hmac-key-with-at-least-thirty-two-bytes";
-      const messages: Array<{ body: string; to: string }> = [];
-      local.env.NANOCODEX_SMS_SEND = {
-        async fetch(input: RequestInfo | URL, init?: RequestInit) {
-          const request = new Request(input, init);
-          messages.push(await request.json<{ body: string; to: string }>());
-          return new Response(null, { status: 202 });
-        },
-      } as Fetcher;
+      const twilio = mockTwilioVerify(local.env);
       const origin = "https://nanocodex.example";
 
       const first = await beginSmsOtp(local.env, origin, "+30 (690) 000-0000");
       expect(first.response.status).toBe(202);
       expect(first.challengeId).toMatch(/^[A-Za-z0-9_-]{43}$/);
-      expect(messages).toHaveLength(1);
+      expect(twilio.calls[0]).toEqual({
+        authorization: `Basic ${btoa(`${TWILIO_API_KEY_SID}:${TWILIO_API_KEY_SECRET}`)}`,
+        form: {
+          Channel: "sms",
+          To: "+306900000000",
+        },
+        url: `https://verify.twilio.com/v2/Services/${TWILIO_VERIFY_SERVICE_SID}/Verifications`,
+      });
       expect(JSON.stringify([...local.values("sms-otp")])).not.toContain("+306900000000");
-      const firstCode = messages[0]!.body.match(/\b(\d{6})\b/)?.[1];
-      expect(firstCode).toBeDefined();
+      expect(JSON.stringify([...local.values("sms-otp")])).not.toContain("123456");
 
+      twilio.checkStatus = "pending";
       const wrong = await completeSmsOtp(
         local.env,
         origin,
         "+306900000000",
         first.challengeId,
-        "999999" === firstCode ? "999998" : "999999",
+        "999999",
       );
       expect(wrong.status).toBe(400);
-      await expect(wrong.json()).resolves.toMatchObject({ attempts_remaining: 4 });
+      await expect(wrong.json()).resolves.toEqual({ error: "invalid_or_expired_otp" });
 
+      twilio.checkStatus = "approved";
       const verified = await completeSmsOtp(
         local.env,
         origin,
         "+306900000000",
         first.challengeId,
-        firstCode!,
+        "123456",
       );
       expect(verified.status).toBe(200);
+      expect(twilio.calls[2]).toEqual({
+        authorization: `Basic ${btoa(`${TWILIO_API_KEY_SID}:${TWILIO_API_KEY_SECRET}`)}`,
+        form: {
+          Code: "123456",
+          VerificationSid: `VE${"0".repeat(31)}1`,
+        },
+        url: `https://verify.twilio.com/v2/Services/${TWILIO_VERIFY_SERVICE_SID}/VerificationCheck`,
+      });
       const firstAccount = await verified.clone().json<{
-        user: { address: string; id: string; persistent: boolean };
+        user: { id: string; persistent: boolean };
       }>();
-      expect(firstAccount.user).toMatchObject({ persistent: true });
-      expect(firstAccount.user.address).toMatch(/^0x[0-9a-f]{40}$/);
+      expect(firstAccount.user).toEqual({ id: expect.any(String), persistent: true });
       const cookie = verified.headers.get("set-cookie")!.split(";", 1)[0]!;
       expect(cookie).toMatch(/^nanocodex_account=s_[A-Za-z0-9_-]{43}$/);
 
@@ -218,45 +233,6 @@ describe("SMS OTP authentication", () => {
         headers: { cookie },
       }), local.env, new URL(`${origin}/v1/me`));
       await expect(current!.json()).resolves.toMatchObject(firstAccount);
-
-      const resources = [
-        "urn:nanocodex:agent:run",
-        "urn:nanocodex:app:test-workspace",
-        `urn:nanocodex:origin:${encodeURIComponent("https://app.example")}`,
-        "urn:nanocodex:authorization:hosted",
-      ];
-      const authorizeUrl = new URL("/v1/connect/hosted-authorization/authorize", origin);
-      const authorized = await routeAccountLinkRequest(new Request(authorizeUrl, {
-        method: "POST",
-        headers: { cookie, "content-type": "application/json", origin },
-        body: JSON.stringify({
-          account_address: firstAccount.user.address,
-          app_id: "test-workspace",
-          app_origin: "https://app.example",
-          resources,
-        }),
-      }), local.env, authorizeUrl);
-      expect(authorized?.status).toBe(200);
-      const { code } = await authorized!.json<{ code: string }>();
-
-      const exchangeUrl = new URL("https://nanocodex.internal/connect/hosted-authorizations/exchange");
-      const exchanged = await routeAccountLinkRequest(new Request(exchangeUrl, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          account_address: firstAccount.user.address,
-          app_id: "test-workspace",
-          app_origin: "https://app.example",
-          code,
-          resources,
-        }),
-      }), local.env, exchangeUrl);
-      expect(exchanged?.status).toBe(200);
-      await expect(exchanged!.json()).resolves.toMatchObject({
-        account_address: firstAccount.user.address,
-        resources,
-        user_id: firstAccount.user.id,
-      });
 
       const loggedOut = await routeAccountRequest(new Request(`${origin}/v1/auth/logout`, {
         method: "POST",
@@ -268,13 +244,12 @@ describe("SMS OTP authentication", () => {
       local.deleteMatching("sms-otp", "cooldown:");
       const second = await beginSmsOtp(local.env, origin, "+306900000000", "198.51.100.2");
       expect(second.response.status).toBe(202);
-      const secondCode = messages[1]!.body.match(/\b(\d{6})\b/)?.[1];
       const restored = await completeSmsOtp(
         local.env,
         origin,
         "+306900000000",
         second.challengeId,
-        secondCode!,
+        "654321",
       );
       await expect(restored.json()).resolves.toEqual(firstAccount);
     } finally {
@@ -282,12 +257,48 @@ describe("SMS OTP authentication", () => {
     }
   });
 
+  it("promotes only the anonymous pre-login user and never aliases a new phone to a persistent account", async () => {
+    const local = portableEnv();
+    local.env.NANOCODEX_OTP_HMAC_KEY = "test-sms-otp-hmac-key-with-at-least-thirty-two-bytes";
+    mockTwilioVerify(local.env);
+    const origin = "https://nanocodex.example";
+    const meUrl = new URL("/v1/me", origin);
+    const anonymous = await routeAccountRequest(new Request(meUrl), local.env, meUrl);
+    const anonymousUser = await anonymous!.clone().json<{ user: { id: string; persistent: boolean } }>();
+    const anonymousCookie = anonymous!.headers.get("set-cookie")!.split(";", 1)[0]!;
+    expect(anonymousUser.user.persistent).toBe(false);
+
+    const first = await beginSmsOtp(local.env, origin, "+14155550125", "198.51.100.10", anonymousCookie);
+    const promoted = await completeSmsOtp(
+      local.env,
+      origin,
+      "+14155550125",
+      first.challengeId,
+      "123456",
+      anonymousCookie,
+    );
+    const promotedUser = await promoted.clone().json<{ user: { id: string; persistent: boolean } }>();
+    const persistentCookie = promoted.headers.get("set-cookie")!.split(";", 1)[0]!;
+    expect(promotedUser.user).toEqual({ id: anonymousUser.user.id, persistent: true });
+
+    const second = await beginSmsOtp(local.env, origin, "+14155550126", "198.51.100.11", persistentCookie);
+    const separate = await completeSmsOtp(
+      local.env,
+      origin,
+      "+14155550126",
+      second.challengeId,
+      "654321",
+      persistentCookie,
+    );
+    const separateUser = await separate.json<{ user: { id: string; persistent: boolean } }>();
+    expect(separateUser.user.persistent).toBe(true);
+    expect(separateUser.user.id).not.toBe(promotedUser.user.id);
+  });
+
   it("enforces browser origin, resend limits, and configured delivery", async () => {
     const local = portableEnv();
     local.env.NANOCODEX_OTP_HMAC_KEY = "test-sms-otp-hmac-key-with-at-least-thirty-two-bytes";
-    local.env.NANOCODEX_SMS_SEND = {
-      fetch() { return Promise.resolve(new Response(null, { status: 202 })); },
-    } as unknown as Fetcher;
+    mockTwilioVerify(local.env);
     const origin = "https://nanocodex.example";
 
     const crossOrigin = await routeAccountRequest(new Request(`${origin}/v1/auth/sms/start`, {
@@ -314,46 +325,80 @@ describe("SMS OTP authentication", () => {
     unavailable.env.NANOCODEX_OTP_HMAC_KEY = local.env.NANOCODEX_OTP_HMAC_KEY;
     const failed = await beginSmsOtp(unavailable.env, origin, "+14155550124");
     expect(failed.response.status).toBe(503);
-    unavailable.env.NANOCODEX_SMS_SEND = local.env.NANOCODEX_SMS_SEND;
+    mockTwilioVerify(unavailable.env);
     const retried = await beginSmsOtp(unavailable.env, origin, "+14155550124");
     expect(retried.response.status).toBe(202);
   });
 
-  it("invalidates a challenge after five incorrect codes", async () => {
+  it("fails closed on provider errors and preserves the challenge for retry", async () => {
     const local = portableEnv();
     local.env.NANOCODEX_OTP_HMAC_KEY = "test-sms-otp-hmac-key-with-at-least-thirty-two-bytes";
-    let deliveredCode = "";
-    local.env.NANOCODEX_SMS_SEND = {
-      async fetch(input: RequestInfo | URL, init?: RequestInit) {
-        const request = new Request(input, init);
-        const message = await request.json<{ body: string }>();
-        deliveredCode = message.body.match(/\b(\d{6})\b/)?.[1] ?? "";
-        return new Response(null, { status: 202 });
-      },
-    } as unknown as Fetcher;
+    const twilio = mockTwilioVerify(local.env);
     const origin = "https://nanocodex.example";
     const started = await beginSmsOtp(local.env, origin, "+14155550124");
-    const incorrect = deliveredCode === "000000" ? "000001" : "000000";
-
-    for (let attemptsRemaining = 4; attemptsRemaining >= 0; attemptsRemaining -= 1) {
-      const response = await completeSmsOtp(
-        local.env,
-        origin,
-        "+14155550124",
-        started.challengeId,
-        incorrect,
-      );
-      expect(response.status).toBe(400);
-      await expect(response.json()).resolves.toMatchObject({ attempts_remaining: attemptsRemaining });
-    }
-    const exhausted = await completeSmsOtp(
+    twilio.checkHttpStatus = 404;
+    const rejected = await completeSmsOtp(
       local.env,
       origin,
       "+14155550124",
       started.challengeId,
-      deliveredCode,
+      "000000",
     );
-    expect(exhausted.status).toBe(400);
+    expect(rejected.status).toBe(400);
+    await expect(rejected.json()).resolves.toEqual({ error: "invalid_or_expired_otp" });
+
+    twilio.checkHttpStatus = 503;
+    const unavailable = await completeSmsOtp(
+      local.env,
+      origin,
+      "+14155550124",
+      started.challengeId,
+      "123456",
+    );
+    expect(unavailable.status).toBe(503);
+    await expect(unavailable.json()).resolves.toEqual({ error: "sms_verification_failed" });
+
+    twilio.checkHttpStatus = 200;
+    twilio.checkStatus = "approved";
+    const retried = await completeSmsOtp(
+      local.env,
+      origin,
+      "+14155550124",
+      started.challengeId,
+      "123456",
+    );
+    expect(retried.status).toBe(200);
+  });
+
+  it("cleans up failed delivery so the same phone can retry immediately", async () => {
+    const local = portableEnv();
+    local.env.NANOCODEX_OTP_HMAC_KEY = "test-sms-otp-hmac-key-with-at-least-thirty-two-bytes";
+    const twilio = mockTwilioVerify(local.env);
+    const origin = "https://nanocodex.example";
+    twilio.startHttpStatus = 503;
+
+    const unavailable = await beginSmsOtp(local.env, origin, "+14155550127");
+    expect(unavailable.response.status).toBe(503);
+    await expect(unavailable.response.json()).resolves.toEqual({ error: "sms_delivery_failed" });
+
+    twilio.startHttpStatus = 201;
+    const retried = await beginSmsOtp(local.env, origin, "+14155550127");
+    expect(retried.response.status).toBe(202);
+  });
+
+  it("supports account SID and auth token credentials", async () => {
+    const local = portableEnv();
+    local.env.NANOCODEX_OTP_HMAC_KEY = "test-sms-otp-hmac-key-with-at-least-thirty-two-bytes";
+    const twilio = mockTwilioVerify(local.env);
+    delete local.env.TWILIO_API_KEY_SID;
+    delete local.env.TWILIO_API_KEY_SECRET;
+    local.env.TWILIO_AUTH_TOKEN = "test-twilio-auth-token";
+
+    const started = await beginSmsOtp(local.env, "https://nanocodex.example", "+14155550128");
+    expect(started.response.status).toBe(202);
+    expect(twilio.calls[0]?.authorization).toBe(
+      `Basic ${btoa(`${TWILIO_ACCOUNT_SID}:test-twilio-auth-token`)}`,
+    );
   });
 });
 
@@ -1015,11 +1060,51 @@ function loginWithPortableCookie(
   }), env, url) as Promise<Response>;
 }
 
+type TwilioVerifyCall = Readonly<{
+  authorization: string | null;
+  form: Record<string, string>;
+  url: string;
+}>;
+
+function mockTwilioVerify(env: AccountAuthEnv) {
+  env.TWILIO_ACCOUNT_SID = TWILIO_ACCOUNT_SID;
+  env.TWILIO_API_KEY_SID = TWILIO_API_KEY_SID;
+  env.TWILIO_API_KEY_SECRET = TWILIO_API_KEY_SECRET;
+  env.TWILIO_VERIFY_SERVICE_SID = TWILIO_VERIFY_SERVICE_SID;
+  const state = {
+    calls: [] as TwilioVerifyCall[],
+    checkHttpStatus: 200,
+    checkStatus: "approved",
+    startHttpStatus: 201,
+    verificationCount: 0,
+  };
+  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const request = new Request(input, init);
+    const form = Object.fromEntries([...await request.formData()]
+      .map(([key, value]) => [key, String(value)]));
+    state.calls.push({
+      authorization: request.headers.get("authorization"),
+      form,
+      url: request.url,
+    });
+    if (request.url.endsWith("/Verifications")) {
+      state.verificationCount += 1;
+      return Response.json({
+        sid: `VE${state.verificationCount.toString(16).padStart(32, "0")}`,
+        status: "pending",
+      }, { status: state.startHttpStatus });
+    }
+    return Response.json({ status: state.checkStatus }, { status: state.checkHttpStatus });
+  }));
+  return state;
+}
+
 async function beginSmsOtp(
   env: AccountAuthEnv,
   origin: string,
   phone: string,
   ip = "198.51.100.1",
+  cookie?: string,
 ): Promise<{ challengeId: string; response: Response }> {
   const url = new URL("/v1/auth/sms/start", origin);
   const response = await routeAccountRequest(new Request(url, {
@@ -1028,6 +1113,7 @@ async function beginSmsOtp(
       "cf-connecting-ip": ip,
       "content-type": "application/json",
       origin,
+      ...(cookie ? { cookie } : {}),
     },
     body: JSON.stringify({ phone }),
   }), env, url) as Response;
@@ -1043,11 +1129,12 @@ function completeSmsOtp(
   phone: string,
   challengeId: string,
   code: string,
+  cookie?: string,
 ): Promise<Response> {
   const url = new URL("/v1/auth/sms/verify", origin);
   return routeAccountRequest(new Request(url, {
     method: "POST",
-    headers: { "content-type": "application/json", origin },
+    headers: { "content-type": "application/json", origin, ...(cookie ? { cookie } : {}) },
     body: JSON.stringify({ challenge_id: challengeId, code, phone }),
   }), env, url) as Promise<Response>;
 }

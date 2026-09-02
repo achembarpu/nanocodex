@@ -58,7 +58,7 @@ export async function connect(client, options) {
   if (typeof permission !== "string" || permission.length === 0) throw new TypeError("connect permission must be a non-empty string");
   const requestedConnectors = normalizeCloudAccounts(options.capabilities?.cloudAccounts);
   const agentVisibility = normalizeAgentVisibility(options.capabilities?.agent);
-  const authorization = options.authorization ?? "hosted";
+  const authorization = options.authorization ?? (client.principal ? "hosted" : "access_key");
   if (authorization !== "access_key" && authorization !== "hosted") {
     throw new TypeError("connect authorization must be access_key or hosted");
   }
@@ -483,7 +483,7 @@ export async function reconnect(client, options = {}) {
   const authorization = options.authorization
     ?? (retainedAuthorization === "access_key" || retainedAuthorization === "hosted"
       ? retainedAuthorization
-      : "hosted");
+      : (client.principal ? "hosted" : "access_key"));
   if (client.principal && authorization !== "hosted") {
     client._clearSession();
     throw new TypeError("host principal connections require hosted authorization");

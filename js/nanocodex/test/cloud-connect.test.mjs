@@ -1030,6 +1030,7 @@ test("Connect grants ChatGPT and an exact local tool catalog without delegated k
   });
 
   const connection = await client.connection.connect({
+    authorization: "hosted",
     capabilities: {
       cloudAccounts: { chatgpt: true },
       agent: {

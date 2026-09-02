@@ -20,9 +20,9 @@ const PERSISTENT_SESSION_TTL_SECONDS = 365 * 24 * 60 * 60;
 const WEBAUTHN_CHALLENGE_TTL_SECONDS = 5 * 60;
 const OTP_CHALLENGE_TTL_SECONDS = 5 * 60;
 const OTP_RESEND_SECONDS = 60;
-const OTP_MAX_ATTEMPTS = 5;
 const OTP_PHONE_REQUESTS_PER_HOUR = 5;
 const OTP_IP_REQUESTS_PER_HOUR = 20;
+const OTP_PROVIDER_TIMEOUT_MS = 10_000;
 const USER_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const API_KEY = /^ncx_live_([A-Za-z0-9_-]{12})_([A-Za-z0-9_-]{43})$/;
@@ -32,6 +32,8 @@ const LEGACY_PASSKEY_SESSION_TOKEN = /^[0-9a-f]{64}$/;
 const OTP_CHALLENGE_ID = /^[A-Za-z0-9_-]{43}$/;
 const OTP_CODE = /^\d{6}$/;
 const E164_PHONE = /^\+[1-9]\d{7,14}$/;
+const TWILIO_VERIFY_SERVICE_SID = /^VA[0-9a-f]{32}$/i;
+const TWILIO_VERIFICATION_SID = /^VE[0-9a-f]{32}$/i;
 const ACCOUNT_ADDRESS = /^0x[0-9a-f]{40}$/;
 const PORTABLE_CREDENTIAL_ID = /^[A-Za-z0-9_-]{1,512}$/;
 const PORTABLE_PUBLIC_KEY = /^0x(?:[0-9a-fA-F]{2}){1,1024}$/;
@@ -64,10 +66,11 @@ export interface AccountAuthEnv {
   NANOCODEX_API_KEYS: DurableObjectNamespace<ApiKeyRecord>;
   NANOCODEX_LOCAL_WEBAUTHN_HMAC_KEY?: string;
   NANOCODEX_OTP_HMAC_KEY?: string;
-  NANOCODEX_SMS_SEND?: Fetcher;
   TWILIO_ACCOUNT_SID?: string;
+  TWILIO_API_KEY_SECRET?: string;
+  TWILIO_API_KEY_SID?: string;
   TWILIO_AUTH_TOKEN?: string;
-  TWILIO_FROM_NUMBER?: string;
+  TWILIO_VERIFY_SERVICE_SID?: string;
   NANOCODEX_ORGANIZATIONS: DurableObjectNamespace<Organization>;
 }
 
@@ -211,17 +214,14 @@ type AccountSessionPayload = Readonly<{
 }>;
 
 type SmsIdentity = Readonly<{
-  accountAddress: `0x${string}`;
   userId: string;
 }>;
 
 type SmsOtpChallenge = Readonly<{
-  attemptsRemaining: number;
-  candidateAccountAddress: `0x${string}`;
   candidateUserId: string;
-  digest: string;
   expiresAt: number;
   phoneDigest: string;
+  verificationSid: string;
 }>;
 
 type PortableCredential = Readonly<{
@@ -486,32 +486,24 @@ async function startSmsOtp(
     });
   }
 
-  const principal = await authenticate(request, env, url);
-  const candidateUserId = principal?.kind === "account_session"
-    ? principal.userId
+  const session = await readBrowserSession(request, env);
+  const sessionToken = cookieValue(request, ACCOUNT_COOKIE);
+  const candidateUserId = session && sessionToken && ANONYMOUS_SESSION_TOKEN.test(sessionToken)
+    ? session.userId
     : crypto.randomUUID();
-  const candidateAccountAddress = await accountAddressForRequest(
-    request,
-    env,
-    url,
-    candidateUserId,
-  );
   const challengeId = randomBase64Url(32);
-  const code = randomOtpCode();
-  const challenge: SmsOtpChallenge = {
-    attemptsRemaining: OTP_MAX_ATTEMPTS,
-    candidateAccountAddress,
-    candidateUserId,
-    digest: await keyedDigest(secret, `otp:${challengeId}:${code}`),
-    expiresAt: now + OTP_CHALLENGE_TTL_SECONDS,
-    phoneDigest,
-  };
-  await Promise.all([
-    store.set(`challenge:${challengeId}`, challenge, { ttl: OTP_CHALLENGE_TTL_SECONDS }),
-    store.set(`active:${phoneDigest}`, challengeId, { ttl: OTP_CHALLENGE_TTL_SECONDS }),
-  ]);
   try {
-    await sendSms(env, phone, `Your Nanocodex code is ${code}. It expires in 5 minutes.`);
+    const verificationSid = await startTwilioSmsVerification(env, phone);
+    const challenge: SmsOtpChallenge = {
+      candidateUserId,
+      expiresAt: now + OTP_CHALLENGE_TTL_SECONDS,
+      phoneDigest,
+      verificationSid,
+    };
+    await Promise.all([
+      store.set(`challenge:${challengeId}`, challenge, { ttl: OTP_CHALLENGE_TTL_SECONDS }),
+      store.set(`active:${phoneDigest}`, challengeId, { ttl: OTP_CHALLENGE_TTL_SECONDS }),
+    ]);
   } catch {
     await Promise.all([
       store.delete(`challenge:${challengeId}`),
@@ -555,24 +547,23 @@ async function verifySmsOtp(
     || challenge.phoneDigest !== phoneDigest || challenge.expiresAt <= now) {
     return json({ error: "invalid_or_expired_otp" }, { status: 400 });
   }
-  const expected = await keyedDigest(secret, `otp:${challengeId}:${code}`);
-  if (!constantTimeEqual(challenge.digest, expected)) {
-    const attemptsRemaining = challenge.attemptsRemaining - 1;
-    if (attemptsRemaining > 0) {
-      await store.set(`challenge:${challengeId}`, {
-        ...challenge,
-        attemptsRemaining,
-      }, { ttl: Math.max(1, challenge.expiresAt - now) });
-    } else {
-      await store.delete(`active:${phoneDigest}`);
-    }
-    return json({ error: "invalid_or_expired_otp", attempts_remaining: attemptsRemaining }, {
-      status: 400,
+  let approved: boolean;
+  try {
+    approved = await checkTwilioSmsVerification(env, challenge.verificationSid, code);
+  } catch {
+    await store.set(`challenge:${challengeId}`, challenge, {
+      ttl: Math.max(1, challenge.expiresAt - now),
     });
+    return json({ error: "sms_verification_failed" }, { status: 503 });
+  }
+  if (!approved) {
+    await store.set(`challenge:${challengeId}`, challenge, {
+      ttl: Math.max(1, challenge.expiresAt - now),
+    });
+    return json({ error: "invalid_or_expired_otp" }, { status: 400 });
   }
 
   const proposedIdentity: SmsIdentity = {
-    accountAddress: challenge.candidateAccountAddress,
     userId: challenge.candidateUserId,
   };
   const identityKey = `identity:${phoneDigest}`;
@@ -587,7 +578,6 @@ async function verifySmsOtp(
     return json({ error: "sms_identity_unavailable" }, { status: 503 });
   }
   await ensureAccount(env, identity.userId, true);
-  await rememberAccountAddress(env, identity.userId, identity.accountAddress);
 
   const previousToken = cookieValue(request, ACCOUNT_COOKIE);
   if (previousToken && (ANONYMOUS_SESSION_TOKEN.test(previousToken) || SMS_SESSION_TOKEN.test(previousToken))) {
@@ -603,7 +593,6 @@ async function verifySmsOtp(
   await store.delete(`active:${phoneDigest}`);
   return json({
     user: {
-      address: identity.accountAddress,
       id: identity.userId,
       persistent: true,
     },
@@ -775,16 +764,10 @@ export async function authenticatePersistentHostedAccount(
         return { accountAddress, principal };
       }
     } catch {
-      // Fall through to the hosted SMS account address.
+      // A persistent SMS identity is valid without an attached wallet.
     }
   }
-  try {
-    const accountAddress = await derivedAccountAddress(env, principal.userId);
-    await rememberAccountAddress(env, principal.userId, accountAddress);
-    return { accountAddress, principal };
-  } catch {
-    return undefined;
-  }
+  return undefined;
 }
 
 /** @deprecated Use authenticatePersistentHostedAccount. */
@@ -1327,6 +1310,7 @@ async function resolveOrCreateBrowserAccount(
   await Promise.all([
     ensureAccount(env, userId, false),
     authStore(env, "account").set(accountSessionKey(token), {
+      authentication: "anonymous",
       userId,
       issuedAt,
       expiresAt: issuedAt + SESSION_TTL_SECONDS,
@@ -2142,15 +2126,6 @@ async function reserveWindowSlot(
   return false;
 }
 
-function randomOtpCode(): string {
-  const ceiling = 4_294_000_000;
-  for (;;) {
-    const bytes = crypto.getRandomValues(new Uint8Array(4));
-    const value = new DataView(bytes.buffer).getUint32(0);
-    if (value < ceiling) return String(value % 1_000_000).padStart(6, "0");
-  }
-}
-
 async function keyedDigest(secret: string, value: string): Promise<string> {
   const key = await crypto.subtle.importKey(
     "raw",
@@ -2166,66 +2141,103 @@ async function keyedDigest(secret: string, value: string): Promise<string> {
   )));
 }
 
-function constantTimeEqual(left: string, right: string): boolean {
-  const length = Math.max(left.length, right.length);
-  let different = left.length ^ right.length;
-  for (let index = 0; index < length; index += 1) {
-    different |= (left.charCodeAt(index) || 0) ^ (right.charCodeAt(index) || 0);
-  }
-  return different === 0;
-}
-
 function isSmsOtpChallenge(value: unknown): value is SmsOtpChallenge {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
   const challenge = value as Partial<SmsOtpChallenge>;
-  return Number.isSafeInteger(challenge.attemptsRemaining)
-    && Number(challenge.attemptsRemaining) > 0
-    && Number(challenge.attemptsRemaining) <= OTP_MAX_ATTEMPTS
-    && typeof challenge.candidateAccountAddress === "string"
-    && ACCOUNT_ADDRESS.test(challenge.candidateAccountAddress)
-    && isUserId(challenge.candidateUserId)
-    && typeof challenge.digest === "string" && BASE64_URL.test(challenge.digest)
+  return isUserId(challenge.candidateUserId)
     && Number.isSafeInteger(challenge.expiresAt)
-    && typeof challenge.phoneDigest === "string" && BASE64_URL.test(challenge.phoneDigest);
+    && typeof challenge.phoneDigest === "string" && BASE64_URL.test(challenge.phoneDigest)
+    && typeof challenge.verificationSid === "string"
+    && TWILIO_VERIFICATION_SID.test(challenge.verificationSid);
 }
 
 function isSmsIdentity(value: unknown): value is SmsIdentity {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
   const identity = value as Partial<SmsIdentity>;
-  return typeof identity.accountAddress === "string"
-    && ACCOUNT_ADDRESS.test(identity.accountAddress)
-    && isUserId(identity.userId);
+  return isUserId(identity.userId);
 }
 
-async function sendSms(env: AccountAuthEnv, to: string, body: string): Promise<void> {
-  let response: Response;
-  if (env.NANOCODEX_SMS_SEND) {
-    response = await env.NANOCODEX_SMS_SEND.fetch("https://sms.internal/send", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ body, to }),
-    });
-  } else {
-    const sid = env.TWILIO_ACCOUNT_SID;
-    const token = env.TWILIO_AUTH_TOKEN;
-    const from = normalizedPhone(env.TWILIO_FROM_NUMBER);
-    if (!sid || !/^AC[0-9a-f]{32}$/i.test(sid) || !token || !from) {
-      throw new Error("SMS delivery is not configured");
-    }
-    response = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${sid}/Messages.json`, {
-      method: "POST",
-      headers: {
-        authorization: `Basic ${btoa(`${sid}:${token}`)}`,
-        "content-type": "application/x-www-form-urlencoded;charset=UTF-8",
-      },
-      body: new URLSearchParams({ Body: body, From: from, To: to }),
-    });
+function twilioVerifyRequest(
+  env: AccountAuthEnv,
+  resource: "Verifications" | "VerificationCheck",
+  body: Record<string, string>,
+): Readonly<{ body: URLSearchParams; headers: Record<string, string>; method: "POST"; url: string }> {
+  const accountSid = env.TWILIO_ACCOUNT_SID;
+  const apiKeySid = env.TWILIO_API_KEY_SID;
+  const apiKeySecret = env.TWILIO_API_KEY_SECRET;
+  const authToken = env.TWILIO_AUTH_TOKEN;
+  const serviceSid = env.TWILIO_VERIFY_SERVICE_SID;
+  const apiKey = apiKeySid && /^SK[0-9a-f]{32}$/i.test(apiKeySid) && apiKeySecret
+    ? { secret: apiKeySecret, sid: apiKeySid }
+    : undefined;
+  const credential = apiKey ?? (authToken && accountSid && /^AC[0-9a-f]{32}$/i.test(accountSid)
+    ? { secret: authToken, sid: accountSid }
+    : undefined);
+  if (!serviceSid || !TWILIO_VERIFY_SERVICE_SID.test(serviceSid) || !credential) {
+    throw new Error("Twilio Verify is not configured");
   }
-  if (!response.ok) {
-    await response.body?.cancel();
-    throw new Error(`SMS delivery failed with HTTP ${response.status}`);
-  }
-  await response.body?.cancel();
+  return {
+    body: new URLSearchParams(body),
+    headers: {
+      authorization: `Basic ${btoa(`${credential.sid}:${credential.secret}`)}`,
+      "content-type": "application/x-www-form-urlencoded;charset=UTF-8",
+    },
+    method: "POST",
+    url: `https://verify.twilio.com/v2/Services/${serviceSid}/${resource}`,
+  };
+}
+
+async function startTwilioSmsVerification(env: AccountAuthEnv, to: string): Promise<string> {
+  const request = twilioVerifyRequest(env, "Verifications", { Channel: "sms", To: to });
+  return fetchResponseWithDeadline(
+    { fetch: (input: RequestInfo | URL, init?: RequestInit) => fetch(input, init) },
+    request.url,
+    { body: request.body, headers: request.headers, method: request.method },
+    OTP_PROVIDER_TIMEOUT_MS,
+    "SMS OTP delivery",
+    async (response) => {
+      if (!response.ok) throw new Error(`SMS delivery failed with HTTP ${response.status}`);
+      const value: unknown = await response.json();
+      if (typeof value !== "object" || value === null || Array.isArray(value)) {
+        throw new Error("Twilio Verify returned an invalid response");
+      }
+      const verification = value as { sid?: unknown; status?: unknown };
+      if (typeof verification.sid !== "string" || !TWILIO_VERIFICATION_SID.test(verification.sid)
+        || verification.status !== "pending") {
+        throw new Error("Twilio Verify did not create a pending verification");
+      }
+      return verification.sid;
+    },
+    { retryable: true },
+  );
+}
+
+async function checkTwilioSmsVerification(
+  env: AccountAuthEnv,
+  verificationSid: string,
+  code: string,
+): Promise<boolean> {
+  const request = twilioVerifyRequest(env, "VerificationCheck", {
+    Code: code,
+    VerificationSid: verificationSid,
+  });
+  return fetchResponseWithDeadline(
+    { fetch: (input: RequestInfo | URL, init?: RequestInit) => fetch(input, init) },
+    request.url,
+    { body: request.body, headers: request.headers, method: request.method },
+    OTP_PROVIDER_TIMEOUT_MS,
+    "SMS OTP verification",
+    async (response) => {
+      if (response.status === 404) return false;
+      if (!response.ok) throw new Error(`SMS verification failed with HTTP ${response.status}`);
+      const value: unknown = await response.json();
+      if (typeof value !== "object" || value === null || Array.isArray(value)) {
+        throw new Error("Twilio Verify returned an invalid response");
+      }
+      return (value as { status?: unknown }).status === "approved";
+    },
+    { retryable: true },
+  );
 }
 
 async function accountAddressForRequest(
@@ -2233,7 +2245,7 @@ async function accountAddressForRequest(
   env: AccountAuthEnv,
   url: URL,
   userId: string,
-): Promise<`0x${string}`> {
+): Promise<`0x${string}` | undefined> {
   const remembered = await readAccountAddress(env, userId);
   if (remembered) return remembered;
   const session = await webAuthnHandler(env, url).getSession(request);
@@ -2248,25 +2260,10 @@ async function accountAddressForRequest(
         return address;
       }
     } catch {
-      // Legacy credentials that cannot be decoded receive the hosted address.
+      // Legacy credentials that cannot be decoded do not imply wallet ownership.
     }
   }
-  const address = await derivedAccountAddress(env, userId);
-  await rememberAccountAddress(env, userId, address);
-  return address;
-}
-
-async function derivedAccountAddress(
-  env: AccountAuthEnv,
-  userId: string,
-): Promise<`0x${string}`> {
-  const secret = otpSecret(env);
-  if (!secret) throw new Error("hosted account identity is unavailable");
-  const digest = decodeBase64Url(await keyedDigest(secret, `account-address:${userId}`));
-  if (!digest || digest.byteLength < 20) throw new Error("hosted account identity is unavailable");
-  return `0x${[...digest.slice(0, 20)]
-    .map((byte) => byte.toString(16).padStart(2, "0"))
-    .join("")}`;
+  return undefined;
 }
 
 async function rememberAccountAddress(

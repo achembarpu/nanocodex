@@ -74,11 +74,12 @@ first-party SMS OTP flow owned by the managed Cloudflare Worker.
    browser when possible. `--no-open` suppresses only that automatic launch.
 
 6. **Establish the Nanocodex account.** The user enters an E.164 phone number
-   and a six-digit code delivered by SMS. The managed Worker generates and
-   verifies the code, binds only an HMAC digest of the phone to the account,
-   and issues the same HttpOnly account session used by managed agents. A new
-   phone promotes the current browser account; a known phone restores its
-   existing agents, memory, and connections.
+   and a six-digit code delivered by Twilio Verify over SMS or eligible RCS.
+   Verify generates and checks the code. The managed Worker binds only an HMAC
+   digest of the phone to the account and issues the same HttpOnly account
+   session used by managed agents. A new phone promotes only the current
+   anonymous browser account; a known phone restores its existing agents,
+   memory, and connections.
 
 7. **Run the focused action.** The browser derives its work from the signed
    `wallet_connect` request:
@@ -149,15 +150,18 @@ first-party SMS OTP flow owned by the managed Cloudflare Worker.
 
 ## Capability and storage boundaries
 
-- The managed Cloudflare Worker owns SMS OTP generation, HMAC phone identity,
-  abuse limits, account sessions, and the one-time hosted authorization.
+- The managed Cloudflare Worker owns HMAC phone identity, local abuse limits,
+  browser-bound challenges, account sessions, and the one-time hosted
+  authorization. Twilio Verify owns OTP generation, delivery, attempt limits,
+  expiry, and checking.
   Tempo Accounts/Wata owns the device-code transport, PKCE exchange,
   `wallet_connect` envelope, and the explicit signed access-key step-up used
   for MPP.
-- OTPs expire after five minutes, allow five guesses, enforce a 60-second
-  resend delay, and are capped per phone and per Cloudflare client IP. Twilio
-  Messaging or the `NANOCODEX_SMS_SEND` service binding only delivers the
-  message; it never decides identity or verifies a code.
+- The Worker retains each browser challenge for five minutes, enforces a
+  60-second resend delay, and caps starts per phone and Cloudflare client IP.
+  The Verify Service must use six-digit codes with a validity window compatible
+  with that local lifetime. The Worker stores only keyed HMAC phone digests and
+  opaque Verify identifiers; it never stores an OTP.
 - Nanocodex Connect owns the application identity, requested Nanocodex
   resources, account linking, connector onboarding, consent UI, and scoped
   grant.

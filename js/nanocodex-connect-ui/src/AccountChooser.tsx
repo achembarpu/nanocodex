@@ -102,12 +102,13 @@ export function AccountChooser({
       if (!response.ok) throw new Error(otpError(body, "That code didn’t work."));
       if (!isRecord(body) || !isRecord(body.user)
         || typeof body.user.id !== "string"
-        || typeof body.user.address !== "string"
-        || !/^0x[0-9a-f]{40}$/.test(body.user.address)) {
+        || (body.user.address !== undefined
+          && (typeof body.user.address !== "string"
+            || !/^0x[0-9a-f]{40}$/.test(body.user.address)))) {
         throw new Error("The account service returned an invalid session.");
       }
       onChooseAccount({
-        address: body.user.address as `0x${string}`,
+        ...(body.user.address ? { address: body.user.address as `0x${string}` } : {}),
         authentication: "sms_otp",
         current: true,
         label: maskedPhone(challenge.phone),

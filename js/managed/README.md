@@ -56,13 +56,20 @@ protocol. `/health` is the service health endpoint.
 
 ### SMS OTP delivery
 
-Set `NANOCODEX_OTP_HMAC_KEY` to at least 32 random bytes. Delivery can use a
-private `NANOCODEX_SMS_SEND` Service Binding accepting `{ "to", "body" }`, or
-Twilio Messaging via the `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, and
-`TWILIO_FROM_NUMBER` Worker secrets. The Worker stores phone numbers only as
-keyed HMAC digests and never logs the code or provider credentials. Keep the
-HMAC key stable; rotating it requires an identity migration or known phones
-will resolve to new accounts.
+Set `NANOCODEX_OTP_HMAC_KEY` to at least 32 random bytes and create a Twilio
+Verify Service configured for SMS with six-digit codes. Provide its
+`TWILIO_VERIFY_SERVICE_SID` with `TWILIO_API_KEY_SID` and
+`TWILIO_API_KEY_SECRET` Worker secrets. `TWILIO_ACCOUNT_SID` plus
+`TWILIO_AUTH_TOKEN` is accepted as a fallback credential pair when an API key
+is not configured.
+
+Twilio Verify generates, delivers, and checks each code, automatically upgrading
+eligible SMS requests to RCS. Nanocodex retains a five-minute opaque local
+challenge so a successful verification can be bound to the initiating browser,
+and stores the phone only as a keyed HMAC digest for identity and abuse limits.
+It never logs phone numbers, codes, provider responses, or credentials. Keep the
+HMAC key stable; rotating it requires an identity migration or known phones will
+resolve to new accounts.
 
 `wrangler.jsonc` is the binding and migration source of truth. Development
 uses the same Worker role with local Durable Objects, local egress binding, R2,
