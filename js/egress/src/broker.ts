@@ -32,6 +32,7 @@ export interface BrokerEnv extends CredentialVaultEnv {
   CHATGPT_ISSUER?: string;
   ALLOW_LOCAL_CREDENTIAL_CLAIM?: string;
   LOCAL_CHATGPT_BOOTSTRAP?: string;
+  NANOCODEX_LOCAL_CHATGPT_AUTO_CLAIM?: string;
 }
 
 export type UserCredentialSnapshot = Readonly<{
@@ -238,7 +239,12 @@ export class UserCredentialBroker extends DurableObject<BrokerEnv> {
 
   async #initialize(): Promise<void> {
     const row = await this.#state.storage.get<StoredRow>(STATE_KEY);
-    if (!row) return;
+    if (!row) {
+      if (localCredentialAutoClaimEnabled(this.#env)) {
+        await this.#claimLocalBootstrap();
+      }
+      return;
+    }
     const opened = await this.#vault.open<CredentialState>(row.envelope);
     const quarantined = this.#installRestoredState(opened.value);
     if (quarantined || opened.reseal) {
@@ -961,6 +967,12 @@ function localCredentialClaimEnabled(env: BrokerEnv): boolean {
   const environment = env.ENVIRONMENT?.trim().toLowerCase();
   return env.ALLOW_LOCAL_CREDENTIAL_CLAIM === "true"
     && (environment === "development" || environment === "local" || environment === "test");
+}
+
+function localCredentialAutoClaimEnabled(env: BrokerEnv): boolean {
+  return localCredentialClaimEnabled(env)
+    && env.NANOCODEX_LOCAL_CHATGPT_AUTO_CLAIM === "true"
+    && Boolean(env.LOCAL_CHATGPT_BOOTSTRAP?.trim());
 }
 
 function parseExpiry(value: unknown): number | undefined {

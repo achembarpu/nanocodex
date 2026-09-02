@@ -1,3 +1,1 @@
-export function namedTool(name, tool) {
-  return Object.freeze({ name, ...tool });
-}
+export { namedTool } from "nanocodex-tools/named-tool";

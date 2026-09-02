@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import { createServer } from "node:http";
 import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -9,8 +10,89 @@ import WebSocket, { WebSocketServer } from "ws";
 
 import { readCodexSubscription } from "../codex-auth-file.mjs";
 import { createNanocodexCloudflarePlugins } from "../cloudflare-plugin.mjs";
+import { createNanocodexVitePlugin } from "../plugin.mjs";
 import { startChatGptWorkerEgress } from "../chatgpt-egress.mjs";
 import { isLocalNanocodexOrigin } from "../oauth-relay.mjs";
+
+test("development applications mount their own Vite graph at safe path boundaries", async () => {
+  const childRequests = [];
+  const childOptions = [];
+  let childClosed = false;
+  let middleware;
+  const httpServer = new EventEmitter();
+  const plugin = createNanocodexVitePlugin({
+    chatGpt: false,
+    devApplications: [{
+      headers: { "content-security-policy": "frame-ancestors 'self'" },
+      path: "/dialog/",
+      root: new URL("../../connect-dialog", import.meta.url),
+    }],
+  }, {
+    target: "vite",
+    buildJsPackage: async () => {},
+    createViteServer: async (options) => {
+      childOptions.push(options);
+      return {
+        close: async () => { childClosed = true; },
+        middlewares(request, response, next) {
+          childRequests.push({ method: request.method, url: request.url });
+          request.url = request.url.replace("/dialog", "");
+          if (request.url.startsWith("/fallthrough")) next();
+          else response.emit("finish");
+        },
+      };
+    },
+  });
+  await plugin.configureServer({
+    config: { root: "/parent", logger: { info() {}, error() {} } },
+    httpServer,
+    middlewares: { use(value) { middleware = value; } },
+    watcher: { add() {}, on() {}, off() {} },
+  });
+  assert.equal(childOptions[0].base, "/dialog/");
+  assert.equal(childOptions[0].appType, "spa");
+  assert.equal(childOptions[0].server.middlewareMode, true);
+  assert.equal(childOptions[0].server.hmr.server, httpServer);
+  assert.equal(childOptions[0].server.ws, undefined);
+
+  const get = mockMiddlewareCall(middleware, { method: "GET", url: "/dialog/src/main.tsx?raw=one" });
+  assert.equal(get.nextCalled, false);
+  assert.equal(get.request.url, "/dialog/src/main.tsx?raw=one");
+  assert.equal(get.responseHeaders.get("content-security-policy"), "frame-ancestors 'self'");
+  assert.deepEqual(childRequests.pop(), { method: "GET", url: "/dialog/src/main.tsx?raw=one" });
+
+  const head = mockMiddlewareCall(middleware, { method: "HEAD", url: "/dialog/?head=yes" });
+  assert.equal(head.nextCalled, false);
+  assert.equal(head.request.url, "/dialog/?head=yes");
+  assert.deepEqual(childRequests.pop(), { method: "HEAD", url: "/dialog/?head=yes" });
+
+  const post = mockMiddlewareCall(middleware, { method: "POST", url: "/dialog/?post=yes" });
+  assert.equal(post.nextCalled, true);
+  assert.equal(childRequests.length, 0);
+
+  const outside = mockMiddlewareCall(middleware, { method: "GET", url: "/dialogue?outside=yes" });
+  assert.equal(outside.nextCalled, true);
+  assert.equal(childRequests.length, 0);
+
+  const fallthrough = mockMiddlewareCall(middleware, { method: "GET", url: "/dialog/fallthrough?kept=yes" });
+  assert.equal(fallthrough.nextCalled, true);
+  assert.equal(fallthrough.request.url, "/dialog/fallthrough?kept=yes");
+  await plugin.closeBundle();
+  assert.equal(childClosed, true);
+});
+
+test("development application mounts reject ambiguous or unsafe paths", () => {
+  const create = (devApplications) => createNanocodexVitePlugin(
+    { chatGpt: false, devApplications },
+    { target: "vite" },
+  );
+  assert.throws(() => create([{ path: "/", root: "." }]), /non-root URL path/);
+  assert.throws(() => create([{ path: "/safe/%2e%2e", root: "." }]), /safe URL segments/);
+  assert.throws(() => create([
+    { path: "/same", root: "." },
+    { path: "/same/", root: "." },
+  ]), /duplicate path/);
+});
 
 test("the OAuth relay accepts canonical and high-port secure worktree origins", () => {
   assert.equal(isLocalNanocodexOrigin("https://nanocodex.localhost"), true);
@@ -67,6 +149,7 @@ test("one Vite plugin gives only the selected broker exact development bindings"
     assert.equal(broker.vars.ENVIRONMENT, "development");
     assert.equal(broker.vars.FROM_WRANGLER, "kept-too");
     assert.equal(broker.vars.ALLOW_INSECURE_LOOPBACK_RELAY, "true");
+    assert.equal(broker.vars.NANOCODEX_LOCAL_CHATGPT_AUTO_CLAIM, "true");
     assert.equal(broker.vars.GITHUB_OAUTH_CLIENT_ID, "github-id");
     assert.equal(broker.vars.GITHUB_OAUTH_CLIENT_SECRET, "github-secret");
     assert.match(
@@ -254,4 +337,20 @@ function listen(server) {
 
 function close(server) {
   return new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+}
+
+function mockMiddlewareCall(middleware, request) {
+  const response = new EventEmitter();
+  const responseHeaders = new Map();
+  response.setHeader = (name, value) => responseHeaders.set(name.toLowerCase(), String(value));
+  let nextCalled = false;
+  middleware(request, response, (error) => {
+    if (error) throw error;
+    nextCalled = true;
+  });
+  return {
+    request,
+    responseHeaders,
+    get nextCalled() { return nextCalled; },
+  };
 }

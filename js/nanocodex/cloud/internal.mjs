@@ -282,27 +282,32 @@ function agentConversationId(value, name) {
 }
 
 export function machineUsdConfigFromWire(value) {
-  const wire = object(value, "machineUSD config");
+  const wire = object(value, "MACH config");
   return Object.freeze({
-    chainId: integer(wire.chain_id, "machineUSD config.chain_id"),
-    minUsdAmountCents: integer(wire.min_usd_amount_cents, "machineUSD config.min_usd_amount_cents"),
-    maxUsdAmountCents: integer(wire.max_usd_amount_cents, "machineUSD config.max_usd_amount_cents"),
-    onrampEnabled: boolean(wire.onramp_enabled, "machineUSD config.onramp_enabled"),
-    stripePublishableKey: string(wire.stripe_publishable_key, "machineUSD config.stripe_publishable_key"),
-    tokenAddress: hex(wire.token_address, "machineUSD config.token_address"),
+    chainId: integer(wire.chain_id, "MACH config.chain_id"),
+    minUsdAmountCents: integer(wire.min_usd_amount_cents, "MACH config.min_usd_amount_cents"),
+    maxUsdAmountCents: integer(wire.max_usd_amount_cents, "MACH config.max_usd_amount_cents"),
+    onrampEnabled: wire.onramp_enabled === undefined
+      ? true
+      : boolean(wire.onramp_enabled, "MACH config.onramp_enabled"),
+    stripePublishableKey: string(wire.stripe_publishable_key, "MACH config.stripe_publishable_key"),
+    tokenAddress: hex(wire.token_address, "MACH config.token_address"),
   });
 }
 
 export function fundResultFromWire(value, client) {
-  const wire = object(value, "machineUSD funding result");
-  const order = object(wire.order, "machineUSD funding result.order");
+  const wire = object(value, "MACH funding result");
+  const order = object(wire.order, "MACH funding result.order");
   return Object.freeze({
     order: Object.freeze({
-      id: string(order.id, "machineUSD order.id"),
-      status: string(order.status, "machineUSD order.status"),
-      usdAmountCents: integer(order.usd_amount_cents, "machineUSD order.usd_amount_cents"),
-      machineUsdAmount: bigint(order.machine_usd_amount_atomics, "machineUSD order.machine_usd_amount_atomics"),
-      issuanceTransactionHash: hex(order.issuance_transaction_hash, "machineUSD order.issuance_transaction_hash"),
+      id: string(order.id, "MACH order.id"),
+      status: string(order.status, "MACH order.status"),
+      usdAmountCents: integer(order.usd_amount_cents, "MACH order.usd_amount_cents"),
+      machineUsdAmount: bigint(
+        order.mach_amount_atomics ?? order.machine_usd_amount_atomics,
+        "MACH order.mach_amount_atomics",
+      ),
+      issuanceTransactionHash: hex(order.issuance_transaction_hash, "MACH order.issuance_transaction_hash"),
     }),
     connection: connectionFromWire(wire.connection),
   });

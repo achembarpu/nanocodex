@@ -428,48 +428,14 @@ export type TurnResult = Readonly<{
   dispose(): void;
 }>;
 
-export type SubagentToolContext = Readonly<{
-  /** Runtime-owned ID within this root's task tree. */
-  agentId: string;
-  /** Runtime-owned parent ID, or null when the parent is the root. */
-  parentAgentId: string | null;
-  /** The child session that invoked the inherited tool. */
-  sessionId: string;
-  /** Role assigned when this child was spawned. */
-  role: string;
-  /** Task assigned when this child was spawned. */
-  task: string;
-}>;
-
-export type ToolContext = {
-  callId: string;
-  parentCallId: string;
-  sessionId: string;
-  /** Runtime-reported model identifier for the agent invoking this tool. */
-  model: string;
-  signal: AbortSignal;
-  /** Present for tools invoked by a subagent; absent for the root agent. */
-  subagent?: SubagentToolContext | undefined;
-};
-
-export type Tool = {
-  description: string;
-  /** Explicitly permits concurrent nested calls; otherwise the tool is exclusive. */
-  supportsParallelToolCalls?: boolean | undefined;
-  /** Runtime JSON Schema for model-generated input. Defaults to an open object. */
-  parameters?: Record<string, unknown> | undefined;
-  /** Runtime JSON Schema for the resolved handler value shown to Code Mode. */
-  outputSchema?: Record<string, unknown> | undefined;
-  handler(input: unknown, context: ToolContext): unknown | Promise<unknown>;
-  /** Releases state owned by one completed agent session. */
-  releaseSession?(sessionId: string): void;
-  /** Releases all retained tool state when the owning host shuts down. */
-  dispose?(): void | Promise<void>;
-};
-
-export type ToolMap = Record<string, Tool>;
-
-export type NamedTool = Tool & Readonly<{ name: string }>;
+import type { NamedTool, ToolMap } from "nanocodex-tools";
+export type {
+  NamedTool,
+  SubagentToolContext,
+  Tool,
+  ToolContext,
+  ToolMap,
+} from "nanocodex-tools";
 
 /** Static JavaScript tools, optionally composed with Rust-backed extensions. */
 export type ToolConfiguration<Extension = never> =

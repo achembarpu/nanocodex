@@ -4,7 +4,7 @@ import {
   ConnectOnboarding,
   type ConnectOnboardingHost,
   type ConnectRequest,
-} from "@nanocodex-connect/App";
+} from "nanocodex-connect-ui/App";
 import {
   deviceApiOrigin,
   deviceUserCode,
@@ -14,10 +14,10 @@ import {
 import {
   focusedMcpConnection,
   mcpConnectionsFromWire,
-} from "@nanocodex-connect/connectPolicy.mjs";
-import type { McpConnection } from "@nanocodex-connect/connectTypes";
+} from "nanocodex-connect-ui/connectPolicy.mjs";
+import type { McpConnection } from "nanocodex-connect-ui/connectTypes";
 import { ConnectHome } from "./ConnectHome";
-import "@nanocodex-connect/styles.css";
+import "nanocodex-connect-ui/styles.css";
 import "./DeviceConnect.css";
 
 export function DeviceConnect() {

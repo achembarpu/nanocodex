@@ -15,6 +15,11 @@ py/bindings/python/nanocodex/*.so
 py/bindings/python/nanocodex/*.dylib
 py/bindings/python/nanocodex/*.pyd
 js/nanocodex/node_modules/
+js/nanocodex-tools/node_modules/
+js/nanocodex-tools/dist/
+js/nanocodex-connect-protocol/node_modules/
+js/nanocodex-connect-ui/node_modules/
+js/nanocodex-connect-ui/dist/
 js/nanocodex-vite/node_modules/
 js/nanocodex-vite/dist/
 js/nanocodex-react/node_modules/

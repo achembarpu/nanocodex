@@ -24,7 +24,7 @@ test("Mercator REST handoffs execute through bounded MPP fetch", async () => {
   });
   const body = { idempotencyKey: "quote-1", plan: { steps: [] } };
   const result = await tool.handler({
-    url: "https://mercator.tempoxyz.dev/v1/jobs",
+    url: "https://mercator.tempo.xyz/v1/jobs",
     method: "POST",
     body,
     maxSpend: "0.005",
@@ -51,7 +51,7 @@ test("Mercator REST handoffs cannot escape their origin or Connect spend limit",
     relay: "https://connect.example/v1/mercator/jobs",
   });
   const request = {
-    url: "https://mercator.tempoxyz.dev/v1/jobs",
+    url: "https://mercator.tempo.xyz/v1/jobs",
     method: "POST",
     body: {},
     maxSpend: "0.005",
@@ -59,7 +59,7 @@ test("Mercator REST handoffs cannot escape their origin or Connect spend limit",
 
   await assert.rejects(
     tool.handler({ ...request, url: "https://example.com/v1/jobs" }),
-    /must target https:\/\/mercator\.tempoxyz\.dev\/v1\/jobs/,
+    /must target https:\/\/mercator\.tempo\.xyz\/v1\/jobs/,
   );
   await assert.rejects(
     tool.handler({ ...request, maxSpend: "0.250001" }),

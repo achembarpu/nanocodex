@@ -55,10 +55,9 @@ const CHATGPT_IMPORT_RESOURCE_PREFIX: &str =
 const MPP_LIMIT: u64 = 10_000_000;
 const MPP_PERIOD: u64 = 86_400;
 
-const MACHINE_USD: &str = "0x20c0000000000000000000006637932dE5413804";
+const MACH: &str = "0x20c000000000000000000000f37de3740ADec032";
 const USDC_E: &str = "0x20C000000000000000000000b9537d11c60E8b50";
-const MACHINE_USD_SWAPPER: &str = "0xd588ED9Ae08643A450157Adaf61c3C0C1BBd0dbb";
-const TIP20_CHANNEL_ESCROW: &str = "0x4d50500000000000000000000000000000000000";
+const TIP20_CHANNEL_ESCROW: &str = "0x33b901018174DDabE4841042ab76ba85D4e24f25";
 const MERCATOR_SETTLEMENT: &str = "0xa295C42FBCC026a62304A7701f25B4c91799B0dA";
 
 const REQUIRED_DATA_CAPABILITIES: &[&str] = &[
@@ -72,7 +71,7 @@ const CONNECTOR_NAMES: &[&str] = &["chatgpt", "github", "gmail", "gdrive", "x"];
 
 #[derive(Args, Clone)]
 pub(crate) struct Login {
-    /// Approve the bounded MACHUSD/USDC.e MPP spending policy.
+    /// Approve the bounded MACH/USDC.e MPP spending policy.
     #[arg(long, action = ArgAction::SetTrue)]
     mpp: bool,
     /// Use a trusted local Nanocodex Connect endpoint for development.
@@ -1617,7 +1616,7 @@ fn validate_connection(
         );
     }
     ensure!(
-        requested.mpp == capabilities.contains("mpp.machusd"),
+        requested.mpp == capabilities.contains("mpp.mach"),
         "MPP capability did not match the request"
     );
     match (
@@ -1714,7 +1713,7 @@ fn validate_hosted_connection(
 ) -> Result<()> {
     ensure!(!requested.mpp, "hosted authorization cannot grant MPP");
     ensure!(
-        !capabilities.contains("mpp.machusd"),
+        !capabilities.contains("mpp.mach"),
         "hosted authorization cannot grant MPP"
     );
     let now = unix_timestamp()?;
@@ -1960,7 +1959,7 @@ impl StoredLogin {
         REQUIRED_DATA_CAPABILITIES
             .iter()
             .all(|item| capabilities.contains(item))
-            && (!mpp || capabilities.contains("mpp.machusd"))
+            && (!mpp || capabilities.contains("mpp.mach"))
     }
 
     const fn authorization_mode(&self) -> AuthorizationMode {
@@ -2319,12 +2318,12 @@ fn wallet_connect_request(
     let public_key = format!("0x04{}", hex::encode(signer.public_key()));
     let limits = if requested.mpp {
         json!([
-            { "token": MACHINE_USD, "limit": "0x989680", "period": MPP_PERIOD },
+            { "token": MACH, "limit": "0x989680", "period": MPP_PERIOD },
             { "token": USDC_E, "limit": "0x989680", "period": MPP_PERIOD },
         ])
     } else {
         json!([
-            { "token": MACHINE_USD, "limit": "0x0", "period": 0 },
+            { "token": MACH, "limit": "0x0", "period": 0 },
             { "token": USDC_E, "limit": "0x0", "period": 0 },
         ])
     };
@@ -2332,8 +2331,8 @@ fn wallet_connect_request(
         json!([
             { "address": USDC_E, "selector": "0xa9059cbb", "recipients": [MERCATOR_SETTLEMENT] },
             { "address": USDC_E, "selector": "0x95777d59", "recipients": [MERCATOR_SETTLEMENT] },
-            { "address": MACHINE_USD, "selector": "0x095ea7b3", "recipients": [MACHINE_USD_SWAPPER] },
-            { "address": MACHINE_USD_SWAPPER, "selector": "0x34189fed" },
+            { "address": MACH, "selector": "0xa9059cbb", "recipients": [MERCATOR_SETTLEMENT] },
+            { "address": MACH, "selector": "0x95777d59", "recipients": [MERCATOR_SETTLEMENT] },
             { "address": TIP20_CHANNEL_ESCROW, "selector": "0xedc53b00" },
             { "address": TIP20_CHANNEL_ESCROW, "selector": "0xdc48471e" },
         ])
@@ -2373,7 +2372,7 @@ fn expected_limits(mpp: bool) -> Result<Vec<TokenLimit>> {
     if !mpp {
         return Ok(vec![
             TokenLimit {
-                token: address(MACHINE_USD)?,
+                token: address(MACH)?,
                 limit: U256::ZERO,
                 period: 0,
             },
@@ -2386,7 +2385,7 @@ fn expected_limits(mpp: bool) -> Result<Vec<TokenLimit>> {
     }
     Ok(vec![
         TokenLimit {
-            token: address(MACHINE_USD)?,
+            token: address(MACH)?,
             limit: U256::from(MPP_LIMIT),
             period: MPP_PERIOD,
         },
@@ -2417,12 +2416,8 @@ fn expected_calls(mpp: bool) -> Result<Vec<CallScope>> {
     Ok(vec![
         scope(USDC_E, [0xa9, 0x05, 0x9c, 0xbb], &[MERCATOR_SETTLEMENT])?,
         scope(USDC_E, [0x95, 0x77, 0x7d, 0x59], &[MERCATOR_SETTLEMENT])?,
-        scope(
-            MACHINE_USD,
-            [0x09, 0x5e, 0xa7, 0xb3],
-            &[MACHINE_USD_SWAPPER],
-        )?,
-        scope(MACHINE_USD_SWAPPER, [0x34, 0x18, 0x9f, 0xed], &[])?,
+        scope(MACH, [0xa9, 0x05, 0x9c, 0xbb], &[MERCATOR_SETTLEMENT])?,
+        scope(MACH, [0x95, 0x77, 0x7d, 0x59], &[MERCATOR_SETTLEMENT])?,
         scope(TIP20_CHANNEL_ESCROW, [0xed, 0xc5, 0x3b, 0x00], &[])?,
         scope(TIP20_CHANNEL_ESCROW, [0xdc, 0x48, 0x47, 0x1e], &[])?,
     ])
@@ -2432,7 +2427,7 @@ fn connection_limits(mpp: bool) -> Result<Vec<ConnectionLimit>> {
     if !mpp {
         return Ok(vec![
             ConnectionLimit {
-                token: address(MACHINE_USD)?,
+                token: address(MACH)?,
                 limit: "0".to_owned(),
                 period: 0,
             },
@@ -2445,7 +2440,7 @@ fn connection_limits(mpp: bool) -> Result<Vec<ConnectionLimit>> {
     }
     Ok(vec![
         ConnectionLimit {
-            token: address(MACHINE_USD)?,
+            token: address(MACH)?,
             limit: MPP_LIMIT.to_string(),
             period: MPP_PERIOD,
         },
@@ -2474,8 +2469,8 @@ fn connection_scopes(mpp: bool) -> Result<Vec<ConnectionScope>> {
     Ok(vec![
         scope(USDC_E, "0xa9059cbb", &[MERCATOR_SETTLEMENT])?,
         scope(USDC_E, "0x95777d59", &[MERCATOR_SETTLEMENT])?,
-        scope(MACHINE_USD, "0x095ea7b3", &[MACHINE_USD_SWAPPER])?,
-        scope(MACHINE_USD_SWAPPER, "0x34189fed", &[])?,
+        scope(MACH, "0xa9059cbb", &[MERCATOR_SETTLEMENT])?,
+        scope(MACH, "0x95777d59", &[MERCATOR_SETTLEMENT])?,
         scope(TIP20_CHANNEL_ESCROW, "0xedc53b00", &[])?,
         scope(TIP20_CHANNEL_ESCROW, "0xdc48471e", &[])?,
     ])
@@ -2523,7 +2518,7 @@ fn print_summary(login: &StoredLogin) {
     );
     println!(
         "MPP           {}",
-        enabled(capabilities.contains("mpp.machusd"))
+        enabled(capabilities.contains("mpp.mach"))
     );
     println!("Grant expires {}", format_utc(login.expires_at));
 }
@@ -3189,7 +3184,7 @@ mod tests {
         assert_eq!(
             capabilities["authorizeAccessKey"]["limits"],
             json!([
-                { "token": MACHINE_USD, "limit": "0x0", "period": 0 },
+                { "token": MACH, "limit": "0x0", "period": 0 },
                 { "token": USDC_E, "limit": "0x0", "period": 0 },
             ])
         );
@@ -3539,13 +3534,13 @@ mod tests {
         );
         login.capabilities.push("chatgpt".to_owned());
         login.capabilities.push("github".to_owned());
-        login.capabilities.push("mpp.machusd".to_owned());
+        login.capabilities.push("mpp.mach".to_owned());
 
         assert!(login.satisfies_login(false));
         assert!(login.satisfies_login(true));
         login
             .capabilities
-            .retain(|capability| capability != "mpp.machusd");
+            .retain(|capability| capability != "mpp.mach");
         assert!(login.satisfies_login(false));
         assert!(!login.satisfies_login(true));
         login
@@ -4282,7 +4277,7 @@ mod tests {
                         "keyId": key,
                         "keyType": "secp256k1",
                         "limits": [
-                            { "token": MACHINE_USD, "limit": "0", "period": 0 },
+                            { "token": MACH, "limit": "0", "period": 0 },
                             { "token": USDC_E, "limit": "0", "period": 0 },
                         ],
                         "signature": {
@@ -4328,7 +4323,7 @@ mod tests {
                             "key_id": key,
                             "key_type": "secp256k1",
                             "limits": [
-                                { "token": MACHINE_USD, "limit": "0", "period": 0 },
+                                { "token": MACH, "limit": "0", "period": 0 },
                                 { "token": USDC_E, "limit": "0", "period": 0 },
                             ],
                             "scopes": [],

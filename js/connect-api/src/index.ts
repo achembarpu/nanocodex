@@ -28,11 +28,11 @@ import {
   localMcpAuthorization,
   wrapLocalConnectorAuthorizationState,
   wrapLocalMcpAuthorizationState,
-} from "../../account/localConnectorCallback";
+} from "nanocodex-vite/oauth-relay";
 import {
   scopedConnectConnectorState,
   unscopedConnectConnectorState,
-} from "../../account/connectConnectorCallback.mjs";
+} from "nanocodex-connect-protocol";
 import {
   canonicalRemoteMcpTarget,
   isMcpConnectionId,
@@ -143,13 +143,11 @@ const CLI_APP_ORIGIN = cliApp.origin;
 const DIALOG_ORIGIN = "https://nanocodex.gakonst.workers.dev";
 const API_ORIGIN = "https://nanocodex-connect-api.gakonst.workers.dev";
 const NANOCODEX_ORIGIN = "https://nanocodex.gakonst.workers.dev";
-const MACHINE_USD_ORIGIN = "https://machine-usd.porto.workers.dev";
-const MERCATOR_ORIGIN = "https://mercator.tempoxyz.dev";
+const MERCATOR_ORIGIN = "https://mercator.tempo.xyz";
 const TEMPO_RPC = "https://api.tempo.xyz/rpc/4217";
-const MACHINE_USD = "0x20c0000000000000000000006637932dE5413804";
+const MACHINE_USD = "0x20c000000000000000000000f37de3740ADec032";
 const USDC_E = "0x20C000000000000000000000b9537d11c60E8b50";
-const MACHINE_USD_SWAPPER = "0xd588ED9Ae08643A450157Adaf61c3C0C1BBd0dbb";
-const TIP20_CHANNEL_ESCROW = "0x4d50500000000000000000000000000000000000";
+const TIP20_CHANNEL_ESCROW = "0x33b901018174DDabE4841042ab76ba85D4e24f25";
 const MERCATOR_SETTLEMENT = "0xa295C42FBCC026a62304A7701f25B4c91799B0dA";
 const MPP_LIMIT = 10_000_000n;
 const MPP_PERIOD = 86_400;
@@ -499,7 +497,7 @@ export default {
         );
       }
       if (request.method === "GET" && url.pathname === "/v1/machine-usd/config") {
-        const upstream = await fetch(`${MACHINE_USD_ORIGIN}/v1/config`, {
+        const upstream = await fetch(`${MERCATOR_ORIGIN}/v1/onramp/config`, {
           headers: { accept: "application/json" },
         });
         return cors(new Response(upstream.body, {
@@ -540,7 +538,7 @@ export default {
       }
       if (request.method === "POST" && url.pathname === "/v1/machine-usd/orders") {
         requireOnrampOrigin(request);
-        const upstream = await fetch(`${MACHINE_USD_ORIGIN}/v1/orders`, {
+        const upstream = await fetch(`${MERCATOR_ORIGIN}/v1/onramp/orders`, {
           method: "POST",
           headers: {
             "content-type": "application/json",
@@ -554,7 +552,7 @@ export default {
       if (request.method === "GET" && machineUsdOrder) {
         requireOnrampOrigin(request);
         const upstream = await fetch(
-          `${MACHINE_USD_ORIGIN}/v1/orders/${encodeURIComponent(machineUsdOrder[1]!)}`,
+          `${MERCATOR_ORIGIN}/v1/onramp/orders/${encodeURIComponent(machineUsdOrder[1]!)}`,
           { headers: { authorization: requiredHeader(request, "authorization") } },
         );
         return cors(proxy(upstream), request);
@@ -1709,8 +1707,8 @@ function validateGrantAccessKey(
   const expectedScopes = new Set([
     scopeKey({ address: USDC_E, selector: "0xa9059cbb", recipients: [MERCATOR_SETTLEMENT] }),
     scopeKey({ address: USDC_E, selector: "0x95777d59", recipients: [MERCATOR_SETTLEMENT] }),
-    scopeKey({ address: MACHINE_USD, selector: "0x095ea7b3", recipients: [MACHINE_USD_SWAPPER] }),
-    scopeKey({ address: MACHINE_USD_SWAPPER, selector: "0x34189fed" }),
+    scopeKey({ address: MACHINE_USD, selector: "0xa9059cbb", recipients: [MERCATOR_SETTLEMENT] }),
+    scopeKey({ address: MACHINE_USD, selector: "0x95777d59", recipients: [MERCATOR_SETTLEMENT] }),
     scopeKey({ address: TIP20_CHANNEL_ESCROW, selector: "0xedc53b00" }),
     scopeKey({ address: TIP20_CHANNEL_ESCROW, selector: "0xdc48471e" }),
   ]);
@@ -1779,7 +1777,7 @@ async function handleGrantRoute(
     return grantMcpRequest(request, env, grant, mcpAction[1]!);
   }
   if (action === "mpp/balance" && request.method === "GET") {
-    if (!grant.capabilities.includes("mpp.machusd") || !grant.accessKey) {
+    if (!grant.capabilities.includes("mpp.mach") || !grant.accessKey) {
       throw new ApiFailure(403, "mpp_not_granted", "This connection has no MPP authority.");
     }
     const refreshed = await withGrantMutationLock(store, grant.id, async () => {
@@ -2341,7 +2339,7 @@ async function connectAccountInfo(env: Env, store: Kv.Kv, current: GrantRecord) 
     ...connectorInfo,
     identity: { tempoAddress: current.accountAddress },
     stablecoins: [
-      { token: MACHINE_USD, symbol: "MACHUSD", balance: machineUsd.toString(), decimals: 6 },
+      { token: MACHINE_USD, symbol: "MACH", balance: machineUsd.toString(), decimals: 6 },
       { token: USDC_E, symbol: "USDC.e", balance: settlement.toString(), decimals: 6 },
     ],
     authorizations,
@@ -2415,7 +2413,7 @@ function grantAuthorization(grant: GrantRecord) {
       }),
     }, spend: {
       token: MACHINE_USD,
-      symbol: "MACHUSD",
+      symbol: "MACH",
       spent: grant.spentAtomics,
       limit: MPP_LIMIT.toString(),
       period: MPP_PERIOD,
@@ -2738,7 +2736,7 @@ async function boundedRequestBytes(request: Request, limit: number): Promise<Arr
 
 function tokenSymbol(token: `0x${string}`): string {
   const normalized = token.toLowerCase();
-  if (normalized === MACHINE_USD.toLowerCase()) return "MACHUSD";
+  if (normalized === MACHINE_USD.toLowerCase()) return "MACH";
   if (normalized === USDC_E.toLowerCase()) return "USDC.e";
   return "TIP20";
 }
@@ -3355,7 +3353,7 @@ async function chargeGrant(
   body: Record<string, unknown>,
 ) {
   if (grant.status !== "active") throw new ApiFailure(409, "grant_inactive", "The grant is not active.");
-  if (!grant.capabilities.includes("mpp.machusd") || !grant.accessKey) {
+  if (!grant.capabilities.includes("mpp.mach") || !grant.accessKey) {
     throw new ApiFailure(403, "mpp_not_granted", "This connection has no MPP authority.");
   }
   const ttl = remainingGrantTtl(grant);
@@ -3372,7 +3370,7 @@ async function chargeGrant(
   }
   const availableBalance = await tokenBalance(MACHINE_USD, grant.accountAddress);
   if (amount > availableBalance) {
-    throw new ApiFailure(402, "machine_usd_required", "Add machineUSD before paying for this capability.");
+    throw new ApiFailure(402, "machine_usd_required", "Add MACH before paying for this capability.");
   }
   const origin = requiredOrigin(body.origin, "origin");
   const updated = {
@@ -4809,7 +4807,7 @@ function approvedHostedCapabilities(resources: readonly string[]): string[] {
   const approved = new Set(resources);
   return [
     ...(approved.has("urn:nanocodex:capability:mercator:boost") ? ["mercator.boost"] : []),
-    ...(approved.has("urn:nanocodex:mpp:machusd:spend") ? ["mpp.machusd"] : []),
+    ...(approved.has("urn:nanocodex:mpp:machusd:spend") ? ["mpp.mach"] : []),
     ...(approved.has(HOSTED_HISTORY_RESOURCE) ? ["history:read"] : []),
     ...(approved.has(HOSTED_MEMORY_READ_RESOURCE) ? ["memory:read"] : []),
     ...(approved.has(HOSTED_MEMORY_WRITE_RESOURCE) ? ["memory:write"] : []),
@@ -4857,6 +4855,13 @@ function connectionBalances(account: `0x${string}`): Promise<readonly [bigint, b
 }
 
 function connectionWire(grant: GrantRecord, grantToken: string) {
+  if (grant.capabilities.includes("mpp.machusd")) {
+    throw new ApiFailure(
+      409,
+      "grant_reauthorization_required",
+      "This connection authorizes legacy machineUSD and must be reconnected for MACH.",
+    );
+  }
   const balancesReady = grant.balanceAtomics !== undefined
     && grant.settlementBalanceAtomics !== undefined;
   return {
@@ -4871,7 +4876,7 @@ function connectionWire(grant: GrantRecord, grantToken: string) {
       access_key: grant.accessKey,
       mpp: {
         token: MACHINE_USD,
-        symbol: "MACHUSD",
+        symbol: "MACH",
         balance_atomics: grant.balanceAtomics ?? "0",
         balance_status: balancesReady ? "ready" : "pending",
         settlement_token: USDC_E,

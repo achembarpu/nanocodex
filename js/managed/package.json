@@ -21,8 +21,9 @@
     "@cloudflare/sandbox": "0.12.4",
     "@jitl/quickjs-wasmfile-release-asyncify": "0.32.0",
     "accounts": "0.16.2",
-    "isomorphic-git": "^1.41.5",
     "nanocodex": "workspace:*",
+    "nanocodex-tools": "workspace:*",
+    "nanocodex-vite": "workspace:*",
     "quickjs-emscripten-core": "0.32.0",
     "ox": "0.14.36",
     "viem": "^2.54.0"

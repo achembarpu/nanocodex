@@ -100,7 +100,7 @@ default to its persistent Responses WebSocket.
 
 ## Built-in Mercator MCP
 
-`--provider.tempo` adds `https://mercator.tempoxyz.dev/mcp` to the standard MCP
+`--provider.tempo` adds `https://mercator.tempo.xyz/mcp` to the standard MCP
 defaults. Direct OpenAI mode does not add it. `--mcp-defaults=false` is the
 explicit opt-out, while a named `mercator` entry in Codex config or `--mcp`
 overrides the built-in endpoint.

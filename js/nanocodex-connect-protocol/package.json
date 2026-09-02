@@ -1,0 +1,38 @@
+{
+  "name": "nanocodex-connect-protocol",
+  "version": "0.1.0",
+  "description": "Low-level Connect callback protocol helpers for Nanocodex",
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./index.d.mts",
+      "import": "./index.mjs"
+    }
+  },
+  "files": [
+    "index.d.mts",
+    "index.mjs",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs && npm run test:typecheck",
+    "test:typecheck": "tsc -p test/tsconfig.json"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3"
+  },
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "license": "MIT OR Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gakonst/nanocodex.git",
+    "directory": "js/nanocodex-connect-protocol"
+  }
+}

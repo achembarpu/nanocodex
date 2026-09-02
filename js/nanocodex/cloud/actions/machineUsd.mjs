@@ -14,9 +14,9 @@ export async function fund(client, options) {
     throw new TypeError("fund requires an integer usdAmountCents");
   }
   const config = await getConfig(client, { signal: options.signal });
-  if (!config.onrampEnabled) throw new Error("The machineUSD onramp is unavailable");
+  if (!config.onrampEnabled) throw new Error("The MACH onramp is unavailable");
   if (options.usdAmountCents < config.minUsdAmountCents || options.usdAmountCents > config.maxUsdAmountCents) {
-    throw new RangeError(`machineUSD amount must be from ${config.minUsdAmountCents} through ${config.maxUsdAmountCents} cents`);
+    throw new RangeError(`MACH amount must be from ${config.minUsdAmountCents} through ${config.maxUsdAmountCents} cents`);
   }
   const approval = await client.dialog.open(Object.freeze({
     id: crypto.randomUUID(),

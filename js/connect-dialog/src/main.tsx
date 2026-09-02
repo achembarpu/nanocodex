@@ -1,10 +1,10 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 
-import { logoutAccount } from "./App";
+import { logoutAccount } from "nanocodex-connect-ui/App";
 import { App } from "./DialogApp";
 import { startWalletHost } from "./protocol";
-import "./styles.css";
+import "nanocodex-connect-ui/styles.css";
 
 startWalletHost({ logout: logoutAccount });
 document.documentElement.classList.add("connect-dialog-standalone");

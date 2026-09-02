@@ -40,10 +40,9 @@ const visibility = new Set(["reply", "actions", "history", "traces"]);
 const chainId = "0x1079";
 const accessKeyLifetime = 30 * 86_400;
 const accessKeyClockSkew = 5 * 60;
-const machineUsd = "0x20c0000000000000000000006637932de5413804";
+const machineUsd = "0x20c000000000000000000000f37de3740adec032";
 const usdcE = "0x20c000000000000000000000b9537d11c60e8b50";
-const machineUsdSwapper = "0xd588ed9ae08643a450157adaf61c3c0c1bbd0dbb";
-const tip20ChannelEscrow = "0x4d50500000000000000000000000000000000000";
+const tip20ChannelEscrow = "0x33b901018174ddabe4841042ab76ba85d4e24f25";
 const mercatorSettlement = "0xa295c42fbcc026a62304a7701f25b4c91799b0da";
 const mppLimit = "0x989680";
 const mppPeriod = 86_400;
@@ -187,8 +186,8 @@ function validateInstallationAccessKey(value, mpp) {
   const expectedScopes = [
     { address: usdcE, selector: "0xa9059cbb", recipients: [mercatorSettlement] },
     { address: usdcE, selector: "0x95777d59", recipients: [mercatorSettlement] },
-    { address: machineUsd, selector: "0x095ea7b3", recipients: [machineUsdSwapper] },
-    { address: machineUsdSwapper, selector: "0x34189fed" },
+    { address: machineUsd, selector: "0xa9059cbb", recipients: [mercatorSettlement] },
+    { address: machineUsd, selector: "0x95777d59", recipients: [mercatorSettlement] },
     { address: tip20ChannelEscrow, selector: "0xedc53b00" },
     { address: tip20ChannelEscrow, selector: "0xdc48471e" },
   ];

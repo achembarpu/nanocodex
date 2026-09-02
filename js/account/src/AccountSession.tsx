@@ -13,7 +13,7 @@ import { Provider, Storage, webAuthn } from "accounts";
 import type {
   AccountSelection,
   StoredPasskey,
-} from "@nanocodex-connect/AccountChooser";
+} from "nanocodex-connect-ui/AccountChooser";
 import {
   getCurrentUser,
   isRecord,
@@ -21,8 +21,8 @@ import {
   responseFailure,
   type AuthenticatedAccount,
 } from "./accountSessionRequest";
-import { logoutBrowserAccountSession } from "@nanocodex-connect/browserAccountSession";
-import { retainSavedPasskeyLabels } from "@nanocodex-connect/savedPasskeyAccounts";
+import { logoutBrowserAccountSession } from "nanocodex-connect-ui/browserAccountSession";
+import { retainSavedPasskeyLabels } from "nanocodex-connect-ui/savedPasskeyAccounts";
 import { clientFailureMessage } from "./clientFailure";
 
 export { isRecord, responseFailure } from "./accountSessionRequest";

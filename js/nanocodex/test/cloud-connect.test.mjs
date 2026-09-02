@@ -1288,7 +1288,7 @@ test("Connect rejects an empty spending policy before opening the wallet", async
 test("Connect preserves explicit zero spending and empty call scopes for signing", async () => {
   const expiry = Math.floor(Date.now() / 1_000) + 3_600;
   const limits = [
-    { token: "0x20c0000000000000000000006637932dE5413804", limit: 0n, period: 0 },
+    { token: "0x20c000000000000000000000f37de3740ADec032", limit: 0n, period: 0 },
     { token: "0x20C000000000000000000000b9537d11c60E8b50", limit: 0n, period: 0 },
   ];
   let walletRequest;
@@ -1832,7 +1832,7 @@ function testConnectionWire({
     } }),
     ...(authorizationMode === "hosted" ? {} : { mpp: {
       token: "0x20c0000000000000000000000000000000000001",
-      symbol: "MACHUSD",
+      symbol: "MACH",
       balance_status: "ready",
       settlement_token: "0x20C000000000000000000000b9537d11c60E8b50",
       settlement_symbol: "USDC.e",

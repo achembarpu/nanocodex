@@ -1,7 +1,7 @@
 import type { PluginConfig } from "@cloudflare/vite-plugin";
 import type { PluginOption } from "vite";
 
-import type { NanocodexChatGptViteOptions } from "./index.mjs";
+import type { NanocodexChatGptViteOptions, NanocodexDevApplication } from "./index.mjs";
 
 export type NanocodexCloudflareViteOptions = Readonly<{
   /** Cloudflare Vite plugin options. Nanocodex adds only exact development credential bindings. */
@@ -11,6 +11,8 @@ export type NanocodexCloudflareViteOptions = Readonly<{
     /** Put the local Codex credential only in this auxiliary broker Worker. */
     credentialBrokerWorker?: string | undefined;
   }>) | false | undefined;
+  /** Sibling Vite applications mounted into this development server. */
+  devApplications?: readonly NanocodexDevApplication[] | undefined;
   /** Start the fixed local OAuth callback relay while serving. */
   oauthRelay?: boolean | undefined;
 }>;

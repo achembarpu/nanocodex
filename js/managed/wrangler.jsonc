@@ -73,10 +73,6 @@
       {
         "name": "NANOCODEX_ORGANIZATIONS",
         "class_name": "Organization"
-      },
-      {
-        "name": "NANOCODEX_COMPUTE_SANDBOX",
-        "class_name": "Sandbox"
       }
     ]
   },
@@ -108,8 +104,7 @@
     }
   ],
   "vars": {
-    "AGENT_IDLE_TIMEOUT_MS": "30000",
-    "NANOCODEX_COMPUTE_PROVIDER": "cloudflare"
+    "AGENT_IDLE_TIMEOUT_MS": "30000"
   },
   "env": {
     "development": {

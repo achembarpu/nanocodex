@@ -1,7 +1,7 @@
 import { Buffer } from "./browserBuffer.mjs";
 import { CancellationTokenSource, CommandRequestMessage, SshAuthenticationType, SshClientSession, SshSessionConfiguration, WebSocketStream, } from "./devTunnelsSshBrowser.mjs";
 import { importKey } from "@microsoft/dev-tunnels-ssh-keys";
-import { defineCommand, } from "just-bash/browser";
+import { defineCommand } from "nanocodex-tools/just-bash/browser";
 export function createSshCommand(filesystem) {
     return defineCommand("ssh", async (args, context) => {
         if (args[0] === "--help")

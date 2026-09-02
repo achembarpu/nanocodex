@@ -6,15 +6,15 @@ import {
   useState,
   type FormEvent,
 } from "react";
-import { AccountChooser } from "@nanocodex-connect/AccountChooser";
+import { AccountChooser } from "nanocodex-connect-ui/AccountChooser";
 import {
   AccountConnectionCard,
   AccountConnectionSection,
   AccountConnectionSurface,
-} from "@nanocodex-connect/AccountConnectionSurface";
+} from "nanocodex-connect-ui/AccountConnectionSurface";
 import { isRecord, responseFailure, useAccountSession } from "./AccountSession";
 import { clientFailureMessage } from "./clientFailure";
-import { ConnectionLogo } from "@nanocodex-connect/ConnectionLogo";
+import { ConnectionLogo } from "nanocodex-connect-ui/ConnectionLogo";
 import { deploymentHealth } from "./deploymentHealth";
 import { localDevelopmentCredential } from "./localDevelopmentCredential";
 import { ProfileConnectors } from "./ProfileConnectors";

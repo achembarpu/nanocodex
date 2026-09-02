@@ -3,10 +3,9 @@ import { createConfig } from "nanocodex-react/connect";
 
 const DEFAULT_DIALOG_HOST = "https://nanocodex.gakonst.workers.dev/connect-dialog/";
 const DEFAULT_API_HOST = "https://nanocodex-connect-api.gakonst.workers.dev";
-const MACHINE_USD = "0x20c0000000000000000000006637932dE5413804" as const;
+const MACHINE_USD = "0x20c000000000000000000000f37de3740ADec032" as const;
 const USDC_E = "0x20C000000000000000000000b9537d11c60E8b50" as const;
-const MACHINE_USD_SWAPPER = "0xd588ED9Ae08643A450157Adaf61c3C0C1BBd0dbb" as const;
-const TIP20_CHANNEL_ESCROW = "0x4d50500000000000000000000000000000000000" as const;
+const TIP20_CHANNEL_ESCROW = "0x33b901018174DDabE4841042ab76ba85D4e24f25" as const;
 const MERCATOR_SETTLEMENT = "0xa295C42FBCC026a62304A7701f25B4c91799B0dA" as const;
 const localBrowserHostname = (() => {
   const hostname = globalThis.location?.hostname.toLowerCase();
@@ -74,8 +73,8 @@ export const client = Client.create({
       scopes: [
         { address: USDC_E, selector: "0xa9059cbb", recipients: [MERCATOR_SETTLEMENT] },
         { address: USDC_E, selector: "0x95777d59", recipients: [MERCATOR_SETTLEMENT] },
-        { address: MACHINE_USD, selector: "0x095ea7b3", recipients: [MACHINE_USD_SWAPPER] },
-        { address: MACHINE_USD_SWAPPER, selector: "0x34189fed" },
+        { address: MACHINE_USD, selector: "0xa9059cbb", recipients: [MERCATOR_SETTLEMENT] },
+        { address: MACHINE_USD, selector: "0x95777d59", recipients: [MERCATOR_SETTLEMENT] },
         { address: TIP20_CHANNEL_ESCROW, selector: "0xedc53b00" },
         { address: TIP20_CHANNEL_ESCROW, selector: "0xdc48471e" },
       ],

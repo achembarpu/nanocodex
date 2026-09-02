@@ -430,7 +430,7 @@ function testConnectionWire({ expiry, keyId, capabilities, mcpConnections = [] }
     },
     mpp: {
       token: "0x20c0000000000000000000000000000000000001",
-      symbol: "MACHUSD",
+      symbol: "MACH",
       balance_status: "ready",
       settlement_token: "0x20C000000000000000000000b9537d11c60E8b50",
       settlement_symbol: "USDC.e",

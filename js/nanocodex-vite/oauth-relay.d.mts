@@ -1,5 +1,18 @@
 export type LocalOAuthProvider = "github" | "gmail" | "gdrive" | "x";
 export type LocalOAuthFlow = "connect" | "managed";
+export type LocalConnectorFlow = LocalOAuthFlow;
+export type LocalConnectorAuthorization = Readonly<{
+  connector: LocalOAuthProvider;
+  redirectUri: string;
+  targetOrigin: string;
+  flow: LocalConnectorFlow;
+}>;
+export type LocalMcpAuthorization = Readonly<{
+  connectionId: string;
+  redirectUri: string;
+  targetOrigin: string;
+  flow: LocalConnectorFlow;
+}>;
 export type LocalOAuthRelayEnvelope = Readonly<{
   v: 1;
   p: LocalOAuthProvider;
@@ -29,6 +42,26 @@ export const LOCAL_OAUTH_RELAY_HMAC_KEY: "nanocodex-local-oauth-relay-hmac-v1-on
 export function localOAuthRelayCallbackUrl(provider: string): string | undefined;
 export function localMcpOAuthRelayCallbackUrl(connectionId: string): string | undefined;
 export function isLocalNanocodexOrigin(value: string): boolean;
+export function localConnectorAuthorization(
+  targetOrigin: string,
+  connector: string,
+  flow: LocalConnectorFlow,
+): LocalConnectorAuthorization | undefined;
+export function localMcpAuthorization(
+  targetOrigin: string,
+  connectionId: string,
+  flow: LocalConnectorFlow,
+): LocalMcpAuthorization | undefined;
+export function wrapLocalConnectorAuthorizationState(
+  authorizationUrl: URL,
+  local: LocalConnectorAuthorization,
+  relayKey: string,
+): Promise<URL>;
+export function wrapLocalMcpAuthorizationState(
+  authorizationUrl: URL,
+  local: LocalMcpAuthorization,
+  relayKey: string,
+): Promise<URL>;
 export function signLocalOAuthRelayState(
   value: Readonly<{
     provider: string;

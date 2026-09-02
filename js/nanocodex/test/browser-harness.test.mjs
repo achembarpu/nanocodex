@@ -184,7 +184,7 @@ test("accountInfo adds app authorization without forwarding unknown control-plan
       identity: { tempoAddress: "0xabc", brokerUserId: "secret" },
       stablecoins: [{
         token: "0x01",
-        symbol: "MACHUSD",
+        symbol: "MACH",
         balance: "5000000",
         decimals: 6,
         providerCredential: "secret",
@@ -199,13 +199,13 @@ test("accountInfo adds app authorization without forwarding unknown control-plan
         accessKey: {
           id: "0x02",
           expiry: 2_000_000_000,
-          limits: [{ token: "0x01", symbol: "MACHUSD", limit: "10000000", period: 86_400 }],
+          limits: [{ token: "0x01", symbol: "MACH", limit: "10000000", period: 86_400 }],
           scopes: [{ address: "0x03", selector: "0x12345678", recipients: ["0x04"] }],
           witness: "secret",
         },
         spend: {
           token: "0x01",
-          symbol: "MACHUSD",
+          symbol: "MACH",
           spent: "250000",
           limit: "10000000",
           period: 86_400,
@@ -223,7 +223,7 @@ test("accountInfo adds app authorization without forwarding unknown control-plan
     authenticated: ["chatgpt"],
     accounts: { chatgpt: "Subscription" },
     identity: { tempoAddress: "0xabc" },
-    stablecoins: [{ token: "0x01", symbol: "MACHUSD", balance: "5000000", decimals: 6 }],
+    stablecoins: [{ token: "0x01", symbol: "MACH", balance: "5000000", decimals: 6 }],
     authorizations: [{
       appId: "atlas-workspace",
       permission: "agent.run",
@@ -234,12 +234,12 @@ test("accountInfo adds app authorization without forwarding unknown control-plan
       accessKey: {
         id: "0x02",
         expiry: 2_000_000_000,
-        limits: [{ token: "0x01", symbol: "MACHUSD", limit: "10000000", period: 86_400 }],
+        limits: [{ token: "0x01", symbol: "MACH", limit: "10000000", period: 86_400 }],
         scopes: [{ address: "0x03", selector: "0x12345678", recipients: ["0x04"] }],
       },
       spend: {
         token: "0x01",
-        symbol: "MACHUSD",
+        symbol: "MACH",
         spent: "250000",
         limit: "10000000",
         period: 86_400,

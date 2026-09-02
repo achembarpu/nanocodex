@@ -1,4 +1,4 @@
-import { isScopedConnectConnectorState } from "../connectConnectorCallback.mjs";
+import { isScopedConnectConnectorState } from "nanocodex-connect-protocol";
 
 export type ConnectApiProxyEnv = {
   ENVIRONMENT?: string;

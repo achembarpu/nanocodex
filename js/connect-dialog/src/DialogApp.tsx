@@ -1,6 +1,6 @@
 import { useCallback, useSyncExternalStore } from "react";
 
-import { ConnectOnboarding } from "./App";
+import { ConnectOnboarding } from "nanocodex-connect-ui/App";
 import { parentDialog } from "./protocol";
 
 export function App() {

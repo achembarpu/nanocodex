@@ -5,7 +5,7 @@ export default defineConfig({
   base: "/connect-dialog/",
   plugins: [react()],
   resolve: {
-    dedupe: ["@tanstack/react-query", "react", "react-dom"],
+    dedupe: ["react", "react-dom"],
   },
   server: {
     port: 4177,

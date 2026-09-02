@@ -17,6 +17,11 @@ state, or tool configuration. Model and connector access crosses the private
 `NANOCODEX` Service Binding to `nanocodex-egress`, which owns credential routing
 and injection.
 
+Reusable Hosted Tools protocol, broker-state, and durable-memory policy live in
+`nanocodex-tools`. This Worker supplies their Durable Object SQL/WebSocket
+adapters and retains account scope, Connect authorization, bindings, and
+storage ownership.
+
 ## Public journeys and protocol boundaries
 
 - Passkey/account and API-key routes establish the account identity that owns
@@ -48,12 +53,10 @@ protocol. `/health` is the service health endpoint.
 | `NANOCODEX_ROOMS`, `NANOCODEX_MULTIPLAYER_QUOTA` | Multiplayer state and global quota. |
 | `NANOCODEX_AUTH`, `NANOCODEX_USERS`, `NANOCODEX_API_KEYS`, `NANOCODEX_ORGANIZATIONS`, `NANOCODEX_MEMORY` | Account, key, organization, and durable-memory ownership. |
 | `NANOCODEX_HISTORY`, `HISTORY_AI_SEARCH` | R2 history archive and production history retrieval. |
-| `NANOCODEX_COMPUTE_SANDBOX` | Production Cloudflare Sandbox container for managed compute. |
 
 `wrangler.jsonc` is the binding and migration source of truth. Development
 uses the same Worker role with local Durable Objects, local egress binding, R2,
-and shorter idle timing; AI Search and the Sandbox container are production
-bindings.
+and shorter idle timing; AI Search is a production binding.
 
 ## Development and operation
 

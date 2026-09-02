@@ -7,7 +7,11 @@ export function createNanocodexCloudflarePlugins(options, cloudflare, integratio
     ? undefined
     : options.chatGpt?.credentialBrokerWorker;
   const core = createNanocodexVitePlugin(
-    { chatGpt: options.chatGpt, oauthRelay: options.oauthRelay },
+    {
+      chatGpt: options.chatGpt,
+      devApplications: options.devApplications,
+      oauthRelay: options.oauthRelay,
+    },
     {
       ...integration,
       target: "cloudflare",

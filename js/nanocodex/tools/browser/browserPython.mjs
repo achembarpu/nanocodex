@@ -1,4 +1,4 @@
-import { defineCommand, } from "just-bash/browser";
+import { defineCommand } from "nanocodex-tools/just-bash/browser";
 export class BrowserPythonRuntime {
     #workspaceRoot;
     #egress;

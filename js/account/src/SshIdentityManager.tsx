@@ -1,6 +1,6 @@
 import { useId, useState, type FormEvent } from "react";
 
-import { AccountConnectionSection } from "@nanocodex-connect/AccountConnectionSurface";
+import { AccountConnectionSection } from "nanocodex-connect-ui/AccountConnectionSurface";
 import { responseFailure } from "./AccountSession";
 import { clientFailureMessage } from "./clientFailure";
 import {

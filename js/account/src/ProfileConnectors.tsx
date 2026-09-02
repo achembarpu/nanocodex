@@ -4,15 +4,15 @@ import {
   AccountConnectionGrid,
   McpConnectionAddCard,
   McpConnectionCard,
-} from "@nanocodex-connect/AccountConnectionSurface";
+} from "nanocodex-connect-ui/AccountConnectionSurface";
 import { isRecord, responseFailure } from "./AccountSession";
 import { clientFailureMessage } from "./clientFailure";
 import { announceAccountMcpCatalogChanged } from "./browserMcp";
-import { ConnectionLogo } from "@nanocodex-connect/ConnectionLogo";
+import { ConnectionLogo } from "nanocodex-connect-ui/ConnectionLogo";
 import {
   connectorCompletion,
   connectorCompletionFor,
-} from "@nanocodex-connect/connectorCompletion";
+} from "nanocodex-connect-ui/connectorCompletion";
 
 type ConnectorId = "github" | "gmail" | "gdrive" | "x";
 type ConnectorStatus = Readonly<{

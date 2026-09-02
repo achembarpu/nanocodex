@@ -143,7 +143,7 @@ export function App() {
       },
       {
         onSuccess(result: MachineUsdFunding) {
-          record("machineUSD added", `Order ${result.order.id} issued $5.00 machineUSD.`);
+          record("MACH added", `Order ${result.order.id} issued $5.00 MACH.`);
         },
         onError(reason: Error) {
           if (isUserRejection(reason)) {
@@ -529,7 +529,7 @@ function ConnectionWorkspace({
             </span>
           </div>
           <div className="balance-value" data-testid="mpp-balance">
-            {formatMachineUsd(paidConnection.mpp.balance)} <span>MACHUSD</span>
+            {formatMachineUsd(paidConnection.mpp.balance)} <span>MACH</span>
           </div>
           <div className="balance-meta">
             {formatMachineUsd(paidConnection.mpp.spent)} spent of {formatMachineUsd(paidConnection.mpp.limit)} daily limit
@@ -539,8 +539,8 @@ function ConnectionWorkspace({
         <div className="action-grid" aria-label="Connection actions">
           {mppReady ? <article className="action-card">
             <div>
-              <strong>{mercatorReady ? "Add machineUSD" : "Unlock Mercator"}</strong>
-              <p>Buy MACHUSD in this dialog with the embedded headless onramp.</p>
+              <strong>{mercatorReady ? "Add MACH" : "Unlock Mercator"}</strong>
+              <p>Buy MACH through Mercator's secure hosted checkout.</p>
             </div>
             <button
               className="secondary-button"
@@ -549,13 +549,13 @@ function ConnectionWorkspace({
               onClick={onFund}
               type="button"
             >
-              {mercatorReady ? "Add $5.00" : "Buy MACHUSD"}
+              {mercatorReady ? "Add $5.00" : "Buy MACH"}
             </button>
           </article> : null}
           <article className="action-card">
             <div>
               <strong>Explicit MPP boundary</strong>
-              <p>Mercator can spend at most 0.25 MACHUSD per request and 10.00 per day.</p>
+              <p>Mercator can spend at most 0.25 MACH per request and 10.00 per day.</p>
             </div>
           </article>
         </div>

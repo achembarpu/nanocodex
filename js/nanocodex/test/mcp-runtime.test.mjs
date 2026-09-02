@@ -531,7 +531,7 @@ test("remote MCP tools retry payment challenges through McpClient.wrap", async (
     id: "nanocodex-paid-mcp",
     intent: "charge",
     method: "tempo",
-    realm: "mercator.tempoxyz.dev",
+    realm: "mercator.tempo.xyz",
     request: {},
   });
   const calls = [];

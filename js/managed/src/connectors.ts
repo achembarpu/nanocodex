@@ -8,7 +8,7 @@ import { bindAgentCredential } from "./credentials";
 import {
   localConnectorAuthorization,
   wrapLocalConnectorAuthorizationState,
-} from "../../account/localConnectorCallback";
+} from "nanocodex-vite/oauth-relay";
 import { canonicalRemoteMcpTarget } from "../../mcp-target.mjs";
 
 type ConnectorEnv = AccountAuthEnv & {

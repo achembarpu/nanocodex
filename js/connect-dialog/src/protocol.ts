@@ -1,7 +1,7 @@
 import type { Dialog } from "nanocodex/connect";
 import { Wata, postMessage } from "wata/host";
-import { mcpConnectionsFromWire, registeredApp } from "./connectPolicy.mjs";
-import type { ConnectRequest, WalletRequest } from "./connectTypes";
+import { mcpConnectionsFromWire, registeredApp } from "nanocodex-connect-ui/connectPolicy.mjs";
+import type { ConnectRequest, WalletRequest } from "nanocodex-connect-ui/connectTypes";
 
 export type Request = Exclude<ConnectRequest, { type: "deviceError" | "deviceComplete" }>;
 

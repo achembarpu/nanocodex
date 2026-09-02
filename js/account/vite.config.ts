@@ -6,7 +6,6 @@ import { readFile, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { defineConfig, type Plugin } from "vite";
 import { isLocalDocumentRequest } from "./scripts/local-document-request.mjs";
-import { rewriteConnectDialogDevModuleUrl } from "./vite/connectDialogDevModules.ts";
 import { rewriteDocsDevModuleUrl } from "./vite/docsDevModules.ts";
 import {
   documentStatusForPath,
@@ -16,8 +15,6 @@ import { isManagedRoutePath } from "./worker/managedProxy.ts";
 import { isConnectApiBrowserRoutePath } from "./worker/connectApiProxy.ts";
 
 const repositoryRoot = fileURLToPath(new URL("../..", import.meta.url));
-const connectDialogIndex = new URL("../connect-dialog/index.html", import.meta.url);
-const connectDialogRoot = fileURLToPath(new URL("../connect-dialog", import.meta.url));
 const repositoryRevision = execFileSync("git", ["rev-parse", "HEAD"], {
   cwd: repositoryRoot,
   encoding: "utf8",
@@ -32,69 +29,6 @@ if (localServerPort !== undefined
   throw new Error("PORT must be a valid TCP port");
 }
 
-function localConnectApplications(): Plugin {
-  return {
-    name: "nanocodex-local-connect-applications",
-    enforce: "pre",
-    apply: "serve" as const,
-    configureServer(vite) {
-      vite.middlewares.use(async (request, response, next) => {
-        const method = request.method ?? "GET";
-        const url = new URL(request.url ?? "/", "https://localhost");
-
-        const serveDocument = async (
-          index: URL,
-          transformPath: string,
-          rewrite?: (html: string) => string,
-        ) => {
-          const source = await readFile(index, "utf8");
-          const html = await vite.transformIndexHtml(transformPath, rewrite?.(source) ?? source);
-          response.statusCode = 200;
-          response.setHeader("cache-control", "no-store");
-          response.setHeader("content-type", "text/html; charset=utf-8");
-          response.end(method === "HEAD" ? undefined : html);
-        };
-
-        if (url.pathname === "/connect-dialog" || url.pathname.startsWith("/connect-dialog/")) {
-          if (method !== "GET" && method !== "HEAD") {
-            next();
-            return;
-          }
-          if (url.pathname.startsWith("/connect-dialog/src/")) {
-            const sourcePath = url.pathname.slice("/connect-dialog".length);
-            request.url = `/@fs${connectDialogRoot}${sourcePath}${url.search}`;
-            next();
-            return;
-          }
-          if (isLocalDocumentRequest(
-            request,
-            url.pathname === "/connect-dialog" || url.pathname === "/connect-dialog/",
-          )) {
-            try {
-              response.setHeader(
-                "content-security-policy",
-                "frame-ancestors 'self' https://nanocodex.localhost https://*.nanocodex.localhost http://nanocodex.localhost:* http://*.nanocodex.localhost:*",
-              );
-              await serveDocument(
-                connectDialogIndex,
-                `${url.pathname}${url.search}`,
-                (html) => html.replace(
-                  'src="/src/main.tsx"',
-                  `src="${rewriteConnectDialogDevModuleUrl("/connect-dialog/src/main.tsx")}"`,
-                ),
-              );
-            } catch (error) {
-              next(error as Error);
-            }
-            return;
-          }
-        }
-        next();
-      });
-    },
-  };
-}
-
 function applicationRouteFallback(): Plugin {
   return {
     name: "nanocodex-application-route-fallback",
@@ -102,12 +36,6 @@ function applicationRouteFallback(): Plugin {
     apply: "serve" as const,
     configureServer(vite) {
       vite.middlewares.use(async (request, response, next) => {
-        const connectDialogModuleUrl = rewriteConnectDialogDevModuleUrl(request.url);
-        if (connectDialogModuleUrl != null && (request.method === "GET" || request.method === "HEAD")) {
-          request.url = connectDialogModuleUrl;
-          next();
-          return;
-        }
         const docsModuleUrl = rewriteDocsDevModuleUrl(request.url);
         if (docsModuleUrl != null && (request.method === "GET" || request.method === "HEAD")) {
           request.url = docsModuleUrl;
@@ -185,13 +113,15 @@ export default defineConfig({
     "process.env": "{}",
   },
   plugins: [
-    localConnectApplications(),
-    applicationRouteFallback(),
-    linkPreviewMetadata(),
-    deploymentBuildAttestation(),
-    react(),
     nanocodex({
       chatGpt: { credentialBrokerWorker: "nanocodex-egress" },
+      devApplications: [{
+        headers: {
+          "content-security-policy": "frame-ancestors 'self' https://nanocodex.localhost https://*.nanocodex.localhost http://nanocodex.localhost:* http://*.nanocodex.localhost:*",
+        },
+        path: "/connect-dialog",
+        root: new URL("../connect-dialog", import.meta.url),
+      }],
       oauthRelay: true,
       cloudflare: {
         inspectorPort: 0,
@@ -202,15 +132,13 @@ export default defineConfig({
         ],
       },
     }),
+    applicationRouteFallback(),
+    linkPreviewMetadata(),
+    deploymentBuildAttestation(),
+    react(),
   ],
   resolve: {
-    alias: {
-      "@nanocodex-connect": fileURLToPath(
-        new URL("../connect-dialog/src", import.meta.url),
-      ),
-    },
     dedupe: [
-      "@stripe/stripe-js",
       "accounts",
       "react",
       "react-dom",
@@ -232,7 +160,7 @@ export default defineConfig({
   // dependency cache must not hold an older Worker/React contract after a
   // package edit, and the WASM glue plus binary are indivisible.
   optimizeDeps: {
-    exclude: ["nanocodex", "nanocodex-react"],
+    exclude: ["nanocodex", "nanocodex-connect-ui", "nanocodex-react"],
   },
   worker: {
     format: "es",

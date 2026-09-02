@@ -1,4 +1,4 @@
-import { defineCommand, } from "just-bash/browser";
+import { defineCommand } from "nanocodex-tools/just-bash/browser";
 const runtimes = new WeakMap();
 export function createCompilerCommand(name, filesystem, egress) {
     const runtime = runtimes.get(filesystem) ?? new BrowserCompilerRuntime(egress);

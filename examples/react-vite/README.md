@@ -26,7 +26,7 @@ the MPP integration from same-origin IndexedDB and opens
 do not initialize a wallet, access key, or payment session.
 
 Marking the model manager as a Nanocodex Tempo provider automatically enables
-the built-in Mercator MCP at `https://mercator.tempoxyz.dev/mcp`, backed by the
+the built-in Mercator MCP at `https://mercator.tempo.xyz/mcp`, backed by the
 same delegated signer and persistent channel store. Nanocodex exposes
 only provider-native `tool_search` to the model initially. Mercator's tools stay
 deferred under `mcp__mercator__*`, become discoverable through BM25 search, and

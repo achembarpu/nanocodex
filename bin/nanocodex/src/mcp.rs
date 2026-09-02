@@ -47,7 +47,7 @@ const DEFAULT_MCP_SERVERS: [(&str, &str, &str); 5] = [
         "Search Vocs developer documentation.",
     ),
 ];
-pub(crate) const MERCATOR_MCP_URL: &str = "https://mercator.tempoxyz.dev/mcp";
+pub(crate) const MERCATOR_MCP_URL: &str = "https://mercator.tempo.xyz/mcp";
 const MERCATOR_MCP_DESCRIPTION: &str = "Discovers and composes paid Tempo services and MPP flows.";
 
 fn default_parallel_tools(name: &str) -> &'static [&'static str] {

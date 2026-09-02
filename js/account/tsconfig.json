@@ -13,7 +13,6 @@
     "moduleResolution": "Bundler",
     "baseUrl": ".",
     "paths": {
-      "@nanocodex-connect/*": ["../connect-dialog/src/*"],
       "nanocodex": ["../nanocodex/index.d.mts"],
       "nanocodex/browser": ["../nanocodex/browser/index.d.mts"],
       "nanocodex/browser/voice": ["../nanocodex/browser/Voice.d.mts"],

@@ -205,7 +205,7 @@ export function useConnectAgent(parameters = {}) {
   });
 }
 
-/** Funds the current connection with machineUSD through the decorated client. */
+/** Funds the current connection with MACH through the decorated client. */
 export function useFund(parameters = {}) {
   const config = useConfig(parameters);
   return useConnectMutation(
@@ -353,8 +353,8 @@ export function NanocodexDialog({ dialog }) {
       "section",
       { "aria-labelledby": id, role: "dialog" },
       createElement("h2", { id }, "Nanocodex Connect"),
-      createElement("p", null, `Add $${dollars} of machineUSD to this connection?`),
-      dialogActions(dialog, "Add machineUSD", { approved: true }),
+      createElement("p", null, `Add $${dollars} of MACH to this connection?`),
+      dialogActions(dialog, "Add MACH", { approved: true }),
     );
   }
 

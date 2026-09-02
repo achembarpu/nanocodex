@@ -38,6 +38,7 @@ let packageBuild;
 
 export function createNanocodexVitePlugin(options, integration) {
   const tools = nanocodexTools();
+  const devApplications = normalizeDevApplications(options.devApplications);
   const chatGpt = options.chatGpt ?? {};
   const credentialBrokerWorker = integration.target === "cloudflare"
     && typeof chatGpt.credentialBrokerWorker === "string"
@@ -54,6 +55,8 @@ export function createNanocodexVitePlugin(options, integration) {
   let workerAuth;
   let egress;
   let oauthRelay;
+  let devApplicationServers = [];
+  let devApplicationCleanup;
   let cleanupPromise;
 
   const cleanup = () => cleanupPromise ??= (async () => {
@@ -71,6 +74,12 @@ export function createNanocodexVitePlugin(options, integration) {
     oauthRelay = undefined;
     await active?.close();
   };
+
+  const cleanupDevApplications = () => devApplicationCleanup ??= (async () => {
+    const active = devApplicationServers;
+    devApplicationServers = [];
+    await Promise.all(active.map(({ server }) => server.close()));
+  })();
 
   return {
     name: "nanocodex",
@@ -122,6 +131,7 @@ export function createNanocodexVitePlugin(options, integration) {
             ...oauthBindings,
             ALLOW_INSECURE_LOOPBACK_RELAY: "true",
             CODEX_RELAY_URL: egress.relayUrl,
+            NANOCODEX_LOCAL_CHATGPT_AUTO_CLAIM: "true",
             LOCAL_CHATGPT_BOOTSTRAP: JSON.stringify({
               access_token: workerAuth.accessToken,
               account_id: workerAuth.accountId,
@@ -151,8 +161,23 @@ export function createNanocodexVitePlugin(options, integration) {
     },
     async configureServer(vite) {
       vite.httpServer?.once("close", () => {
-        void Promise.all([cleanup(), cleanupOAuthRelay()]);
+        void Promise.all([cleanup(), cleanupOAuthRelay(), cleanupDevApplications()]);
       });
+      if (devApplications.length > 0) {
+        const createViteServer = integration.createViteServer
+          ?? (await import("vite")).createServer;
+        try {
+          devApplicationServers = await createDevApplicationServers(
+            vite,
+            devApplications,
+            createViteServer,
+          );
+        } catch (error) {
+          await cleanupDevApplications();
+          throw error;
+        }
+        vite.middlewares.use(devApplicationMiddleware(devApplicationServers));
+      }
       if (await isSourceCheckout()) {
         watchRustBuildInputs(vite, rebuildJsPackage);
       }
@@ -166,8 +191,131 @@ export function createNanocodexVitePlugin(options, integration) {
       );
     },
     async closeBundle() {
-      await Promise.all([cleanup(), cleanupOAuthRelay()]);
+      await Promise.all([cleanup(), cleanupOAuthRelay(), cleanupDevApplications()]);
     },
+  };
+}
+
+function normalizeDevApplications(configured) {
+  if (configured === undefined) return [];
+  if (!Array.isArray(configured)) throw new TypeError("Nanocodex devApplications must be an array");
+  const paths = new Set();
+  const applications = configured.map((application, index) => {
+    if (application === null || typeof application !== "object") {
+      throw new TypeError(`Nanocodex devApplications[${index}] must be an object`);
+    }
+    const path = normalizeDevApplicationPath(application.path, index);
+    if (paths.has(path)) throw new TypeError(`Nanocodex devApplications contains duplicate path ${path}`);
+    paths.add(path);
+    const root = application.root;
+    if (typeof root !== "string" && !(root instanceof URL)) {
+      throw new TypeError(`Nanocodex devApplications[${index}].root must be a path or file URL`);
+    }
+    if (typeof root === "string" && root.length === 0) {
+      throw new TypeError(`Nanocodex devApplications[${index}].root must not be empty`);
+    }
+    if (root instanceof URL && root.protocol !== "file:") {
+      throw new TypeError(`Nanocodex devApplications[${index}].root must be a file URL`);
+    }
+    const headers = normalizeDevApplicationHeaders(application.headers, index);
+    return Object.freeze({ path, root, headers });
+  });
+  return Object.freeze(applications.sort((left, right) => right.path.length - left.path.length));
+}
+
+function normalizeDevApplicationHeaders(configured, index) {
+  if (configured === undefined) return Object.freeze({});
+  if (configured === null || typeof configured !== "object" || Array.isArray(configured)) {
+    throw new TypeError(`Nanocodex devApplications[${index}].headers must be an object`);
+  }
+  try {
+    return Object.freeze(Object.fromEntries(new Headers(configured)));
+  } catch (error) {
+    throw new TypeError(
+      `Nanocodex devApplications[${index}].headers contains an invalid header: ${errorMessage(error)}`,
+    );
+  }
+}
+
+function normalizeDevApplicationPath(configured, index) {
+  if (typeof configured !== "string") {
+    throw new TypeError(`Nanocodex devApplications[${index}].path must be a URL path`);
+  }
+  const path = configured.endsWith("/") ? configured.slice(0, -1) : configured;
+  if (path === "" || path === "/" || !path.startsWith("/") || path.includes("?") || path.includes("#")) {
+    throw new TypeError(`Nanocodex devApplications[${index}].path must be a non-root URL path`);
+  }
+  for (const encoded of path.slice(1).split("/")) {
+    let segment;
+    try {
+      segment = decodeURIComponent(encoded);
+    } catch {
+      throw new TypeError(`Nanocodex devApplications[${index}].path must have valid URL encoding`);
+    }
+    if (segment === "" || segment === "." || segment === ".." || segment.includes("/") || segment.includes("\\")) {
+      throw new TypeError(`Nanocodex devApplications[${index}].path must have safe URL segments`);
+    }
+  }
+  return path;
+}
+
+async function createDevApplicationServers(vite, applications, createViteServer) {
+  const mounted = [];
+  try {
+    for (const application of applications) {
+      const root = application.root instanceof URL
+        ? fileURLToPath(application.root)
+        : resolve(vite.config.root, application.root);
+      const server = await createViteServer({
+        root,
+        base: `${application.path}/`,
+        appType: "spa",
+        clearScreen: false,
+        server: {
+          middlewareMode: true,
+          hmr: vite.httpServer ? { server: vite.httpServer } : false,
+        },
+      });
+      mounted.push({ ...application, server });
+    }
+    return mounted;
+  } catch (error) {
+    await Promise.all(mounted.map(({ server }) => server.close()));
+    throw error;
+  }
+}
+
+function devApplicationMiddleware(applications) {
+  return (request, response, next) => {
+    const method = request.method ?? "GET";
+    if (method !== "GET" && method !== "HEAD") return next();
+    let pathname;
+    try {
+      pathname = new URL(request.url ?? "/", "http://nanocodex.invalid").pathname;
+    } catch {
+      return next();
+    }
+    const application = applications.find(({ path }) => pathname === path || pathname.startsWith(`${path}/`));
+    if (!application) return next();
+    for (const [name, value] of Object.entries(application.headers)) {
+      response.setHeader(name, value);
+    }
+
+    const originalUrl = request.url;
+    let restored = false;
+    const restore = () => {
+      if (restored) return;
+      restored = true;
+      request.url = originalUrl;
+      response.off("finish", restore);
+      response.off("close", restore);
+    };
+    response.once("finish", restore);
+    response.once("close", restore);
+    application.server.middlewares(request, response, (error) => {
+      restore();
+      next(error);
+    });
   };
 }
 

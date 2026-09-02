@@ -105,7 +105,7 @@ export function mock(options = {}) {
                 capabilities: [
                   "nanocodex.agent",
                   "mercator.boost",
-                  "mpp.machusd",
+                  "mpp.mach",
                   ...connectors,
                   ...mcpConnections.map(({ id }) => `mcp:${id}`),
                 ],
@@ -124,7 +124,7 @@ export function mock(options = {}) {
               },
               mpp: {
                 token: machineUsdAddress,
-                symbol: "MACHUSD",
+                symbol: "MACH",
                 balance_status: "ready",
                 settlement_token: "0x20C000000000000000000000b9537d11c60E8b50",
                 settlement_symbol: "USDC.e",
@@ -215,7 +215,7 @@ export function mock(options = {}) {
               },
               mpp: {
                 token: machineUsdAddress,
-                symbol: "MACHUSD",
+                symbol: "MACH",
                 settlement_token: "0x20C000000000000000000000b9537d11c60E8b50",
                 settlement_symbol: "USDC.e",
                 settlement_balance_atomics: "0",
@@ -287,7 +287,6 @@ export function mock(options = {}) {
               chain_id: 4217,
               min_usd_amount_cents: 500,
               max_usd_amount_cents: 10_000,
-              onramp_enabled: true,
               stripe_publishable_key: "pk_test_nanocodex",
               token_address: machineUsdAddress,
             };
@@ -298,7 +297,7 @@ export function mock(options = {}) {
             const wire = requiredActiveGrant(grants, grantId);
             const usdAmountCents = request.body?.usd_amount_cents;
             if (!Number.isSafeInteger(usdAmountCents) || usdAmountCents < 500 || usdAmountCents > 10_000) {
-              throw new TypeError("machineUSD amount must be from 500 through 10000 cents");
+              throw new TypeError("MACH amount must be from 500 through 10000 cents");
             }
             const amount = BigInt(usdAmountCents) * 10_000n;
             wire.mpp = {
@@ -328,7 +327,7 @@ export function mock(options = {}) {
             if (amount <= 0n) throw new TypeError("MPP amount must be positive");
             if (amount > max) throw new HttpError(403, "This payment exceeds the per-request permission.", { code: "mpp_request_limit_exceeded" });
             if (spent + amount > limit) throw new HttpError(403, "This payment exceeds the daily MPP permission.", { code: "mpp_period_limit_exceeded" });
-            if (amount > balance) throw new HttpError(402, "Add machineUSD before paying for this capability.", { code: "machine_usd_required" });
+            if (amount > balance) throw new HttpError(402, "Add MACH before paying for this capability.", { code: "machine_usd_required" });
             wire.mpp = {
               ...wire.mpp,
               balance_atomics: String(balance - amount),

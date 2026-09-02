@@ -5,9 +5,20 @@ export type NanocodexChatGptViteOptions = Readonly<{
   responsesPath?: `/${string}` | undefined;
 }>;
 
+export type NanocodexDevApplication = Readonly<{
+  /** Development response headers applied to every request handled by this mount. */
+  headers?: Readonly<Record<string, string>> | undefined;
+  /** Non-root URL path where the application is served during development. */
+  path: `/${string}`;
+  /** Application root. Its Vite config and index.html remain owned by the application. */
+  root: string | URL;
+}>;
+
 export type NanocodexViteOptions = Readonly<{
   /** Local ChatGPT subscription support is on by default; pass false to disable it. */
   chatGpt?: NanocodexChatGptViteOptions | false | undefined;
+  /** Sibling Vite applications mounted into this development server. */
+  devApplications?: readonly NanocodexDevApplication[] | undefined;
   /** Start the fixed local OAuth callback relay while serving. */
   oauthRelay?: boolean | undefined;
 }>;

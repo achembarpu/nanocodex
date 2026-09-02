@@ -1,45 +1,26 @@
 import { connect as cloudflareConnect } from "cloudflare:sockets";
 import {
-  createSshCommand,
-  createWebStreamSshStream,
-  type SshCommandResult,
-  type SshIdentityReferenceRequest,
-} from "nanocodex/tools/ssh";
-import type { Workspace } from "nanocodex/workspace";
-
-type SocketLike = Readonly<{
-  readable: ReadableStream<Uint8Array>;
-  writable: WritableStream<Uint8Array>;
-  opened: Promise<unknown>;
-  closed: Promise<void>;
-  close(): Promise<void>;
-}>;
-
-type Connect = (
-  address: Readonly<{ hostname: string; port: number }>,
-  options: Readonly<{ allowHalfOpen: boolean; secureTransport: "off" }>,
-) => SocketLike;
+  createWorkspaceSshCommand,
+  type SshConnect,
+  type Workspace,
+} from "nanocodex-tools";
+import type {
+  SshCommandResult,
+  SshIdentityReferenceRequest,
+} from "nanocodex-tools/ssh";
 
 /** Mounts direct and private-egress SSH into Just Bash without a Linux sandbox. */
 export function createCloudflareSshCommand(options: Readonly<{
-  connect?: Connect;
+  connect?: SshConnect;
   egress?: Fetcher;
   filesystem(): Workspace;
   resolvePassword?(reference: string): Promise<string>;
   sshIdentityAllowed?(reference: string): boolean;
   subject?: string;
 }>) {
-  const open = options.connect ?? cloudflareConnect as Connect;
-  return createSshCommand({
-    transport: "tcp",
-    maxOutputBytes: 4 * 1024 * 1024,
-    readIdentity: async (path, context) => new TextDecoder().decode(
-      await options.filesystem().readFile(resolveWorkspacePath(
-        options.filesystem().root,
-        context.cwd,
-        path,
-      )),
-    ),
+  return createWorkspaceSshCommand({
+    connect: options.connect ?? cloudflareConnect as SshConnect,
+    filesystem: options.filesystem,
     ...(options.resolvePassword === undefined
       ? {}
       : { resolvePassword: options.resolvePassword }),
@@ -57,17 +38,6 @@ export function createCloudflareSshCommand(options: Readonly<{
             return executeBrokeredSsh(options.egress!, options.subject!, request, context.signal);
           },
         }),
-    async openStream(endpoint, signal) {
-      if (endpoint instanceof URL) throw new Error("TCP SSH requires a host and port");
-      const socket = open(endpoint, { allowHalfOpen: true, secureTransport: "off" });
-      try {
-        await abortable(socket.opened, signal);
-        return createWebStreamSshStream(socket, signal);
-      } catch (error) {
-        await socket.close();
-        throw error;
-      }
-    },
   });
 }
 
@@ -106,43 +76,6 @@ async function executeBrokeredSsh(
     throw new Error("private egress returned an invalid SSH result");
   }
   return { stdout, stderr, exitCode };
-}
-
-function resolveWorkspacePath(root: string, cwd: string, path: string): string {
-  const absolute = path.startsWith("/");
-  if (absolute && path !== root && !path.startsWith(`${root}/`)) {
-    throw new Error(`SSH identity path must stay within ${root}`);
-  }
-  const base = absolute ? [] : relativeParts(root, cwd);
-  const parts = [...base];
-  const input = absolute ? path.slice(root.length) : path;
-  for (const part of input.split("/")) {
-    if (!part || part === ".") continue;
-    if (part === "..") {
-      if (parts.length === 0) throw new Error(`SSH identity path escapes ${root}`);
-      parts.pop();
-    } else parts.push(part);
-  }
-  return parts.length === 0 ? root : `${root}/${parts.join("/")}`;
-}
-
-function relativeParts(root: string, path: string): string[] {
-  if (path === root) return [];
-  if (!path.startsWith(`${root}/`)) throw new Error(`SSH cwd must stay within ${root}`);
-  return path.slice(root.length + 1).split("/").filter(Boolean);
-}
-
-function abortable<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
-  if (signal === undefined) return promise;
-  if (signal.aborted) return Promise.reject(signal.reason ?? new Error("SSH command cancelled"));
-  return new Promise((resolve, reject) => {
-    const abort = () => reject(signal.reason ?? new Error("SSH command cancelled"));
-    signal.addEventListener("abort", abort, { once: true });
-    promise.then(
-      (value) => { signal.removeEventListener("abort", abort); resolve(value); },
-      (error) => { signal.removeEventListener("abort", abort); reject(error); },
-    );
-  });
 }
 
 function stringField(value: unknown, field: string): string | undefined {

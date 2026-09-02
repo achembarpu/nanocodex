@@ -41,6 +41,59 @@ export function isLocalNanocodexOrigin(value) {
     && port !== LOCAL_OAUTH_RELAY_PORT;
 }
 
+export function localConnectorAuthorization(targetOrigin, connector, flow) {
+  if (!PROVIDERS.has(connector) || !isLocalNanocodexOrigin(targetOrigin)) return undefined;
+  const redirectUri = localOAuthRelayCallbackUrl(connector);
+  if (!redirectUri) return undefined;
+  return {
+    connector,
+    redirectUri,
+    targetOrigin: new URL(targetOrigin).origin,
+    flow,
+  };
+}
+
+export function localMcpAuthorization(targetOrigin, connectionId, flow) {
+  if (typeof connectionId !== "string" || !CONNECTION_ID.test(connectionId)
+    || !isLocalNanocodexOrigin(targetOrigin)) return undefined;
+  const redirectUri = localMcpOAuthRelayCallbackUrl(connectionId);
+  if (!redirectUri) return undefined;
+  return {
+    connectionId,
+    redirectUri,
+    targetOrigin: new URL(targetOrigin).origin,
+    flow,
+  };
+}
+
+export async function wrapLocalConnectorAuthorizationState(authorizationUrl, local, relayKey) {
+  const state = authorizationUrl.searchParams.get("state");
+  if (!state || state.length > MAX_INNER_STATE_LENGTH) {
+    throw new Error("invalid local connector authorization state");
+  }
+  authorizationUrl.searchParams.set("state", await signLocalOAuthRelayState({
+    provider: local.connector,
+    targetOrigin: local.targetOrigin,
+    flow: local.flow,
+    state,
+  }, relayKey));
+  return authorizationUrl;
+}
+
+export async function wrapLocalMcpAuthorizationState(authorizationUrl, local, relayKey) {
+  const state = authorizationUrl.searchParams.get("state");
+  if (!state || state.length > MAX_INNER_STATE_LENGTH) {
+    throw new Error("invalid local MCP authorization state");
+  }
+  authorizationUrl.searchParams.set("state", await signLocalOAuthRelayState({
+    connectionId: local.connectionId,
+    targetOrigin: local.targetOrigin,
+    flow: local.flow,
+    state,
+  }, relayKey));
+  return authorizationUrl;
+}
+
 export async function signLocalOAuthRelayState(
   { provider, connectionId, targetOrigin, flow, state },
   secret,

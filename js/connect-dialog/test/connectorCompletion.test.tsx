@@ -4,7 +4,7 @@ import {
   connectorCompletion,
   connectorCompletionFor,
   isConnectorCompletion,
-} from "../src/connectorCompletion";
+} from "nanocodex-connect-ui/connectorCompletion";
 
 describe("connector OAuth completion", () => {
   it("accepts completion only from the exact origin, popup, and connector", () => {

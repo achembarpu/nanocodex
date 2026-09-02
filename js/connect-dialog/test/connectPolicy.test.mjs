@@ -23,7 +23,7 @@ import {
   sanitizeWalletResult,
   signedAppResources,
   usesBrowserLocalWebAuthn,
-} from "../src/connectPolicy.mjs";
+} from "nanocodex-connect-ui/connectPolicy.mjs";
 
 const LINEAR_MCP = "linear_abcdefghijklmnopqrstuvwxyz0123456789";
 const CLOUDFLARE_MCP = "cloudf_abcdefghijklmnopqrstuvwxyz0123456789";

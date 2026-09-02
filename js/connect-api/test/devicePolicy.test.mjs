@@ -33,19 +33,19 @@ function registration(resources, capabilities = {}) {
             chainId: "0x1079",
             expiry: Math.floor(Date.now() / 1_000) + 30 * 86_400,
             limits: mpp ? [
-              { token: "0x20c0000000000000000000006637932dE5413804", limit: "0x989680", period: 86_400 },
+              { token: "0x20c000000000000000000000f37de3740ADec032", limit: "0x989680", period: 86_400 },
               { token: "0x20C000000000000000000000b9537d11c60E8b50", limit: "0x989680", period: 86_400 },
             ] : [
-              { token: "0x20c0000000000000000000006637932dE5413804", limit: "0x0", period: 0 },
+              { token: "0x20c000000000000000000000f37de3740ADec032", limit: "0x0", period: 0 },
               { token: "0x20C000000000000000000000b9537d11c60E8b50", limit: "0x0", period: 0 },
             ],
             scopes: mpp ? [
               { address: "0x20C000000000000000000000b9537d11c60E8b50", selector: "0xa9059cbb", recipients: ["0xa295C42FBCC026a62304A7701f25B4c91799B0dA"] },
               { address: "0x20C000000000000000000000b9537d11c60E8b50", selector: "0x95777d59", recipients: ["0xa295C42FBCC026a62304A7701f25B4c91799B0dA"] },
-              { address: "0x20c0000000000000000000006637932dE5413804", selector: "0x095ea7b3", recipients: ["0xd588ED9Ae08643A450157Adaf61c3C0C1BBd0dbb"] },
-              { address: "0xd588ED9Ae08643A450157Adaf61c3C0C1BBd0dbb", selector: "0x34189fed" },
-              { address: "0x4d50500000000000000000000000000000000000", selector: "0xedc53b00" },
-              { address: "0x4d50500000000000000000000000000000000000", selector: "0xdc48471e" },
+              { address: "0x20c000000000000000000000f37de3740ADec032", selector: "0xa9059cbb", recipients: ["0xa295C42FBCC026a62304A7701f25B4c91799B0dA"] },
+              { address: "0x20c000000000000000000000f37de3740ADec032", selector: "0x95777d59", recipients: ["0xa295C42FBCC026a62304A7701f25B4c91799B0dA"] },
+              { address: "0x33b901018174DDabE4841042ab76ba85D4e24f25", selector: "0xedc53b00" },
+              { address: "0x33b901018174DDabE4841042ab76ba85D4e24f25", selector: "0xdc48471e" },
             ] : [],
           },
           ...capabilities,
@@ -163,7 +163,7 @@ test("CLI device registration always binds a prepared installation access key", 
   assert.throws(() => parseCliRegisterBody(missingLimits), /policy/);
   const unrequestedSpend = registration(base);
   unrequestedSpend.message.payload[0].params[0].capabilities.authorizeAccessKey.limits = [{
-    token: "0x20c0000000000000000000006637932dE5413804",
+    token: "0x20c000000000000000000000f37de3740ADec032",
     limit: "0x989680",
     period: 86_400,
   }];

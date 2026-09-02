@@ -9,6 +9,11 @@ import {
 
 const plugin = nanocodex({
   chatGpt: { responsesPath: "/api/responses" },
+  devApplications: [{
+    headers: { "content-security-policy": "frame-ancestors 'self'" },
+    path: "/connect-dialog",
+    root: new URL("../../connect-dialog", import.meta.url),
+  }],
   oauthRelay: true,
 });
 plugin.resolveId("node-rsa");
@@ -17,6 +22,7 @@ await plugin.config({}, { command: "build" });
 nanocodexCloudflare({
   chatGpt: false,
   cloudflare: {},
+  devApplications: [{ path: "/connect-dialog", root: "../connect-dialog" }],
   oauthRelay: true,
 });
 
