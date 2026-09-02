@@ -51,7 +51,7 @@ impl EventCursor {
         &self.0
     }
 
-    fn observe(&mut self, cursor: String) -> Result<bool, ManagedError> {
+    pub(crate) fn observe(&mut self, cursor: String) -> Result<bool, ManagedError> {
         validate_numeric_cursor(&cursor)?;
         let is_new = self.0 == "latest" || cursor_before(&self.0, &cursor);
         if is_new {

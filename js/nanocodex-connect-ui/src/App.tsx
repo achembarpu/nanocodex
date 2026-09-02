@@ -42,6 +42,7 @@ import {
   requestManagedWalletConnect,
   requestManagedWalletRevocation,
 } from "./walletWorker.mjs";
+import { AppVisibilityPermissions } from "./AppVisibilityPermissions.js";
 
 import { classifyMachineUsdOrder } from "./machineUsdOrder.mjs";
 import {
@@ -1767,12 +1768,7 @@ function WizardRequestSummary({ appVisibility, request }: Readonly<{
     <section className="wizard-request-summary" aria-labelledby="wizard-request-heading">
       <h2 className="sr-only" id="wizard-request-heading">Installation capabilities</h2>
       <div className="wizard-visibility" role="list" aria-label="App sees">
-        {appVisibility.map((permission) => (
-          <div key={permission.resource} role="listitem">
-            <span>✓</span>
-            <div><strong>{permission.label}</strong><small>{permission.detail}</small></div>
-          </div>
-        ))}
+        <AppVisibilityPermissions permissions={appVisibility} />
         {request.mpp ? (
           <div role="listitem">
             <span>✓</span>

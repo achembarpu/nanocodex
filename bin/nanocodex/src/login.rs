@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fmt, fs,
     io::{Read, Write},
     num::NonZeroU64,
@@ -14,6 +14,7 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use clap::{ArgAction, Args};
 use eyre::{Result, WrapErr, bail, ensure, eyre};
 use futures_util::StreamExt;
+use percent_encoding::{AsciiSet, CONTROLS, percent_decode_str, utf8_percent_encode};
 use rand::RngCore;
 use reqwest::{Client, Response, StatusCode, Url, redirect::Policy};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -52,6 +53,10 @@ const CHATGPT_ACCOUNT_ID_LIMIT: usize = 256;
 const CHATGPT_IMPORT_DOMAIN: &[u8] = b"nanocodex/chatgpt-credential-import/v1\0";
 const CHATGPT_IMPORT_RESOURCE_PREFIX: &str =
     "urn:nanocodex:credential-import:chatgpt:codex-auth-v1:sha256:";
+pub(crate) const LOCAL_BROWSER_COOKIE_SYNC_RESOURCE_PREFIX: &str =
+    "urn:nanocodex:browser-cookies:local-sync:";
+const URI_COMPONENT_ORIGIN_ENCODE_SET: &AsciiSet =
+    &CONTROLS.add(b'%').add(b'/').add(b':').add(b'[').add(b']');
 const MPP_LIMIT: u64 = 10_000_000;
 const MPP_PERIOD: u64 = 86_400;
 
@@ -74,6 +79,13 @@ pub(crate) struct Login {
     /// Approve the bounded MACH/USDC.e MPP spending policy.
     #[arg(long, action = ArgAction::SetTrue)]
     mpp: bool,
+    /// Authorize this installation to sync cookies for one exact HTTP(S) origin.
+    #[arg(
+        long = "browser-cookie-origin",
+        value_name = "ORIGIN",
+        value_parser = canonical_browser_cookie_origin
+    )]
+    browser_cookie_origin: Option<String>,
     /// Use a trusted local Nanocodex Connect endpoint for development.
     #[arg(
         long,
@@ -214,17 +226,19 @@ pub(crate) struct Logout {}
 impl Login {
     pub(crate) async fn run(self) -> Result<()> {
         let paths = LoginPaths::default()?;
-        let request = RequestedCapabilities::login(self.mpp);
+        let mut request =
+            RequestedCapabilities::login(self.mpp, self.browser_cookie_origin.as_deref());
         let device_base = validated_device_base(self.device_base_url.as_deref())?;
         let expected_origin = normalized_origin(api_origin(&device_base)?)?;
         let prior = StoredLogin::load(&paths.login)?;
         let mut active = active_login(&paths.login, Some(&expected_origin)).await?;
         if let Some(stored) = &mut active {
             finish_pending_retirement(&paths, stored).await?;
-            if stored.satisfies_login(self.mpp) {
+            if stored.satisfies_login(self.mpp, self.browser_cookie_origin.as_deref()) {
                 print_summary(stored);
                 return Ok(());
             }
+            request.preserve_from(stored)?;
         }
         let retirement = active
             .as_ref()
@@ -252,7 +266,10 @@ impl Connect {
             finish_pending_retirement(&paths, stored).await?;
         }
 
-        let request = RequestedCapabilities::connect(&self.services);
+        let mut request = RequestedCapabilities::connect(&self.services);
+        if let Some(stored) = &active {
+            request.preserve_from(stored)?;
+        }
         let retirement = active
             .as_ref()
             .map(|login| PendingRetirement::from_login(login, true))
@@ -353,17 +370,19 @@ struct RequestedCapabilities {
     mcp_targets: Vec<String>,
     mcp_connections: Vec<ManagedMcpConnection>,
     mpp: bool,
+    browser_cookie_origin: Option<String>,
     focus_connector: Option<&'static str>,
     focus_mcp: bool,
 }
 
 impl RequestedCapabilities {
-    const fn login(mpp: bool) -> Self {
+    fn login(mpp: bool, browser_cookie_origin: Option<&str>) -> Self {
         Self {
             connectors: Vec::new(),
             mcp_targets: Vec::new(),
             mcp_connections: Vec::new(),
             mpp,
+            browser_cookie_origin: browser_cookie_origin.map(str::to_owned),
             focus_connector: None,
             focus_mcp: false,
         }
@@ -392,11 +411,55 @@ impl RequestedCapabilities {
             mcp_targets,
             mcp_connections: Vec::new(),
             mpp: false,
+            browser_cookie_origin: None,
             focus_connector: sole_target
                 .then(|| connector_targets.first().copied())
                 .flatten(),
             focus_mcp: sole_target && connector_targets.is_empty(),
         }
+    }
+
+    fn preserve_from(&mut self, login: &StoredLogin) -> Result<()> {
+        let capabilities: HashSet<&str> = login.capabilities.iter().map(String::as_str).collect();
+        self.connectors = requested_connectors(
+            &CONNECTOR_NAMES
+                .iter()
+                .copied()
+                .filter(|connector| {
+                    self.connectors.contains(connector) || capabilities.contains(*connector)
+                })
+                .collect::<Vec<_>>(),
+        );
+        for connection in &login.mcp_connections {
+            if !self
+                .mcp_connections
+                .iter()
+                .any(|existing| existing.id == connection.id)
+            {
+                self.mcp_connections.push(connection.clone());
+            }
+        }
+        self.mpp |= capabilities.contains("mpp.mach");
+        if self.browser_cookie_origin.is_none() {
+            let origins = login
+                .capabilities
+                .iter()
+                .filter(|capability| {
+                    capability.starts_with(LOCAL_BROWSER_COOKIE_SYNC_RESOURCE_PREFIX)
+                })
+                .map(|capability| {
+                    parse_local_browser_cookie_sync_resource(capability).ok_or_else(|| {
+                        eyre!("stored grant has an invalid browser cookie sync authority")
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            ensure!(
+                origins.len() <= 1,
+                "stored grant has multiple browser cookie sync authorities"
+            );
+            self.browser_cookie_origin = origins.into_iter().next();
+        }
+        Ok(())
     }
 
     fn resources(&self, chatgpt_import_resource: Option<&str>) -> Vec<String> {
@@ -439,8 +502,51 @@ impl RequestedCapabilities {
         } else {
             resources.push("urn:nanocodex:authorization:hosted".to_owned());
         }
+        if let Some(origin) = &self.browser_cookie_origin {
+            resources.push(local_browser_cookie_sync_resource(origin));
+        }
         resources
     }
+}
+
+pub(crate) fn local_browser_cookie_sync_resource(origin: &str) -> String {
+    format!(
+        "{LOCAL_BROWSER_COOKIE_SYNC_RESOURCE_PREFIX}{}",
+        utf8_percent_encode(origin, URI_COMPONENT_ORIGIN_ENCODE_SET)
+    )
+}
+
+fn parse_local_browser_cookie_sync_resource(resource: &str) -> Option<String> {
+    let encoded = resource.strip_prefix(LOCAL_BROWSER_COOKIE_SYNC_RESOURCE_PREFIX)?;
+    let decoded = percent_decode_str(encoded).decode_utf8().ok()?;
+    let canonical = canonical_browser_cookie_origin(&decoded).ok()?;
+    (local_browser_cookie_sync_resource(&canonical) == resource).then_some(canonical)
+}
+
+pub(crate) fn canonical_browser_cookie_origin(value: &str) -> std::result::Result<String, String> {
+    let url = Url::parse(value).map_err(|_| "expected an absolute HTTP(S) origin".to_owned())?;
+    if !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || !matches!(url.path(), "" | "/")
+    {
+        return Err("expected only a scheme, host, and optional port".to_owned());
+    }
+    let host = url
+        .host_str()
+        .ok_or_else(|| "expected an HTTP(S) origin with a host".to_owned())?;
+    let secure = url.scheme() == "https";
+    let loopback_http = url.scheme() == "http"
+        && (host.eq_ignore_ascii_case("localhost")
+            || host == "127.0.0.1"
+            || matches!(host, "::1" | "[::1]"));
+    if !secure && !loopback_http {
+        return Err(
+            "browser cookie sync requires HTTPS, except for loopback development".to_owned(),
+        );
+    }
+    Ok(url.origin().ascii_serialization())
 }
 
 #[derive(Serialize)]
@@ -768,7 +874,16 @@ impl LoginFlow {
                 || request.connectors.contains(&Connector::Chatgpt.id()),
             "ChatGPT credential import requires an explicit ChatGPT connection request"
         );
-        request.mcp_connections = self.create_mcp_intents(&request.mcp_targets).await?;
+        let created_mcp_connections = self.create_mcp_intents(&request.mcp_targets).await?;
+        for connection in created_mcp_connections {
+            if !request
+                .mcp_connections
+                .iter()
+                .any(|existing| existing.id == connection.id)
+            {
+                request.mcp_connections.push(connection);
+            }
+        }
         let signer = PrivateKeySigner::random();
         let requested_expiry = unix_timestamp()?
             .checked_add(ACCESS_KEY_LIFETIME)
@@ -1483,7 +1598,12 @@ struct ConnectionResponse {
     mcp_connections: Vec<ManagedMcpConnection>,
     #[serde(default)]
     access_key: Option<ConnectionAccessKey>,
+    #[serde(default = "empty_json_object")]
     mpp: Value,
+}
+
+fn empty_json_object() -> Value {
+    Value::Object(Default::default())
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
@@ -1501,6 +1621,8 @@ struct ConnectionGrant {
     status: String,
     expires_at: u64,
     capabilities: Vec<String>,
+    #[serde(default)]
+    connector_connections: HashMap<String, Vec<String>>,
     #[serde(default)]
     mcp_connections: Vec<ManagedMcpConnection>,
 }
@@ -1615,10 +1737,30 @@ fn validate_connection(
             "unrequested connector {connector} was granted"
         );
     }
+    for (connector, connection_ids) in &response.grant.connector_connections {
+        ensure!(
+            requested.connectors.contains(&connector.as_str()),
+            "unrequested connector {connector} connection authority was granted"
+        );
+        let unique: HashSet<&str> = connection_ids.iter().map(String::as_str).collect();
+        ensure!(
+            !connection_ids.is_empty()
+                && unique.len() == connection_ids.len()
+                && connection_ids.iter().all(|id| is_base64url(id, 43)),
+            "invalid connector {connector} connection authority"
+        );
+    }
     ensure!(
         requested.mpp == capabilities.contains("mpp.mach"),
         "MPP capability did not match the request"
     );
+    if let Some(origin) = &requested.browser_cookie_origin {
+        let capability = local_browser_cookie_sync_resource(origin);
+        ensure!(
+            capabilities.contains(capability.as_str()),
+            "browser cookie sync authority for {origin} is missing"
+        );
+    }
     match (
         approved,
         response.authorization_mode,
@@ -1735,6 +1877,11 @@ fn validate_hosted_connection(
     expected.insert("agent.history.read");
     expected.extend(requested.connectors.iter().copied());
     expected.extend(expected_mcp_capabilities.iter().map(String::as_str));
+    let expected_cookie_capability = requested
+        .browser_cookie_origin
+        .as_deref()
+        .map(local_browser_cookie_sync_resource);
+    expected.extend(expected_cookie_capability.as_deref());
     ensure!(
         response.grant.capabilities.len() == expected.len() && capabilities == &expected,
         "hosted grant capabilities changed"
@@ -1954,12 +2101,16 @@ impl StoredLogin {
         Ok(())
     }
 
-    fn satisfies_login(&self, mpp: bool) -> bool {
+    fn satisfies_login(&self, mpp: bool, browser_cookie_origin: Option<&str>) -> bool {
         let capabilities: HashSet<&str> = self.capabilities.iter().map(String::as_str).collect();
         REQUIRED_DATA_CAPABILITIES
             .iter()
             .all(|item| capabilities.contains(item))
             && (!mpp || capabilities.contains("mpp.mach"))
+            && browser_cookie_origin.is_none_or(|origin| {
+                let resource = local_browser_cookie_sync_resource(origin);
+                capabilities.contains(resource.as_str())
+            })
     }
 
     const fn authorization_mode(&self) -> AuthorizationMode {
@@ -2070,6 +2221,30 @@ pub(crate) async fn load_managed_credential(
             "Nanocodex Connect grant is missing required {capability} capability"
         );
     }
+    Ok(Some(ScopedManagedCredential {
+        origin: Url::parse(&login.origin).wrap_err("stored Connect origin is invalid")?,
+        grant_token: login.grant_token,
+        grant_id: login.grant_id,
+        account_id: login.account_id,
+        account_address: login.account_address,
+        mcp_connections: login.mcp_connections,
+    }))
+}
+
+/// Loads a live CLI grant authorized to sync cookies for one exact origin.
+pub(crate) async fn load_browser_cookie_sync_credential(
+    codex_home: &Path,
+    origin: &str,
+) -> Result<Option<ScopedManagedCredential>> {
+    let path = codex_home.join("connect.json");
+    let Some(login) = active_login(&path, None).await? else {
+        return Ok(None);
+    };
+    let capability = local_browser_cookie_sync_resource(origin);
+    ensure!(
+        login.capabilities.iter().any(|item| item == &capability),
+        "Nanocodex Connect grant is not authorized to sync cookies for {origin}; rerun `nanocodex login --browser-cookie-origin={origin}`"
+    );
     Ok(Some(ScopedManagedCredential {
         origin: Url::parse(&login.origin).wrap_err("stored Connect origin is invalid")?,
         grant_token: login.grant_token,
@@ -2301,6 +2476,8 @@ struct RevokedGrant {
     status: String,
     expires_at: u64,
     capabilities: Vec<String>,
+    #[serde(default, rename = "connector_connections")]
+    _connector_connections: HashMap<String, Vec<String>>,
     #[serde(default, rename = "mcp_connections")]
     _mcp_connections: Vec<ManagedMcpConnection>,
 }
@@ -2618,7 +2795,10 @@ fn is_local_nanocodex_origin(url: &Url) -> bool {
     };
     (url.scheme() == "https"
         && url.port().is_none()
-        && (host == "nanocodex.local" || trusted_label(".nanocodex.local")))
+        && (host == "nanocodex.local"
+            || trusted_label(".nanocodex.local")
+            || host == "nanocodex.localhost"
+            || trusted_label(".nanocodex.localhost")))
         || (url.scheme() == "http"
             && (host == "nanocodex.localhost" || trusted_label(".nanocodex.localhost")))
 }
@@ -2887,6 +3067,7 @@ mod tests {
         assert!(validated_device_base(None).is_ok());
         assert!(validated_device_base(Some("https://nanocodex.local/v1/device")).is_ok());
         assert!(validated_device_base(Some("https://nanocodex.local/v1/device/")).is_ok());
+        assert!(validated_device_base(Some("https://nanocodex.localhost/v1/device")).is_ok());
         assert!(
             validated_device_base(Some("https://passkey-fix-a1b2c3.nanocodex.local/v1/device"))
                 .is_ok()
@@ -3166,6 +3347,7 @@ mod tests {
             mcp_targets: Vec::new(),
             mcp_connections: Vec::new(),
             mpp: false,
+            browser_cookie_origin: None,
             focus_connector: None,
             focus_mcp: false,
         };
@@ -3214,6 +3396,7 @@ mod tests {
             mcp_targets: Vec::new(),
             mcp_connections: Vec::new(),
             mpp: true,
+            browser_cookie_origin: None,
             focus_connector: Some("github"),
             focus_mcp: false,
         };
@@ -3245,6 +3428,7 @@ mod tests {
             mcp_targets: Vec::new(),
             mcp_connections: Vec::new(),
             mpp: false,
+            browser_cookie_origin: None,
             focus_connector: None,
             focus_mcp: false,
         };
@@ -3281,7 +3465,7 @@ mod tests {
             .expect("valid hosted result");
         assert!(matches!(approved, ApprovedWalletResult::Hosted(_)));
 
-        let mpp = RequestedCapabilities::login(true);
+        let mpp = RequestedCapabilities::login(true, None);
         assert!(
             validate_wallet_result(result.clone(), &signer, 4_000_000_000, &mpp)
                 .err()
@@ -3310,7 +3494,7 @@ mod tests {
             approval_id: "a".repeat(43),
         });
         let expires_at = unix_timestamp().unwrap() + ACCESS_KEY_LIFETIME;
-        let response: ConnectionResponse = serde_json::from_value(hosted_connection_wire(
+        let mut hosted = hosted_connection_wire(
             account,
             expires_at,
             vec![
@@ -3323,9 +3507,32 @@ mod tests {
                 "memory:write",
                 "github",
             ],
-        ))
-        .unwrap();
+        );
+        hosted.as_object_mut().unwrap().remove("mpp");
+        let response: ConnectionResponse = serde_json::from_value(hosted).unwrap();
         validate_connection(&response, &approved, &request).unwrap();
+
+        let mut exact_connector = hosted_connection_wire(
+            account,
+            expires_at,
+            vec![
+                "nanocodex.agent",
+                "agent.output.final",
+                "agent.output.actions",
+                "agent.history.read",
+                "history:read",
+                "memory:read",
+                "memory:write",
+                "github",
+            ],
+        );
+        exact_connector["grant"]["connector_connections"] = json!({"github": ["a".repeat(43)]});
+        let response: ConnectionResponse = serde_json::from_value(exact_connector.clone()).unwrap();
+        validate_connection(&response, &approved, &request).unwrap();
+
+        exact_connector["grant"]["connector_connections"] = json!({"gmail": ["b".repeat(43)]});
+        let response: ConnectionResponse = serde_json::from_value(exact_connector).unwrap();
+        assert!(validate_connection(&response, &approved, &request).is_err());
 
         let mut extra = hosted_connection_wire(
             account,
@@ -3536,21 +3743,79 @@ mod tests {
         login.capabilities.push("github".to_owned());
         login.capabilities.push("mpp.mach".to_owned());
 
-        assert!(login.satisfies_login(false));
-        assert!(login.satisfies_login(true));
+        assert!(login.satisfies_login(false, None));
+        assert!(login.satisfies_login(true, None));
         login
             .capabilities
             .retain(|capability| capability != "mpp.mach");
-        assert!(login.satisfies_login(false));
-        assert!(!login.satisfies_login(true));
+        assert!(login.satisfies_login(false, None));
+        assert!(!login.satisfies_login(true, None));
         login
             .capabilities
             .retain(|capability| capability != "chatgpt");
-        assert!(login.satisfies_login(false));
+        assert!(login.satisfies_login(false, None));
         login
             .capabilities
             .retain(|capability| capability != "memory:write");
-        assert!(!login.satisfies_login(false));
+        assert!(!login.satisfies_login(false, None));
+    }
+
+    #[test]
+    fn browser_cookie_authority_is_canonical_and_exact() {
+        let origin = canonical_browser_cookie_origin("https://Console.Example.com:443").unwrap();
+        assert_eq!(origin, "https://console.example.com");
+        assert_eq!(
+            local_browser_cookie_sync_resource(&origin),
+            "urn:nanocodex:browser-cookies:local-sync:https%3A%2F%2Fconsole.example.com"
+        );
+        assert!(canonical_browser_cookie_origin("http://example.com").is_err());
+        assert!(canonical_browser_cookie_origin("http://127.0.0.2:8787").is_err());
+        assert_eq!(
+            canonical_browser_cookie_origin("http://[::1]:8787").unwrap(),
+            "http://[::1]:8787"
+        );
+        assert!(canonical_browser_cookie_origin("https://example.com/path").is_err());
+
+        let mut login = test_stored_login("http://127.0.0.1:8787");
+        login.capabilities.extend(
+            REQUIRED_DATA_CAPABILITIES
+                .iter()
+                .map(|capability| (*capability).to_owned()),
+        );
+        login
+            .capabilities
+            .push(local_browser_cookie_sync_resource(&origin));
+        assert!(login.satisfies_login(false, Some(&origin)));
+        assert!(!login.satisfies_login(false, Some("https://other.example")));
+    }
+
+    #[test]
+    fn grant_rotation_preserves_existing_optional_authority() {
+        let origin = "https://console.twilio.com";
+        let mut stored = test_stored_login("http://127.0.0.1:8787");
+        stored.capabilities.extend([
+            "github".to_owned(),
+            "mpp.mach".to_owned(),
+            local_browser_cookie_sync_resource(origin),
+        ]);
+        stored.mcp_connections.push(ManagedMcpConnection {
+            id: "m".repeat(43),
+            name: "Existing MCP".to_owned(),
+        });
+
+        let mut connect =
+            RequestedCapabilities::connect(&[ConnectTarget::Connector(Connector::Gmail)]);
+        connect.preserve_from(&stored).unwrap();
+        assert_eq!(connect.connectors, vec!["github", "gmail"]);
+        assert_eq!(connect.mcp_connections, stored.mcp_connections);
+        assert!(connect.mpp);
+        assert_eq!(connect.browser_cookie_origin.as_deref(), Some(origin));
+
+        let replacement = "https://other.example";
+        let mut login = RequestedCapabilities::login(false, Some(replacement));
+        login.preserve_from(&stored).unwrap();
+        assert_eq!(login.browser_cookie_origin.as_deref(), Some(replacement));
+        assert_eq!(login.connectors, vec!["github"]);
     }
 
     #[test]
@@ -3574,7 +3839,7 @@ mod tests {
 
     #[test]
     fn connection_requests_only_the_explicit_connectors() {
-        let login = RequestedCapabilities::login(false);
+        let login = RequestedCapabilities::login(false, None);
         assert!(login.connectors.is_empty());
         assert_eq!(login.focus_connector, None);
 
@@ -3669,7 +3934,7 @@ mod tests {
         let mut flow = LoginFlow::new(base, paths.clone(), false).unwrap();
         flow.poll_second = Duration::from_millis(1);
         flow.overall_timeout = Duration::from_secs(2);
-        flow.complete(RequestedCapabilities::login(false), None)
+        flow.complete(RequestedCapabilities::login(false, None), None)
             .await
             .unwrap();
         server.await.unwrap();
@@ -3963,6 +4228,7 @@ mod tests {
                     mcp_targets: Vec::new(),
                     mcp_connections: Vec::new(),
                     mpp: false,
+                    browser_cookie_origin: None,
                     focus_connector: Some("github"),
                     focus_mcp: false,
                 },
@@ -4014,6 +4280,7 @@ mod tests {
                     mcp_targets: Vec::new(),
                     mcp_connections: Vec::new(),
                     mpp: false,
+                    browser_cookie_origin: None,
                     focus_connector: None,
                     focus_mcp: false,
                 },
@@ -4069,6 +4336,7 @@ mod tests {
                 mcp_targets: Vec::new(),
                 mcp_connections: Vec::new(),
                 mpp: false,
+                browser_cookie_origin: None,
                 focus_connector: None,
                 focus_mcp: false,
             },
@@ -4382,6 +4650,7 @@ mod tests {
                         "status": "revoked",
                         "expires_at": prior.expires_at,
                         "capabilities": prior.capabilities,
+                        "connector_connections": {},
                         "mcp_connections": [],
                     })
                 }

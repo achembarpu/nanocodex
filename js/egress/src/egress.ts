@@ -1,3 +1,4 @@
+import { WorkerEntrypoint } from "cloudflare:workers";
 import {
   AgentSubjectDirectory,
   type BrokerEnv,
@@ -9,6 +10,13 @@ import {
   validateMaterializedVaultEntry,
   validateVaultEntryPayload,
 } from "./broker";
+import {
+  BROWSER_COOKIE_JAR_ID,
+  MAX_BROWSER_COOKIE_JAR_BODY_BYTES,
+  validateBrowserCookieJarBinding,
+  validateBrowserCookieJarDelete,
+  validateBrowserCookieJarUpsert,
+} from "./browser-cookie-jar";
 import {
   UserConnectorBroker,
   type ConnectorBrokerEnv,
@@ -35,6 +43,7 @@ const SUBJECT_DIRECTORY_PREFIX = "agent-subject-v1:";
 const READINESS_SUBJECT_DIRECTORY_NAME = "agent-subject-readiness-v1";
 const SUBJECT = /^[A-Za-z0-9_-]{43,128}$/;
 const USER_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const CHIEF_USER_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const SUBJECT_HEADER = "x-nanocodex-subject";
 const PROVIDER_PLACEHOLDER = "Bearer NANOCODEX_PROVIDER_CREDENTIAL";
 const MODEL_STATUS_PATH = "/.well-known/nanocodex/model-status";
@@ -181,6 +190,23 @@ export interface EgressEnv extends BrokerEnv, ConnectorBrokerEnv {
   ALLOW_INSECURE_LOOPBACK_RELAY?: string;
   NANOCODEX_BROKER_PROBE_TOKEN?: string;
   DEPLOYMENT_SHA?: string;
+}
+
+export class ChiefOfStaffEgress extends WorkerEntrypoint<EgressEnv> {
+  async ensureCredential(userIdValue: unknown): Promise<void> {
+    if (typeof userIdValue !== "string" || !CHIEF_USER_ID.test(userIdValue)) {
+      throw new Error("invalid_chief_user");
+    }
+    const response = await userBroker(this.env, userIdValue).fetch(
+      "https://credentials.internal/v1/chief-of-staff/openai-key",
+      { method: "PUT" },
+    );
+    if (!response.ok) {
+      await response.body?.cancel();
+      throw new Error("chief_credential_unavailable");
+    }
+    await response.body?.cancel();
+  }
 }
 
 type ModelOperation = Readonly<{
@@ -953,6 +979,88 @@ async function handleControl(request: Request, url: URL, env: EgressEnv): Promis
         body: forwardedBody,
       }),
     });
+  }
+
+  const browserCookieJarMatch = url.pathname.match(
+    /^\/users\/([A-Za-z0-9][A-Za-z0-9._:-]{0,127})\/credentials\/browser-cookie-jars(?:\/([A-Za-z0-9_-]{22,64})(?:\/(materialize|names))?)?$/,
+  );
+  if (browserCookieJarMatch) {
+    const userId = browserCookieJarMatch[1]!;
+    const id = browserCookieJarMatch[2];
+    const projection = browserCookieJarMatch[3];
+    if (!id) {
+      if (request.method !== "GET") return jsonError(405, "method_not_allowed");
+      if (await hasRequestPayload(request)) return jsonError(400, "invalid_request");
+      return userBroker(env, userId).fetch("https://credentials.internal/v1/browser-cookie-jars");
+    }
+    if (!BROWSER_COOKIE_JAR_ID.test(id)) {
+      return jsonError(400, "invalid_browser_cookie_jar_id");
+    }
+    const target = `https://credentials.internal/v1/browser-cookie-jars/${id}${
+      projection ? `/${projection}` : ""
+    }`;
+    if (request.method === "PUT" && !projection) {
+      if (!isJsonContentType(request.headers.get("content-type"))) {
+        return jsonError(415, "invalid_content_type");
+      }
+      let value: unknown;
+      try { value = JSON.parse(await readBoundedText(request, MAX_BROWSER_COOKIE_JAR_BODY_BYTES)); }
+      catch (error) {
+        return error instanceof EgressFailure
+          ? jsonError(error.status, error.code)
+          : jsonError(400, "invalid_browser_cookie_jar");
+      }
+      const upsert = validateBrowserCookieJarUpsert(value);
+      if (!upsert) return jsonError(400, "invalid_browser_cookie_jar");
+      return userBroker(env, userId).fetch(target, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          schema_version: 1,
+          origin: upsert.origin,
+          profile_id: upsert.profileId,
+          store_id: upsert.storeId,
+          revision: upsert.revision,
+          cookies: upsert.cookies,
+        }),
+      });
+    }
+    if (request.method === "POST" && projection) {
+      if (!isJsonContentType(request.headers.get("content-type"))) {
+        return jsonError(415, "invalid_content_type");
+      }
+      const value = await readJson(request, 8 * 1024);
+      const binding = validateBrowserCookieJarBinding(value);
+      if (!binding) return jsonError(400, "invalid_browser_cookie_jar_binding");
+      return userBroker(env, userId).fetch(target, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          origin: binding.origin,
+          profile_id: binding.profileId,
+          store_id: binding.storeId,
+        }),
+      });
+    }
+    if (request.method === "DELETE" && !projection) {
+      if (!isJsonContentType(request.headers.get("content-type"))) {
+        return jsonError(415, "invalid_content_type");
+      }
+      const value = await readJson(request, 8 * 1024);
+      const deletion = validateBrowserCookieJarDelete(value);
+      if (!deletion) return jsonError(400, "invalid_browser_cookie_jar_delete");
+      return userBroker(env, userId).fetch(target, {
+        method: "DELETE",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          origin: deletion.origin,
+          profile_id: deletion.profileId,
+          store_id: deletion.storeId,
+          revision: deletion.revision,
+        }),
+      });
+    }
+    return jsonError(405, "method_not_allowed");
   }
 
   const connectorMatch = url.pathname.match(

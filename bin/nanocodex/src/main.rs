@@ -1,6 +1,7 @@
 mod auth;
 mod benchmark;
 mod browser;
+mod browser_cookie_sync;
 mod config;
 #[cfg(feature = "tempo")]
 mod credits;
@@ -102,6 +103,8 @@ enum Command {
     Status(login::Status),
     /// Revoke and remove this installation's Nanocodex Connect login.
     Logout(login::Logout),
+    /// Inspect or synchronize local browser cookies and the encrypted account Vault.
+    Cookies(browser_cookie_sync::Cookies),
     /// Inspect or purchase Nanocodex NANOUSD credits.
     #[cfg(feature = "tempo")]
     Credits(credits::Credits),
@@ -200,6 +203,7 @@ async fn run(cli: Cli) -> Result<()> {
         Some(Command::Connect(command)) => command.run().await,
         Some(Command::Status(command)) => command.run().await,
         Some(Command::Logout(command)) => command.run().await,
+        Some(Command::Cookies(command)) => command.run().await,
         #[cfg(feature = "tempo")]
         Some(Command::Credits(command)) => command.run().await,
         Some(Command::Eval(command)) => command.run().await,
@@ -263,6 +267,72 @@ async fn run(cli: Cli) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cookie_commands_auto_detect_supported_browsers_for_an_exact_origin() {
+        let cli = Cli::try_parse_from([
+            "nanocodex",
+            "cookies",
+            "sync",
+            "https://console.twilio.com",
+            "--cookie-auth",
+            "interactive",
+        ])
+        .unwrap();
+        assert!(matches!(cli.command, Some(Command::Cookies(_))));
+        for source in ["local", "vault", "both"] {
+            let cli = Cli::try_parse_from([
+                "nanocodex",
+                "cookies",
+                "list",
+                "https://console.twilio.com",
+                "--from",
+                source,
+            ])
+            .unwrap();
+            assert!(matches!(cli.command, Some(Command::Cookies(_))));
+        }
+        assert!(
+            Cli::try_parse_from([
+                "nanocodex",
+                "cookies",
+                "sync",
+                "https://console.twilio.com/path",
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "nanocodex",
+                "cookies",
+                "sync",
+                "https://console.twilio.com",
+                "--cookies",
+                "brave",
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "nanocodex",
+                "cookies",
+                "list",
+                "https://console.twilio.com/path",
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "nanocodex",
+                "cookies",
+                "list",
+                "https://console.twilio.com",
+                "--from",
+                "somewhere",
+            ])
+            .is_err()
+        );
+    }
 
     #[cfg(feature = "tempo")]
     #[test]
@@ -411,29 +481,23 @@ mod tests {
     fn browser_and_cookie_selection_follow_platform_defaults() {
         let tui = Cli::try_parse_from(["nanocodex"]).unwrap();
         assert!(tui.agent.browser_enabled());
-        #[cfg(target_os = "macos")]
-        assert!(!tui.agent.copies_all_browser_cookies());
+        assert!(tui.agent.copies_all_browser_cookies());
         #[cfg(target_os = "macos")]
         assert!(!tui.agent.uses_brave_browser());
-        #[cfg(not(target_os = "macos"))]
-        assert!(tui.agent.copies_all_browser_cookies());
+        #[cfg(target_os = "macos")]
+        assert!(tui.agent.uses_interactive_browser_cookie_authorization());
 
         let tui = Cli::try_parse_from(["nanocodex", "--browser"]).unwrap();
         assert!(tui.agent.browser_enabled());
         assert!(!tui.agent.uses_brave_browser());
 
-        let brave =
-            Cli::try_parse_from(["nanocodex", "--browser=brave", "--cookies=true"]).unwrap();
+        let brave = Cli::try_parse_from(["nanocodex", "--browser=brave"]).unwrap();
         assert!(brave.agent.browser_enabled());
         assert!(brave.agent.uses_brave_browser());
 
-        let chromium =
-            Cli::try_parse_from(["nanocodex", "--browser=chromium", "--cookies=true"]).unwrap();
+        let chromium = Cli::try_parse_from(["nanocodex", "--browser=chromium"]).unwrap();
         assert!(chromium.agent.browser_enabled());
         assert!(!chromium.agent.uses_brave_browser());
-
-        let all_cookies = Cli::try_parse_from(["nanocodex", "--cookies=all"]).unwrap();
-        assert!(all_cookies.agent.browser_enabled());
 
         let interactive = Cli::try_parse_from(["nanocodex", "--cookie-auth=interactive"]).unwrap();
         assert!(
@@ -445,21 +509,8 @@ mod tests {
         let host_passkeys = Cli::try_parse_from(["nanocodex", "--passkeys=host"]).unwrap();
         assert!(host_passkeys.agent.uses_host_browser_passkeys());
 
-        let no_cookies = Cli::try_parse_from(["nanocodex", "--cookies=none"]).unwrap();
-        assert!(no_cookies.agent.browser_enabled());
-        assert!(!no_cookies.agent.copies_all_browser_cookies());
-
-        let chrome_source =
-            Cli::try_parse_from(["nanocodex", "--browser=brave", "--cookies=chrome"]).unwrap();
-        assert!(chrome_source.agent.browser_enabled());
-
-        let firefox_source =
-            Cli::try_parse_from(["nanocodex", "--browser", "--cookies=firefox"]).unwrap();
-        assert!(firefox_source.agent.browser_enabled());
-
-        let safari_source =
-            Cli::try_parse_from(["nanocodex", "--browser", "--cookies=safari"]).unwrap();
-        assert!(safari_source.agent.browser_enabled());
+        assert!(Cli::try_parse_from(["nanocodex", "--cookies=none"]).is_err());
+        assert!(Cli::try_parse_from(["nanocodex", "--cookies=brave"]).is_err());
 
         let run = Cli::try_parse_from(["nanocodex", "run", "inspect example.com"]).unwrap();
         let Some(Command::Run(run)) = run.command else {
@@ -467,9 +518,9 @@ mod tests {
         };
         assert!(run.agent.browser_enabled());
 
-        let disabled =
-            Cli::try_parse_from(["nanocodex", "--browser=none", "--cookies=none"]).unwrap();
+        let disabled = Cli::try_parse_from(["nanocodex", "--browser=none"]).unwrap();
         assert!(!disabled.agent.browser_enabled());
+        assert!(!disabled.agent.copies_all_browser_cookies());
     }
 
     #[test]

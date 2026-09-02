@@ -4,7 +4,11 @@ import {
   isAllowedChatGptCredentialImportResource,
 } from "./chatGptCredentialImport.mts";
 import { isAllowedMcpResource, validateMcpResources } from "./mcpPolicy.mts";
-import { isAllowedAppToolCatalogResource } from "./appToolPolicy.mts";
+import {
+  CLI_BROWSER_COOKIE_SYNC_RESOURCE_PREFIX,
+  isAllowedAppToolCatalogResource,
+  parseCliBrowserCookieSyncResource,
+} from "./appToolPolicy.mts";
 
 type UnknownRecord = Record<string, unknown>;
 type ParsedCliWalletRequest = Readonly<{
@@ -102,6 +106,14 @@ export function parseCliWalletRequest(value: unknown): ParsedCliWalletRequest {
     throw new Error("The CLI wallet_connect resources are invalid.");
   }
   const signedResources = resources as string[];
+  const browserCookieResources = signedResources.filter((resource) => (
+    resource.startsWith("urn:nanocodex:browser-cookies")
+  ));
+  if (browserCookieResources.length > 1
+    || (browserCookieResources.length === 1
+      && parseCliBrowserCookieSyncResource(browserCookieResources[0]) === undefined)) {
+    throw new Error("The CLI browser cookie sync resource must select one canonical origin.");
+  }
   const requestedConnectors = connectorResources(signedResources);
   const credentialImport = credentialImportDigestFromResources(signedResources);
   if (credentialImport !== undefined && !requestedConnectors.has("chatgpt")) {
@@ -370,6 +382,9 @@ function isAllowedResource(resource: string): boolean {
   if (isAllowedMcpResource(resource)) return true;
   if (isAllowedAppToolCatalogResource(resource)) return true;
   if (isAllowedChatGptCredentialImportResource(resource)) return true;
+  if (resource.startsWith(CLI_BROWSER_COOKIE_SYNC_RESOURCE_PREFIX)) {
+    return parseCliBrowserCookieSyncResource(resource) !== undefined;
+  }
   if (resource.startsWith("urn:nanocodex:connector:")) {
     return connectors.has(resource.slice("urn:nanocodex:connector:".length));
   }

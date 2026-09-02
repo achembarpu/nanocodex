@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     path::{Component, Path, PathBuf},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -8,6 +9,8 @@ use std::env;
 
 use rusqlite::{Connection, OpenFlags, backup::Backup};
 use url::Url;
+
+use crate::{BrowserCookieSameSite, BrowserError};
 
 /// A standard Chromium-family browser profile that can supply cookies.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -27,6 +30,104 @@ pub enum BrowserCookieAuthorization {
     /// If background import cannot decrypt a populated store, open one visible
     /// temporary copied profile so the user can authorize Keychain access.
     Interactive,
+}
+
+/// A non-opaque partition key retained while exporting a Chromium cookie.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BrowserProfileCookiePartitionKey {
+    pub top_level_site: String,
+    pub has_cross_site_ancestor: bool,
+}
+
+/// One lossless Chromium cookie exported at the harness boundary.
+///
+/// This type is deliberately absent from the model-callable browser action
+/// schema. Its custom debug representation never includes the cookie value.
+#[derive(Clone, PartialEq)]
+pub struct BrowserProfileCookie {
+    pub name: String,
+    pub value: String,
+    pub domain: String,
+    pub path: String,
+    pub host_only: bool,
+    pub secure: bool,
+    pub http_only: bool,
+    pub same_site: Option<BrowserCookieSameSite>,
+    pub session: bool,
+    pub expires_epoch_seconds: Option<f64>,
+    pub partition_key: Option<BrowserProfileCookiePartitionKey>,
+}
+
+impl std::fmt::Debug for BrowserProfileCookie {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("BrowserProfileCookie")
+            .field("name", &self.name)
+            .field("value", &"[redacted]")
+            .field("domain", &self.domain)
+            .field("path", &self.path)
+            .field("host_only", &self.host_only)
+            .field("secure", &self.secure)
+            .field("http_only", &self.http_only)
+            .field("same_site", &self.same_site)
+            .field("session", &self.session)
+            .field("expires_epoch_seconds", &self.expires_epoch_seconds)
+            .field("partition_key", &self.partition_key)
+            .finish()
+    }
+}
+
+/// Lossless cookies exported for one exact HTTP(S) origin.
+#[derive(Clone, PartialEq)]
+pub struct BrowserOriginCookieCapture {
+    pub origin: Url,
+    pub cookies: Vec<BrowserProfileCookie>,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct ProfileCookieIdentity {
+    name: String,
+    domain: String,
+    path: String,
+    partition_top_level_site: Option<String>,
+    has_cross_site_ancestor: Option<bool>,
+}
+
+#[derive(Default)]
+pub(crate) struct ProfileCookieSnapshot {
+    pub(crate) cookie_count: i64,
+    session_cookies: HashSet<ProfileCookieIdentity>,
+}
+
+impl ProfileCookieSnapshot {
+    pub(crate) fn was_session(
+        &self,
+        name: &str,
+        domain: &str,
+        path: &str,
+        partition_top_level_site: Option<&str>,
+        has_cross_site_ancestor: Option<bool>,
+    ) -> bool {
+        self.session_cookies.iter().any(|candidate| {
+            candidate.name == name
+                && candidate.domain == domain
+                && candidate.path == path
+                && candidate.partition_top_level_site.as_deref() == partition_top_level_site
+                && candidate
+                    .has_cross_site_ancestor
+                    .is_none_or(|expected| Some(expected) == has_cross_site_ancestor)
+        })
+    }
+}
+
+impl std::fmt::Debug for BrowserOriginCookieCapture {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("BrowserOriginCookieCapture")
+            .field("origin", &self.origin)
+            .field("cookie_count", &self.cookies.len())
+            .finish()
+    }
 }
 
 impl BrowserProfileKind {
@@ -68,7 +169,7 @@ impl BraveSession {
     /// Returns an error when the platform has no standard location, the home
     /// directory is unavailable, or Brave is not installed there.
     pub fn standard() -> Result<Self, BraveSessionError> {
-        Self::standard_for(BrowserProfileKind::Brave)
+        Self::standard_cookie_for(BrowserProfileKind::Brave)
     }
 
     /// Locates a standard Chromium-family installation and user-data directory.
@@ -140,10 +241,29 @@ impl BraveSession {
                 PathBuf::from(home).join(user_data_directory),
             );
 
-            let session = Self::new(executable, user_data_dir);
+            let mut session = Self::new(executable, user_data_dir);
             session.validate_paths()?;
+            if let Some(profile_directory) = discover_cookie_profile(&session.user_data_dir) {
+                session.profile_directory = profile_directory;
+            }
             Ok(session)
         }
+    }
+
+    /// Locates an installed Chromium-family browser with a usable cookie profile.
+    ///
+    /// Unlike [`Self::standard_for`], this rejects installations that do not yet
+    /// contain a cookie database. Browser launch and host-passkey discovery must
+    /// use `standard_for` so they do not depend on unrelated cookie state.
+    pub fn standard_cookie_for(browser: BrowserProfileKind) -> Result<Self, BraveSessionError> {
+        let mut session = Self::standard_for(browser)?;
+        session.profile_directory =
+            discover_cookie_profile(&session.user_data_dir).ok_or_else(|| {
+                BraveSessionError::CookiesUnavailable {
+                    profile: session.user_data_dir.clone(),
+                }
+            })?;
+        Ok(session)
     }
 
     /// Creates a profile session from explicit executable and user-data paths.
@@ -165,6 +285,12 @@ impl BraveSession {
     pub fn profile_directory(mut self, directory: impl Into<PathBuf>) -> Self {
         self.profile_directory = directory.into();
         self
+    }
+
+    /// Returns the selected single-component profile directory.
+    #[must_use]
+    pub fn selected_profile_directory(&self) -> &Path {
+        &self.profile_directory
     }
 
     /// Allows cookies applicable to one exact HTTP(S) origin to enter the
@@ -208,6 +334,24 @@ impl BraveSession {
         self
     }
 
+    /// Exports lossless Chromium cookies applicable to one exact origin.
+    ///
+    /// The source profile is copied and opened only by the same short-lived
+    /// isolated broker used for normal cookie import. Cookie values remain at
+    /// this harness-only boundary and are never exposed as browser actions.
+    /// Opaque cookie partitions are rejected instead of being flattened.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a non-origin URL, inaccessible or undecryptable
+    /// profile, unsupported opaque partition, or failed broker cleanup.
+    pub async fn capture_origin_cookies(
+        &self,
+        origin: Url,
+    ) -> Result<BrowserOriginCookieCapture, BrowserError> {
+        crate::native::capture_profile_origin_cookies(self, origin).await
+    }
+
     /// Returns the source browser executable selected by this session.
     #[must_use]
     pub fn executable(&self) -> &Path {
@@ -216,6 +360,15 @@ impl BraveSession {
 
     pub(crate) fn allowed_origins(&self) -> &[Url] {
         &self.allowed_origins
+    }
+
+    pub(crate) fn scoped_to_origin(&self, origin: Url) -> Result<Self, BraveSessionError> {
+        let mut scoped = self.clone();
+        scoped.allowed_origins = vec![origin];
+        scoped.copy_all_cookies = false;
+        scoped.include_site_data = false;
+        scoped.validate()?;
+        Ok(scoped)
     }
 
     pub(crate) const fn includes_site_data(&self) -> bool {
@@ -245,7 +398,7 @@ impl BraveSession {
     pub(crate) async fn prepare(
         &self,
         target_user_data_dir: &Path,
-    ) -> Result<i64, BraveSessionError> {
+    ) -> Result<ProfileCookieSnapshot, BraveSessionError> {
         self.validate()?;
         let source_profile = self.user_data_dir.join(&self.profile_directory);
         if self.include_site_data
@@ -318,8 +471,7 @@ impl BraveSession {
                 });
             }
         }
-        let mut components = self.profile_directory.components();
-        if !matches!(components.next(), Some(Component::Normal(_))) || components.next().is_some() {
+        if !is_single_profile_component(&self.profile_directory) {
             return Err(BraveSessionError::InvalidProfileDirectory {
                 directory: self.profile_directory.clone(),
             });
@@ -342,11 +494,77 @@ impl BraveSession {
     }
 }
 
+fn discover_cookie_profile(user_data_dir: &Path) -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Ok(local_state) = std::fs::read(user_data_dir.join("Local State"))
+        && let Ok(local_state) = serde_json::from_slice::<serde_json::Value>(&local_state)
+        && let Some(profile) = local_state.get("profile")
+    {
+        if let Some(last_used) = profile.get("last_used").and_then(serde_json::Value::as_str) {
+            push_profile_candidate(&mut candidates, PathBuf::from(last_used));
+        }
+        if let Some(last_active_profiles) = profile
+            .get("last_active_profiles")
+            .and_then(serde_json::Value::as_array)
+        {
+            for active_profile in last_active_profiles {
+                if let Some(active_profile) = active_profile.as_str() {
+                    push_profile_candidate(&mut candidates, PathBuf::from(active_profile));
+                }
+            }
+        }
+    }
+
+    push_profile_candidate(&mut candidates, PathBuf::from("Default"));
+    let mut numbered_profiles = std::fs::read_dir(user_data_dir)
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let name = entry.file_name();
+            name.to_str()
+                .filter(|name| name.starts_with("Profile "))
+                .map(PathBuf::from)
+        })
+        .collect::<Vec<_>>();
+    numbered_profiles.sort_unstable();
+    for profile in numbered_profiles {
+        push_profile_candidate(&mut candidates, profile);
+    }
+
+    candidates.into_iter().find(|directory| {
+        let profile = user_data_dir.join(directory);
+        is_directory_without_following_symlinks(&profile)
+            && [profile.join("Network/Cookies"), profile.join("Cookies")]
+                .into_iter()
+                .any(|database| is_file_without_following_symlinks(&database))
+    })
+}
+
+fn push_profile_candidate(candidates: &mut Vec<PathBuf>, candidate: PathBuf) {
+    if is_single_profile_component(&candidate) && !candidates.contains(&candidate) {
+        candidates.push(candidate);
+    }
+}
+
+fn is_single_profile_component(directory: &Path) -> bool {
+    let mut components = directory.components();
+    matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none()
+}
+
+fn is_directory_without_following_symlinks(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_dir())
+}
+
+fn is_file_without_following_symlinks(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_file())
+}
+
 fn snapshot_cookies(
     source: &Path,
     target: &Path,
     allowed_hosts: Option<&[String]>,
-) -> Result<i64, BraveSessionError> {
+) -> Result<ProfileCookieSnapshot, BraveSessionError> {
     let source = Connection::open_with_flags(
         source,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
@@ -381,6 +599,7 @@ fn snapshot_cookies(
         }
         transaction.commit()?;
     }
+    let session_cookies = session_cookie_identities(&target)?;
     let transaction = target.transaction()?;
     transaction.execute(
         "UPDATE cookies
@@ -389,7 +608,53 @@ fn snapshot_cookies(
         [temporary_cookie_expiry()?],
     )?;
     transaction.commit()?;
-    Ok(target.query_row("SELECT COUNT(*) FROM cookies", [], |row| row.get(0))?)
+    Ok(ProfileCookieSnapshot {
+        cookie_count: target.query_row("SELECT COUNT(*) FROM cookies", [], |row| row.get(0))?,
+        session_cookies,
+    })
+}
+
+fn session_cookie_identities(
+    database: &Connection,
+) -> Result<HashSet<ProfileCookieIdentity>, rusqlite::Error> {
+    let mut columns = database.prepare("PRAGMA table_info(cookies)")?;
+    let columns = columns
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<HashSet<_>, _>>()?;
+    if ["name", "host_key", "path", "is_persistent"]
+        .iter()
+        .any(|column| !columns.contains(*column))
+    {
+        return Ok(HashSet::new());
+    }
+    let partition = columns
+        .contains("top_frame_site_key")
+        .then_some("top_frame_site_key")
+        .unwrap_or("''");
+    let ancestor = columns
+        .contains("has_cross_site_ancestor")
+        .then_some("has_cross_site_ancestor")
+        .unwrap_or("NULL");
+    let mut statement = database.prepare(&format!(
+        "SELECT name, host_key, path, {partition}, {ancestor} \
+         FROM cookies WHERE is_persistent = 0"
+    ))?;
+    statement
+        .query_map([], |row| {
+            let partition = row.get::<_, String>(3)?;
+            let ancestor = row.get::<_, Option<i64>>(4)?;
+            let partition_top_level_site = (!partition.is_empty()).then_some(partition);
+            Ok(ProfileCookieIdentity {
+                name: row.get(0)?,
+                domain: row.get(1)?,
+                path: row.get(2)?,
+                has_cross_site_ancestor: partition_top_level_site
+                    .as_ref()
+                    .and(ancestor.map(|value| value != 0)),
+                partition_top_level_site,
+            })
+        })?
+        .collect()
 }
 
 pub(crate) fn cookie_applies_to(cookie_host: &str, allowed_host: &str) -> bool {
@@ -476,10 +741,96 @@ pub enum BraveSessionError {
 
 #[cfg(test)]
 mod tests {
-    use std::error::Error;
+    use std::{
+        error::Error,
+        path::{Path, PathBuf},
+    };
 
     use rusqlite::Connection;
     use tempfile::tempdir;
+
+    fn create_cookie_database(
+        user_data_dir: &Path,
+        profile: &str,
+        database: &str,
+    ) -> Result<(), std::io::Error> {
+        let database = user_data_dir.join(profile).join(database);
+        std::fs::create_dir_all(database.parent().expect("cookie database has a parent"))?;
+        std::fs::write(database, [])
+    }
+
+    #[test]
+    fn discovers_active_numbered_profile_from_local_state() -> Result<(), Box<dyn Error>> {
+        let directory = tempdir()?;
+        std::fs::write(
+            directory.path().join("Local State"),
+            r#"{"profile":{"last_active_profiles":["Profile 1","Default"]}}"#,
+        )?;
+        create_cookie_database(directory.path(), "Profile 1", "Network/Cookies")?;
+        create_cookie_database(directory.path(), "Default", "Cookies")?;
+
+        assert_eq!(
+            super::discover_cookie_profile(directory.path()),
+            Some(PathBuf::from("Profile 1"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn missing_active_profile_falls_back_to_default() -> Result<(), Box<dyn Error>> {
+        let directory = tempdir()?;
+        std::fs::write(
+            directory.path().join("Local State"),
+            r#"{"profile":{"last_used":"Profile 9","last_active_profiles":["Profile 8"]}}"#,
+        )?;
+        create_cookie_database(directory.path(), "Default", "Network/Cookies")?;
+        create_cookie_database(directory.path(), "Profile 1", "Cookies")?;
+
+        assert_eq!(
+            super::discover_cookie_profile(directory.path()),
+            Some(PathBuf::from("Default"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn malformed_local_state_falls_back_to_numbered_profiles() -> Result<(), Box<dyn Error>> {
+        let directory = tempdir()?;
+        std::fs::write(directory.path().join("Local State"), b"{not json")?;
+        create_cookie_database(directory.path(), "Profile 2", "Cookies")?;
+        create_cookie_database(directory.path(), "Profile 1", "Network/Cookies")?;
+
+        assert_eq!(
+            super::discover_cookie_profile(directory.path()),
+            Some(PathBuf::from("Profile 1"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn no_usable_profile_rejects_traversal_candidates() -> Result<(), Box<dyn Error>> {
+        let directory = tempdir()?;
+        let user_data_dir = directory.path().join("user-data");
+        std::fs::create_dir(&user_data_dir)?;
+        create_cookie_database(directory.path(), "outside", "Network/Cookies")?;
+        std::fs::write(
+            user_data_dir.join("Local State"),
+            r#"{"profile":{"last_used":"../outside","last_active_profiles":["/outside"]}}"#,
+        )?;
+        std::fs::create_dir(user_data_dir.join("Profile 1"))?;
+
+        assert_eq!(super::discover_cookie_profile(&user_data_dir), None);
+        Ok(())
+    }
+
+    #[test]
+    fn explicitly_configured_profile_directory_is_preserved() {
+        let session = super::BraveSession::new("/brave", "/profile")
+            .profile_directory("Profile 7")
+            .copy_all_cookies();
+
+        assert_eq!(session.trace_value()["profileDirectory"], "Profile 7");
+    }
 
     #[test]
     fn interactive_cookie_authorization_is_explicit_session_policy() {
@@ -508,6 +859,65 @@ mod tests {
             "console.example.com"
         ));
         assert!(!super::cookie_applies_to("notexample.com", "example.com"));
+    }
+
+    #[test]
+    fn capture_scope_requires_one_exact_origin() -> Result<(), Box<dyn Error>> {
+        let directory = tempdir()?;
+        let executable = directory.path().join("browser");
+        let user_data = directory.path().join("profile");
+        std::fs::write(&executable, [])?;
+        std::fs::create_dir(&user_data)?;
+        let session = super::BraveSession::new(executable, user_data).copy_all_cookies();
+
+        let scoped = session.scoped_to_origin(url::Url::parse("https://example.com")?)?;
+        assert_eq!(scoped.allowed_origins().len(), 1);
+        assert!(!scoped.copies_all_cookies());
+        assert!(matches!(
+            session.scoped_to_origin(url::Url::parse("https://example.com/account")?),
+            Err(super::BraveSessionError::InvalidOrigin { .. })
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn snapshot_remembers_original_session_and_partition_identity() -> Result<(), Box<dyn Error>> {
+        let database = Connection::open_in_memory()?;
+        database.execute_batch(
+            "CREATE TABLE cookies(
+                name TEXT NOT NULL,
+                host_key TEXT NOT NULL,
+                path TEXT NOT NULL,
+                top_frame_site_key TEXT NOT NULL,
+                has_cross_site_ancestor INTEGER NOT NULL,
+                is_persistent INTEGER NOT NULL
+            );
+            INSERT INTO cookies VALUES(
+                'plain', 'example.com', '/', '', 0, 0
+            );
+            INSERT INTO cookies VALUES(
+                'partitioned', '.example.com', '/app', 'https://top.example', 1, 0
+            );
+            INSERT INTO cookies VALUES(
+                'persistent', 'example.com', '/', '', 0, 1
+            );",
+        )?;
+
+        let sessions = super::session_cookie_identities(&database)?;
+        let snapshot = super::ProfileCookieSnapshot {
+            cookie_count: 3,
+            session_cookies: sessions,
+        };
+        assert!(snapshot.was_session("plain", "example.com", "/", None, None));
+        assert!(snapshot.was_session(
+            "partitioned",
+            ".example.com",
+            "/app",
+            Some("https://top.example"),
+            Some(true),
+        ));
+        assert!(!snapshot.was_session("persistent", "example.com", "/", None, None));
+        Ok(())
     }
 
     #[test]

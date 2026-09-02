@@ -159,10 +159,12 @@ button {
   cursor: pointer;
 }
 button.primary { border-color: #181716; color: #fff; background: #181716; }
+button.danger { border-color: #b9584d; color: #8a2929; background: #fff8f6; }
 button:disabled { cursor: default; opacity: .45; }
 .actions { flex-wrap: wrap; gap: 7px; }
 
-.preview {
+.preview,
+.cookie-sync {
   display: grid;
   gap: 10px;
   padding: 11px;
@@ -170,8 +172,8 @@ button:disabled { cursor: default; opacity: .45; }
   border-radius: 11px;
   background: #fff;
 }
-.preview p, .panel-details p { color: #68625a; font-size: 11px; line-height: 1.45; }
-.preview h2 { margin: 2px 0 3px; }
+.preview p, .cookie-sync p, .panel-details p { color: #68625a; font-size: 11px; line-height: 1.45; }
+.preview h2, .cookie-sync h2 { margin: 2px 0 3px; }
 .eyebrow { color: #34724d; font-size: 9px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
 
 .notice, .error { border-radius: 8px; padding: 9px 10px; font-size: 11px; line-height: 1.4; }

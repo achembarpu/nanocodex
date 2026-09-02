@@ -84,7 +84,7 @@ type ExpectedMcpCallback = Readonly<{
   requestedMcpConnections: readonly McpConnection[];
 }>;
 
-type VisibilityPermission = Readonly<{
+export type VisibilityPermission = Readonly<{
   resource: string;
   label:
     | "Reply"
@@ -96,7 +96,8 @@ type VisibilityPermission = Readonly<{
     | "Memory read"
     | "Memory write"
     | "Conversation"
-    | "Browser tab tool";
+    | "Browser tab tool"
+    | "Browser cookie sync";
   detail: string;
 }>;
 
@@ -104,6 +105,10 @@ const appResourcePrefix = "urn:nanocodex:app:";
 const appOriginResourcePrefix = "urn:nanocodex:origin:";
 const connectorFocusResourcePrefix = "urn:nanocodex:connector-focus:";
 const credentialImportResourcePrefix = "urn:nanocodex:credential-import:";
+const browserCookieSyncResource = "urn:nanocodex:browser-cookies:sync";
+export const CLI_BROWSER_COOKIE_SYNC_RESOURCE_PREFIX =
+  "urn:nanocodex:browser-cookies:local-sync:";
+const browserCookiesResourcePrefix = "urn:nanocodex:browser-cookies";
 const agentConversationResourcePrefix = "urn:nanocodex:agent:conversation:";
 const appToolCatalogResource = /^urn:nanocodex:app-tool-catalog:sha256:[0-9a-f]{64}$/;
 const hostPrincipalExchangeResourcePrefix = "urn:nanocodex:host-principal:exchange:";
@@ -124,6 +129,40 @@ const mcpConnectionStatuses = new Set<McpConnectionStatus>([
 ]);
 const mcpCallbackContinuationVersion = 1;
 const mcpCallbackContinuationLifetimeMs = 10 * 60 * 1000;
+
+export function formatCliBrowserCookieSyncResource(origin: unknown): string {
+  const canonical = canonicalBrowserCookieOrigin(origin);
+  if (!canonical) throw new TypeError("CLI browser cookie sync requires one canonical origin.");
+  return `${CLI_BROWSER_COOKIE_SYNC_RESOURCE_PREFIX}${encodeURIComponent(canonical)}`;
+}
+
+export function parseCliBrowserCookieSyncResource(resource: unknown): string | undefined {
+  if (typeof resource !== "string"
+    || !resource.startsWith(CLI_BROWSER_COOKIE_SYNC_RESOURCE_PREFIX)) return undefined;
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(resource.slice(CLI_BROWSER_COOKIE_SYNC_RESOURCE_PREFIX.length));
+  } catch {
+    return undefined;
+  }
+  const canonical = canonicalBrowserCookieOrigin(decoded);
+  return canonical && resource === formatCliBrowserCookieSyncResource(canonical)
+    ? canonical
+    : undefined;
+}
+
+function canonicalBrowserCookieOrigin(value: unknown): string | undefined {
+  if (typeof value !== "string" || value.length === 0 || value.length > 2_048) return undefined;
+  let url: URL;
+  try { url = new URL(value); } catch { return undefined; }
+  if (url.origin !== value || url.username || url.password) return undefined;
+  if (url.protocol === "https:") return url.origin;
+  if (url.protocol !== "http:") return undefined;
+  const hostname = url.hostname.toLowerCase();
+  return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "[::1]"
+    ? url.origin
+    : undefined;
+}
 
 const signedAppVisibility = Object.freeze([
   Object.freeze({
@@ -255,6 +294,14 @@ export function parseConnectPolicy(resources: unknown): ConnectPolicy {
     throw new Error("Nanocodex Connect received invalid signed resources.");
   }
   const signedResources = resources.filter((resource) => typeof resource === "string");
+  const browserCookieResources = signedResources.filter((resource) =>
+    resource.startsWith(browserCookiesResourcePrefix));
+  if (browserCookieResources.length > 1
+    || (browserCookieResources.length === 1
+      && browserCookieResources[0] !== browserCookieSyncResource
+      && parseCliBrowserCookieSyncResource(browserCookieResources[0]) === undefined)) {
+    throw new Error("The signed browser cookie sync resource is invalid.");
+  }
   const credentialImports = signedResources.filter((resource) =>
     resource.startsWith(credentialImportResourcePrefix));
   if (credentialImports.length === 0) {
@@ -433,6 +480,22 @@ export function appVisibilityPermissions(resources: unknown): readonly Visibilit
       resource: appToolCatalogs[0],
       label: "Browser tab tool",
       detail: "Use only the exact local browser tool catalog approved here",
+    }));
+  }
+  if (requested.has(browserCookieSyncResource)) {
+    visibility.push(Object.freeze({
+      resource: browserCookieSyncResource,
+      label: "Browser cookie sync",
+      detail: "Allow the Chrome extension to upload and restore cookie values for the current site. Restored cookies can grant access to your signed-in account. Cookie values are encrypted in your account Vault and are never shown to the model.",
+    }));
+  }
+  for (const resource of requested) {
+    const origin = parseCliBrowserCookieSyncResource(resource);
+    if (!origin) continue;
+    visibility.push(Object.freeze({
+      resource,
+      label: "Browser cookie sync",
+      detail: `Allow the Nanocodex CLI to upload and restore cookie values only for ${origin}. Restored cookies can grant access to your signed-in account. Cookie values are encrypted in your account Vault and are never shown to the model.`,
     }));
   }
   return visibility;

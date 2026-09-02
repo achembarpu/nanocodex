@@ -44,6 +44,7 @@ futures-util.workspace = true
 hex.workspace = true
 image.workspace = true
 indicatif.workspace = true
+percent-encoding.workspace = true
 jsonschema.workspace = true
 nanocodex.workspace = true
 nanocodex-durability = { workspace = true, features = ["sqlite"] }

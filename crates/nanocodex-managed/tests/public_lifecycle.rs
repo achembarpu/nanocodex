@@ -15,7 +15,7 @@ use axum::{
 };
 use futures_util::{FutureExt, stream};
 use nanocodex_agent::{AgentEvents, Nanocodex, PromptRequest, TurnControl, TurnResult};
-use nanocodex_managed::{Managed, ManagedApiKey, ManagedClient};
+use nanocodex_managed::{Managed, ManagedApiKey, ManagedClient, ManagedError};
 use nanocodex_oai_api::events::AgentEventKind;
 use serde_json::{Value, json};
 use tokio::sync::{Notify, mpsc};
@@ -225,7 +225,7 @@ async fn public_managed_lifecycle_preserves_durable_identity_control_and_replay(
             .expect("completed managed agent should shut down");
 
         let (reopened, reopened_events): (Nanocodex, AgentEvents) =
-            Nanocodex::builder(Managed::open(client, AGENT_ID))
+            Nanocodex::builder(Managed::open(client.clone(), AGENT_ID))
                 .build()
                 .await
                 .expect("public managed open should build");
@@ -246,9 +246,46 @@ async fn public_managed_lifecycle_preserves_durable_identity_control_and_replay(
             .await
             .expect("reopened managed agent should shut down");
 
+        let state = client
+            .state(AGENT_ID)
+            .await
+            .expect("public managed state snapshot should load");
+        let state_reads_before_open = lock(&fixture.inner.state_reads).len();
+        let mut invalid_state = state.clone();
+        invalid_state.latest_event_cursor = "latest".to_owned();
+        let invalid_open: nanocodex_agent::Result<(Nanocodex, AgentEvents)> = Nanocodex::builder(
+            Managed::open_from_state(client.clone(), AGENT_ID, invalid_state),
+        )
+        .build()
+        .await;
+        let error = match invalid_open {
+            Ok(_) => panic!("state-fenced open must reject the latest sentinel"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("agent state latest event cursor is invalid")
+        );
+        let (from_state, _): (Nanocodex, AgentEvents) =
+            Nanocodex::builder(Managed::open_from_state(client.clone(), AGENT_ID, state))
+                .build()
+                .await
+                .expect("public managed state-fenced open should build");
+        fixture.wait_for_event_cursor("43").await;
+        assert_eq!(
+            lock(&fixture.inner.state_reads).len(),
+            state_reads_before_open,
+            "opening from a validated state must not repeat the state request"
+        );
+        from_state
+            .disconnect()
+            .await
+            .expect("state-fenced agent should disconnect");
+
         assert_eq!(
             lock(&fixture.inner.state_reads).as_slice(),
-            [AGENT_ID, AGENT_ID]
+            [AGENT_ID, AGENT_ID, AGENT_ID]
         );
         let event_cursors = lock(&fixture.inner.event_cursors);
         assert_eq!(event_cursors.first().map(String::as_str), Some("40"));
@@ -288,6 +325,15 @@ async fn public_managed_lifecycle_preserves_durable_identity_control_and_replay(
         assert_eq!(actions[2].turn_id, ACTIVE_TURN_ID);
         assert_eq!(actions[2].body, None);
 
+        let latest_error = client
+            .state("agent-latest-cursor")
+            .await
+            .expect_err("state client must reject the non-exact latest sentinel");
+        assert!(matches!(
+            latest_error,
+            ManagedError::InvalidResponse("agent state latest event cursor is invalid")
+        ));
+
         server.abort();
     })
     .await
@@ -313,6 +359,12 @@ async fn agent_state(
     headers: HeaderMap,
 ) -> Response<Body> {
     authorize(&fixture, &headers);
+    if agent_id == "agent-latest-cursor" {
+        return json_response(
+            StatusCode::OK,
+            agent_state_json("agent-latest-cursor", "latest"),
+        );
+    }
     let latest_event_cursor = {
         let mut reads = lock(&fixture.inner.state_reads);
         reads.push(agent_id);
@@ -320,28 +372,32 @@ async fn agent_state(
     };
     json_response(
         StatusCode::OK,
-        json!({
-            "agent_id": AGENT_ID,
-            "session_id": SESSION_ID,
-            "has_snapshot": true,
-            "completed_turns": 0,
-            "last_active": 1,
-            "active_turns": [],
-            "active_turn_details": [],
-            "agent_loaded": true,
-            "connected_clients": 0,
-            "capabilities": {
-                "durable_turns": true,
-                "resumable_events": true,
-                "live_steer": true,
-                "live_cancel": true,
-                "workspace": "cloud",
-                "sandbox_escalation": false
-            },
-            "latest_event_cursor": latest_event_cursor,
-            "stream_error": null
-        }),
+        agent_state_json(AGENT_ID, latest_event_cursor),
     )
+}
+
+fn agent_state_json(agent_id: &str, latest_event_cursor: &str) -> Value {
+    json!({
+        "agent_id": agent_id,
+        "session_id": SESSION_ID,
+        "has_snapshot": true,
+        "completed_turns": 0,
+        "last_active": 1,
+        "active_turns": [],
+        "active_turn_details": [],
+        "agent_loaded": true,
+        "connected_clients": 0,
+        "capabilities": {
+            "durable_turns": true,
+            "resumable_events": true,
+            "live_steer": true,
+            "live_cancel": true,
+            "workspace": "cloud",
+            "sandbox_escalation": false
+        },
+        "latest_event_cursor": latest_event_cursor,
+        "stream_error": null
+    })
 }
 
 async fn events(

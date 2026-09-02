@@ -1,7 +1,7 @@
 use std::{
     collections::{HashMap, VecDeque},
     sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use futures_util::{SinkExt, StreamExt};
@@ -29,6 +29,10 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_millis(100);
 const PONG_TIMEOUT: Duration = Duration::from_secs(10);
 #[cfg(test)]
 const PONG_TIMEOUT: Duration = Duration::from_millis(50);
+#[cfg(not(test))]
+const STABLE_CONNECTION: Duration = Duration::from_secs(30);
+#[cfg(test)]
+const STABLE_CONNECTION: Duration = Duration::from_millis(250);
 
 pub(crate) struct Config {
     pub(crate) endpoint: Url,
@@ -48,7 +52,6 @@ pub(crate) async fn run(
     status: watch::Sender<AttachmentStatus>,
     closed: watch::Sender<Option<Result<(), AttachmentError>>>,
 ) {
-    let mut first = true;
     let mut backoff = Duration::from_millis(100);
     let terminal = loop {
         let _ = status.send(AttachmentStatus::Connecting);
@@ -70,7 +73,6 @@ pub(crate) async fn run(
                     "endpoint rejected the bearer credential".into(),
                 ));
             }
-            Err(error) if first => break Err(AttachmentError::Transport(error.to_string().into())),
             Err(_) => {
                 let _ = status.send(AttachmentStatus::Disconnected);
                 if wait_backoff(&mut commands, backoff).await {
@@ -80,6 +82,7 @@ pub(crate) async fn run(
                 continue;
             }
         };
+        let connected_at = Instant::now();
         let end = connection(
             socket,
             ConnectionContext {
@@ -91,8 +94,9 @@ pub(crate) async fn run(
             &mut commands,
         )
         .await;
-        if matches!(*status.borrow(), AttachmentStatus::Ready) {
-            first = false;
+        if matches!(*status.borrow(), AttachmentStatus::Ready)
+            && connected_at.elapsed() >= STABLE_CONNECTION
+        {
             backoff = Duration::from_millis(100);
         }
         match end {
@@ -108,7 +112,6 @@ pub(crate) async fn run(
                 );
                 break Err(AttachmentError::Fenced(reason));
             }
-            ConnectionEnd::Failed(error) if first => break Err(error),
             ConnectionEnd::Failed(_) | ConnectionEnd::Disconnected => {
                 let _ = status.send(AttachmentStatus::Disconnected);
                 if wait_backoff(&mut commands, backoff).await {
@@ -117,7 +120,6 @@ pub(crate) async fn run(
                 backoff = (backoff * 2).min(Duration::from_secs(5));
             }
         }
-        first = false;
     };
     runtime.shutdown().await;
     if terminal.is_ok() {

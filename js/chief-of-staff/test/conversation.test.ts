@@ -36,11 +36,25 @@ class RememberingGateway implements ManagedAgentGateway {
 }
 
 const channel: ChannelIdentity = {
-  accountId: "account-a",
   channelId: "D123ABC",
   conversationId: "dm:U123ABC",
   platform: "slack",
   teamId: "T123ABC",
+  userId: "U123ABC",
+};
+
+const viberChannel: ChannelIdentity = {
+  botUri: "nanocodex-chief",
+  conversationId: "dm:01234567890A=",
+  platform: "viber",
+  userId: "01234567890A=",
+};
+
+const whatsappChannel: ChannelIdentity = {
+  businessPhoneNumberId: "123456789012345",
+  conversationId: "whatsapp:123456789012345:15551234567",
+  platform: "whatsapp",
+  userId: "15551234567",
 };
 
 test("a durable conversation reuses one managed agent across two turns", async () => {
@@ -108,7 +122,7 @@ test("a replayed message id with altered input is fenced", async () => {
   );
 });
 
-test("durable state cannot be rebound across accounts or Slack channels", async () => {
+test("durable state cannot be rebound across Slack actors or channels", async () => {
   const store = new MemoryConversationStore();
   const gateway = new RememberingGateway();
   const engine = new ConversationEngine(store, gateway);
@@ -120,7 +134,7 @@ test("durable state cannot be rebound across accounts or Slack channels", async 
   });
 
   for (const conflicting of [
-    { ...channel, accountId: "account-b" },
+    { ...channel, userId: "U999XYZ" },
     { ...channel, channelId: "D999XYZ" },
   ]) {
     await assert.rejects(
@@ -135,6 +149,104 @@ test("durable state cannot be rebound across accounts or Slack channels", async 
         && error.code === "channel_identity_conflict",
     );
   }
-  assert.notEqual(await digest(channel), await digest({ ...channel, accountId: "account-b" }));
+  assert.notEqual(await digest(channel), await digest({ ...channel, userId: "U999XYZ" }));
   assert.notEqual(await digest(channel), await digest({ ...channel, channelId: "D999XYZ" }));
+});
+
+test("a Viber subscriber receives one durable agent across multiple messages", async () => {
+  const store = new MemoryConversationStore();
+  const gateway = new RememberingGateway();
+  const engine = new ConversationEngine(store, gateway);
+  await engine.turn({
+    actorId: "01234567890A=",
+    channel: viberChannel,
+    messageId: "5741311803571721087",
+    text: "Remember kiwi",
+  });
+  const second = await engine.turn({
+    actorId: "01234567890A=",
+    channel: viberChannel,
+    messageId: "5741311803571721088",
+    text: "What should you remember?",
+  });
+
+  assert.equal(second.finalMessage, "You asked me to remember kiwi.");
+  assert.equal(second.turnId.startsWith("viber-"), true);
+  assert.equal(gateway.created.length, 1);
+  assert.equal(gateway.turns[0]?.input.includes("Chief of Staff in Viber"), true);
+});
+
+test("Viber actors cannot cross another subscriber's durable route", async () => {
+  const engine = new ConversationEngine(new MemoryConversationStore(), new RememberingGateway());
+  await assert.rejects(
+    engine.turn({
+      actorId: "another-user=",
+      channel: viberChannel,
+      messageId: "5741311803571721087",
+      text: "Hello",
+    }),
+    (error: unknown) => error instanceof ConversationError
+      && error.status === 400
+      && error.code === "invalid_actor",
+  );
+});
+
+test("Viber replies are truncated to the provider text limit", async () => {
+  const gateway: ManagedAgentGateway = {
+    async createAgent() { return "agent-chief"; },
+    async runTurn() { return "x".repeat(8_000); },
+  };
+  const result = await new ConversationEngine(new MemoryConversationStore(), gateway).turn({
+    actorId: "01234567890A=",
+    channel: viberChannel,
+    messageId: "5741311803571721087",
+    text: "Write a long answer",
+  });
+
+  assert.equal(result.finalMessage.length, 7_000);
+  assert.equal(result.finalMessage.endsWith("[Response truncated for Viber]"), true);
+});
+
+test("a WhatsApp conversation keeps its own durable agent and channel-aware prompt", async () => {
+  const store = new MemoryConversationStore();
+  const gateway = new RememberingGateway();
+  const engine = new ConversationEngine(store, gateway);
+  await engine.turn({
+    actorId: "15551234567",
+    channel: whatsappChannel,
+    messageId: "wamid.first",
+    text: "Remember kiwi",
+  });
+  const second = await engine.turn({
+    actorId: "15551234567",
+    channel: whatsappChannel,
+    messageId: "wamid.second",
+    text: "What should you remember?",
+  });
+
+  assert.equal(second.finalMessage, "You asked me to remember kiwi.");
+  assert.match(second.turnId, /^whatsapp-/);
+  assert.match(gateway.turns[0]!.input, /Chief of Staff in WhatsApp/);
+  assert.equal(gateway.created.length, 1);
+});
+
+test("Slack and WhatsApp identities cannot share durable conversation state", async () => {
+  const engine = new ConversationEngine(new MemoryConversationStore(), new RememberingGateway());
+  await engine.turn({
+    actorId: "U123ABC",
+    channel,
+    messageId: "1700000000.000001",
+    text: "Remember kiwi",
+  });
+
+  await assert.rejects(
+    engine.turn({
+      actorId: "15551234567",
+      channel: whatsappChannel,
+      messageId: "wamid.second",
+      text: "What should you remember?",
+    }),
+    (error: unknown) => error instanceof ConversationError
+      && error.code === "channel_identity_conflict",
+  );
 });

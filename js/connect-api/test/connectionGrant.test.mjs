@@ -24,3 +24,22 @@ test("connector execution uses only the provider-neutral selector header", () =>
   assert.match(source, /"x-nanocodex-connector-connection"/);
   assert.doesNotMatch(`${source}\n${managedGrant}`, /x-nanocodex-connector-instance/i);
 });
+
+test("signed browser cookie sync consent enters the retained grant capability set", () => {
+  assert.match(
+    source,
+    /approved\.has\(BROWSER_COOKIE_SYNC_RESOURCE\)\s*\?\s*\[BROWSER_COOKIE_SYNC_RESOURCE\]/,
+  );
+  assert.match(
+    source,
+    /grant\.capabilities\.includes\(BROWSER_COOKIE_SYNC_RESOURCE\)/,
+  );
+  assert.match(
+    source,
+    /parseCliBrowserCookieSyncResource\(resource\)\s*!==\s*undefined/,
+  );
+  assert.match(
+    source,
+    /parseCliBrowserCookieSyncResource\(capability\)/,
+  );
+});

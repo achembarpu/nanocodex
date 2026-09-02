@@ -11,6 +11,7 @@ import type { ToolContext } from "nanocodex/host";
 import { createPageAgent, type PageAgentSession } from "../../lib/agent";
 import {
   connectNanocodex,
+  cookieSyncTransport,
   createConversationId,
   disconnectNanocodex,
   isManagedAgentId,
@@ -29,6 +30,12 @@ import type {
 } from "../../lib/extension";
 import { acquireCleanupHost, type CleanupHostLock } from "../../lib/host-lock";
 import type { StoredSiteRecipe } from "../../lib/recipe";
+import type {
+  BrowserCookieJarV1,
+  CookieCaptureHandle,
+  CookieRestoreConfirmation,
+  SyncedCookieJarReference,
+} from "../../lib/cookie-sync";
 
 interface ActiveOperation {
   cancelled: boolean;
@@ -62,6 +69,9 @@ export function App() {
   const [preview, setPreview] = useState<PreviewInfo>();
   const [kept, setKept] = useState("");
   const [saved, setSaved] = useState<StoredSiteRecipe[]>([]);
+  const [cookieCapture, setCookieCapture] = useState<SyncedCookieJarReference>();
+  const [cookieBusy, setCookieBusy] = useState(false);
+  const [cookieNotice, setCookieNotice] = useState("");
   const connectionRef = useRef<NanocodexConnection | undefined>(undefined);
   const sessionRef = useRef<PageAgentSession | undefined>(undefined);
   const sessionOpeningRef = useRef<Promise<PageAgentSession> | undefined>(undefined);
@@ -113,6 +123,7 @@ export function App() {
         void operation.turn?.cancel().catch(() => {});
       }
       leaseRef.current = undefined;
+      setCookieCapture(undefined);
       setTab(undefined);
       setPreview(undefined);
       setActivity(undefined);
@@ -209,6 +220,8 @@ export function App() {
       const current = leaseRef.current;
       leaseRef.current = undefined;
       if (current) await sendMessage({ type: "lease.release", lease_id: current.lease_id }).catch(() => {});
+      setCookieCapture(undefined);
+      setCookieNotice("");
       const session = sessionRef.current;
       sessionRef.current = undefined;
       await session?.close().catch(() => {});
@@ -508,6 +521,8 @@ export function App() {
       setAgentOpening(false);
       setTab(undefined);
       setPreview(undefined);
+      setCookieCapture(undefined);
+      setCookieNotice("");
       await disconnectNanocodex(conversationIdRef.current);
     } catch (cause) {
       setError(`Disconnected locally. ${errorMessage(cause)}`);
@@ -560,6 +575,168 @@ export function App() {
       setKept("");
     } catch (cause) {
       setError(errorMessage(cause));
+    }
+  }
+
+  async function claimActivePageForCookieSync(): Promise<PageLease> {
+    const windowId = await currentPanelWindowId();
+    const selection = await selectedPageSelection(windowId);
+    try {
+      const selectionId = selection.default_tab_ref;
+      if (!selectionId || !selection.tabs.some(({ tab_ref }) => tab_ref === selectionId)) {
+        throw new Error("No active HTTP or HTTPS tab is available in this side panel's window.");
+      }
+      const previous = leaseRef.current;
+      const claimed = await sendMessage<PageLease>({
+        type: "page.claim",
+        selection_id: selectionId,
+        ...(previous ? { previous_lease_id: previous.lease_id } : {}),
+      });
+      leaseRef.current = claimed;
+      setTab(claimed.tab);
+      setPreview(undefined);
+      setCookieCapture(undefined);
+      return claimed;
+    } finally {
+      if (selection.snapshot_id) {
+        await sendMessage({
+          type: "page.selection.release",
+          snapshot_id: selection.snapshot_id,
+        }).catch(() => {});
+      }
+    }
+  }
+
+  async function captureCurrentSiteCookies(): Promise<void> {
+    const activeConnection = connectionRef.current;
+    if (!activeConnection || operationRef.current || cookieBusy || preview) return;
+    setCookieBusy(true);
+    setCookieNotice("");
+    setError("");
+    let captureToRelease: Readonly<{ capture_id: string; lease_id: string }> | undefined;
+    try {
+      const granted = await chrome.permissions.request({ permissions: ["cookies"] });
+      if (!granted) throw new Error("Cookie access was not granted.");
+      const current = await claimActivePageForCookieSync();
+      const captured = await sendMessage<CookieCaptureHandle>({
+        type: "cookie.capture",
+        lease_id: current.lease_id,
+      });
+      captureToRelease = captured;
+      const exported = await sendMessage<{ jar_id: string; jar: BrowserCookieJarV1 }>({
+        type: "cookie.sync.export",
+        capture_id: captured.capture_id,
+        lease_id: current.lease_id,
+      });
+      const transport = cookieSyncTransport(activeConnection);
+      const existing = (await transport.list({
+        origin: captured.origin,
+        profile_id: captured.profile_id,
+        store_id: captured.store_id,
+      }))[0];
+      const metadata = await transport.replace(existing?.id ?? exported.jar_id, {
+        ...exported.jar,
+        revision: existing?.revision ?? 0,
+      });
+      setCookieCapture({
+        jar_id: metadata.id,
+        lease_id: current.lease_id,
+        origin: metadata.origin,
+        profile_id: metadata.profile_id,
+        store_id: metadata.store_id,
+        cookie_count: metadata.cookie_count,
+        revision: metadata.revision,
+      });
+      setCookieNotice(`Synced ${metadata.cookie_count} cookie${metadata.cookie_count === 1 ? "" : "s"} for ${metadata.origin}. Values were sent only through authenticated Connect.`);
+    } catch (cause) {
+      setError(errorMessage(cause));
+    } finally {
+      if (captureToRelease) {
+        await sendMessage({
+          type: "cookie.capture.release",
+          capture_id: captureToRelease.capture_id,
+          lease_id: captureToRelease.lease_id,
+        }).catch(() => {});
+      }
+      setCookieBusy(false);
+    }
+  }
+
+  async function restoreCurrentSiteCookies(): Promise<void> {
+    const activeConnection = connectionRef.current;
+    if (!activeConnection || cookieBusy) return;
+    setCookieBusy(true);
+    setCookieNotice("");
+    setError("");
+    let confirmation: CookieRestoreConfirmation | undefined;
+    try {
+      const granted = await chrome.permissions.request({ permissions: ["cookies"] });
+      if (!granted) throw new Error("Cookie access was not granted.");
+      let current = leaseRef.current;
+      let captured = cookieCapture;
+      if (!current || !captured || captured.lease_id !== current.lease_id) {
+        current = await claimActivePageForCookieSync();
+        const probe = await sendMessage<CookieCaptureHandle>({
+          type: "cookie.capture",
+          lease_id: current.lease_id,
+        });
+        await sendMessage({
+          type: "cookie.capture.release",
+          capture_id: probe.capture_id,
+          lease_id: current.lease_id,
+        }).catch(() => {});
+        const saved = (await cookieSyncTransport(activeConnection).list({
+          origin: probe.origin,
+          profile_id: probe.profile_id,
+          store_id: probe.store_id,
+        }))[0];
+        if (!saved) throw new Error(`No saved cookies exist for ${probe.origin} in this browser profile.`);
+        captured = {
+          jar_id: saved.id,
+          lease_id: current.lease_id,
+          origin: saved.origin,
+          profile_id: saved.profile_id,
+          store_id: saved.store_id,
+          cookie_count: saved.cookie_count,
+          revision: saved.revision,
+        };
+        setCookieCapture(captured);
+      }
+      const jar = await cookieSyncTransport(activeConnection).materialize(captured.jar_id, {
+        origin: captured.origin,
+        profile_id: captured.profile_id,
+        store_id: captured.store_id,
+      });
+      const staged = await sendMessage<CookieCaptureHandle>({
+        type: "cookie.restore.stage",
+        lease_id: current.lease_id,
+        jar,
+      });
+      confirmation = await sendMessage<CookieRestoreConfirmation>({
+        type: "cookie.restore.prepare",
+        capture_id: staged.capture_id,
+        lease_id: current.lease_id,
+      });
+      const confirmed = window.confirm(
+        `Replace cookies currently applicable to ${confirmation.origin} with the ${confirmation.cookie_count} in-memory captured cookie${confirmation.cookie_count === 1 ? "" : "s"}? This can sign you out or replace newer site state.`,
+      );
+      if (!confirmed) {
+        await sendMessage({
+          type: "cookie.restore.cancel",
+          confirmation_id: confirmation.confirmation_id,
+        }).catch(() => {});
+        return;
+      }
+      const restored = await sendMessage<{ origin: string; cookie_count: number }>({
+        type: "cookie.restore.apply",
+        confirmation_id: confirmation.confirmation_id,
+        confirmed: true,
+      });
+      setCookieNotice(`Restored ${restored.cookie_count} cookie${restored.cookie_count === 1 ? "" : "s"} for ${restored.origin}.`);
+    } catch (cause) {
+      setError(errorMessage(cause));
+    } finally {
+      setCookieBusy(false);
     }
   }
 
@@ -761,7 +938,29 @@ export function App() {
         </section>
       ) : null}
 
+      <section className="cookie-sync" aria-label="Current-site cookie sync">
+        <div>
+          <span className="eyebrow">Current site only</span>
+          <h2>Cookie sync</h2>
+          <p>Capture explicitly syncs only this leased site through authenticated Connect. Cookie values never enter chat, React state, extension storage, logs, transcripts, or the model.</p>
+        </div>
+        <div className="actions">
+          <button
+            type="button"
+            disabled={!connection || operationActive || cookieBusy || Boolean(preview)}
+            onClick={() => void captureCurrentSiteCookies()}
+          >{cookieBusy ? "Working…" : "Capture this site"}</button>
+          <button
+            className="danger"
+            type="button"
+            disabled={!connection || operationActive || cookieBusy || Boolean(preview)}
+            onClick={() => void restoreCurrentSiteCookies()}
+          >Restore saved cookies…</button>
+        </div>
+      </section>
+
       {kept ? <p className="notice" role="status">Saved “{kept}” for this site.</p> : null}
+      {cookieNotice ? <p className="notice" role="status">{cookieNotice}</p> : null}
       {error ? <p className="error" role="alert">{error}</p> : null}
 
       <div className="panel-details">
@@ -780,7 +979,7 @@ export function App() {
         ) : null}
         <details>
           <summary>Privacy and tab access</summary>
-          <p>The agent can list safe titles and origins for loaded HTTP(S) tabs when you name another tab. Without a target, it uses the active web tab when the page tool runs and never falls back to an older tab. Ordinary chat does not read tabs. Page contents are inspected only when the cleanup tool runs, and every change stays bound to one exact document. It cannot read form values, cookies, or browser storage. Your signed grant allows replies, actions, conversation history, and full run traces, but never spending or contracts.</p>
+          <p>The agent can list safe titles and origins for loaded HTTP(S) tabs when you name another tab. Without a target, it uses the active web tab when the page tool runs and never falls back to an older tab. Ordinary chat does not read tabs. Page contents are inspected only when the cleanup tool runs, and every change stays bound to one exact document. Cookie access is optional and requested only when you press Capture this site; values remain isolated in background memory and are never shown to the agent. Your signed grant allows replies, actions, conversation history, full run traces, and explicit browser-cookie sync, but never spending or contracts.</p>
         </details>
       </div>
     </main>

@@ -1,27 +1,36 @@
-import { Check, Copy, ExternalLink, RefreshCw, ShieldCheck } from "lucide-react";
+import { Bot, Check, Copy, ExternalLink, MessageCircle, Plus, RefreshCw, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { useAccountSession } from "./AccountSession";
 import "./ChiefOfStaffDemo.css";
 
 type Channel = Readonly<{
-  availability: "ready" | "setup_required" | "not_enabled";
+  availability: "ready" | "configured" | "setup_required" | "not_enabled";
   contract: "first_party" | "vendor_official";
   detail: string;
-  id: "slack" | "whatsapp" | "imessage";
+  id: "slack" | "whatsapp" | "imessage" | "viber";
+  webhookUrl?: string | null;
 }>;
 
 type Readiness = Readonly<{
   accountMatch: boolean;
   channels: readonly Channel[];
   configured: boolean;
+  installations: readonly Readonly<{
+    botUserId: string | null;
+    installedAt: number;
+    teamId: string;
+    teamName: string;
+  }>[];
+  installUrl: string | null;
   webhookUrl: string | null;
 }>;
 
-const labels = { slack: "Slack", whatsapp: "WhatsApp", imessage: "iMessage" } as const;
+const labels = { slack: "Slack", whatsapp: "WhatsApp", imessage: "iMessage", viber: "Viber" } as const;
 const docs = {
   slack: "https://chat-sdk.dev/adapters/slack",
-  whatsapp: "https://chat-sdk.dev/adapters/whatsapp",
+  whatsapp: "https://chat-sdk.dev/adapters/official/whatsapp",
   imessage: "https://chat-sdk.dev/adapters/photon",
+  viber: "https://developers.viber.com/docs/api/rest-bot-api/",
 } as const;
 
 export function ChiefOfStaffDemo() {
@@ -29,7 +38,8 @@ export function ChiefOfStaffDemo() {
   const [readiness, setReadiness] = useState<Readiness | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const [copied, setCopied] = useState(false);
+  const [operation, setOperation] = useState<string | null>(null);
+  const [copiedViber, setCopiedViber] = useState(false);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -56,12 +66,35 @@ export function ChiefOfStaffDemo() {
     void refresh();
   }, [account.status, refresh]);
 
-  const copyWebhook = useCallback(async () => {
-    if (!readiness?.webhookUrl) return;
-    await navigator.clipboard.writeText(readiness.webhookUrl);
-    setCopied(true);
-    window.setTimeout(() => setCopied(false), 1_500);
-  }, [readiness?.webhookUrl]);
+  const removeInstallation = useCallback(async (teamId: string) => {
+    if (operation) return;
+    setOperation(teamId);
+    setError(null);
+    try {
+      const response = await fetch(
+        `/api/chief-of-staff/slack/installations/${encodeURIComponent(teamId)}`,
+        { method: "DELETE", credentials: "same-origin" },
+      );
+      if (!response.ok) throw new Error("Couldn’t remove the Slack app.");
+      await refresh();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Couldn’t remove the Slack app.");
+    } finally {
+      setOperation(null);
+    }
+  }, [operation, refresh]);
+
+  const copyViberWebhook = useCallback(async (webhookUrl: string) => {
+    await navigator.clipboard.writeText(webhookUrl);
+    setCopiedViber(true);
+    window.setTimeout(() => setCopiedViber(false), 1_500);
+  }, []);
+
+  const viber = readiness?.channels.find((channel) => channel.id === "viber");
+  const whatsapp = readiness?.channels.find((channel) => channel.id === "whatsapp");
+  const activeChannels = readiness?.channels.filter((channel) =>
+    channel.availability === "ready" || channel.availability === "configured"
+  ) ?? [];
 
   return (
     <article className="chief-demo page-grid">
@@ -69,15 +102,15 @@ export function ChiefOfStaffDemo() {
         <p className="eyebrow">Demos · Chat SDK integration</p>
         <h1>Chief of Staff</h1>
         <p>
-          Bring one account-owned, durable Nanocodex agent into supported messaging channels.
-          The integration Worker verifies provider traffic and keeps every account, workspace,
-          channel, and conversation on its own route.
+          Install a durable Nanocodex agent as its own messaging identity across Slack,
+          WhatsApp, and Viber. Every workspace, phone, subscriber, and conversation stays on
+          its own isolated route.
         </p>
         <div className="chief-hero-status" aria-live="polite">
           <span className={`chief-status-dot${readiness?.configured ? " is-ready" : ""}`} />
-          <span>{loading ? "Checking deployment" : readiness?.configured
-            ? "Slack is ready"
-            : "Slack setup required"}</span>
+          <span>{loading ? "Checking deployment" : activeChannels.length > 0
+            ? `${activeChannels.map((channel) => labels[channel.id]).join(" + ")} configured`
+            : "Messaging setup required"}</span>
           <button type="button" onClick={() => void refresh()} disabled={loading}>
             <RefreshCw aria-hidden="true" /> Refresh
           </button>
@@ -98,11 +131,12 @@ export function ChiefOfStaffDemo() {
                 <small>{channel.contract === "first_party" ? "First-party adapter" : "Vendor adapter"}</small>
               </div>
               <strong>{channel.availability === "ready" ? "Ready"
+                : channel.availability === "configured" ? "Configured"
                 : channel.availability === "setup_required" ? "Setup required" : "Not enabled"}</strong>
             </header>
             <p>{channel.detail}</p>
             <a href={docs[channel.id]} target="_blank" rel="noreferrer">
-              Official Chat SDK contract <ExternalLink aria-hidden="true" />
+              {channel.id === "viber" ? "Official Viber API" : "Official Chat SDK contract"} <ExternalLink aria-hidden="true" />
             </a>
           </article>
         ))}
@@ -111,31 +145,117 @@ export function ChiefOfStaffDemo() {
       <section className="chief-setup" aria-labelledby="chief-setup-title">
         <header>
           <div>
-            <p className="eyebrow">Slack deployment</p>
-            <h2 id="chief-setup-title">Wire the signed ingress</h2>
+            <p className="eyebrow">Slack AI bot</p>
+            <h2 id="chief-setup-title">Add Chief of Staff to Slack</h2>
           </div>
-          <ShieldCheck aria-hidden="true" />
+          <Bot aria-hidden="true" />
         </header>
+        <div className="chief-install-action">
+          <div>
+            <strong>One workspace approval</strong>
+            <p>Slack shows the bot permissions, then installs the app and returns you here. No token or webhook setup.</p>
+          </div>
+          {readiness?.installUrl ? <a className="chief-add-slack" href={readiness.installUrl}>
+            <Plus aria-hidden="true" /> Add to Slack
+          </a> : <span className="chief-install-unavailable">Deployment setup required</span>}
+        </div>
+        {(readiness?.installations ?? []).map((installation) => (
+          <div className="chief-installation" key={installation.teamId}>
+            <div>
+              <strong>{installation.teamName}</strong>
+              <p>Bot installed{installation.botUserId ? ` as ${installation.botUserId}` : ""}</p>
+            </div>
+            <button
+              type="button"
+              disabled={operation !== null}
+              onClick={() => void removeInstallation(installation.teamId)}
+            >
+              <Trash2 aria-hidden="true" />
+              {operation === installation.teamId ? "Removing" : "Remove"}
+            </button>
+          </div>
+        ))}
+        <p className="chief-secret-note">
+          This installs the AI bot. The separate Slack connector acts as your own Slack user and
+          has its own authorization, tokens, and workspace grants.
+        </p>
+      </section>
+
+      <section className="chief-setup" aria-labelledby="chief-viber-title">
+        <header>
+          <div>
+            <p className="eyebrow">Viber chatbot</p>
+            <h2 id="chief-viber-title">Connect the Viber bot</h2>
+          </div>
+          <Bot aria-hidden="true" />
+        </header>
+        <div className="chief-install-action">
+          <div>
+            <strong>Commercial bot webhook</strong>
+            <p>Configure the bot token, name, and URI once, then register this signed callback URL with Viber.</p>
+          </div>
+          {viber?.webhookUrl ? <button
+            className="chief-copy-viber"
+            type="button"
+            onClick={() => void copyViberWebhook(viber.webhookUrl!)}
+          >
+            {copiedViber ? <Check aria-hidden="true" /> : <Copy aria-hidden="true" />}
+            {copiedViber ? "Copied" : "Copy webhook"}
+          </button> : <span className="chief-install-unavailable">Deployment setup required</span>}
+        </div>
+        <p className="chief-secret-note">
+          Callback signatures are verified before routing. Each Viber subscriber receives an
+          isolated durable agent session, with replay-safe outbound delivery.
+        </p>
+      </section>
+
+      <section className="chief-setup" aria-labelledby="chief-whatsapp-title">
+        <header>
+          <div>
+            <p className="eyebrow">WhatsApp Cloud API</p>
+            <h2 id="chief-whatsapp-title">Connect Chief of Staff to WhatsApp</h2>
+          </div>
+          <MessageCircle aria-hidden="true" />
+        </header>
+        <div className="chief-install-action">
+          <div>
+            <strong>One business number, one durable assistant</strong>
+            <p>Meta verifies the callback and signs every inbound message. Access tokens and app secrets stay inside the integration Worker.</p>
+          </div>
+          <span className="chief-install-unavailable">
+            {whatsapp?.availability === "configured"
+              ? "Worker configured"
+              : "Operator setup required"}
+          </span>
+        </div>
         <ol>
           <li>
             <span>01</span>
-            <div><strong>Bind the account</strong><p>Set the Worker-only <code>NANOCODEX_API_KEY</code>. Its account must match this page’s signed-in account.</p></div>
+            <div>
+              <strong>Add WhatsApp to the Meta business app</strong>
+              <p>Use a permanent System User access token for the production business phone number.</p>
+            </div>
           </li>
           <li>
             <span>02</span>
-            <div><strong>Configure Slack</strong><p>Set <code>SLACK_BOT_TOKEN</code>, <code>SLACK_SIGNING_SECRET</code>, <code>SLACK_BOT_USER_ID</code>, and <code>SLACK_TEAM_ID</code> as Worker secrets.</p></div>
+            <div>
+              <strong>Configure the callback</strong>
+              <p>Use the callback below and the same verify token configured as the Worker secret.</p>
+              <code>{whatsapp?.webhookUrl ?? "WhatsApp callback unavailable"}</code>
+            </div>
           </li>
           <li>
             <span>03</span>
-            <div><strong>Register the webhook</strong><p>Use this URL for Slack Events API requests. Subscribe to app mentions and message events for each enabled channel type.</p></div>
-            {readiness?.webhookUrl ? <button type="button" onClick={() => void copyWebhook()}>
-              {copied ? <Check aria-hidden="true" /> : <Copy aria-hidden="true" />}
-              {copied ? "Copied" : "Copy URL"}
-            </button> : null}
+            <div>
+              <strong>Subscribe message events</strong>
+              <p>Subscribe the webhook to <code>messages</code> and <code>user_id_update</code>, then send the business number a message.</p>
+            </div>
           </li>
         </ol>
-        {readiness?.webhookUrl ? <code className="chief-webhook">{readiness.webhookUrl}</code> : null}
-        <p className="chief-secret-note">Credential values stay inside Worker bindings and are never returned to this application.</p>
+        <p className="chief-secret-note">
+          The assistant replies inside WhatsApp’s customer-service window. Business-initiated
+          conversations outside that window require a separately approved Meta template.
+        </p>
       </section>
     </article>
   );
@@ -143,6 +263,7 @@ export function ChiefOfStaffDemo() {
 
 const fallbackChannels: readonly Channel[] = [
   { id: "slack", availability: "setup_required", contract: "first_party", detail: "Readiness has not been confirmed by the integration Worker." },
-  { id: "whatsapp", availability: "not_enabled", contract: "first_party", detail: "The SDK contract exists, but this deployment does not claim a configured Meta webhook." },
+  { id: "whatsapp", availability: "setup_required", contract: "first_party", detail: "Add the Meta app credentials and subscribe the shared webhook to enable WhatsApp." },
   { id: "imessage", availability: "not_enabled", contract: "vendor_official", detail: "Chat SDK catalogs vendor adapters; no iMessage provider is connected here." },
+  { id: "viber", availability: "setup_required", contract: "first_party", detail: "Connect a commercial Viber chatbot to enable signed inbound messages and durable replies." },
 ];

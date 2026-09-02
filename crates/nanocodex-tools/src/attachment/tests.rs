@@ -1,4 +1,4 @@
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
@@ -66,6 +66,69 @@ fn target_is_transport_only_and_redacts_the_bearer() {
     assert!(!format!("{target:?}").contains("very-secret"));
     assert!(AttachmentTarget::new("https://example.test", "secret").is_err());
     assert!(AttachmentTarget::new("ws://example.test", " ").is_err());
+}
+
+#[tokio::test]
+async fn start_returns_before_ready_and_detach_owns_initialization_cleanup() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("ws://{}/tools", listener.local_addr().unwrap());
+    let (catalog_tx, catalog_rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let mut socket = accept(&listener).await;
+        assert_eq!(recv_json(&mut socket).await["type"], "catalog");
+        let _ = catalog_tx.send(());
+        match socket.next().await {
+            Some(Ok(Message::Close(_))) | Some(Err(_)) | None => {}
+            frame => panic!("expected attachment shutdown, received {frame:?}"),
+        }
+    });
+    let tools = Tools::builder()
+        .without_defaults()
+        .tool(EchoTool)
+        .build()
+        .unwrap();
+    let (attachment, _) = tools
+        .attach(AttachmentTarget::new(endpoint, "bearer").unwrap())
+        .start()
+        .unwrap();
+    assert_eq!(attachment.status(), AttachmentStatus::Connecting);
+    catalog_rx.await.unwrap();
+    tokio::time::timeout(Duration::from_secs(1), attachment.detach())
+        .await
+        .unwrap()
+        .unwrap();
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn fast_ready_disconnects_keep_exponential_reconnect_backoff() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("ws://{}/tools", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let mut accepted = Vec::new();
+        for _ in 0..4 {
+            let mut socket = ready(&listener).await;
+            accepted.push(Instant::now());
+            socket.close(None).await.unwrap();
+        }
+        accepted
+    });
+    let tools = Tools::builder()
+        .without_defaults()
+        .tool(EchoTool)
+        .build()
+        .unwrap();
+    let (attachment, _) = tools
+        .attach(AttachmentTarget::new(endpoint, "bearer").unwrap())
+        .start()
+        .unwrap();
+    let accepted = tokio::time::timeout(Duration::from_secs(2), server)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(accepted[2].duration_since(accepted[1]) >= Duration::from_millis(170));
+    assert!(accepted[3].duration_since(accepted[2]) >= Duration::from_millis(350));
+    attachment.detach().await.unwrap();
 }
 
 #[tokio::test]

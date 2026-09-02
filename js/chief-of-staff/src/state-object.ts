@@ -6,23 +6,169 @@ import {
   type ConversationStore,
   type ConversationTurnRequest,
 } from "./conversation.ts";
-import { NanocodexManagedGateway } from "./managed.ts";
-import { sameChannelIdentity, type ChannelIdentity } from "./protocol.ts";
+import {
+  claimDelivery,
+  completeDelivery,
+  type DeliveryRecord,
+  releaseDelivery,
+} from "./delivery.ts";
+import {
+  NanocodexManagedGateway,
+  type ChiefOfStaffIdentity,
+} from "./managed.ts";
+import {
+  sameChannelIdentity,
+  validSlackInstallationMetadata,
+  type ChannelIdentity,
+  type SlackInstallationMetadata,
+} from "./protocol.ts";
 import type { Env } from "./worker.ts";
 
 type ExpiringValue = Readonly<{ expiresAt: number | null; value: unknown }>;
 
+function chiefIdentity(channel: ChannelIdentity): ChiefOfStaffIdentity {
+  switch (channel.platform) {
+    case "slack": return {
+      provider: "slack",
+      subject: channel.userId,
+      tenant: channel.teamId,
+    };
+    case "viber": return {
+      provider: "viber",
+      subject: channel.userId,
+      tenant: channel.botUri,
+    };
+    case "whatsapp": return {
+      provider: "whatsapp",
+      subject: channel.userId,
+      tenant: channel.businessPhoneNumberId,
+    };
+  }
+}
+
 export class ChiefOfStaffState extends DurableObject<Env> {
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
-    if (request.method !== "POST") return json({ error: "method_not_allowed" }, 405);
-    if (url.pathname === "/chat-sdk") return this.chatState(request);
-    if (url.pathname === "/conversation/turn") return this.conversationTurn(request);
+    if (url.pathname === "/chat-sdk" && request.method === "POST") return this.chatState(request);
+    if (url.pathname === "/conversation/turn" && request.method === "POST") return this.conversationTurn(request);
+    if (url.pathname === "/conversation/delivery" && request.method === "POST") {
+      return this.conversationDelivery(request);
+    }
+    if (url.pathname === "/slack/installations/claim" && request.method === "POST") {
+      return this.claimSlackInstallation(request);
+    }
+    if (url.pathname === "/slack/installations") return this.slackInstallations(request);
     return json({ error: "not_found" }, 404);
   }
 
+  private async conversationDelivery(request: Request): Promise<Response> {
+    let body: Record<string, unknown>;
+    try { body = await request.json<Record<string, unknown>>(); }
+    catch { return json({ error: "invalid_request" }, 400); }
+    const deliveryId = typeof body.deliveryId === "string" ? body.deliveryId : "";
+    if (!/^viber:(?:reply|welcome):[0-9]+$/.test(deliveryId)) {
+      return json({ error: "invalid_request" }, 400);
+    }
+    const key = `delivery:${deliveryId}`;
+    switch (body.operation) {
+      case "claim": return this.ctx.storage.transaction(async (transaction) => {
+        const retained = await transaction.get<DeliveryRecord>(key);
+        const now = Date.now();
+        const claim = claimDelivery(retained, now, now + 45_000, crypto.randomUUID());
+        if (claim.status === "claimed") await transaction.put(key, claim.record);
+        return json({ status: claim.status, token: claim.token }, 200);
+      });
+      case "complete": {
+        if (typeof body.token !== "string") return json({ error: "invalid_request" }, 400);
+        const token = body.token;
+        const completed = await this.ctx.storage.transaction(async (transaction) => {
+          const record = completeDelivery(await transaction.get<DeliveryRecord>(key), token);
+          if (!record) return false;
+          await transaction.put(key, record);
+          return true;
+        });
+        return completed ? json({ status: "completed" }, 200) : json({ error: "claim_conflict" }, 409);
+      }
+      case "release": {
+        if (typeof body.token !== "string") return json({ error: "invalid_request" }, 400);
+        const token = body.token;
+        await this.ctx.storage.transaction(async (transaction) => {
+          const retained = await transaction.get<DeliveryRecord>(key);
+          if (releaseDelivery(retained, token)) await transaction.delete(key);
+        });
+        return json({ status: "released" }, 200);
+      }
+      default: return json({ error: "invalid_request" }, 400);
+    }
+  }
+
+  private async slackInstallations(request: Request): Promise<Response> {
+    if (request.method === "GET") {
+      const retained = await this.ctx.storage.list<SlackInstallationMetadata>({ prefix: "slack:metadata:" });
+      const installations = [...retained.values()]
+        .filter(validSlackInstallationMetadata)
+        .sort((left, right) => right.installedAt - left.installedAt);
+      return json({ installations }, 200);
+    }
+    let body: unknown;
+    try { body = await request.json(); }
+    catch { return json({ error: "invalid_request" }, 400); }
+    if (!validSlackInstallationMetadata(body)) return json({ error: "invalid_request" }, 400);
+    const key = `slack:metadata:${body.teamId}`;
+    if (request.method === "PUT") {
+      return this.ctx.storage.transaction(async (transaction) => {
+        const ownerKey = `slack:owner:${body.teamId}`;
+        const owner = await transaction.get<string>(ownerKey);
+        const current = await transaction.get<unknown>(key);
+        const expected = owner ?? (validSlackInstallationMetadata(current) ? current.accountId : undefined);
+        if (expected !== body.accountId) return json({ error: "account_forbidden" }, 409);
+        await transaction.put(key, body);
+        return new Response(null, { status: 204 });
+      });
+    }
+    if (request.method === "DELETE") {
+      return this.ctx.storage.transaction(async (transaction) => {
+        const ownerKey = `slack:owner:${body.teamId}`;
+        const owner = await transaction.get<string>(ownerKey);
+        const current = await transaction.get<unknown>(key);
+        const expected = owner ?? (validSlackInstallationMetadata(current) ? current.accountId : undefined);
+        if (expected !== undefined && expected !== body.accountId) {
+          return json({ error: "account_forbidden" }, 409);
+        }
+        await Promise.all([transaction.delete(key), transaction.delete(ownerKey)]);
+        return new Response(null, { status: 204 });
+      });
+    }
+    return json({ error: "method_not_allowed" }, 405);
+  }
+
+  private async claimSlackInstallation(request: Request): Promise<Response> {
+    let body: unknown;
+    try { body = await request.json(); }
+    catch { return json({ error: "invalid_request" }, 400); }
+    if (!isRecord(body)
+      || Object.keys(body).length !== 2
+      || typeof body.accountId !== "string"
+      || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(body.accountId)
+      || typeof body.teamId !== "string"
+      || !/^T[A-Z0-9]+$/.test(body.teamId)) {
+      return json({ error: "invalid_request" }, 400);
+    }
+    return this.ctx.storage.transaction(async (transaction) => {
+      const ownerKey = `slack:owner:${body.teamId}`;
+      const metadata = await transaction.get<unknown>(`slack:metadata:${body.teamId}`);
+      const owner = await transaction.get<string>(ownerKey)
+        ?? (validSlackInstallationMetadata(metadata) ? metadata.accountId : undefined);
+      if (owner !== undefined && owner !== body.accountId) {
+        return json({ error: "workspace_already_installed" }, 409);
+      }
+      if (owner === undefined) await transaction.put(ownerKey, body.accountId);
+      return new Response(null, { status: 204 });
+    });
+  }
+
   private async conversationTurn(request: Request): Promise<Response> {
-    if (!this.env.NANOCODEX_BACKEND || !this.env.NANOCODEX_API_KEY) {
+    if (!this.env.NANOCODEX_BACKEND) {
       return json({ error: "managed_service_unavailable" }, 503);
     }
     let body: ConversationTurnRequest;
@@ -31,7 +177,7 @@ export class ChiefOfStaffState extends DurableObject<Env> {
     try {
       const engine = new ConversationEngine(
         new DurableConversationStore(this.ctx.storage),
-        new NanocodexManagedGateway(this.env.NANOCODEX_BACKEND, this.env.NANOCODEX_API_KEY),
+        new NanocodexManagedGateway(this.env.NANOCODEX_BACKEND, chiefIdentity(body.channel)),
       );
       return json(await engine.turn(body), 200);
     } catch (error) {

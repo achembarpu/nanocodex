@@ -401,7 +401,6 @@ fn durable_command_for_request(
         .arg("--rollouts")
         .arg("false")
         .arg("--browser=none")
-        .arg("--cookies=none")
         .arg("--mcp-defaults")
         .arg("false")
         .arg("--mcp-codex-config")

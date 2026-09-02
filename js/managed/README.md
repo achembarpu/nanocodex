@@ -12,7 +12,7 @@ and recovery. The edge Worker owns routing and authorization; an agent ID is a
 routing identifier, never authority. Each agent route reauthenticates the
 account or grant and forwards only its permitted slice.
 
-Provider credentials never enter this Worker, browser state, durable agent
+Connector credentials never enter this Worker, browser state, durable agent
 state, or tool configuration. Model and connector access crosses the private
 `NANOCODEX` Service Binding to `nanocodex-egress`, which owns credential routing
 and injection.
@@ -53,6 +53,7 @@ protocol. `/health` is the service health endpoint.
 | `NANOCODEX_ROOMS`, `NANOCODEX_MULTIPLAYER_QUOTA` | Multiplayer state and global quota. |
 | `NANOCODEX_AUTH`, `NANOCODEX_USERS`, `NANOCODEX_API_KEYS`, `NANOCODEX_ORGANIZATIONS`, `NANOCODEX_MEMORY` | Account, key, organization, and durable-memory ownership. |
 | `NANOCODEX_HISTORY`, `HISTORY_AI_SEARCH` | R2 history archive and production history retrieval. |
+| `BROWSER`, `LOADER` | Browser Run and the sandboxed Worker loader used by the official Agents browser runtime. |
 
 ### SMS OTP delivery
 
@@ -97,6 +98,26 @@ uses the same Worker role with local Durable Objects, local egress binding, R2,
 and shorter idle timing; AI Search is a production binding. The wallet reuses
 the existing `NANOCODEX` binding, so it adds no managed-Worker secret, binding,
 or Durable Object migration.
+
+### Managed browser provider
+
+`MANAGED_BROWSER_PROVIDER` is deployment policy and accepts `cloudflare` or
+`browserbase`; it is never a browser-tool argument. Cloudflare is the default
+and uses the `BROWSER` binding. Browserbase uses the same official Agents CDP
+runtime through a Worker-side binding adapter. Set its API key only as a
+Wrangler secret (never in `vars`, logs, or tool configuration):
+
+```bash
+pnpm exec wrangler secret put BROWSERBASE_API_KEY --config wrangler.jsonc
+```
+
+`BROWSERBASE_PROJECT_ID` is optional and can also be supplied as a secret.
+Browserbase sessions explicitly disable CAPTCHA solving, advanced stealth,
+verified-browser mode, proxies, and provider recording. Both providers retain
+one session per durable agent for bounded reuse. Signed CDP/Live View URLs and
+cookie-bearing CDP fields are redacted at the tool adapter boundary; human
+handoff remains disabled until there is an account-authenticated first-party
+handoff route that can resolve provider URLs without crossing model results.
 
 ### Host-principal project registry
 
