@@ -9,9 +9,47 @@ import {
   type ConnectorConnectionSelection,
 } from "./connector-status";
 
+const MAX_VAULT_ENTRIES = 100;
+const VAULT_ID = /^[A-Za-z0-9_-]{22,64}$/;
+
 type BrokerBinding = Readonly<{
   fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response>;
 }>;
+
+export type VaultEntry =
+  | Readonly<{
+      id: string;
+      kind: "login";
+      name: string;
+      created_at: number;
+      username: string;
+    }>
+  | Readonly<{
+      id: string;
+      kind: "card";
+      name: string;
+      created_at: number;
+      last4: string;
+    }>
+  | Readonly<{
+      id: string;
+      kind: "address";
+      name: string;
+      created_at: number;
+      address_line_1: string;
+      address_line_2?: string;
+      city: string;
+      state: string;
+      zip: string;
+      country: string;
+    }>
+  | Readonly<{
+      id: string;
+      kind: "phone";
+      name: string;
+      created_at: number;
+      phone_number: string;
+    }>;
 
 export type AccountInfo = Readonly<{
   status: "disabled" | "ready" | "unavailable";
@@ -26,6 +64,7 @@ export type AccountInfo = Readonly<{
   identity: Readonly<Record<string, never>>;
   stablecoins: readonly [];
   authorizations: readonly [];
+  vault: readonly VaultEntry[];
 }>;
 
 export async function accountInfo(
@@ -37,9 +76,11 @@ export async function accountInfo(
 ): Promise<AccountInfo> {
   if (!enabled) return emptyInfo("disabled");
   try {
-    const response = await binding.fetch(
-      `https://broker.internal/users/${encodeURIComponent(userId)}/connectors`,
-    );
+    const encodedUserId = encodeURIComponent(userId);
+    const [response, vault] = await Promise.all([
+      binding.fetch(`https://broker.internal/users/${encodedUserId}/connectors`),
+      accountVault(binding, encodedUserId),
+    ]);
     if (!response.ok) {
       await response.body?.cancel();
       return emptyInfo("unavailable");
@@ -73,6 +114,7 @@ export async function accountInfo(
       identity: {},
       stablecoins: [],
       authorizations: [],
+      vault,
     };
   } catch {
     return emptyInfo("unavailable");
@@ -84,8 +126,9 @@ export function projectAccountInfo(
   allowedConnectors?: readonly ConnectorCapabilityId[],
   allowedConnections?: ConnectorConnectionSelection,
 ): AccountInfo {
+  const vault = vaultEntries(info.vault);
   if (allowedConnectors === undefined) {
-    return { ...info, connectorAccounts: info.connectorAccounts ?? {} };
+    return { ...info, connectorAccounts: info.connectorAccounts ?? {}, vault };
   }
   const allowed = new Set(allowedConnectors);
   const connectorAccounts = Object.fromEntries(
@@ -119,6 +162,7 @@ export function projectAccountInfo(
     authenticated,
     accounts,
     connectorAccounts,
+    vault,
   };
 }
 
@@ -129,6 +173,9 @@ export function withInitialAccountInfo(input: PromptInput, info: AccountInfo): P
     "again unless the task requires state refreshed after this first prompt. When connectorAccounts",
     "lists multiple connections for a service, choose the appropriate one by label and pass its id",
     "as X-Nanocodex-Connector-Connection on that provider request. Never invent a connection id.",
+    "Vault entries are safe references only and never contain passwords, full card numbers, CVVs,",
+    "expiry details,",
+    "or billing ZIPs.",
   ].join(" ");
   const context = {
     type: "text" as const,
@@ -148,5 +195,104 @@ function emptyInfo(status: "disabled" | "unavailable"): AccountInfo {
     identity: {},
     stablecoins: [],
     authorizations: [],
+    vault: [],
   };
+}
+
+async function accountVault(
+  binding: BrokerBinding,
+  encodedUserId: string,
+): Promise<readonly VaultEntry[]> {
+  try {
+    const response = await binding.fetch(
+      `https://broker.internal/users/${encodedUserId}/credentials`,
+    );
+    if (!response.ok) {
+      await response.body?.cancel();
+      return [];
+    }
+    const value: unknown = await response.json();
+    return isRecord(value) ? vaultEntries(value.vault) : [];
+  } catch {
+    return [];
+  }
+}
+
+function vaultEntries(value: unknown): readonly VaultEntry[] {
+  if (!Array.isArray(value) || value.length > MAX_VAULT_ENTRIES) return [];
+  const projected: VaultEntry[] = [];
+  for (const entry of value) {
+    const safe = vaultEntry(entry);
+    if (!safe) return [];
+    projected.push(safe);
+  }
+  return projected;
+}
+
+function vaultEntry(value: unknown): VaultEntry | undefined {
+  if (!isRecord(value)
+    || typeof value.id !== "string" || !VAULT_ID.test(value.id)
+    || !vaultText(value.name, 120)
+    || !Number.isSafeInteger(value.created_at)
+    || Number(value.created_at) < 0) return undefined;
+  const common = {
+    id: value.id,
+    name: value.name,
+    created_at: value.created_at as number,
+  };
+  if (value.kind === "login"
+    && exactKeys(value, ["id", "kind", "name", "created_at", "username"])
+    && vaultText(value.username, 512)) {
+    return { ...common, kind: "login", username: value.username };
+  }
+  if (value.kind === "card"
+    && exactKeys(value, ["id", "kind", "name", "created_at", "last4"])
+    && typeof value.last4 === "string" && /^[0-9]{4}$/.test(value.last4)) {
+    return { ...common, kind: "card", last4: value.last4 };
+  }
+  if (value.kind === "address") {
+    const hasLine2 = Object.prototype.hasOwnProperty.call(value, "address_line_2");
+    if (!exactKeys(value, [
+      "id", "kind", "name", "created_at", "address_line_1",
+      ...(hasLine2 ? ["address_line_2"] : []),
+      "city", "state", "zip", "country",
+    ])
+      || !vaultText(value.address_line_1, 256)
+      || (hasLine2 && !vaultText(value.address_line_2, 256))
+      || !vaultText(value.city, 120)
+      || !vaultText(value.state, 120)
+      || !vaultText(value.zip, 32)
+      || !vaultText(value.country, 120)) return undefined;
+    return {
+      ...common,
+      kind: "address",
+      address_line_1: value.address_line_1,
+      ...(hasLine2 ? { address_line_2: value.address_line_2 as string } : {}),
+      city: value.city,
+      state: value.state,
+      zip: value.zip,
+      country: value.country,
+    };
+  }
+  if (value.kind === "phone"
+    && exactKeys(value, ["id", "kind", "name", "created_at", "phone_number"])
+    && vaultText(value.phone_number, 64)) {
+    return { ...common, kind: "phone", phone_number: value.phone_number };
+  }
+  return undefined;
+}
+
+function exactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
+  const keys = Object.keys(value);
+  return keys.length === expected.length && keys.every((key) => expected.includes(key));
+}
+
+function vaultText(value: unknown, maxBytes: number): value is string {
+  return typeof value === "string" && value.length > 0 && value.trim() === value
+    && !/[\u0000-\u001f\u007f]/.test(value)
+    && new TextEncoder().encode(value).byteLength <= maxBytes;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }

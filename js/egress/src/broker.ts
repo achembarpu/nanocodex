@@ -22,6 +22,10 @@ const MAX_REFRESH_BACKOFF_ATTEMPT = 5;
 const MAX_PROVIDER_RESPONSE_BYTES = 16 * 1024;
 const MAX_IMPORTED_TOKEN_BYTES = 32 * 1024;
 const MAX_IMPORTED_ACCOUNT_ID_BYTES = 256;
+const MAX_VAULT_ENTRIES = 100;
+const MAX_VAULT_BODY_BYTES = 12 * 1024;
+const VAULT_ID = /^[A-Za-z0-9_-]{22,64}$/;
+const VAULT_ENTRY_KEY_PREFIX = "vault-entry:";
 const SUBJECT = /^[A-Za-z0-9_-]{43,128}$/;
 const USER_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const SUBJECT_DIRECTORY_PREFIX = "agent-subject-v1:";
@@ -65,6 +69,45 @@ type PendingLogin = {
   pollAfterMs: number;
   nextPollAt: number;
 };
+export type VaultKind = "login" | "card" | "address" | "phone";
+export type VaultEntryPayload =
+  | Readonly<{ kind: "login"; name: string; username: string; password: string }>
+  | Readonly<{
+      kind: "card";
+      name: string;
+      card_number: string;
+      expiry_month: string;
+      expiry_year: string;
+      cvv: string;
+      billing_zip: string;
+    }>
+  | Readonly<{
+      kind: "address";
+      name: string;
+      address_line_1: string;
+      address_line_2?: string;
+      city: string;
+      state: string;
+      zip: string;
+      country: string;
+    }>
+  | Readonly<{ kind: "phone"; name: string; phone_number: string }>;
+export type VaultEntry = VaultEntryPayload & Readonly<{ id: string; createdAt: number }>;
+type VaultEntryMetadata = (
+  | Readonly<{ kind: "login"; name: string; username: string }>
+  | Readonly<{ kind: "card"; name: string; last4: string }>
+  | Readonly<{
+      kind: "address";
+      name: string;
+      address_line_1: string;
+      address_line_2?: string;
+      city: string;
+      state: string;
+      zip: string;
+      country: string;
+    }>
+  | Readonly<{ kind: "phone"; name: string; phone_number: string }>
+) & Readonly<{ id: string; createdAt: number }>;
 type CredentialState = {
   version: 1;
   active: "openai" | "chatgpt" | null;
@@ -72,6 +115,7 @@ type CredentialState = {
   chatgpt?: ChatGptCredential;
   login?: PendingLogin;
   ssh?: Record<string, BrokeredSshIdentity>;
+  vault?: Record<string, VaultEntryMetadata>;
 };
 type StoredRow = { envelope: EncryptedEnvelope };
 
@@ -246,8 +290,10 @@ export class UserCredentialBroker extends DurableObject<BrokerEnv> {
       return;
     }
     const opened = await this.#vault.open<CredentialState>(row.envelope);
-    const quarantined = this.#installRestoredState(opened.value);
-    if (quarantined || opened.reseal) {
+    const installed = this.#installRestoredState(opened.value);
+    if (installed.legacy.length) {
+      await this.#migrateLegacyVault(installed.legacy);
+    } else if (installed.changed || opened.reseal) {
       await this.#persist();
     }
     await this.#schedule();
@@ -261,6 +307,89 @@ export class UserCredentialBroker extends DurableObject<BrokerEnv> {
       }
       if (request.method === "GET" && url.pathname === "/v1/status") {
         return json(this.#publicStatus(), 200);
+      }
+      const vaultMatch = url.pathname.match(
+        /^\/v1\/vault\/(login|card|address|phone)(?:\/([A-Za-z0-9_-]{22,64}))?$/,
+      );
+      if (vaultMatch) {
+        const kind = vaultMatch[1] as VaultKind;
+        const id = vaultMatch[2];
+        if (request.method === "POST" && !id) {
+          if (!isJsonContentType(request.headers.get("content-type"))) {
+            return jsonError(415, "invalid_content_type");
+          }
+          const payload = validateVaultEntryPayload(
+            await readJson(request, MAX_VAULT_BODY_BYTES),
+            kind,
+          );
+          if (!payload) return jsonError(400, "invalid_vault_entry");
+          if (Object.keys(this.#credentials.vault ?? {}).length >= MAX_VAULT_ENTRIES) {
+            return jsonError(409, "vault_entry_limit_reached");
+          }
+          let generatedId: string;
+          do { generatedId = randomVaultId(); }
+          while (this.#credentials.vault?.[generatedId] !== undefined);
+          const entry = { ...payload, id: generatedId, createdAt: Date.now() } as VaultEntry;
+          const metadata = vaultEntryMetadata(entry);
+          const next: CredentialState = {
+            ...this.#credentials,
+            vault: { ...this.#credentials.vault, [generatedId]: metadata },
+          };
+          const [stateEnvelope, entryEnvelope] = await Promise.all([
+            this.#vault.seal(next),
+            this.#entryVault(generatedId).seal(entry),
+          ]);
+          await this.#state.storage.transaction(async (transaction) => {
+            await transaction.put(STATE_KEY, { envelope: stateEnvelope } satisfies StoredRow);
+            await transaction.put(vaultEntryStorageKey(generatedId), {
+              envelope: entryEnvelope,
+            } satisfies StoredRow);
+          });
+          this.#credentials = next;
+          return json(publicVaultEntry(entry), 201);
+        }
+        if (request.method === "DELETE" && id) {
+          const current = this.#credentials.vault?.[id];
+          if (current?.kind === kind) {
+            const entries = { ...this.#credentials.vault };
+            delete entries[id];
+            const next: CredentialState = { ...this.#credentials };
+            if (Object.keys(entries).length) next.vault = entries;
+            else delete next.vault;
+            const stateEnvelope = await this.#vault.seal(next);
+            await this.#state.storage.transaction(async (transaction) => {
+              await transaction.put(STATE_KEY, { envelope: stateEnvelope } satisfies StoredRow);
+              await transaction.delete(vaultEntryStorageKey(id));
+            });
+            this.#credentials = next;
+          }
+          return new Response(null, { status: 204, headers: noStoreHeaders() });
+        }
+        return jsonError(405, "method_not_allowed");
+      }
+      const vaultMaterialize = url.pathname.match(
+        /^\/v1\/vault-entry\/([A-Za-z0-9_-]{22,64})$/,
+      )?.[1];
+      if (vaultMaterialize) {
+        if (request.method !== "POST") return jsonError(405, "method_not_allowed");
+        if (await hasRequestPayload(request)) return jsonError(400, "invalid_request");
+        const metadata = this.#credentials.vault?.[vaultMaterialize];
+        if (!metadata) return jsonError(404, "vault_entry_not_configured");
+        const row = await this.#state.storage.get<StoredRow>(
+          vaultEntryStorageKey(vaultMaterialize),
+        );
+        if (!row) return jsonError(404, "vault_entry_not_configured");
+        const opened = await this.#entryVault(vaultMaterialize).open<unknown>(row.envelope);
+        const entry = validateStoredVaultEntry(vaultMaterialize, opened.value);
+        if (!entry || !sameVaultEntryMetadata(metadata, vaultEntryMetadata(entry))) {
+          return jsonError(503, "vault_entry_invalid");
+        }
+        if (opened.reseal) {
+          await this.#state.storage.put(vaultEntryStorageKey(vaultMaterialize), {
+            envelope: await this.#entryVault(vaultMaterialize).seal(entry),
+          } satisfies StoredRow);
+        }
+        return json(entry, 200);
       }
       const sshIdentity = url.pathname.match(/^\/v1\/ssh-identities\/([A-Za-z0-9][A-Za-z0-9._-]{0,63})$/)?.[1];
       if (sshIdentity && validSshIdentityReference(sshIdentity)) {
@@ -390,6 +519,9 @@ export class UserCredentialBroker extends DurableObject<BrokerEnv> {
         username: identity.username,
         host_key_sha256: identity.hostKeySha256,
       })),
+      vault: Object.values(this.#credentials.vault ?? {})
+        .map(publicVaultEntry)
+        .sort((left, right) => right.created_at - left.created_at || compareText(left.id, right.id)),
     };
   }
 
@@ -669,6 +801,13 @@ export class UserCredentialBroker extends DurableObject<BrokerEnv> {
     } satisfies StoredRow);
   }
 
+  #entryVault(id: string): CredentialVault {
+    return new CredentialVault(
+      this.#env,
+      `user/${this.#state.id.toString()}/vault/${id}`,
+    );
+  }
+
   async #persistAndSchedule(): Promise<void> {
     const row = {
       envelope: await this.#vault.seal(this.#credentials),
@@ -689,19 +828,67 @@ export class UserCredentialBroker extends DurableObject<BrokerEnv> {
         return;
       }
       const opened = await this.#vault.open<CredentialState>(row.envelope);
-      this.#installRestoredState(opened.value);
+      const installed = this.#installRestoredState(opened.value);
+      if (installed.legacy.length) await this.#migrateLegacyVault(installed.legacy);
     } catch {
       this.#credentials = { version: 1, active: null };
     }
   }
 
-  #installRestoredState(restored: CredentialState): boolean {
+  #installRestoredState(restored: CredentialState): Readonly<{
+    changed: boolean;
+    legacy: readonly VaultEntry[];
+  }> {
+    let changed = false;
+    const legacy: VaultEntry[] = [];
+    const validVault = Object.entries(isRecord(restored.vault) ? restored.vault : {})
+      .flatMap(([id, value]) => {
+        const metadata = validateStoredVaultMetadata(id, value);
+        if (metadata) return [metadata];
+        const entry = validateStoredVaultEntry(id, value);
+        if (entry) {
+          legacy.push(entry);
+          changed = true;
+          return [vaultEntryMetadata(entry)];
+        }
+        changed = true;
+        return [];
+      })
+      .sort((left, right) => right.createdAt - left.createdAt || compareText(left.id, right.id));
+    if (restored.vault !== undefined && !isRecord(restored.vault)) changed = true;
+    if (validVault.length > MAX_VAULT_ENTRIES) changed = true;
+    const retainedVault = validVault.slice(0, MAX_VAULT_ENTRIES);
+    const retainedIds = new Set(retainedVault.map(({ id }) => id));
+    if (retainedVault.length) {
+      restored.vault = Object.fromEntries(retainedVault.map((entry) => [entry.id, entry]));
+    } else {
+      delete restored.vault;
+    }
     this.#credentials = restored;
     const chatgpt = restored.chatgpt;
-    if (chatgpt?.refreshState !== "in_flight") return false;
-    chatgpt.refreshState = "ready";
-    chatgpt.deadReason = "refresh_outcome_unknown";
-    return true;
+    if (chatgpt?.refreshState === "in_flight") {
+      chatgpt.refreshState = "ready";
+      chatgpt.deadReason = "refresh_outcome_unknown";
+      changed = true;
+    }
+    return {
+      changed,
+      legacy: legacy.filter(({ id }) => retainedIds.has(id)),
+    };
+  }
+
+  async #migrateLegacyVault(entries: readonly VaultEntry[]): Promise<void> {
+    const sealed = await Promise.all(entries.map(async (entry) => ({
+      key: vaultEntryStorageKey(entry.id),
+      row: { envelope: await this.#entryVault(entry.id).seal(entry) } satisfies StoredRow,
+    })));
+    const stateRow = {
+      envelope: await this.#vault.seal(this.#credentials),
+    } satisfies StoredRow;
+    await this.#state.storage.transaction(async (transaction) => {
+      await transaction.put(STATE_KEY, stateRow);
+      for (const { key, row } of sealed) await transaction.put(key, row);
+    });
   }
 
   async #schedule(): Promise<void> {
@@ -935,6 +1122,295 @@ export function validChatGptCredentialImport(
   return true;
 }
 
+export function validateVaultEntryPayload(
+  value: unknown,
+  kind: VaultKind,
+): VaultEntryPayload | undefined {
+  if (!isRecord(value)) return undefined;
+  const expected = vaultPayloadKeys(kind, Object.prototype.hasOwnProperty.call(value, "address_line_2"));
+  const keys = Object.keys(value);
+  if (keys.length !== expected.length || keys.some((key) => !expected.includes(key))) {
+    return undefined;
+  }
+  const name = vaultText(value.name, 120);
+  if (!name) return undefined;
+  if (kind === "login") {
+    const username = vaultText(value.username, 512);
+    const password = vaultSecret(value.password, 8_192);
+    return username && password ? { kind, name, username, password } : undefined;
+  }
+  if (kind === "card") {
+    const cardNumber = vaultCardNumber(value.card_number);
+    const expiryMonth = typeof value.expiry_month === "string"
+      && /^(?:0?[1-9]|1[0-2])$/.test(value.expiry_month) ? value.expiry_month : undefined;
+    const expiryYear = typeof value.expiry_year === "string"
+      && /^[0-9]{4}$/.test(value.expiry_year) ? value.expiry_year : undefined;
+    const cvv = typeof value.cvv === "string" && /^[0-9]{3,4}$/.test(value.cvv)
+      ? value.cvv : undefined;
+    const billingZip = vaultText(value.billing_zip, 32);
+    return cardNumber && expiryMonth && expiryYear && cvv && billingZip
+      ? {
+          kind,
+          name,
+          card_number: cardNumber,
+          expiry_month: expiryMonth,
+          expiry_year: expiryYear,
+          cvv,
+          billing_zip: billingZip,
+        }
+      : undefined;
+  }
+  if (kind === "address") {
+    const addressLine1 = vaultText(value.address_line_1, 256);
+    const addressLine2 = value.address_line_2 === undefined
+      ? undefined : vaultText(value.address_line_2, 256);
+    const city = vaultText(value.city, 120);
+    const state = vaultText(value.state, 120);
+    const zip = vaultText(value.zip, 32);
+    const country = vaultText(value.country, 120);
+    if (!addressLine1 || (value.address_line_2 !== undefined && !addressLine2)
+      || !city || !state || !zip || !country) return undefined;
+    return {
+      kind,
+      name,
+      address_line_1: addressLine1,
+      ...(addressLine2 ? { address_line_2: addressLine2 } : {}),
+      city,
+      state,
+      zip,
+      country,
+    };
+  }
+  const phoneNumber = vaultText(value.phone_number, 64);
+  return phoneNumber ? { kind, name, phone_number: phoneNumber } : undefined;
+}
+
+function vaultPayloadKeys(kind: VaultKind, hasAddressLine2 = false): readonly string[] {
+  switch (kind) {
+    case "login": return ["name", "username", "password"];
+    case "card": return [
+      "name", "card_number", "expiry_month", "expiry_year", "cvv", "billing_zip",
+    ];
+    case "address": return [
+      "name", "address_line_1",
+      ...(hasAddressLine2 ? ["address_line_2"] : []),
+      "city", "state", "zip", "country",
+    ];
+    case "phone": return ["name", "phone_number"];
+  }
+}
+
+function validateStoredVaultEntry(id: string, value: unknown): VaultEntry | undefined {
+  if (!VAULT_ID.test(id) || !isRecord(value) || value.id !== id
+    || !Number.isSafeInteger(value.createdAt) || (value.createdAt as number) < 0
+    || !["login", "card", "address", "phone"].includes(String(value.kind))) return undefined;
+  const kind = value.kind as VaultKind;
+  const payloadKeys = vaultPayloadKeys(
+    kind,
+    Object.prototype.hasOwnProperty.call(value, "address_line_2"),
+  );
+  const payload = Object.fromEntries(
+    payloadKeys.map((key) => [key, value[key]]),
+  );
+  if (Object.keys(value).length !== payloadKeys.length + 3) return undefined;
+  const validated = validateVaultEntryPayload(payload, kind);
+  return validated
+    ? { ...validated, id, createdAt: value.createdAt as number } as VaultEntry
+    : undefined;
+}
+
+export function validateMaterializedVaultEntry(
+  id: string,
+  value: unknown,
+): VaultEntry | undefined {
+  return validateStoredVaultEntry(id, value);
+}
+
+function validateStoredVaultMetadata(
+  id: string,
+  value: unknown,
+): VaultEntryMetadata | undefined {
+  if (!VAULT_ID.test(id) || !isRecord(value) || value.id !== id
+    || !Number.isSafeInteger(value.createdAt) || (value.createdAt as number) < 0
+    || !["login", "card", "address", "phone"].includes(String(value.kind))) {
+    return undefined;
+  }
+  const kind = value.kind as VaultKind;
+  const common = {
+    id,
+    kind,
+    name: vaultText(value.name, 120),
+    createdAt: value.createdAt as number,
+  };
+  if (!common.name) return undefined;
+  if (kind === "login") {
+    const username = vaultText(value.username, 512);
+    return username && hasExactKeys(value, ["id", "kind", "name", "username", "createdAt"])
+      ? { ...common, kind, name: common.name, username }
+      : undefined;
+  }
+  if (kind === "card") {
+    const last4 = typeof value.last4 === "string" && /^[0-9]{4}$/.test(value.last4)
+      ? value.last4 : undefined;
+    return last4 && hasExactKeys(value, ["id", "kind", "name", "last4", "createdAt"])
+      ? { ...common, kind, name: common.name, last4 }
+      : undefined;
+  }
+  if (kind === "address") {
+    const addressLine1 = vaultText(value.address_line_1, 256);
+    const addressLine2 = value.address_line_2 === undefined
+      ? undefined : vaultText(value.address_line_2, 256);
+    const city = vaultText(value.city, 120);
+    const state = vaultText(value.state, 120);
+    const zip = vaultText(value.zip, 32);
+    const country = vaultText(value.country, 120);
+    const expected = [
+      "id", "kind", "name", "address_line_1",
+      ...(addressLine2 ? ["address_line_2"] : []),
+      "city", "state", "zip", "country", "createdAt",
+    ];
+    return addressLine1 && city && state && zip && country
+      && (value.address_line_2 === undefined || addressLine2)
+      && hasExactKeys(value, expected)
+      ? {
+          ...common,
+          kind,
+          name: common.name,
+          address_line_1: addressLine1,
+          ...(addressLine2 ? { address_line_2: addressLine2 } : {}),
+          city,
+          state,
+          zip,
+          country,
+        }
+      : undefined;
+  }
+  const phoneNumber = vaultText(value.phone_number, 64);
+  return phoneNumber && hasExactKeys(value, ["id", "kind", "name", "phone_number", "createdAt"])
+    ? { ...common, kind, name: common.name, phone_number: phoneNumber }
+    : undefined;
+}
+
+function vaultEntryMetadata(entry: VaultEntry): VaultEntryMetadata {
+  const common = {
+    id: entry.id,
+    name: entry.name,
+    createdAt: entry.createdAt,
+  };
+  switch (entry.kind) {
+    case "login": return { ...common, kind: entry.kind, username: entry.username };
+    case "card": return {
+      ...common,
+      kind: entry.kind,
+      last4: entry.card_number.replaceAll(" ", "").replaceAll("-", "").slice(-4),
+    };
+    case "address": return {
+      ...common,
+      kind: entry.kind,
+      address_line_1: entry.address_line_1,
+      ...(entry.address_line_2 ? { address_line_2: entry.address_line_2 } : {}),
+      city: entry.city,
+      state: entry.state,
+      zip: entry.zip,
+      country: entry.country,
+    };
+    case "phone": return { ...common, kind: entry.kind, phone_number: entry.phone_number };
+  }
+}
+
+function sameVaultEntryMetadata(
+  left: VaultEntryMetadata,
+  right: VaultEntryMetadata,
+): boolean {
+  if (left.id !== right.id || left.kind !== right.kind || left.name !== right.name
+    || left.createdAt !== right.createdAt) return false;
+  switch (left.kind) {
+    case "login": return right.kind === left.kind && left.username === right.username;
+    case "card": return right.kind === left.kind && left.last4 === right.last4;
+    case "address": return right.kind === left.kind
+      && left.address_line_1 === right.address_line_1
+      && left.address_line_2 === right.address_line_2
+      && left.city === right.city
+      && left.state === right.state
+      && left.zip === right.zip
+      && left.country === right.country;
+    case "phone": return right.kind === left.kind && left.phone_number === right.phone_number;
+  }
+}
+
+function vaultEntryStorageKey(id: string): string {
+  return `${VAULT_ENTRY_KEY_PREFIX}${id}`;
+}
+
+function publicVaultEntry(entry: VaultEntry | VaultEntryMetadata): Readonly<{
+  id: string;
+  kind: VaultKind;
+  name: string;
+  created_at: number;
+  username?: string;
+  last4?: string;
+  address_line_1?: string;
+  address_line_2?: string;
+  city?: string;
+  state?: string;
+  zip?: string;
+  country?: string;
+  phone_number?: string;
+}> {
+  const metadata = "password" in entry || "card_number" in entry
+    ? vaultEntryMetadata(entry as VaultEntry)
+    : entry as VaultEntryMetadata;
+  const common = {
+    id: metadata.id,
+    kind: metadata.kind,
+    name: metadata.name,
+    created_at: metadata.createdAt,
+  };
+  switch (metadata.kind) {
+    case "login": return { ...common, username: metadata.username };
+    case "card": return { ...common, last4: metadata.last4 };
+    case "address": return {
+      ...common,
+      address_line_1: metadata.address_line_1,
+      ...(metadata.address_line_2 ? { address_line_2: metadata.address_line_2 } : {}),
+      city: metadata.city,
+      state: metadata.state,
+      zip: metadata.zip,
+      country: metadata.country,
+    };
+    case "phone": return { ...common, phone_number: metadata.phone_number };
+  }
+}
+
+function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
+  const expectedSet = new Set(expected);
+  return Object.keys(value).length === expectedSet.size
+    && Object.keys(value).every((key) => expectedSet.has(key));
+}
+
+function randomVaultId(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(24));
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
+}
+
+function vaultText(value: unknown, maxBytes: number): string | undefined {
+  return exactBoundedString(value, maxBytes);
+}
+
+function vaultSecret(value: unknown, maxBytes: number): string | undefined {
+  return typeof value === "string" && value.length > 0 && !value.includes("\0")
+    && new TextEncoder().encode(value).byteLength <= maxBytes ? value : undefined;
+}
+
+function vaultCardNumber(value: unknown): string | undefined {
+  const cardNumber = vaultText(value, 23);
+  if (!cardNumber || !/^[0-9][0-9 -]*[0-9]$/.test(cardNumber)) return undefined;
+  return /^[0-9]{12,19}$/.test(cardNumber.replaceAll(" ", "").replaceAll("-", ""))
+    ? cardNumber : undefined;
+}
+
 function strictJwtPayload(token: string): Record<string, unknown> | undefined {
   return /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(token)
     ? jwtPayload(token)
@@ -1045,6 +1521,12 @@ function positiveNumberString(value: unknown): number | undefined {
 }
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function isJsonContentType(value: string | null): boolean {
+  return value?.split(";", 1)[0]?.trim().toLowerCase() === "application/json";
+}
+function compareText(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
 }
 function noStoreHeaders(): Record<string, string> {
   return { "cache-control": "no-store", pragma: "no-cache" };

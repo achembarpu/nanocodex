@@ -6,10 +6,117 @@ import {
 } from "../src/managed-egress";
 
 const SUBJECT = "s".repeat(43);
+const VAULT_ID = "v".repeat(22);
 
 afterEach(() => vi.unstubAllGlobals());
 
 describe("Computer egress gateway", () => {
+  it("routes only vault references and placeholders through the private binding", async () => {
+    const seen: Request[] = [];
+    const binding = {
+      async fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+        seen.push(new Request(input, init));
+        return Response.json({ ok: true });
+      },
+    } as Fetcher;
+    const publicFetch = vi.fn();
+    vi.stubGlobal("fetch", publicFetch);
+    const gateway = testGateway(binding);
+    const body = JSON.stringify({
+      username: "{{NANOCODEX_VAULT_USERNAME}}",
+      password: "{{NANOCODEX_VAULT_PASSWORD}}",
+    });
+
+    const response = await gateway.fetch("https://accounts.example/session", {
+      method: "POST",
+      headers: {
+        authorization: "Basic {{NANOCODEX_VAULT_BASIC}}",
+        "content-type": "application/json",
+        "x-api-key": "{{NANOCODEX_VAULT_PASSWORD}}",
+        "x-nanocodex-vault-id": VAULT_ID,
+      },
+      body,
+    });
+
+    expect(response.status).toBe(200);
+    expect(publicFetch).not.toHaveBeenCalled();
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.url).toBe("https://vault-egress.internal/v1/request");
+    expect(seen[0]!.method).toBe("POST");
+    expect(seen[0]!.headers.get("content-type")).toBe("application/json");
+    expect(seen[0]!.headers.get("x-nanocodex-subject")).toBe(SUBJECT);
+    expect(seen[0]!.headers.get("authorization")).toBeNull();
+    expect(await seen[0]!.json()).toEqual({
+      vault_id: VAULT_ID,
+      url: "https://accounts.example/session",
+      method: "POST",
+      headers: {
+        authorization: "Basic {{NANOCODEX_VAULT_BASIC}}",
+        "content-type": "application/json",
+        "x-api-key": "{{NANOCODEX_VAULT_PASSWORD}}",
+      },
+      body,
+    });
+  });
+
+  it("denies raw secrets and provider destinations in vault mode", async () => {
+    const binding = { fetch: vi.fn() } as unknown as Fetcher;
+    const publicFetch = vi.fn();
+    vi.stubGlobal("fetch", publicFetch);
+    const gateway = testGateway(binding);
+    const cases: Array<[string, RequestInit, string]> = [
+      ["https://example.com/", {
+        headers: { authorization: "Bearer raw-secret", "x-nanocodex-vault-id": VAULT_ID },
+      }, "credential_header_denied"],
+      ["https://example.com/", {
+        headers: { cookie: "session=raw-secret", "x-nanocodex-vault-id": VAULT_ID },
+      }, "credential_header_denied"],
+      ["https://example.com/", {
+        headers: { "x-api-key": "raw-secret", "x-nanocodex-vault-id": VAULT_ID },
+      }, "credential_header_denied"],
+      ["https://api.github.com/user", {
+        headers: { "x-nanocodex-vault-id": VAULT_ID },
+      }, "destination_denied"],
+    ];
+    for (const [url, init, error] of cases) {
+      const response = await gateway.fetch(url, init);
+      expect(response.status, url).toBe(403);
+      expect(await response.json(), url).toEqual({ error });
+    }
+    expect(binding.fetch).not.toHaveBeenCalled();
+    expect(publicFetch).not.toHaveBeenCalled();
+  });
+
+  it("requires valid vault and subject references before private dispatch", async () => {
+    const binding = { fetch: vi.fn() } as unknown as Fetcher;
+    vi.stubGlobal("fetch", vi.fn());
+    const invalidId = await handleManagedEgress(new Request("https://example.com/", {
+      headers: { "x-nanocodex-vault-id": "invalid" },
+    }), binding, SUBJECT);
+    expect(invalidId.status).toBe(403);
+    expect(await invalidId.json()).toEqual({ error: "vault_reference_denied" });
+
+    const missingSubject = await handleManagedEgress(new Request("https://example.com/", {
+      headers: { "x-nanocodex-vault-id": VAULT_ID },
+    }), binding);
+    expect(missingSubject.status).toBe(403);
+    expect(await missingSubject.json()).toEqual({ error: "requires_login" });
+    expect(binding.fetch).not.toHaveBeenCalled();
+  });
+
+  it("bounds vault request bodies before binding dispatch", async () => {
+    const binding = { fetch: vi.fn() } as unknown as Fetcher;
+    vi.stubGlobal("fetch", vi.fn());
+    const response = await testGateway(binding).fetch("https://example.com/", {
+      method: "POST",
+      headers: { "x-nanocodex-vault-id": VAULT_ID },
+      body: "x".repeat(64 * 1024 + 1),
+    });
+    expect(response.status).toBe(413);
+    expect(await response.json()).toEqual({ error: "request_too_large" });
+    expect(binding.fetch).not.toHaveBeenCalled();
+  });
+
   it("sends provider reads and unbounded writes through the private connector binding", async () => {
     const seen: Request[] = [];
     const binding = {

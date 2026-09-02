@@ -2,6 +2,16 @@ const PROVIDER_PLACEHOLDER = "Bearer NANOCODEX_PROVIDER_CREDENTIAL";
 const CONNECTOR_CONNECTION_HEADER = "x-nanocodex-connector-connection";
 const CONNECTOR_CONNECTION = /^[A-Za-z0-9_-]{43}$/;
 const SUBJECT = /^[A-Za-z0-9_-]{43,128}$/;
+const VAULT_ID = /^[A-Za-z0-9_-]{22,64}$/;
+export const VAULT_ID_HEADER = "x-nanocodex-vault-id";
+const VAULT_EGRESS_URL = "https://vault-egress.internal/v1/request";
+const MAX_VAULT_ENVELOPE_BYTES = 96 * 1024;
+const MAX_VAULT_URL_BYTES = 8 * 1024;
+const MAX_VAULT_BODY_BYTES = 64 * 1024;
+const MAX_VAULT_HEADERS = 64;
+const MAX_VAULT_HEADER_BYTES = 32 * 1024;
+const MAX_VAULT_HEADER_NAME_BYTES = 128;
+const MAX_VAULT_HEADER_VALUE_BYTES = 4 * 1024;
 const MAX_REDIRECTS = 5;
 const REDIRECTS = new Set([301, 302, 303, 307, 308]);
 const ORDINARY_METHODS = new Set(["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"]);
@@ -102,11 +112,32 @@ const PROVIDERS = new Map<string, readonly ProviderPolicy[]>([
     path: (path) => /^\/2\/(?:tweets|users|lists|dm_(?:conversations|events)|media)(?:\/|$)/.test(path),
   }]],
 ]);
+const VAULT_PROVIDER_HOSTS = new Set([
+  ...PROVIDERS.keys(),
+  "api.openai.com",
+  "chatgpt.com",
+]);
 
 const PRIVATE_HEADER = /(?:^|[-_])(?:auth(?:orization)?|cookie|credential|password|proxy|secret|token|api[-_]?key)(?:$|[-_]|\d)/i;
 const FORBIDDEN_HEADERS = new Set([
   "connection", "host", "origin", "proxy-connection", "referer", "te", "trailer",
   "transfer-encoding", "upgrade", CONNECTOR_CONNECTION_HEADER, "x-nanocodex-subject",
+  VAULT_ID_HEADER,
+]);
+const VAULT_FORBIDDEN_HEADERS = new Set([
+  "content-length", "cookie", "expect", "proxy-authorization", "via",
+]);
+const VAULT_BASIC_AUTHORIZATION = "Basic {{NANOCODEX_VAULT_BASIC}}";
+const VAULT_BEARER_AUTHORIZATION = "Bearer {{NANOCODEX_VAULT_PASSWORD}}";
+const VAULT_PLACEHOLDERS = new Set([
+  "{{NANOCODEX_VAULT_USERNAME}}",
+  "{{NANOCODEX_VAULT_PASSWORD}}",
+  "{{NANOCODEX_VAULT_BASIC}}",
+  "{{NANOCODEX_VAULT_CARD_NUMBER}}",
+  "{{NANOCODEX_VAULT_EXPIRY_MONTH}}",
+  "{{NANOCODEX_VAULT_EXPIRY_YEAR}}",
+  "{{NANOCODEX_VAULT_CVV}}",
+  "{{NANOCODEX_VAULT_BILLING_ZIP}}",
 ]);
 const PRIVATE_HOST_SUFFIXES = [
   ".internal",
@@ -126,13 +157,18 @@ export async function handleManagedEgress(
     connectionId?: string,
   ) => ManagedEgressConnectorAccess = () => true,
 ): Promise<Response> {
+  if (request.headers.has(VAULT_ID_HEADER)) {
+    return handleVaultEgress(request, binding, subject);
+  }
   const method = request.method.toUpperCase();
   if (!ORDINARY_METHODS.has(method)) return failure(403, "method_denied");
 
   let url: URL;
   try { url = validateUrl(new URL(request.url)); } catch { return failure(403, "destination_denied"); }
   const provider = providerFor(url);
-  const headerFailure = forbiddenHeader(request.headers, provider !== undefined);
+  const headerFailure = forbiddenHeader(request.headers, {
+    allowConnectorConnection: provider !== undefined,
+  });
   if (headerFailure) return failure(403, "credential_header_denied");
   if (!provider && PROVIDERS.has(url.hostname)) return failure(403, "destination_denied");
   if (provider) {
@@ -169,9 +205,68 @@ export async function handleManagedEgress(
   return fetchPublic(url, request, body);
 }
 
+async function handleVaultEgress(
+  request: Request,
+  binding: Fetcher,
+  subject: string | undefined,
+): Promise<Response> {
+  const vaultId = request.headers.get(VAULT_ID_HEADER);
+  if (!vaultId || !VAULT_ID.test(vaultId)) return failure(403, "vault_reference_denied");
+  if (!subject || !SUBJECT.test(subject)) return failure(403, "requires_login");
+
+  const method = request.method.toUpperCase();
+  if (!ORDINARY_METHODS.has(method)) return failure(403, "method_denied");
+  let url: URL;
+  try { url = validateUrl(new URL(request.url)); } catch { return failure(403, "destination_denied"); }
+  if (encodedBytes(url.href) > MAX_VAULT_URL_BYTES || isProviderDestination(url)) {
+    return failure(403, "destination_denied");
+  }
+
+  const headers = new Headers(request.headers);
+  headers.delete(VAULT_ID_HEADER);
+  if (forbiddenHeader(headers, { vaultMode: true })) {
+    return failure(403, "credential_header_denied");
+  }
+  const projectedHeaders = boundedVaultHeaders(headers);
+  if (!projectedHeaders) return failure(413, "request_too_large");
+
+  let body: string | undefined;
+  try {
+    body = method === "GET" || method === "HEAD" || !request.body
+      ? undefined
+      : await readBoundedText(request, MAX_VAULT_BODY_BYTES);
+  } catch {
+    return failure(413, "request_too_large");
+  }
+  const envelope = JSON.stringify({
+    vault_id: vaultId,
+    url: url.href,
+    method,
+    headers: projectedHeaders,
+    ...(body === undefined ? {} : { body }),
+  });
+  if (encodedBytes(envelope) > MAX_VAULT_ENVELOPE_BYTES) {
+    return failure(413, "request_too_large");
+  }
+  return projectResponse(await binding.fetch(new Request(VAULT_EGRESS_URL, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-nanocodex-subject": subject,
+    },
+    body: envelope,
+    redirect: "manual",
+    signal: request.signal,
+  })));
+}
+
 function providerFor(url: URL): ProviderPolicy | undefined {
   if (url.protocol !== "https:" || url.port) return undefined;
   return PROVIDERS.get(url.hostname)?.find((provider) => provider.path(url.pathname));
+}
+
+function isProviderDestination(url: URL): boolean {
+  return VAULT_PROVIDER_HOSTS.has(url.hostname.toLowerCase().replace(/\.$/, ""));
 }
 
 function canonicalProviderPath(provider: ProviderPolicy, pathname: string): boolean {
@@ -257,15 +352,89 @@ function isDeniedIpLiteral(hostname: string): boolean {
     || normalized.startsWith("::ffff:");
 }
 
-function forbiddenHeader(headers: Headers, allowConnectorConnection = false): string | undefined {
-  for (const [name] of headers) {
+function forbiddenHeader(
+  headers: Headers,
+  options: Readonly<{ allowConnectorConnection?: boolean; vaultMode?: boolean }> = {},
+): string | undefined {
+  for (const [name, value] of headers) {
     const lower = name.toLowerCase();
-    if (allowConnectorConnection && lower === CONNECTOR_CONNECTION_HEADER) continue;
-    if (PRIVATE_HEADER.test(name) || FORBIDDEN_HEADERS.has(lower)
+    if (options.allowConnectorConnection && lower === CONNECTOR_CONNECTION_HEADER) continue;
+    if (FORBIDDEN_HEADERS.has(lower)
+      || (options.vaultMode && (VAULT_FORBIDDEN_HEADERS.has(lower)
+        || lower.startsWith("x-nanocodex-")))
       || lower.startsWith("cf-") || lower.startsWith("forwarded")
       || lower.startsWith("sec-") || lower.startsWith("x-forwarded-")) return name;
+    if (PRIVATE_HEADER.test(name)
+      && (!options.vaultMode || !isVaultPlaceholderHeader(lower, value))) {
+      return name;
+    }
   }
   return undefined;
+}
+
+export function isValidVaultId(value: string | null | undefined): value is string {
+  return typeof value === "string" && VAULT_ID.test(value);
+}
+
+export function isPrivateEgressHeader(name: string): boolean {
+  return PRIVATE_HEADER.test(name);
+}
+
+export function isVaultPlaceholderHeader(name: string, value: string): boolean {
+  const lower = name.toLowerCase();
+  if (lower === "cookie" || lower === "proxy-authorization") return false;
+  if (lower === "authorization") {
+    return value === VAULT_BASIC_AUTHORIZATION || value === VAULT_BEARER_AUTHORIZATION;
+  }
+  return VAULT_PLACEHOLDERS.has(value);
+}
+
+function boundedVaultHeaders(headers: Headers): Record<string, string> | undefined {
+  const entries = [...headers];
+  if (entries.length > MAX_VAULT_HEADERS) return undefined;
+  let aggregateBytes = 0;
+  for (const [name, value] of entries) {
+    const nameBytes = encodedBytes(name);
+    const valueBytes = encodedBytes(value);
+    if (nameBytes > MAX_VAULT_HEADER_NAME_BYTES || valueBytes > MAX_VAULT_HEADER_VALUE_BYTES) {
+      return undefined;
+    }
+    aggregateBytes += nameBytes + valueBytes;
+    if (aggregateBytes > MAX_VAULT_HEADER_BYTES) return undefined;
+  }
+  return Object.fromEntries(entries);
+}
+
+async function readBoundedText(request: Request, maxBytes: number): Promise<string> {
+  if (!request.body) return "";
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel();
+        throw new Error("request too large");
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const encoded = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    encoded.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(encoded);
+}
+
+function encodedBytes(value: string): number {
+  return new TextEncoder().encode(value).byteLength;
 }
 
 function projectResponse(response: Response): Response {

@@ -28,6 +28,10 @@ const CONNECTOR_CONNECTION_SCHEMA = {
   additionalProperties: false,
 };
 const HOST_PRINCIPAL_ID = /^[A-Za-z0-9_-]{43}$/;
+const MAX_VAULT_ENTRIES = 100;
+const VAULT_ID = /^[A-Za-z0-9_-]{22,64}$/;
+const VAULT_ID_SCHEMA = { type: "string", pattern: "^[A-Za-z0-9_-]{22,64}$" };
+const vaultTextSchema = (maxLength) => ({ type: "string", minLength: 1, maxLength });
 const LIMIT_SCHEMA = {
   type: "object",
   properties: {
@@ -38,6 +42,63 @@ const LIMIT_SCHEMA = {
   },
   required: ["token", "symbol", "limit"],
   additionalProperties: false,
+};
+const VAULT_ENTRY_SCHEMA = {
+  oneOf: [
+    {
+      type: "object",
+      properties: {
+        id: VAULT_ID_SCHEMA,
+        kind: { type: "string", enum: ["login"] },
+        name: vaultTextSchema(120),
+        created_at: { type: "integer", minimum: 0 },
+        username: vaultTextSchema(512),
+      },
+      required: ["id", "kind", "name", "created_at", "username"],
+      additionalProperties: false,
+    },
+    {
+      type: "object",
+      properties: {
+        id: VAULT_ID_SCHEMA,
+        kind: { type: "string", enum: ["card"] },
+        name: vaultTextSchema(120),
+        created_at: { type: "integer", minimum: 0 },
+        last4: { type: "string", pattern: "^[0-9]{4}$" },
+      },
+      required: ["id", "kind", "name", "created_at", "last4"],
+      additionalProperties: false,
+    },
+    {
+      type: "object",
+      properties: {
+        id: VAULT_ID_SCHEMA,
+        kind: { type: "string", enum: ["address"] },
+        name: vaultTextSchema(120),
+        created_at: { type: "integer", minimum: 0 },
+        address_line_1: vaultTextSchema(256),
+        address_line_2: vaultTextSchema(256),
+        city: vaultTextSchema(120),
+        state: vaultTextSchema(120),
+        zip: vaultTextSchema(32),
+        country: vaultTextSchema(120),
+      },
+      required: ["id", "kind", "name", "created_at", "address_line_1", "city", "state", "zip", "country"],
+      additionalProperties: false,
+    },
+    {
+      type: "object",
+      properties: {
+        id: VAULT_ID_SCHEMA,
+        kind: { type: "string", enum: ["phone"] },
+        name: vaultTextSchema(120),
+        created_at: { type: "integer", minimum: 0 },
+        phone_number: vaultTextSchema(64),
+      },
+      required: ["id", "kind", "name", "created_at", "phone_number"],
+      additionalProperties: false,
+    },
+  ],
 };
 const ACCOUNT_INFO_SCHEMA = Object.freeze({
   type: "object",
@@ -167,14 +228,22 @@ const ACCOUNT_INFO_SCHEMA = Object.freeze({
         additionalProperties: false,
       },
     },
+    vault: {
+      type: "array",
+      maxItems: MAX_VAULT_ENTRIES,
+      items: VAULT_ENTRY_SCHEMA,
+    },
   },
-  required: ["status", "authenticated", "accounts", "connectorAccounts", "identity", "stablecoins", "authorizations"],
+  required: [
+    "status", "authenticated", "accounts", "connectorAccounts", "identity",
+    "stablecoins", "authorizations", "vault",
+  ],
   additionalProperties: false,
 });
 
 export function browserAccountInfoTool(options) {
   return namedTool("accountInfo", {
-    description: "Report account authentication, stablecoin balances, and app authorization boundaries. Never returns credentials.",
+    description: "Report account authentication, safe Vault references, stablecoin balances, and app authorization boundaries. Vault references never include passwords, full card numbers, CVVs, expiry details, or billing ZIPs.",
     parameters: { type: "object", additionalProperties: false },
     outputSchema: ACCOUNT_INFO_SCHEMA,
     handler: (_input, context) => browserAccountInfo(options, context?.signal),
@@ -250,6 +319,7 @@ export async function browserAccountInfo(options, signal) {
     const accountIdentity = identity(value.identity);
     const accountStablecoins = stablecoins(value.stablecoins);
     const accountAuthorizations = authorizations(value.authorizations);
+    const accountVault = vaultEntries(value.vault);
     if (options.requireAuthorization && (
       (!accountIdentity.tempoAddress && !accountIdentity.hostPrincipal)
       || !Array.isArray(value.stablecoins)
@@ -269,6 +339,7 @@ export async function browserAccountInfo(options, signal) {
       identity: accountIdentity,
       stablecoins: accountStablecoins,
       authorizations: accountAuthorizations,
+      vault: accountVault,
     };
   } catch (error) {
     if (signal?.aborted) throw error;
@@ -285,6 +356,7 @@ function emptyInfo(status) {
     identity: {},
     stablecoins: [],
     authorizations: [],
+    vault: [],
   };
 }
 
@@ -323,6 +395,77 @@ function boundedString(value, maxLength) {
   if (typeof value !== "string") return undefined;
   const normalized = value.trim();
   return normalized && normalized.length <= maxLength ? normalized : undefined;
+}
+
+function vaultEntries(value) {
+  if (!Array.isArray(value) || value.length > MAX_VAULT_ENTRIES) return [];
+  const projected = [];
+  for (const entry of value) {
+    const safe = vaultEntry(entry);
+    if (!safe) return [];
+    projected.push(safe);
+  }
+  return projected;
+}
+
+function vaultEntry(value) {
+  if (!record(value)
+    || typeof value.id !== "string" || !VAULT_ID.test(value.id)
+    || !vaultText(value.name, 120)
+    || !Number.isSafeInteger(value.created_at)
+    || value.created_at < 0) return undefined;
+  const common = { id: value.id, name: value.name, created_at: value.created_at };
+  if (value.kind === "login"
+    && exactKeys(value, ["id", "kind", "name", "created_at", "username"])
+    && vaultText(value.username, 512)) {
+    return { ...common, kind: "login", username: value.username };
+  }
+  if (value.kind === "card"
+    && exactKeys(value, ["id", "kind", "name", "created_at", "last4"])
+    && typeof value.last4 === "string" && /^[0-9]{4}$/.test(value.last4)) {
+    return { ...common, kind: "card", last4: value.last4 };
+  }
+  if (value.kind === "address") {
+    const hasLine2 = Object.prototype.hasOwnProperty.call(value, "address_line_2");
+    if (!exactKeys(value, [
+      "id", "kind", "name", "created_at", "address_line_1",
+      ...(hasLine2 ? ["address_line_2"] : []),
+      "city", "state", "zip", "country",
+    ])
+      || !vaultText(value.address_line_1, 256)
+      || (hasLine2 && !vaultText(value.address_line_2, 256))
+      || !vaultText(value.city, 120)
+      || !vaultText(value.state, 120)
+      || !vaultText(value.zip, 32)
+      || !vaultText(value.country, 120)) return undefined;
+    return {
+      ...common,
+      kind: "address",
+      address_line_1: value.address_line_1,
+      ...(hasLine2 ? { address_line_2: value.address_line_2 } : {}),
+      city: value.city,
+      state: value.state,
+      zip: value.zip,
+      country: value.country,
+    };
+  }
+  if (value.kind === "phone"
+    && exactKeys(value, ["id", "kind", "name", "created_at", "phone_number"])
+    && vaultText(value.phone_number, 64)) {
+    return { ...common, kind: "phone", phone_number: value.phone_number };
+  }
+  return undefined;
+}
+
+function exactKeys(value, expected) {
+  const keys = Object.keys(value);
+  return keys.length === expected.length && keys.every((key) => expected.includes(key));
+}
+
+function vaultText(value, maxBytes) {
+  return typeof value === "string" && value.length > 0 && value.trim() === value
+    && !/[\u0000-\u001f\u007f]/.test(value)
+    && new TextEncoder().encode(value).byteLength <= maxBytes;
 }
 
 function identity(value) {

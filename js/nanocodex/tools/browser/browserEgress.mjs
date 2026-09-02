@@ -1,4 +1,7 @@
 const THREAD_ID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
+const VAULT_ID = /^[A-Za-z0-9_-]{22,64}$/;
+const VAULT_ID_HEADER = "x-nanocodex-vault-id";
+const VAULT_PLACEHOLDER = /\{\{NANOCODEX_VAULT_(?:USERNAME|PASSWORD|BASIC|CARD_NUMBER|EXPIRY_MONTH|EXPIRY_YEAR|CVV|BILLING_ZIP)\}\}/;
 const PRIVATE_HEADER = /(?:^|[-_])(?:auth(?:orization)?|cookie|credential|password|proxy|secret|token|api[-_]?key)(?:$|[-_])/i;
 const FORBIDDEN_HEADERS = new Set([
   "connection", "host", "origin", "proxy-connection", "referer", "te", "trailer",
@@ -59,13 +62,24 @@ export function createBrowserEgressFetch(options) {
       throw new Error("browser egress supports only credential-free http:// and https:// URLs");
     }
     const headers = new Headers(request.headers);
-    for (const [name] of headers) {
+    const vaultId = headers.get(VAULT_ID_HEADER);
+    if (vaultId !== null && !VAULT_ID.test(vaultId)) {
+      throw new Error("browser egress requires a valid Vault item id");
+    }
+    for (const [name, value] of headers) {
       const lower = name.toLowerCase();
-      if (PRIVATE_HEADER.test(name) || FORBIDDEN_HEADERS.has(lower)
+      const privateVaultPlaceholder = vaultId !== null
+        && PRIVATE_HEADER.test(name)
+        && safeVaultHeaderValue(lower, value);
+      if ((!privateVaultPlaceholder && PRIVATE_HEADER.test(name)) || FORBIDDEN_HEADERS.has(lower)
         || lower.startsWith("cf-") || lower.startsWith("forwarded")
         || lower.startsWith("sec-") || lower.startsWith("x-forwarded-")) {
         throw new Error(`browser egress does not accept credential or routing header '${name}'`);
       }
+    }
+    if (vaultId !== null && ![...headers.values()].some((value) => VAULT_PLACEHOLDER.test(value))
+      && (typeof request.body !== "string" || !VAULT_PLACEHOLDER.test(request.body))) {
+      throw new Error("browser egress Vault requests require a supported placeholder");
     }
     try {
       const gatewayHeaders = new Headers(options.headers);
@@ -96,6 +110,15 @@ export function createBrowserEgressFetch(options) {
       throw new Error(`browser egress failed (${detail})`);
     }
   };
+}
+
+function safeVaultHeaderValue(name, value) {
+  if (name === "cookie" || name === "proxy-authorization") return false;
+  if (name === "authorization") {
+    return value === "Basic {{NANOCODEX_VAULT_BASIC}}"
+      || value === "Bearer {{NANOCODEX_VAULT_PASSWORD}}";
+  }
+  return /^\{\{NANOCODEX_VAULT_(?:PASSWORD|BASIC|CARD_NUMBER|EXPIRY_MONTH|EXPIRY_YEAR|CVV|BILLING_ZIP)\}\}$/.test(value);
 }
 
 /** Adapts the shell result to the standard Fetch API used inside browser Workers. */

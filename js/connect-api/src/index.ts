@@ -78,6 +78,8 @@ import {
   sameOrderedResources,
   type HostPrincipal,
 } from "./hostPrincipal.mts";
+import { vaultEgressEnvelope } from "./vaultEgress.mjs";
+import { projectVaultEntries, type VaultMetadata } from "./vaultProjection.mjs";
 
 type WorkerWebSocket = WebSocket & { accept(): void };
 declare const WebSocketPair: {
@@ -220,6 +222,7 @@ const MODEL_TICKET_PROTOCOL_PREFIX = "nanocodex-ticket.";
 const ACCOUNT_LINK_TTL = 5 * 60;
 const REGISTERED_APP_ID = "atlas-workspace";
 const MAX_BROKER_BODY_BYTES = 16 * 1024;
+const MAX_BROKER_CREDENTIALS_BODY_BYTES = 256 * 1024;
 const MAX_CONNECTOR_REQUEST_BODY_BYTES = 256 * 1024;
 const MAX_CONNECTOR_RESPONSE_BODY_BYTES = 1024 * 1024;
 const MAX_AGENT_TOOL_BODY_BYTES = 20 * 1024 * 1024;
@@ -261,7 +264,7 @@ const FORBIDDEN_CONNECTOR_HEADERS = /^(?:authorization|cookie|forwarded|host|ori
 const PRIVATE_EGRESS_HEADER = /(?:^|[-_])(?:auth(?:orization)?|cookie|credential|password|proxy|secret|token|api[-_]?key)(?:$|[-_]|\d)/i;
 const FORBIDDEN_EGRESS_HEADERS = new Set([
   "connection", "host", "origin", "proxy-connection", "referer", "te", "trailer",
-  "transfer-encoding", "upgrade", "x-nanocodex-subject",
+  "transfer-encoding", "upgrade", "x-nanocodex-subject", "x-nanocodex-vault-id",
 ]);
 const BLOCKED_EGRESS_RESPONSE_HEADERS = new Set([
   "clear-site-data", "connection", "content-encoding", "content-length", "keep-alive", "nel", "proxy-authenticate",
@@ -2779,31 +2782,33 @@ async function handleAgentToolRoute(
 
 async function connectAccountInfo(env: Env, store: Kv.Kv, current: GrantRecord) {
   if (current.hostPrincipal) {
-    const connectorInfo = await connectorStatuses(env, current.brokerUserId);
+    const broker = await brokerAccountSnapshot(env, current.brokerUserId);
     return {
-      ...projectGrantConnectorStatuses(connectorInfo, current),
+      ...projectGrantConnectorStatuses(broker, current),
       identity: { hostPrincipal: { kind: "host", id: current.hostPrincipal.id } },
       stablecoins: [],
       authorizations: [grantAuthorization(current)],
+      vault: broker.vault,
     };
   }
   if (!current.accountAddress) {
     throw new ApiFailure(500, "invalid_grant_binding", "The grant has no account or host principal.");
   }
-  const [connectorInfo, machineUsd, settlement, authorizations] = await Promise.all([
-    connectorStatuses(env, current.brokerUserId),
+  const [broker, machineUsd, settlement, authorizations] = await Promise.all([
+    brokerAccountSnapshot(env, current.brokerUserId),
     tokenBalance(MACHINE_USD, current.accountAddress),
     tokenBalance(USDC_E, current.accountAddress),
     accountAuthorizations(store, current),
   ]);
   return {
-    ...projectGrantConnectorStatuses(connectorInfo, current),
+    ...projectGrantConnectorStatuses(broker, current),
     identity: { tempoAddress: current.accountAddress },
     stablecoins: [
       { token: MACHINE_USD, symbol: "MACH", balance: machineUsd.toString(), decimals: 6 },
       { token: USDC_E, symbol: "USDC.e", balance: settlement.toString(), decimals: 6 },
     ],
     authorizations,
+    vault: broker.vault,
   };
 }
 
@@ -2956,6 +2961,32 @@ async function grantBrowserEgress(request: Request, env: Env, grant: GrantRecord
     throw new ApiFailure(400, "invalid_egress_url", "The browser egress URL is invalid.");
   }
   const connector = connectorForUrl(target);
+  let vaultEnvelope;
+  try { vaultEnvelope = vaultEgressEnvelope(value); } catch {
+    throw new ApiFailure(400, "invalid_vault_egress_request", "The Vault egress request is invalid.");
+  }
+  if (vaultEnvelope) {
+    if (connector) {
+      throw new ApiFailure(403, "vault_connector_target_denied", "Vault requests cannot target an OAuth connector.");
+    }
+    const safeTarget = publicEgressUrl(target);
+    if (safeTarget.href !== vaultEnvelope.url) {
+      throw new ApiFailure(400, "invalid_vault_egress_request", "The Vault egress request URL is invalid.");
+    }
+    if (!EGRESS_SUBJECT.test(grant.egressSubject)) {
+      throw new ApiFailure(403, "invalid_grant_binding", "The grant's broker binding is invalid.");
+    }
+    return env.EGRESS.fetch(new Request("https://vault-egress.internal/v1/request", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-nanocodex-subject": grant.egressSubject,
+      },
+      body: JSON.stringify(vaultEnvelope),
+      redirect: "manual",
+      signal: request.signal,
+    }));
+  }
   if (connector) {
     const result = await grantConnectorRequest(env, grant, connector, {
       path: `${target.pathname}${target.search}`,
@@ -3941,16 +3972,48 @@ async function connectorStatuses(
   env: Env,
   brokerUserId: string,
 ): Promise<{ connectors: Record<ConnectorCapability, ConnectorStatus> }> {
+  const { connectorValue, credentialValue } = await brokerAccountValues(env, brokerUserId);
+  return connectorStatusProjection(connectorValue, credentialValue);
+}
+
+async function brokerAccountSnapshot(
+  env: Env,
+  brokerUserId: string,
+): Promise<{ connectors: Record<ConnectorCapability, ConnectorStatus>; vault: VaultMetadata[] }> {
+  const { connectorValue, credentialValue } = await brokerAccountValues(env, brokerUserId);
+  return {
+    ...connectorStatusProjection(connectorValue, credentialValue),
+    vault: projectVaultMetadata(credentialValue.vault),
+  };
+}
+
+async function brokerAccountValues(env: Env, brokerUserId: string) {
   const [connectorValue, credentialValue] = await Promise.all([
     brokerJson(env, `/users/${encodeURIComponent(brokerUserId)}/connectors`),
-    brokerJson(env, `/users/${encodeURIComponent(brokerUserId)}/credentials`),
+    brokerJson(
+      env,
+      `/users/${encodeURIComponent(brokerUserId)}/credentials`,
+      undefined,
+      MAX_BROKER_CREDENTIALS_BODY_BYTES,
+    ),
   ]);
+  return { connectorValue, credentialValue };
+}
+
+function connectorStatusProjection(
+  connectorValue: Record<string, unknown>,
+  credentialValue: Record<string, unknown>,
+): { connectors: Record<ConnectorCapability, ConnectorStatus> } {
   const statuses = isRecord(connectorValue.connectors) ? connectorValue.connectors : {};
   const chatGpt = isRecord(credentialValue.chatgpt) ? credentialValue.chatgpt : {};
   return { connectors: Object.fromEntries(CONNECTOR_IDS.map((capability) => [
     capability,
     connectorStatus(capability === "chatgpt" ? chatGpt : statuses[capability]),
   ])) as Record<ConnectorCapability, ConnectorStatus> };
+}
+
+function projectVaultMetadata(value: unknown): VaultMetadata[] {
+  try { return projectVaultEntries(value); } catch { return []; }
 }
 
 async function mcpConnectionStatuses(env: Env, brokerUserId: string): Promise<McpConnection[]> {
@@ -4881,9 +4944,10 @@ async function brokerJson(
   env: Env,
   path: string,
   init?: RequestInit,
+  limit = MAX_BROKER_BODY_BYTES,
 ): Promise<Record<string, unknown>> {
   const response = await brokerFetch(env, path, init);
-  const text = await boundedResponseText(response, MAX_BROKER_BODY_BYTES);
+  const text = await boundedResponseText(response, limit);
   if (!response.ok) {
     throw new ApiFailure(502, "connector_broker_failed", "The connector broker rejected the operation.");
   }

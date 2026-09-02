@@ -1,6 +1,12 @@
 import { authenticatePersistentAccount, type AccountAuthEnv } from "./account-auth";
 import { bindAgentCredential } from "./credentials";
-import { handleManagedEgress } from "./managed-egress";
+import {
+  handleManagedEgress,
+  isPrivateEgressHeader,
+  isValidVaultId,
+  isVaultPlaceholderHeader,
+  VAULT_ID_HEADER,
+} from "./managed-egress";
 
 type BrowserEgressEnv = AccountAuthEnv & { NANOCODEX: Fetcher };
 
@@ -112,17 +118,30 @@ async function readEnvelope(request: Request): Promise<EgressEnvelope | undefine
   return value as EgressEnvelope;
 }
 
-function decodeHeaders(value: Record<string, string> | undefined): Headers | undefined {
+export function decodeHeaders(value: Record<string, string> | undefined): Headers | undefined {
   if (!value) return new Headers();
   const entries = Object.entries(value);
   const headers = new Headers();
   const names = new Set<string>();
+  let vaultId: string | undefined;
+  for (const [name, headerValue] of entries) {
+    const lower = name.toLowerCase();
+    if (names.has(lower) || typeof headerValue !== "string") return undefined;
+    names.add(lower);
+    if (lower === VAULT_ID_HEADER) {
+      if (!isValidVaultId(headerValue)) return undefined;
+      vaultId = headerValue;
+    }
+  }
+  names.clear();
   try {
     for (const [name, headerValue] of entries) {
-      if (typeof headerValue !== "string") return undefined;
       const lower = name.toLowerCase();
-      if (names.has(lower)) return undefined;
-      if (PRINCIPAL_HEADERS.has(lower)) return undefined;
+      if (PRINCIPAL_HEADERS.has(lower)) {
+        if (lower === "x-nanocodex-subject" || lower === "proxy-authorization" || lower === "cookie"
+          || !vaultId || !isVaultPlaceholderHeader(lower, headerValue)) return undefined;
+      } else if (isPrivateEgressHeader(lower)
+        && (!vaultId || !isVaultPlaceholderHeader(lower, headerValue))) return undefined;
       names.add(lower);
       headers.append(name, headerValue);
     }

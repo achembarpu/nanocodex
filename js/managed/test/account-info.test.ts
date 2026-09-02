@@ -4,6 +4,10 @@ import { accountInfo, projectAccountInfo, withInitialAccountInfo } from "../src/
 
 const A = "a".repeat(43);
 const B = "b".repeat(43);
+const LOGIN_ID = "l".repeat(22);
+const CARD_ID = "c".repeat(22);
+const ADDRESS_ID = "a".repeat(22);
+const PHONE_ID = "p".repeat(22);
 
 describe("managed account info", () => {
   it("projects provider-neutral Google and Slack connection identities", async () => {
@@ -27,6 +31,7 @@ describe("managed account info", () => {
       identity: {},
       stablecoins: [],
       authorizations: [],
+      vault: [],
     });
     expect(JSON.stringify(info)).not.toMatch(/access_token|secret/);
     expect(fetch).toHaveBeenCalledWith(
@@ -104,3 +109,163 @@ function statuses() {
     }] },
   } };
 }
+
+describe("managed accountInfo vault projection", () => {
+  it("projects exact safe metadata for every Vault kind and preserves connector filtering", async () => {
+    const fetch = vi.fn(async (input: RequestInfo | URL) => Response.json(
+      String(input).endsWith("/connectors") ? {
+        connectors: {
+          github: { connected: true, label: "octocat", access_token: "secret" },
+          gmail: { connected: true, label: "private@example.com" },
+        },
+      } : { vault: [
+        { id: LOGIN_ID, kind: "login", name: "Example", created_at: 1, username: "octocat" },
+        { id: CARD_ID, kind: "card", name: "Work card", created_at: 2, last4: "4242" },
+        {
+          id: ADDRESS_ID,
+          kind: "address",
+          name: "Office",
+          created_at: 3,
+          address_line_1: "1 Main Street",
+          address_line_2: "Suite 2",
+          city: "Athens",
+          state: "Attica",
+          zip: "10557",
+          country: "GR",
+        },
+        { id: PHONE_ID, kind: "phone", name: "Mobile", created_at: 4, phone_number: "+301234567890" },
+      ] },
+    ));
+
+    const result = await accountInfo({ fetch }, "user/id", true, ["github"]);
+
+    expect(result).toEqual({
+      status: "ready",
+      authenticated: ["github"],
+      accounts: { github: "octocat" },
+      connectorAccounts: {},
+      identity: {},
+      stablecoins: [],
+      authorizations: [],
+      vault: [
+        { id: LOGIN_ID, kind: "login", name: "Example", created_at: 1, username: "octocat" },
+        { id: CARD_ID, kind: "card", name: "Work card", created_at: 2, last4: "4242" },
+        {
+          id: ADDRESS_ID,
+          kind: "address",
+          name: "Office",
+          created_at: 3,
+          address_line_1: "1 Main Street",
+          address_line_2: "Suite 2",
+          city: "Athens",
+          state: "Attica",
+          zip: "10557",
+          country: "GR",
+        },
+        { id: PHONE_ID, kind: "phone", name: "Mobile", created_at: 4, phone_number: "+301234567890" },
+      ],
+    });
+    expect(JSON.stringify(result)).not.toMatch(/access_token|secret|private@example\.com/);
+    expect(projectAccountInfo(result, [])).toMatchObject({ authenticated: [], accounts: {}, vault: result.vault });
+    expect(fetch.mock.calls.map(([input]) => String(input))).toEqual([
+      "https://broker.internal/users/user%2Fid/connectors",
+      "https://broker.internal/users/user%2Fid/credentials",
+    ]);
+  });
+
+  it.each([
+    undefined,
+    {},
+    [{ id: LOGIN_ID, kind: "login", name: "Example", created_at: 1 }],
+    [{ id: LOGIN_ID, kind: "login", name: "Example", created_at: 1, username: "octocat", password: "secret" }],
+    [
+      { id: PHONE_ID, kind: "phone", name: "Mobile", created_at: 1, phone_number: "+301234567890" },
+      { id: CARD_ID, kind: "card", name: "Work", created_at: "2", last4: "4242" },
+    ],
+  ])("fails the entire Vault projection closed for %j", async (vault) => {
+    const result = await accountInfo({
+      fetch: async (input) => Response.json(
+        String(input).endsWith("/connectors") ? { connectors: {} } : { vault },
+      ),
+    }, "user", true);
+
+    expect(result.status).toBe("ready");
+    expect(result.vault).toEqual([]);
+    expect(JSON.stringify(result)).not.toContain("secret");
+  });
+
+  it("rejects Vault metadata outside broker-compatible bounds", async () => {
+    const malformedVaults = [
+      [{ id: "short", kind: "login", name: "Example", created_at: 1, username: "octocat" }],
+      [{ id: LOGIN_ID, kind: "login", name: " Example", created_at: 1, username: "octocat" }],
+      [{ id: LOGIN_ID, kind: "login", name: "Example", created_at: 1, username: "octo\ncat" }],
+      [{ id: CARD_ID, kind: "card", name: "Card", created_at: 1, last4: "123" }],
+      [{
+        id: ADDRESS_ID,
+        kind: "address",
+        name: "Office",
+        created_at: 1,
+        address_line_1: "a".repeat(257),
+        city: "Athens",
+        state: "Attica",
+        zip: "10557",
+        country: "GR",
+      }],
+      Array.from({ length: 101 }, (_, index) => ({
+        id: index.toString().padStart(22, "p"),
+        kind: "phone",
+        name: "Mobile",
+        created_at: index,
+        phone_number: "+301234567890",
+      })),
+    ];
+    for (const vault of malformedVaults) {
+      const result = await accountInfo({
+        fetch: async (input) => Response.json(
+          String(input).endsWith("/connectors") ? { connectors: {} } : { vault },
+        ),
+      }, "user", true);
+
+      expect(result.vault).toEqual([]);
+    }
+  });
+
+  it("includes an empty required Vault field in disabled and unavailable results", async () => {
+    await expect(accountInfo({ fetch: vi.fn() }, "user", false)).resolves.toMatchObject({ vault: [] });
+    await expect(accountInfo({
+      fetch: async () => new Response(null, { status: 503 }),
+    }, "user", true)).resolves.toMatchObject({ status: "unavailable", vault: [] });
+  });
+
+  it("keeps connector information ready when only credential metadata is unavailable", async () => {
+    const result = await accountInfo({
+      fetch: async (input) => String(input).endsWith("/connectors")
+        ? Response.json({ connectors: { github: { connected: true, label: "octocat" } } })
+        : new Response(null, { status: 503 }),
+    }, "user", true);
+
+    expect(result).toMatchObject({
+      status: "ready",
+      authenticated: ["github"],
+      accounts: { github: "octocat" },
+      vault: [],
+    });
+  });
+
+  it("normalizes a retained legacy snapshot without Vault metadata", () => {
+    const legacy = {
+      status: "ready",
+      authenticated: ["github"],
+      accounts: { github: "octocat" },
+      identity: {},
+      stablecoins: [],
+      authorizations: [],
+    } as unknown as Parameters<typeof projectAccountInfo>[0];
+
+    expect(projectAccountInfo(legacy)).toEqual({
+      ...legacy,
+      connectorAccounts: {},
+      vault: [],
+    });
+  });
+});

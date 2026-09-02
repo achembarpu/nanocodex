@@ -3,7 +3,11 @@ import {
   type BrokerEnv,
   UserCredentialBroker,
   type UserCredentialSnapshot,
+  type VaultEntry,
+  type VaultKind,
   validChatGptCredentialImport,
+  validateMaterializedVaultEntry,
+  validateVaultEntryPayload,
 } from "./broker";
 import {
   UserConnectorBroker,
@@ -37,12 +41,38 @@ const MODEL_STATUS_PATH = "/.well-known/nanocodex/model-status";
 const BROKER_READINESS_PATH = "/.well-known/nanocodex/broker-readiness";
 const MAX_CONTROL_BODY_BYTES = 16 * 1024;
 const MAX_CHATGPT_IMPORT_BODY_BYTES = 64 * 1024;
+const MAX_VAULT_BODY_BYTES = 12 * 1024;
 const MAX_BROKER_RESPONSE_BYTES = 4 * 1024;
 const MAX_MODEL_BODY_BYTES = 32 * 1024 * 1024;
 const MAX_SSH_BODY_BYTES = 72 * 1024;
+const MAX_VAULT_EGRESS_ENVELOPE_BYTES = 96 * 1024;
+const MAX_VAULT_EGRESS_TARGET_BYTES = 8 * 1024;
+const MAX_VAULT_EGRESS_HEADERS = 64;
+const MAX_VAULT_EGRESS_HEADER_NAME_BYTES = 128;
+const MAX_VAULT_EGRESS_HEADER_VALUE_BYTES = 4 * 1024;
+const MAX_VAULT_EGRESS_HEADER_BYTES = 32 * 1024;
+const MAX_VAULT_EGRESS_REQUEST_BODY_BYTES = 64 * 1024;
 const CODEX_ATTESTATION_UNAVAILABLE = '{"v":1,"s":1}';
 const REDIRECT_STATUS = new Set([301, 302, 303, 307, 308]);
 const CONNECTOR_METHODS = new Set(["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"]);
+const VAULT_EGRESS_METHODS = new Set(["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"]);
+const VAULT_ENTRY_ID = /^[A-Za-z0-9_-]{22,64}$/;
+const VAULT_PLACEHOLDER = /\{\{NANOCODEX_VAULT_([A-Z_]+)\}\}/g;
+const VAULT_PLACEHOLDER_MARKER = "NANOCODEX_VAULT_";
+const VAULT_PRIVATE_HEADER = /(?:^|[-_])(?:auth(?:orization)?|cookie|credential|password|proxy|secret|token|api[-_]?key)(?:$|[-_]|\d)/i;
+const VAULT_FORBIDDEN_HEADERS = new Set([
+  "connection", "content-length", "cookie", "expect", "host", "origin", "proxy-authorization", "proxy-connection", "referer",
+  "te", "trailer", "transfer-encoding", "upgrade", "via",
+]);
+const PRIVATE_HOST_SUFFIXES = [
+  ".internal", ".invalid", ".local", ".localhost", ".test", ".home.arpa",
+];
+const VAULT_PROVIDER_HOSTS = new Set([
+  "api.github.com", "api.openai.com", "api.x.com", "chatgpt.com",
+  "calendar.googleapis.com", "docs.googleapis.com", "gmail.googleapis.com",
+  "people.googleapis.com", "sheets.googleapis.com", "slack.com",
+  "slides.googleapis.com", "tasks.googleapis.com", "www.googleapis.com",
+]);
 const RELAY_CAPABILITY_PATH = /^\/v1\/[A-Za-z0-9_-]{43,}$/;
 const RELAY_HTTP_ROUTES: Readonly<Record<ModelOperation["id"], string | undefined>> = {
   responses: undefined,
@@ -58,6 +88,18 @@ type ConnectorOperation = Readonly<{
     | "gsheets" | "gslides" | "gcontacts" | "slack" | "x";
   origin: `https://${string}`;
   paths: readonly RegExp[];
+}>;
+
+type VaultPlaceholder = "USERNAME" | "PASSWORD" | "BASIC" | "CARD_NUMBER"
+  | "EXPIRY_MONTH" | "EXPIRY_YEAR" | "CVV" | "BILLING_ZIP";
+
+type VaultEgressEnvelope = Readonly<{
+  vaultId: string;
+  url: URL;
+  method: string;
+  headers: ReadonlyMap<string, string>;
+  body?: string;
+  placeholders: ReadonlySet<VaultPlaceholder>;
 }>;
 
 const CONNECTOR_OPERATIONS: readonly ConnectorOperation[] = [
@@ -225,6 +267,11 @@ export async function handleEgress(
   try { url = new URL(request.url); } catch { return jsonError(400, "invalid_url"); }
   if (url.username || url.password || url.hash) return jsonError(403, "destination_denied");
 
+  if (url.protocol === "https:" && url.hostname === "vault-egress.internal" && !url.port
+    && url.pathname === "/v1/request" && !url.search) {
+    return handleVaultEgress(request, url, env, started, upstreamFetch);
+  }
+
   if (url.protocol === "https:" && url.hostname === "ssh.internal" && !url.port
     && url.pathname === "/v1/execute" && !url.search) {
     return handleSshEgress(request, url, env, started);
@@ -359,6 +406,284 @@ export async function handleEgress(
         deployment_sha: env.DEPLOYMENT_SHA,
       });
   }
+}
+
+async function handleVaultEgress(
+  request: Request,
+  url: URL,
+  env: EgressEnv,
+  started: number,
+  upstreamFetch: typeof fetch,
+): Promise<Response> {
+  if (request.method !== "POST") {
+    return auditedError(403, "method_denied", request, url, "vault", started);
+  }
+  const subject = request.headers.get(SUBJECT_HEADER);
+  if (!subject || !SUBJECT.test(subject)) {
+    return auditedError(403, "agent_subject_required", request, url, "vault", started);
+  }
+  if (!isJsonContentType(request.headers.get("content-type"))
+    || request.headers.has("authorization") || request.headers.has("cookie")
+    || request.headers.has("proxy-authorization")) {
+    return auditedError(403, "required_header_mismatch", request, url, "vault", started);
+  }
+
+  let envelope: VaultEgressEnvelope;
+  try {
+    const value: unknown = JSON.parse(
+      await readBoundedText(request, MAX_VAULT_EGRESS_ENVELOPE_BYTES),
+    );
+    envelope = validateVaultEgressEnvelope(value);
+  } catch (error) {
+    const problem = error instanceof EgressFailure
+      ? error
+      : new EgressFailure(400, "invalid_vault_request");
+    return auditedError(problem.status, problem.code, request, url, "vault", started);
+  }
+
+  try {
+    const userId = await resolveSubject(env, subject);
+    const entry = await resolveVaultEntry(env, userId, envelope.vaultId);
+    const replacements = vaultReplacements(entry, envelope.placeholders);
+    const headers = new Headers();
+    let injectedHeaderBytes = 0;
+    for (const [name, template] of envelope.headers) {
+      const value = substituteVaultTemplate(template, replacements);
+      injectedHeaderBytes += new TextEncoder().encode(name).byteLength
+        + new TextEncoder().encode(value).byteLength;
+      if (new TextEncoder().encode(value).byteLength > 16 * 1024
+        || injectedHeaderBytes > 64 * 1024) {
+        throw new EgressFailure(413, "vault_request_too_large");
+      }
+      headers.set(name, value);
+    }
+    const body = envelope.body === undefined
+      ? undefined
+      : substituteVaultTemplate(envelope.body, replacements);
+    if (body !== undefined
+      && new TextEncoder().encode(body).byteLength > MAX_VAULT_EGRESS_REQUEST_BODY_BYTES) {
+      throw new EgressFailure(413, "vault_request_too_large");
+    }
+    const upstream = await upstreamFetch(new Request(envelope.url, {
+      method: envelope.method,
+      headers,
+      ...(body === undefined ? {} : { body }),
+      redirect: "manual",
+      signal: request.signal,
+    }));
+    const status = upstream.status;
+    const ok = upstream.ok;
+    await cancelResponseBody(upstream);
+    audit("allow", request, url, "vault", started, {
+      status,
+      deployment_sha: env.DEPLOYMENT_SHA,
+    });
+    return json({ status, ok }, 200);
+  } catch (error) {
+    const problem = egressFailure(error);
+    return auditedError(problem.status, problem.code, request, url, "vault", started, {
+      deployment_sha: env.DEPLOYMENT_SHA,
+    });
+  }
+}
+
+function validateVaultEgressEnvelope(value: unknown): VaultEgressEnvelope {
+  if (!isRecord(value)) throw new EgressFailure(400, "invalid_vault_request");
+  const hasBody = Object.prototype.hasOwnProperty.call(value, "body");
+  const expected = ["vault_id", "url", "method", "headers", ...(hasBody ? ["body"] : [])];
+  const keys = Object.keys(value);
+  if (keys.length !== expected.length || keys.some((key) => !expected.includes(key))
+    || typeof value.vault_id !== "string" || !VAULT_ENTRY_ID.test(value.vault_id)
+    || typeof value.url !== "string"
+    || new TextEncoder().encode(value.url).byteLength > MAX_VAULT_EGRESS_TARGET_BYTES
+    || typeof value.method !== "string" || !VAULT_EGRESS_METHODS.has(value.method)
+    || !isRecord(value.headers)
+    || (hasBody && typeof value.body !== "string")) {
+    throw new EgressFailure(400, "invalid_vault_request");
+  }
+  if ((value.method === "GET" || value.method === "HEAD") && hasBody) {
+    throw new EgressFailure(400, "invalid_vault_request");
+  }
+  let target: URL;
+  try { target = vaultEgressTarget(new URL(value.url)); }
+  catch { throw new EgressFailure(403, "vault_destination_denied"); }
+
+  const entries = Object.entries(value.headers);
+  if (entries.length > MAX_VAULT_EGRESS_HEADERS) {
+    throw new EgressFailure(413, "vault_request_too_large");
+  }
+  const headers = new Map<string, string>();
+  const seen = new Set<string>();
+  const placeholders = new Set<VaultPlaceholder>();
+  let headerBytes = 0;
+  for (const [name, headerValue] of entries) {
+    if (typeof headerValue !== "string") {
+      throw new EgressFailure(400, "invalid_vault_request");
+    }
+    const lower = name.toLowerCase();
+    const nameBytes = new TextEncoder().encode(name).byteLength;
+    const valueBytes = new TextEncoder().encode(headerValue).byteLength;
+    headerBytes += nameBytes + valueBytes;
+    if (!/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(name)
+      || nameBytes > MAX_VAULT_EGRESS_HEADER_NAME_BYTES
+      || valueBytes > MAX_VAULT_EGRESS_HEADER_VALUE_BYTES
+      || /[\0\r\n]/.test(headerValue)
+      || headerBytes > MAX_VAULT_EGRESS_HEADER_BYTES || seen.has(lower)
+      || VAULT_FORBIDDEN_HEADERS.has(lower) || lower.startsWith("cf-")
+      || lower.startsWith("forwarded") || lower.startsWith("sec-")
+      || lower.startsWith("x-forwarded-") || lower.startsWith("x-nanocodex-")) {
+      throw new EgressFailure(403, "vault_header_denied");
+    }
+    const found = vaultTemplatePlaceholders(headerValue);
+    if (VAULT_PRIVATE_HEADER.test(name) && !validVaultPrivateHeader(lower, headerValue)) {
+      throw new EgressFailure(403, "vault_raw_credential_denied");
+    }
+    for (const placeholder of found) placeholders.add(placeholder);
+    seen.add(lower);
+    headers.set(name, headerValue);
+  }
+  let body: string | undefined;
+  if (hasBody) {
+    body = value.body as string;
+    if (new TextEncoder().encode(body).byteLength > MAX_VAULT_EGRESS_REQUEST_BODY_BYTES) {
+      throw new EgressFailure(413, "vault_request_too_large");
+    }
+    for (const placeholder of vaultTemplatePlaceholders(body)) placeholders.add(placeholder);
+  }
+  if (![...placeholders].some((placeholder) => placeholder !== "USERNAME")) {
+    throw new EgressFailure(400, "vault_secret_placeholder_required");
+  }
+  return {
+    vaultId: value.vault_id,
+    url: target,
+    method: value.method,
+    headers,
+    ...(body === undefined ? {} : { body }),
+    placeholders,
+  };
+}
+
+function validVaultPrivateHeader(name: string, value: string): boolean {
+  if (name === "authorization") {
+    return value === "Basic {{NANOCODEX_VAULT_BASIC}}"
+      || value === "Bearer {{NANOCODEX_VAULT_PASSWORD}}";
+  }
+  return /^\{\{NANOCODEX_VAULT_(?:PASSWORD|BASIC|CARD_NUMBER|EXPIRY_MONTH|EXPIRY_YEAR|CVV|BILLING_ZIP)\}\}$/.test(value);
+}
+
+function vaultTemplatePlaceholders(template: string): Set<VaultPlaceholder> {
+  const placeholders = new Set<VaultPlaceholder>();
+  const supported = new Set<VaultPlaceholder>([
+    "USERNAME", "PASSWORD", "BASIC", "CARD_NUMBER", "EXPIRY_MONTH", "EXPIRY_YEAR",
+    "CVV", "BILLING_ZIP",
+  ]);
+  for (const match of template.matchAll(VAULT_PLACEHOLDER)) {
+    if (!supported.has(match[1] as VaultPlaceholder)) {
+      throw new EgressFailure(400, "invalid_vault_placeholder");
+    }
+    placeholders.add(match[1] as VaultPlaceholder);
+  }
+  if (template.replace(VAULT_PLACEHOLDER, "").includes(VAULT_PLACEHOLDER_MARKER)) {
+    throw new EgressFailure(400, "invalid_vault_placeholder");
+  }
+  return placeholders;
+}
+
+function vaultEgressTarget(url: URL): URL {
+  if ((url.protocol !== "http:" && url.protocol !== "https:") || url.username || url.password
+    || url.hash) throw new Error("invalid target");
+  const hostname = url.hostname.toLowerCase().replace(/\.$/, "");
+  if (!hostname || hostname === "localhost" || PRIVATE_HOST_SUFFIXES.some((suffix) => (
+    hostname === suffix.slice(1) || hostname.endsWith(suffix)
+  )) || deniedVaultIpLiteral(hostname) || VAULT_PROVIDER_HOSTS.has(hostname)) {
+    throw new Error("denied target");
+  }
+  return url;
+}
+
+function deniedVaultIpLiteral(hostname: string): boolean {
+  const ipv4 = hostname.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (ipv4) {
+    const octets = ipv4.slice(1).map(Number);
+    if (octets.some((octet) => octet > 255)) return true;
+    const [a, b] = octets;
+    return a === 0 || a === 10 || a === 127 || a! >= 224
+      || (a === 100 && b! >= 64 && b! <= 127)
+      || (a === 169 && b === 254) || (a === 172 && b! >= 16 && b! <= 31)
+      || (a === 192 && (b === 0 || b === 168)) || (a === 198 && (b === 18 || b === 19));
+  }
+  if (!hostname.includes(":")) return false;
+  const normalized = hostname.replace(/^\[/, "").replace(/\]$/, "").toLowerCase();
+  return normalized === "::" || normalized === "::1" || normalized.startsWith("fc")
+    || normalized.startsWith("fd") || normalized.startsWith("fe") || normalized.startsWith("ff")
+    || normalized.startsWith("::ffff:");
+}
+
+async function resolveVaultEntry(
+  env: EgressEnv,
+  userId: string,
+  vaultId: string,
+): Promise<VaultEntry> {
+  const response = await userBroker(env, userId).fetch(
+    `https://credentials.internal/v1/vault-entry/${vaultId}`,
+    { method: "POST" },
+  );
+  if (!response.ok) {
+    await readBoundedText(response, MAX_BROKER_RESPONSE_BYTES);
+    throw new EgressFailure(
+      response.status === 404 ? 409 : 503,
+      response.status === 404 ? "vault_entry_unavailable" : "vault_broker_unavailable",
+    );
+  }
+  let value: unknown;
+  try { value = JSON.parse(await readBoundedText(response, MAX_VAULT_BODY_BYTES)); }
+  catch { throw new EgressFailure(503, "invalid_vault_entry_response"); }
+  const entry = validateMaterializedVaultEntry(vaultId, value);
+  if (!entry) throw new EgressFailure(503, "invalid_vault_entry_response");
+  return entry;
+}
+
+function vaultReplacements(
+  entry: VaultEntry,
+  requested: ReadonlySet<VaultPlaceholder>,
+): ReadonlyMap<VaultPlaceholder, string> {
+  let replacements: Map<VaultPlaceholder, string>;
+  if (entry.kind === "login") {
+    replacements = new Map([
+      ["USERNAME", entry.username],
+      ["PASSWORD", entry.password],
+      ["BASIC", base64Utf8(`${entry.username}:${entry.password}`)],
+    ]);
+  } else if (entry.kind === "card") {
+    replacements = new Map([
+      ["CARD_NUMBER", entry.card_number],
+      ["EXPIRY_MONTH", entry.expiry_month],
+      ["EXPIRY_YEAR", entry.expiry_year],
+      ["CVV", entry.cvv],
+      ["BILLING_ZIP", entry.billing_zip],
+    ]);
+  } else {
+    throw new EgressFailure(403, "vault_entry_kind_mismatch");
+  }
+  if ([...requested].some((placeholder) => !replacements.has(placeholder))) {
+    throw new EgressFailure(403, "vault_entry_kind_mismatch");
+  }
+  return replacements;
+}
+
+function substituteVaultTemplate(
+  template: string,
+  replacements: ReadonlyMap<VaultPlaceholder, string>,
+): string {
+  return template.replace(VAULT_PLACEHOLDER, (_match, name: string) => (
+    replacements.get(name as VaultPlaceholder) ?? ""
+  ));
+}
+
+function base64Utf8(value: string): string {
+  let binary = "";
+  for (const byte of new TextEncoder().encode(value)) binary += String.fromCharCode(byte);
+  return btoa(binary);
 }
 
 async function handleSshEgress(
@@ -624,6 +949,41 @@ async function handleControl(request: Request, url: URL, env: EgressEnv): Promis
         headers: { "content-type": request.headers.get("content-type") ?? "" },
         body: request.body,
       }),
+    });
+  }
+
+  const vaultMatch = url.pathname.match(
+    /^\/users\/([A-Za-z0-9][A-Za-z0-9._:-]{0,127})\/credentials\/vault\/(login|card|address|phone)(?:\/([A-Za-z0-9_-]{22,64}))?$/,
+  );
+  if (vaultMatch) {
+    const userId = vaultMatch[1]!;
+    const kind = vaultMatch[2] as VaultKind;
+    const id = vaultMatch[3];
+    const target = `https://credentials.internal/v1/vault/${kind}${id ? `/${id}` : ""}`;
+    if (request.method === "DELETE" && id) {
+      return userBroker(env, userId).fetch(target, { method: "DELETE" });
+    }
+    if (request.method !== "POST" || id) return jsonError(405, "method_not_allowed");
+    if (!isJsonContentType(request.headers.get("content-type"))) {
+      return jsonError(415, "invalid_content_type");
+    }
+    let body: unknown;
+    try {
+      body = JSON.parse(await readBoundedText(request, MAX_VAULT_BODY_BYTES));
+    } catch (error) {
+      return error instanceof EgressFailure
+        ? jsonError(error.status, error.code)
+        : jsonError(400, "invalid_vault_entry");
+    }
+    const validated = validateVaultEntryPayload(body, kind);
+    if (!validated) return jsonError(400, "invalid_vault_entry");
+    const forwarded = Object.fromEntries(
+      Object.entries(validated).filter(([key]) => key !== "kind"),
+    );
+    return userBroker(env, userId).fetch(target, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(forwarded),
     });
   }
 
@@ -1099,6 +1459,9 @@ function stringField(value: unknown, key: string): string | undefined {
 }
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function isJsonContentType(value: string | null): boolean {
+  return value?.split(";", 1)[0]?.trim().toLowerCase() === "application/json";
 }
 function json(body: unknown, status: number): Response {
   return Response.json(body, { status, headers: { "cache-control": "no-store", pragma: "no-cache" } });

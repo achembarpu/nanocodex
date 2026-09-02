@@ -67,6 +67,77 @@ test("Connect authorization stays on the egress gateway and never reaches its ta
   assert.equal(JSON.stringify(envelope).includes("grant-session"), false);
 });
 
+test("browser egress forwards only an opaque Vault reference and closed placeholders", async () => {
+  const requests = [];
+  const fetch = createBrowserEgressFetch({
+    origin: "https://nanocodex.example",
+    threadId: THREAD_ID,
+    async fetch(input, init) {
+      requests.push(new Request(input, init));
+      return Response.json({ status: 204, ok: true });
+    },
+  });
+  const vaultId = "abcdefghijklmnopqrstuvwxyzABCDEF";
+  await fetch("https://example.com/session", {
+    method: "POST",
+    headers: {
+      authorization: "Basic {{NANOCODEX_VAULT_BASIC}}",
+      "content-type": "application/json",
+      "x-nanocodex-vault-id": vaultId,
+    },
+    body: JSON.stringify({ password: "{{NANOCODEX_VAULT_PASSWORD}}" }),
+  });
+
+  assert.deepEqual(await requests[0].json(), {
+    thread_id: THREAD_ID,
+    url: "https://example.com/session",
+    method: "POST",
+    headers: {
+      authorization: "Basic {{NANOCODEX_VAULT_BASIC}}",
+      "content-type": "application/json",
+      "x-nanocodex-vault-id": vaultId,
+    },
+    body: JSON.stringify({ password: "{{NANOCODEX_VAULT_PASSWORD}}" }),
+  });
+});
+
+test("browser egress rejects raw credentials and malformed Vault requests", async () => {
+  const fetch = createBrowserEgressFetch({
+    origin: "https://nanocodex.example",
+    threadId: THREAD_ID,
+    async fetch() { throw new Error("must not reach gateway"); },
+  });
+
+  await assert.rejects(
+    fetch("https://example.com", { headers: { authorization: "Bearer raw-secret" } }),
+    /does not accept credential/,
+  );
+  await assert.rejects(
+    fetch("https://example.com", {
+      headers: {
+        cookie: "{{NANOCODEX_VAULT_PASSWORD}}",
+        "x-nanocodex-vault-id": "abcdefghijklmnopqrstuvwxyzABCDEF",
+      },
+    }),
+    /does not accept credential/,
+  );
+  await assert.rejects(
+    fetch("https://example.com", {
+      headers: {
+        authorization: "Basic {{NANOCODEX_VAULT_BASIC}}",
+        "x-nanocodex-vault-id": "invalid",
+      },
+    }),
+    /valid Vault item id/,
+  );
+  await assert.rejects(
+    fetch("https://example.com", {
+      headers: { "x-nanocodex-vault-id": "abcdefghijklmnopqrstuvwxyzABCDEF" },
+    }),
+    /require a supported placeholder/,
+  );
+});
+
 test("browser gh makes useful GitHub calls through the same-origin connector", async () => {
   const requests = [];
   const command = createGhCompatibilityCommand({}, {}, (_name, handler) => handler, {

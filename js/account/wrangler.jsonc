@@ -35,7 +35,7 @@
       "/commits",
       "/requests",
       "/connect",
-      "/connect/device",
+      "/connect/*",
       "/connect-dialog",
       "/connect-dialog/*",
       "/docs",

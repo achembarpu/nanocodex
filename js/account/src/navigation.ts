@@ -38,8 +38,8 @@ export function connectDemoUrl(origin: string): string {
 
 export const accountNavigation = {
   surface: "connect",
-  label: "Account",
-  description: "Identity & connections",
+  label: "Connect",
+  description: "Identity, connections & vault",
 } as const satisfies ProductNavigationItem;
 
 export const demoNavigation = [
@@ -96,6 +96,7 @@ export function surfaceFromUrl(url: Pick<URL, "pathname" | "searchParams">): Sur
   if (pathname === "/docs" || pathname.startsWith("/docs/")) return "docs";
   if (pathname === "/agent" && url.searchParams.get("demo") === "attached-tools") return "tools";
   if (pathname === "/connect/device") return "connect";
+  if (pathname === "/connect/vault") return "connect";
 
   const pathMatch = (Object.entries(surfacePaths) as Array<[Surface, string]>).find(
     ([, path]) => path === pathname,

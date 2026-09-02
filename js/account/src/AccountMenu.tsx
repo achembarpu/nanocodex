@@ -18,8 +18,6 @@ import { ConnectionLogo } from "nanocodex-connect-ui/ConnectionLogo";
 import { deploymentHealth } from "./deploymentHealth";
 import { localDevelopmentCredential } from "./localDevelopmentCredential";
 import { ProfileConnectors } from "./ProfileConnectors";
-import { SshIdentityManager } from "./SshIdentityManager";
-import { decodeSshIdentities, type SshIdentityMetadata } from "./sshIdentities";
 
 type ApiKeyMetadata = Readonly<{
   id: string;
@@ -47,7 +45,6 @@ type CredentialStatus = Readonly<{
       pollAfterMs: number;
     };
   };
-  ssh: readonly SshIdentityMetadata[];
 }>;
 
 type AccountDataRequest = Readonly<{
@@ -384,7 +381,7 @@ export function AccountMenu({ inline = false }: Readonly<{ inline?: boolean }>) 
       <div className="account-inline">
         <AccountConnectionSurface
           description={<>Signed in as {shortIdentity(session.account.id)}. Manage the same hosted connections your Nanocodex agents can use.</>}
-          title="Account"
+          title="Connect"
         >
           <AccountConnectionSection
             eyebrow="Account"
@@ -401,14 +398,6 @@ export function AccountMenu({ inline = false }: Readonly<{ inline?: boolean }>) 
               Sign out
             </button>
           </AccountConnectionSection>
-
-          <SshIdentityManager
-            disabled={providerOperation !== null}
-            identities={credentials?.ssh ?? null}
-            onChanged={loadCredentials}
-            presentation="wizard"
-            refreshSession={refreshSession}
-          />
 
           <AccountConnectionSection
             eyebrow="Service"
@@ -775,14 +764,6 @@ export function AccountMenu({ inline = false }: Readonly<{ inline?: boolean }>) 
                 </ProfileConnectors>
                 </section>
 
-                <SshIdentityManager
-                  disabled={!accountPersistent || providerOperation !== null}
-                  identities={credentials?.ssh ?? null}
-                  onChanged={loadCredentials}
-                  presentation={inline ? "wizard" : "profile"}
-                  refreshSession={refreshSession}
-                />
-
                 <section className={`${inline ? "wizard-section " : ""}account-api-keys${accountPersistent ? "" : " is-locked"}`} aria-labelledby="api-key-heading">
                   <div className={inline ? "wizard-section-title api-key-heading" : "api-key-heading"}>
                     <div>
@@ -937,7 +918,6 @@ function decodeCredentialStatus(value: unknown): CredentialStatus {
       ...(typeof value.chatgpt.account_id === "string" ? { accountId: value.chatgpt.account_id } : {}),
       ...(login ? { login } : {}),
     },
-    ssh: decodeSshIdentities(value.ssh),
   };
 }
 

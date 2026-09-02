@@ -698,7 +698,7 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
       : `${surface === "code"
         ? "Source"
         : surface === "connect"
-          ? "Account"
+          ? "Connect"
           : surface === "tools"
             ? "Attached Tools"
             : surface === "chief-of-staff"

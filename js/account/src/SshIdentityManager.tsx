@@ -15,12 +15,14 @@ export function SshIdentityManager({
   onChanged,
   presentation,
   refreshSession,
+  title = "SSH identities",
 }: Readonly<{
   disabled: boolean;
   identities: readonly SshIdentityMetadata[] | null;
   onChanged(): Promise<void>;
   presentation: "profile" | "wizard";
   refreshSession(): Promise<void>;
+  title?: string;
 }>) {
   const id = useId().replaceAll(":", "");
   const [error, setError] = useState<string | null>(null);
@@ -195,6 +197,7 @@ export function SshIdentityManager({
                 <code>{identity.hostKeySha256}</code>
               </div>
               <button
+                aria-label={`Delete SSH identity ${identity.reference}`}
                 disabled={disabled || operation !== null}
                 onClick={() => void remove(identity)}
                 type="button"
@@ -213,7 +216,7 @@ export function SshIdentityManager({
       <AccountConnectionSection
         eyebrow="Infrastructure"
         meta="Private broker"
-        title="SSH identities"
+        title={title}
         titleId={`ssh-identities-${id}`}
       >
         {content}
@@ -225,7 +228,7 @@ export function SshIdentityManager({
     <section className="account-ssh-identities" aria-labelledby={`ssh-identities-${id}`}>
       <div className="api-key-heading">
         <div>
-          <h2 id={`ssh-identities-${id}`}>SSH identities</h2>
+          <h2 id={`ssh-identities-${id}`}>{title}</h2>
           <p>Host target-bound SSH keys for account-owned managed agents.</p>
         </div>
       </div>

@@ -12,6 +12,10 @@ const context = Object.freeze({
   sessionId: "browser-harness-session",
   signal: new AbortController().signal,
 });
+const LOGIN_ID = "l".repeat(22);
+const CARD_ID = "c".repeat(22);
+const ADDRESS_ID = "a".repeat(22);
+const PHONE_ID = "p".repeat(22);
 
 const shellDescriptor = Object.freeze({
   shell: "nanocodex-just-bash",
@@ -68,6 +72,22 @@ test("the default browser harness exposes one exact model-visible tool set", asy
           }] },
           x: { connected: true, label: "Nano Cat (@nanocat)", account_id: "hidden" },
         },
+        vault: [
+          { id: LOGIN_ID, kind: "login", name: "Example", created_at: 1, username: "nanocat" },
+          { id: CARD_ID, kind: "card", name: "Work card", created_at: 2, last4: "4242" },
+          {
+            id: ADDRESS_ID,
+            kind: "address",
+            name: "Office",
+            created_at: 3,
+            address_line_1: "1 Main Street",
+            city: "Athens",
+            state: "Attica",
+            zip: "10557",
+            country: "GR",
+          },
+          { id: PHONE_ID, kind: "phone", name: "Mobile", created_at: 4, phone_number: "+301234567890" },
+        ],
       });
     },
     origin: "https://demo.test",
@@ -146,6 +166,22 @@ test("the default browser harness exposes one exact model-visible tool set", asy
     identity: {},
     stablecoins: [],
     authorizations: [],
+    vault: [
+      { id: LOGIN_ID, kind: "login", name: "Example", created_at: 1, username: "nanocat" },
+      { id: CARD_ID, kind: "card", name: "Work card", created_at: 2, last4: "4242" },
+      {
+        id: ADDRESS_ID,
+        kind: "address",
+        name: "Office",
+        created_at: 3,
+        address_line_1: "1 Main Street",
+        city: "Athens",
+        state: "Attica",
+        zip: "10557",
+        country: "GR",
+      },
+      { id: PHONE_ID, kind: "phone", name: "Mobile", created_at: 4, phone_number: "+301234567890" },
+    ],
   });
   const runtimeInfo = await byName.runtimeInfo.handler({}, context);
   assert.deepEqual(runtimeInfo.account, accountInfo);
@@ -285,6 +321,7 @@ test("accountInfo adds app authorization without forwarding unknown control-plan
         maxPerRequest: "250000",
       },
     }],
+    vault: [],
   });
 });
 
@@ -329,7 +366,103 @@ test("accountInfo projects a bounded host identity and hosted authorization", as
       connectors: ["github"],
       authority: "hosted",
     }],
+    vault: [],
   });
+});
+
+test("accountInfo fails the complete Vault projection closed on unknown secret fields", async () => {
+  const runtime = bindBrowser({
+    ...preparedBrowser(),
+    fetch: async () => Response.json({
+      connectors: { github: { connected: true, label: "octocat" } },
+      vault: [
+        { id: PHONE_ID, kind: "phone", name: "Mobile", created_at: 1, phone_number: "+301234567890" },
+        {
+          id: CARD_ID,
+          kind: "card",
+          name: "Work card",
+          created_at: 2,
+          last4: "4242",
+          card_number: "4242424242424242",
+          cvv: "123",
+          expiry_month: "12",
+          expiry_year: "2030",
+          billing_zip: "10557",
+        },
+      ],
+    }),
+  });
+  const accountInfo = runtime.tools.find(({ name }) => name === "accountInfo");
+
+  const result = await accountInfo.handler({}, context);
+  assert.deepEqual(result.vault, []);
+  assert.equal(JSON.stringify(result).includes("4242424242424242"), false);
+  assert(accountInfo.outputSchema.required.includes("vault"));
+  assert.equal(accountInfo.outputSchema.properties.vault.items.oneOf.length, 4);
+  assert(accountInfo.outputSchema.properties.vault.items.oneOf.every((variant) => (
+    variant.additionalProperties === false && variant.required.includes("created_at")
+  )));
+  assert.match(accountInfo.description, /safe Vault references/);
+  assert.match(accountInfo.description, /never include passwords, full card numbers, CVVs, expiry details, or billing ZIPs/);
+});
+
+test("accountInfo includes an empty required Vault field in login and unavailable outputs", async () => {
+  for (const [response, expectedStatus] of [
+    [new Response(null, { status: 401 }), "requires_login"],
+    [new Response(null, { status: 503 }), "unavailable"],
+  ]) {
+    const runtime = bindBrowser({
+      ...preparedBrowser(),
+      fetch: async () => response,
+    });
+    const accountInfo = runtime.tools.find(({ name }) => name === "accountInfo");
+
+    assert.deepEqual(await accountInfo.handler({}, context), {
+      status: expectedStatus,
+      authenticated: [],
+      accounts: {},
+      connectorAccounts: {},
+      identity: {},
+      stablecoins: [],
+      authorizations: [],
+      vault: [],
+    });
+  }
+});
+
+test("accountInfo rejects Vault metadata outside broker-compatible bounds", async () => {
+  const malformedVaults = [
+    [{ id: "short", kind: "login", name: "Example", created_at: 1, username: "nanocat" }],
+    [{ id: LOGIN_ID, kind: "login", name: " Example", created_at: 1, username: "nanocat" }],
+    [{ id: CARD_ID, kind: "card", name: "Card", created_at: 1, last4: "123" }],
+    [{
+      id: ADDRESS_ID,
+      kind: "address",
+      name: "Office",
+      created_at: 1,
+      address_line_1: "a".repeat(257),
+      city: "Athens",
+      state: "Attica",
+      zip: "10557",
+      country: "GR",
+    }],
+    Array.from({ length: 101 }, (_, index) => ({
+      id: index.toString().padStart(22, "p"),
+      kind: "phone",
+      name: "Mobile",
+      created_at: index,
+      phone_number: "+301234567890",
+    })),
+  ];
+  for (const vault of malformedVaults) {
+    const runtime = bindBrowser({
+      ...preparedBrowser(),
+      fetch: async () => Response.json({ connectors: {}, vault }),
+    });
+    const accountInfo = runtime.tools.find(({ name }) => name === "accountInfo");
+
+    assert.deepEqual((await accountInfo.handler({}, context)).vault, []);
+  }
 });
 
 function preparedBrowser() {
