@@ -15,6 +15,7 @@
     "deploy:broker": "wrangler deploy --env=\"\" --config wrangler.broker.jsonc"
   },
   "dependencies": {
+    "accounts": "0.17.0",
     "nanocodex": "workspace:*"
   },
   "devDependencies": {

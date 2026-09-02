@@ -20,8 +20,9 @@ the repository operator interface in `../../AGENTS.md` for actual operation.
 ## Credential boundary
 
 The broker owns per-user provider credentials, connector OAuth state, MCP
-connection material, and brokered SSH private keys. Durable Objects encrypt
-that state with AES-256-GCM before storage. Production requires
+connection material, brokered SSH private keys, and each persistent account's
+secp256k1 root wallet. Durable Objects encrypt that state with AES-256-GCM
+before storage. Production requires
 `CREDENTIAL_ENCRYPTION_KEY`; a static Secrets Store binding can supply it, and
 `CREDENTIAL_ENCRYPTION_KEY_PREVIOUS` supports key rotation.
 
@@ -31,6 +32,20 @@ account authenticates its own control request and supplies the resolved user
 path; browser callers do not select users, subjects, upstreams, or credentials.
 The development-only ChatGPT bootstrap claim is enabled only by the explicit
 development/test environment and `ALLOW_LOCAL_CREDENTIAL_CLAIM=true`.
+
+The wallet is generated idempotently in the existing per-user
+`UserCredentialBroker` after the managed Worker confirms a successful OTP login.
+Its private key is sealed in the same user-scoped credential envelope and never
+leaves egress. The only wallet signing operations are exact `wallet_connect`
+access-key authorization and `wallet_revokeAccessKey`; there is no generic
+signing, transaction, import, or export surface. Public callers receive only
+the address and sanitized signed operation results.
+
+This is custodial server-side encryption, not user-held end-to-end encryption:
+egress can decrypt the key in Worker memory and the deployment encryption key
+is part of the trust boundary. See
+[persistent account wallet custody](../../docs/WALLET_CUSTODY.md) for the
+lifecycle, allowed operations, and migration boundary.
 
 ## Direct, fail-closed egress
 

@@ -513,6 +513,29 @@ export default defineConfig({
               ? new Response(null, { status: 200 })
               : Response.json({ error: "invalid_request" }, { status: 400 });
           }
+          if (url.hostname === "nanocodex.localhost" && request.method === "POST"
+            && url.pathname === "/v1/connect/auth/challenge") {
+            const body = await request.json() as { chainId?: unknown; resources?: unknown };
+            if (body.chainId !== 4217 || JSON.stringify(body.resources) !== JSON.stringify(["urn:nanocodex:agent:run"])) {
+              return Response.json({ error: "invalid_request" }, { status: 400 });
+            }
+            return Response.json({
+              message: "nanocodex.localhost wants you to sign in with your Ethereum account:\n0x0000000000000000000000000000000000000001\n\nAuthorize Nanocodex.\n\nURI: https://nanocodex.localhost\nVersion: 1\nChain ID: 4217\nNonce: wallettestnonce\nIssued At: 2026-01-01T00:00:00.000Z\nResources:\n- urn:nanocodex:agent:run",
+            });
+          }
+          if (url.hostname === "nanocodex.localhost" && request.method === "POST"
+            && url.pathname === "/v1/connect/auth") {
+            const body = await request.json() as {
+              address?: unknown;
+              message?: unknown;
+              signature?: unknown;
+              returnToken?: unknown;
+            };
+            return typeof body.address === "string" && typeof body.message === "string"
+              && typeof body.signature === "string" && body.returnToken === true
+              ? Response.json({ approval_id: "wallet-test-approval", token: "wallet-test-token" })
+              : Response.json({ error: "invalid_request" }, { status: 400 });
+          }
           if (request.method === "POST" && url.pathname.endsWith("/deviceauth/usercode")) {
             return Response.json({
               device_auth_id: "device-secret",

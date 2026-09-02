@@ -1,4 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
+import { Provider, ProviderRequest, secp256k1, Storage } from "accounts";
 
 import {
   CredentialVault,
@@ -30,6 +31,13 @@ const SUBJECT = /^[A-Za-z0-9_-]{43,128}$/;
 const USER_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const SUBJECT_DIRECTORY_PREFIX = "agent-subject-v1:";
 const SUBJECT_TOMBSTONE_PREFIX = "!deleted:";
+const ROOT_WALLET_PRIVATE_KEY = /^0x[0-9a-fA-F]{64}$/;
+const ROOT_WALLET_ADDRESS = /^0x[0-9a-fA-F]{40}$/;
+const TEMPO_CHAIN_ID = "0x1079";
+const PRODUCTION_CONNECT_API_ORIGIN = "https://nanocodex-connect-api.gakonst.workers.dev";
+const MAX_WALLET_RESOURCES = 64;
+const MAX_WALLET_RESOURCE_BYTES = 512;
+const MAX_WALLET_RESOURCE_TOTAL_BYTES = 8 * 1024;
 
 export interface BrokerEnv extends CredentialVaultEnv {
   AGENT_SUBJECTS: DurableObjectNamespace<AgentSubjectDirectory>;
@@ -68,6 +76,11 @@ type PendingLogin = {
   expiresAt: number;
   pollAfterMs: number;
   nextPollAt: number;
+};
+type RootWallet = {
+  privateKey: `0x${string}`;
+  address: `0x${string}`;
+  createdAt: number;
 };
 export type VaultKind = "login" | "card" | "address" | "phone";
 export type VaultEntryPayload =
@@ -116,6 +129,7 @@ type CredentialState = {
   login?: PendingLogin;
   ssh?: Record<string, BrokeredSshIdentity>;
   vault?: Record<string, VaultEntryMetadata>;
+  wallet?: RootWallet;
 };
 type StoredRow = { envelope: EncryptedEnvelope };
 
@@ -307,6 +321,51 @@ export class UserCredentialBroker extends DurableObject<BrokerEnv> {
       }
       if (request.method === "GET" && url.pathname === "/v1/status") {
         return json(this.#publicStatus(), 200);
+      }
+      if (url.pathname === "/v1/wallet") {
+        if (request.method === "GET") {
+          return this.#credentials.wallet
+            ? json(publicRootWallet(this.#credentials.wallet), 200)
+            : jsonError(404, "wallet_not_configured");
+        }
+        if (request.method === "PUT") {
+          if (await hasRequestPayload(request)) return jsonError(400, "invalid_request");
+          return json(publicRootWallet(await this.#ensureRootWallet()), 200);
+        }
+        return jsonError(405, "method_not_allowed");
+      }
+      if (url.pathname === "/v1/wallet/connect") {
+        if (request.method !== "POST") return jsonError(405, "method_not_allowed");
+        if (!isJsonContentType(request.headers.get("content-type"))) {
+          return jsonError(415, "invalid_content_type");
+        }
+        const requestBody = validateWalletConnectRequest(
+          await readJson(request, MAX_VAULT_BODY_BYTES),
+          this.#env,
+        );
+        if (!requestBody) return jsonError(400, "invalid_wallet_connect_request");
+        const wallet = await this.#ensureRootWallet();
+        return json(await rootWalletProvider(wallet).request(requestBody as never), 200);
+      }
+      if (url.pathname === "/v1/wallet/revoke-access-key") {
+        if (request.method !== "POST") return jsonError(405, "method_not_allowed");
+        if (!isJsonContentType(request.headers.get("content-type"))) {
+          return jsonError(415, "invalid_content_type");
+        }
+        const requestBody = validateWalletRevokeRequest(await readJson(request, MAX_VAULT_BODY_BYTES));
+        if (!requestBody) return jsonError(400, "invalid_wallet_revoke_request");
+        const wallet = await this.#ensureRootWallet();
+        const requested = requestBody.params[0]?.address;
+        if (typeof requested !== "string" || requested.toLowerCase() !== wallet.address.toLowerCase()) {
+          return jsonError(403, "wallet_address_mismatch");
+        }
+        const provider = rootWalletProvider(wallet);
+        await provider.request({
+          method: "wallet_connect",
+          params: [{ chainId: TEMPO_CHAIN_ID, capabilities: { method: "login" } }],
+        } as never);
+        await provider.request(requestBody as never);
+        return json({ ok: true }, 200);
       }
       const vaultMatch = url.pathname.match(
         /^\/v1\/vault\/(login|card|address|phone)(?:\/([A-Za-z0-9_-]{22,64}))?$/,
@@ -523,6 +582,15 @@ export class UserCredentialBroker extends DurableObject<BrokerEnv> {
         .map(publicVaultEntry)
         .sort((left, right) => right.created_at - left.created_at || compareText(left.id, right.id)),
     };
+  }
+
+  async #ensureRootWallet(): Promise<RootWallet> {
+    const current = this.#credentials.wallet;
+    if (current) return current;
+    const wallet = await createRootWallet();
+    this.#credentials = { ...this.#credentials, wallet };
+    await this.#persist();
+    return wallet;
   }
 
   async #credential(recover: boolean, revision: number | undefined): Promise<UserCredentialSnapshot> {
@@ -841,6 +909,10 @@ export class UserCredentialBroker extends DurableObject<BrokerEnv> {
   }> {
     let changed = false;
     const legacy: VaultEntry[] = [];
+    if (restored.wallet !== undefined && !validStoredRootWallet(restored.wallet)) {
+      delete restored.wallet;
+      changed = true;
+    }
     const validVault = Object.entries(isRecord(restored.vault) ? restored.vault : {})
       .flatMap(([id, value]) => {
         const metadata = validateStoredVaultMetadata(id, value);
@@ -910,6 +982,155 @@ export class UserCredentialBroker extends DurableObject<BrokerEnv> {
     }
     return times.length ? Math.min(...times) : undefined;
   }
+}
+
+type WalletConnectRequest = Readonly<{
+  method: "wallet_connect";
+  params: readonly [Readonly<Record<string, unknown>>];
+}>;
+type WalletRevokeRequest = Readonly<{
+  method: "wallet_revokeAccessKey";
+  params: readonly [Readonly<Record<string, unknown>>];
+}>;
+
+function publicRootWallet(wallet: RootWallet): Readonly<{ address: string; created_at: number }> {
+  return { address: wallet.address, created_at: wallet.createdAt };
+}
+
+function validStoredRootWallet(value: unknown): value is RootWallet {
+  return isRecord(value)
+    && Object.keys(value).length === 3
+    && ROOT_WALLET_PRIVATE_KEY.test(String(value.privateKey))
+    && ROOT_WALLET_ADDRESS.test(String(value.address))
+    && typeof value.createdAt === "number"
+    && Number.isSafeInteger(value.createdAt)
+    && value.createdAt > 0;
+}
+
+async function createRootWallet(): Promise<RootWallet> {
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const privateKey = randomRootPrivateKey();
+    try {
+      const provider = rootWalletProvider({ privateKey, address: "0x0000000000000000000000000000000000000000", createdAt: Date.now() });
+      const result = await provider.request({
+        method: "wallet_connect",
+        params: [{ chainId: TEMPO_CHAIN_ID, capabilities: { method: "login" } }],
+      } as never) as { accounts?: readonly { address?: unknown }[] };
+      const address = result.accounts?.[0]?.address;
+      if (typeof address === "string" && ROOT_WALLET_ADDRESS.test(address)) {
+        return {
+          privateKey,
+          address: address.toLowerCase() as `0x${string}`,
+          createdAt: Date.now(),
+        };
+      }
+    } catch { /* retry an invalid scalar without exposing it */ }
+  }
+  throw new BrokerFailure(503, "wallet_provisioning_failed");
+}
+
+function randomRootPrivateKey(): `0x${string}` {
+  const bytes = crypto.getRandomValues(new Uint8Array(32));
+  return `0x${Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("")}`;
+}
+
+function rootWalletProvider(wallet: RootWallet) {
+  return Provider.create({
+    adapter: secp256k1({ privateKey: wallet.privateKey }),
+    storage: Storage.memory({ key: "nanocodex-root-wallet" }),
+    mpp: false,
+  });
+}
+
+function validateWalletConnectRequest(value: unknown, env: BrokerEnv): WalletConnectRequest | undefined {
+  if (!isRecord(value) || !hasExactKeys(value, ["request"]) || !isRecord(value.request)
+    || !hasExactKeys(value.request, ["method", "params"])
+    || value.request.method !== "wallet_connect" || !Array.isArray(value.request.params)
+    || value.request.params.length !== 1 || !isRecord(value.request.params[0])) return undefined;
+  const params = value.request.params[0];
+  if (!hasOnlyKeys(params, ["chainId", "capabilities"]) || params.chainId !== TEMPO_CHAIN_ID
+    || !isRecord(params.capabilities)) return undefined;
+  const capabilities = params.capabilities;
+  if (!hasOnlyKeys(capabilities, ["auth", "authorizeAccessKey", "method", "showDeposit"])
+    || capabilities.method !== "login" || !validWalletAuth(capabilities.auth, env)) return undefined;
+  const request = { method: "wallet_connect", params: [params] } as const;
+  try {
+    ProviderRequest.parse(request, { method: "wallet_connect" });
+    return request;
+  } catch { return undefined; }
+}
+
+function validateWalletRevokeRequest(value: unknown): WalletRevokeRequest | undefined {
+  if (!isRecord(value) || !hasExactKeys(value, ["request"]) || !isRecord(value.request)
+    || !hasExactKeys(value.request, ["method", "params"])
+    || value.request.method !== "wallet_revokeAccessKey" || !Array.isArray(value.request.params)
+    || value.request.params.length !== 1 || !isRecord(value.request.params[0])) return undefined;
+  const request = { method: "wallet_revokeAccessKey", params: [value.request.params[0]] } as const;
+  try {
+    ProviderRequest.parse(request, { method: "wallet_revokeAccessKey" });
+    return request;
+  } catch { return undefined; }
+}
+
+function validWalletAuth(value: unknown, env: BrokerEnv): boolean {
+  if (!isRecord(value)
+    || !hasOnlyKeys(value, ["url", "challenge", "verify", "logout", "resources", "returnToken"])
+    || !Array.isArray(value.resources)
+    || (value.returnToken !== undefined && value.returnToken !== true)) return false;
+  const base = value.url === undefined
+    ? undefined
+    : typeof value.url === "string"
+      ? validConnectAuthEndpoint(value.url, "/v1/connect/auth", env)
+      : undefined;
+  if (value.url !== undefined && !base) return false;
+  const challenge = typeof value.challenge === "string"
+    ? validConnectAuthEndpoint(value.challenge, "/v1/connect/auth/challenge", env)
+    : base
+      ? validConnectAuthEndpoint(new URL("/v1/connect/auth/challenge", base).href, "/v1/connect/auth/challenge", env)
+      : undefined;
+  const verify = typeof value.verify === "string"
+    ? validConnectAuthEndpoint(value.verify, "/v1/connect/auth", env)
+    : base;
+  const logout = typeof value.logout === "string"
+    ? validConnectAuthEndpoint(value.logout, "/v1/connect/auth/logout", env)
+    : value.logout === undefined && base
+      ? validConnectAuthEndpoint(new URL("/v1/connect/auth/logout", base).href, "/v1/connect/auth/logout", env)
+      : undefined;
+  if (!challenge || !verify || challenge.origin !== verify.origin
+    || (value.logout !== undefined && !logout)
+    || (logout && logout.origin !== verify.origin)
+    || value.resources.length > MAX_WALLET_RESOURCES) return false;
+  let total = 0;
+  const seen = new Set<string>();
+  for (const resource of value.resources) {
+    if (typeof resource !== "string" || !resource || /[\u0000-\u001f\u007f]/.test(resource)) return false;
+    const bytes = new TextEncoder().encode(resource).byteLength;
+    if (bytes > MAX_WALLET_RESOURCE_BYTES || (total += bytes) > MAX_WALLET_RESOURCE_TOTAL_BYTES
+      || seen.has(resource)) return false;
+    seen.add(resource);
+  }
+  return true;
+}
+
+function validConnectAuthEndpoint(
+  value: string,
+  pathname: string,
+  env: BrokerEnv,
+): URL | undefined {
+  let url: URL;
+  try { url = new URL(value); } catch { return undefined; }
+  if (url.username || url.password || url.search || url.hash || url.pathname !== pathname) return undefined;
+  if (url.origin === PRODUCTION_CONNECT_API_ORIGIN && url.protocol === "https:" && !url.port) return url;
+  const environment = env.ENVIRONMENT?.trim().toLowerCase();
+  const local = environment !== "production" && environment !== "preview";
+  return local && (url.protocol === "http:" || url.protocol === "https:")
+    && (url.hostname === "nanocodex.localhost" || url.hostname.endsWith(".nanocodex.localhost"))
+    ? url : undefined;
+}
+
+function hasOnlyKeys(value: Record<string, unknown>, allowed: readonly string[]): boolean {
+  const allowedSet = new Set(allowed);
+  return Object.keys(value).every((key) => allowedSet.has(key));
 }
 
 export async function finishRateLimitedRefresh(

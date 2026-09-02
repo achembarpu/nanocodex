@@ -29,6 +29,14 @@ repository and thread Git data, evaluation reads, and credential-backed model
 operations. Provider credentials stay behind Worker bindings and are not part
 of browser configuration.
 
+Persistent SMS accounts use a Worker-owned secp256k1 root wallet. This app may
+display its public address and send exact `wallet_connect` or
+`wallet_revokeAccessKey` requests to the authenticated managed-Worker routes,
+but it never receives the root private key or its encrypted envelope. The key
+is custodial and server-side encrypted in the per-user egress Durable Object;
+it is not user-held end-to-end encryption. Configurable-account migration is
+future work. See [the wallet custody contract](../../docs/WALLET_CUSTODY.md).
+
 Vite uses the Cloudflare and React plugins plus `nanocodex-vite`. Local
 development also serves the Connect dialog and starts the egress, managed, and
 Connect API auxiliary Workers. Build output includes a Cloudflare Wrangler

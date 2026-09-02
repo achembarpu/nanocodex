@@ -223,9 +223,13 @@ describe("SMS OTP authentication", () => {
         url: `https://verify.twilio.com/v2/Services/${TWILIO_VERIFY_SERVICE_SID}/VerificationCheck`,
       });
       const firstAccount = await verified.clone().json<{
-        user: { id: string; persistent: boolean };
+        user: { address: string; id: string; persistent: boolean };
       }>();
-      expect(firstAccount.user).toEqual({ id: expect.any(String), persistent: true });
+      expect(firstAccount.user).toEqual({
+        address: "0x1111111111111111111111111111111111111111",
+        id: expect.any(String),
+        persistent: true,
+      });
       const cookie = verified.headers.get("set-cookie")!.split(";", 1)[0]!;
       expect(cookie).toMatch(/^nanocodex_account=s_[A-Za-z0-9_-]{43}$/);
 
@@ -277,9 +281,15 @@ describe("SMS OTP authentication", () => {
       "123456",
       anonymousCookie,
     );
-    const promotedUser = await promoted.clone().json<{ user: { id: string; persistent: boolean } }>();
+    const promotedUser = await promoted.clone().json<{
+      user: { address: string; id: string; persistent: boolean };
+    }>();
     const persistentCookie = promoted.headers.get("set-cookie")!.split(";", 1)[0]!;
-    expect(promotedUser.user).toEqual({ id: anonymousUser.user.id, persistent: true });
+    expect(promotedUser.user).toEqual({
+      address: "0x1111111111111111111111111111111111111111",
+      id: anonymousUser.user.id,
+      persistent: true,
+    });
 
     const second = await beginSmsOtp(local.env, origin, "+14155550126", "198.51.100.11", persistentCookie);
     const separate = await completeSmsOtp(
@@ -399,6 +409,166 @@ describe("SMS OTP authentication", () => {
     expect(twilio.calls[0]?.authorization).toBe(
       `Basic ${btoa(`${TWILIO_ACCOUNT_SID}:test-twilio-auth-token`)}`,
     );
+  });
+});
+
+describe("managed wallet bridge", () => {
+  it("includes the broker wallet address in OTP success and leaves a failed wallet provision retryable", async () => {
+    const local = portableEnv();
+    local.env.NANOCODEX_OTP_HMAC_KEY = "test-sms-otp-hmac-key-with-at-least-thirty-two-bytes";
+    mockTwilioVerify(local.env);
+    let available = false;
+    local.env.NANOCODEX = {
+      async fetch(input: RequestInfo | URL, init?: RequestInit) {
+        const request = new Request(input, init);
+        if (request.method !== "PUT") return new Response(null, { status: 404 });
+        return available
+          ? Response.json({ address: "0x2222222222222222222222222222222222222222", created_at: 2 })
+          : new Response(null, { status: 503 });
+      },
+    } as Fetcher;
+    const origin = "https://nanocodex.example";
+    const started = await beginSmsOtp(local.env, origin, "+14155550129");
+
+    const unavailable = await completeSmsOtp(
+      local.env,
+      origin,
+      "+14155550129",
+      started.challengeId,
+      "123456",
+    );
+    expect(unavailable.status).toBe(503);
+    await expect(unavailable.json()).resolves.toEqual({ error: "wallet_unavailable" });
+    expect(unavailable.headers.get("set-cookie")).toBeNull();
+
+    available = true;
+    const retried = await completeSmsOtp(
+      local.env,
+      origin,
+      "+14155550129",
+      started.challengeId,
+      "123456",
+    );
+    expect(retried.status).toBe(200);
+    await expect(retried.json()).resolves.toMatchObject({
+      user: { address: "0x2222222222222222222222222222222222222222", persistent: true },
+    });
+  });
+
+  it("requires a persistent session and same-origin mutations before forwarding wallet requests", async () => {
+    const local = portableEnv();
+    const requests: Request[] = [];
+    local.env.NANOCODEX = {
+      async fetch(input: RequestInfo | URL, init?: RequestInit) {
+        requests.push(new Request(input, init));
+        return Response.json({ accepted: true }, { status: 202, headers: { "x-wallet": "preserved" } });
+      },
+    } as Fetcher;
+    const origin = "https://nanocodex.example";
+    const url = new URL("/v1/wallet/connect", origin);
+    const anonymous = await routeAccountRequest(new Request(url, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin },
+      body: "{}",
+    }), local.env, url);
+    expect(anonymous?.status).toBe(401);
+
+    const cookie = persistentAccountCookie(local, USER_ID, "d");
+    const crossOrigin = await routeAccountRequest(new Request(url, {
+      method: "POST",
+      headers: { cookie, "content-type": "application/json", origin: "https://evil.example" },
+      body: "{}",
+    }), local.env, url);
+    expect(crossOrigin?.status).toBe(403);
+
+    const rejectedMaterial = await routeAccountRequest(new Request(url, {
+      method: "POST",
+      headers: { cookie, "content-type": "application/json", origin },
+      body: JSON.stringify({ private_key: "0xdeadbeef" }),
+    }), local.env, url);
+    expect(rejectedMaterial?.status).toBe(400);
+    expect(requests).toHaveLength(0);
+
+    const publicScopeAddress = "0x3333333333333333333333333333333333333333";
+    const allowedPublicAddress = await routeAccountRequest(new Request(url, {
+      method: "POST",
+      headers: { cookie, "content-type": "application/json", origin },
+      body: JSON.stringify({
+        request: {
+          method: "wallet_connect",
+          params: [{
+            capabilities: {
+              authorizeAccessKey: {
+                scopes: [{ address: publicScopeAddress, type: "contract" }],
+              },
+            },
+          }],
+        },
+      }),
+    }), local.env, url);
+    expect(allowedPublicAddress?.status).toBe(202);
+    expect(requests).toHaveLength(1);
+    await expect(requests[0]!.json()).resolves.toMatchObject({
+      request: {
+        params: [{ capabilities: { authorizeAccessKey: { scopes: [{ address: publicScopeAddress }] } } }],
+      },
+    });
+  });
+
+  it("forwards each wallet operation only to its authenticated user and uses the canonical address for /v1/me", async () => {
+    const local = portableEnv();
+    const requests: Request[] = [];
+    local.env.NANOCODEX = {
+      async fetch(input: RequestInfo | URL, init?: RequestInit) {
+        const request = new Request(input, init);
+        requests.push(request);
+        return Response.json({
+          address: new URL(request.url).pathname.includes(SECOND_USER_ID)
+            ? "0x2222222222222222222222222222222222222222"
+            : "0x1111111111111111111111111111111111111111",
+          created_at: 1,
+        });
+      },
+    } as Fetcher;
+    const origin = "https://nanocodex.example";
+    const firstCookie = persistentAccountCookie(local, USER_ID, "d");
+    const secondCookie = persistentAccountCookie(local, SECOND_USER_ID, "e");
+    local.set("account", `address:${USER_ID}`, "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+
+    const firstUrl = new URL("/v1/wallet/connect", origin);
+    const first = await routeAccountRequest(new Request(firstUrl, {
+      method: "POST",
+      headers: { cookie: firstCookie, "content-type": "application/json", origin },
+      body: JSON.stringify({ request: { method: "wallet_connect", params: [{}] } }),
+    }), local.env, firstUrl);
+    expect(first?.status).toBe(200);
+
+    const secondUrl = new URL("/v1/wallet/revoke-access-key", origin);
+    await routeAccountRequest(new Request(secondUrl, {
+      method: "POST",
+      headers: { cookie: secondCookie, "content-type": "application/json", origin },
+      body: JSON.stringify({ request: { method: "wallet_revokeAccessKey", params: [{ key_id: "key_123" }] } }),
+    }), local.env, secondUrl);
+    const mutations = requests.filter((request) => request.method === "POST");
+    expect(mutations.map((request) => request.url)).toEqual([
+      `https://broker.internal/users/${USER_ID}/wallet/connect`,
+      `https://broker.internal/users/${SECOND_USER_ID}/wallet/revoke-access-key`,
+    ]);
+    await expect(mutations[0]!.json()).resolves.toEqual({
+      request: { method: "wallet_connect", params: [{}] },
+    });
+    await expect(mutations[1]!.json()).resolves.toEqual({
+      request: {
+        method: "wallet_revokeAccessKey",
+        params: [{ address: "0x2222222222222222222222222222222222222222", key_id: "key_123" }],
+      },
+    });
+
+    const meUrl = new URL("/v1/me", origin);
+    const me = await routeAccountRequest(new Request(meUrl, { headers: { cookie: firstCookie } }), local.env, meUrl);
+    await expect(me?.json()).resolves.toMatchObject({
+      user: { address: "0x1111111111111111111111111111111111111111", id: USER_ID },
+    });
   });
 });
 
@@ -1026,6 +1196,19 @@ function portableEnv(secret = LOCAL_HMAC_KEY): {
   return {
     env: {
       NANOCODEX_AUTH: auth,
+      NANOCODEX: {
+        async fetch(input: RequestInfo | URL, init?: RequestInit) {
+          const request = new Request(input, init);
+          const match = new URL(request.url).pathname.match(
+            /^\/users\/([0-9a-f-]+)\/wallet(?:\/(connect|revoke-access-key))?$/,
+          );
+          if (!match) return new Response(null, { status: 404 });
+          return Response.json({
+            address: "0x1111111111111111111111111111111111111111",
+            created_at: 1,
+          });
+        },
+      } as Fetcher,
       NANOCODEX_LOCAL_WEBAUTHN_HMAC_KEY: secret,
       NANOCODEX_ORGANIZATIONS: organizations,
       NANOCODEX_USERS: users,
@@ -1058,6 +1241,22 @@ function loginWithPortableCookie(
       metadata: { clientDataJSON: JSON.stringify({ challenge: "AQ" }) },
     }),
   }), env, url) as Promise<Response>;
+}
+
+function persistentAccountCookie(
+  local: ReturnType<typeof portableEnv>,
+  userId: string,
+  character: string,
+): string {
+  const token = character.repeat(64);
+  local.set("webauthn", `session:${token}`, {
+    credentialId: CREDENTIAL_ID,
+    publicKey: PUBLIC_KEY,
+    userId: encodeUserId(userId),
+    issuedAt: 1,
+    expiresAt: Math.floor(Date.now() / 1_000) + 60,
+  });
+  return `nanocodex_account=${token}`;
 }
 
 type TwilioVerifyCall = Readonly<{

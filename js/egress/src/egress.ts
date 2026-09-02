@@ -886,6 +886,35 @@ async function handleControl(request: Request, url: URL, env: EgressEnv): Promis
     );
   }
 
+  const walletMatch = url.pathname.match(
+    /^\/users\/([A-Za-z0-9][A-Za-z0-9._:-]{0,127})\/wallet(?:\/(connect|revoke-access-key))?$/,
+  );
+  if (walletMatch) {
+    const userId = walletMatch[1]!;
+    const operation = walletMatch[2];
+    const target = operation
+      ? `https://credentials.internal/v1/wallet/${operation}`
+      : "https://credentials.internal/v1/wallet";
+    if (!operation && request.method === "GET") {
+      return userBroker(env, userId).fetch(target, { method: "GET" });
+    }
+    if (!operation && request.method === "PUT") {
+      if (await hasRequestPayload(request)) return jsonError(400, "invalid_request");
+      return userBroker(env, userId).fetch(target, { method: "PUT" });
+    }
+    if (operation && request.method === "POST") {
+      if (!isJsonContentType(request.headers.get("content-type"))) {
+        return jsonError(415, "invalid_content_type");
+      }
+      return userBroker(env, userId).fetch(target, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: request.body,
+      });
+    }
+    return jsonError(405, "method_not_allowed");
+  }
+
   const mcpMatch = url.pathname.match(
     /^\/users\/([A-Za-z0-9][A-Za-z0-9._:-]{0,127})\/mcp-connections(?:\/([A-Za-z0-9_-]{43})(?:\/(start|callback))?)?$/,
   );

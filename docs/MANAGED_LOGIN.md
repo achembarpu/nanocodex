@@ -36,7 +36,9 @@ operation for CI, curl, or another machine.
 
 The device envelope still uses Tempo Accounts/Wata `wallet_connect`; this is an
 RPC transport name, not the login mechanism. Nanocodex account login is a
-first-party SMS OTP flow owned by the managed Cloudflare Worker.
+first-party SMS OTP flow owned by the managed Cloudflare Worker. For a
+persistent SMS account, the root signer is the account's custodial Worker-owned
+wallet, not a browser wallet.
 
 ## End-to-end flow
 
@@ -53,8 +55,9 @@ first-party SMS OTP flow owned by the managed Cloudflare Worker.
 3. **Prepare the requested authorization.** A non-MPP request includes
    `urn:nanocodex:authorization:hosted`, allowing Connect to approve hosted
    authority without returning or persisting a key. An explicit MPP request is
-   a separate stronger-auth ceremony: it omits this marker, prepares a local
-   Tempo access key, and requires the signed access-key result.
+   a separate access-key ceremony: it omits this marker, prepares a delegated
+   Tempo access key, and requires the Worker-root-signed access-key result. The
+   delegated key may be returned to the installation; the root key never is.
 
 4. **Register a device authorization.** The CLI starts a Wata device-code
    exchange containing one `wallet_connect` RPC request. The request declares
@@ -76,10 +79,12 @@ first-party SMS OTP flow owned by the managed Cloudflare Worker.
 6. **Establish the Nanocodex account.** The user enters an E.164 phone number
    and a six-digit code delivered by Twilio Verify over SMS or eligible RCS.
    Verify generates and checks the code. The managed Worker binds only an HMAC
-   digest of the phone to the account and issues the same HttpOnly account
-   session used by managed agents. A new phone promotes only the current
-   anonymous browser account; a known phone restores its existing agents,
-   memory, and connections.
+   digest of the phone to the account and provisions the persistent account's
+   root wallet through private egress before issuing the same HttpOnly account
+   session used by managed agents. Wallet provisioning is idempotent and a
+   failure leaves the local challenge retryable. A new phone promotes only the
+   current anonymous browser account; a known phone restores its existing
+   agents, memory, connections, and wallet address.
 
 7. **Run the focused action.** The browser derives its work from the signed
    `wallet_connect` request:
@@ -109,8 +114,11 @@ first-party SMS OTP flow owned by the managed Cloudflare Worker.
    final browser view is the completed installation CTA. The embedded
    `/connect-dialog` approval remains explicit.
 
-9. **Return the explicit Accounts result.** Nanocodex Connect submits the approved
-   `wallet_connect` result to the Wata device-code host. The CLI polls with PKCE
+9. **Return the explicit Accounts result.** For access-key mode, Nanocodex
+   Connect asks the account-authenticated managed Worker to sign the exact
+   `wallet_connect` request; egress uses the account root and returns only a
+   sanitized result. Nanocodex Connect submits the approved result to the Wata
+   device-code host. The CLI polls with PKCE
    and receives exactly one account. The result is either the existing signed
    access-key authorization or a hosted authorization containing a 43-character
    one-time approval identifier and `mode: "hosted"`. The CLI accepts hosted
@@ -153,10 +161,10 @@ first-party SMS OTP flow owned by the managed Cloudflare Worker.
 - The managed Cloudflare Worker owns HMAC phone identity, local abuse limits,
   browser-bound challenges, account sessions, and the one-time hosted
   authorization. Twilio Verify owns OTP generation, delivery, attempt limits,
-  expiry, and checking.
-  Tempo Accounts/Wata owns the device-code transport, PKCE exchange,
-  `wallet_connect` envelope, and the explicit signed access-key step-up used
-  for MPP.
+  expiry, and checking. Tempo Accounts/Wata owns the device-code transport and
+  PKCE exchange. The private egress broker owns persistent SMS-account root
+  wallets and signs only bounded `wallet_connect` access-key authorizations and
+  `wallet_revokeAccessKey` operations.
 - The Worker retains each browser challenge for five minutes, enforces a
   60-second resend delay, and caps starts per phone and Cloudflare client IP.
   The Verify Service must use six-digit codes with a validity window compatible
@@ -166,8 +174,13 @@ first-party SMS OTP flow owned by the managed Cloudflare Worker.
   resources, account linking, connector onboarding, consent UI, and scoped
   grant.
 - The private egress broker exclusively owns hosted ChatGPT, OpenAI, and other
-  provider credentials. Agent actors and CLI clients retain only opaque
-  subjects or scoped grants.
+  provider credentials and persistent account root private keys. Agent actors
+  and CLI clients retain only opaque subjects, scoped grants, and delegated
+  access keys. Root keys and their encrypted envelopes never leave egress.
+- Root wallets use the existing `CREDENTIAL_ENCRYPTION_KEY` envelope in the
+  account's per-user Durable Object. This is custodial server-side encryption,
+  not user-held end-to-end encryption. Configurable-account migration is future
+  work; see [the custody contract](WALLET_CUSTODY.md).
 - A local ChatGPT credential is never uploaded implicitly. In local
   development, `nanocodex connect chatgpt` is the explicit user-approved action
   that claims an available local Codex/ChatGPT credential into the broker when

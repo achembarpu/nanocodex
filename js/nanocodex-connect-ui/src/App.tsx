@@ -1,4 +1,4 @@
-import { dialog, Provider, Storage, webAuthn } from "accounts";
+import { Provider, Storage, webAuthn } from "accounts";
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { Dialog } from "nanocodex/connect";
 
@@ -38,6 +38,10 @@ import {
   type BrowserAccountSession,
 } from "./browserAccountSession.js";
 import { retainSavedPasskeyLabels } from "./savedPasskeyAccounts.js";
+import {
+  requestManagedWalletConnect,
+  requestManagedWalletRevocation,
+} from "./walletWorker.mjs";
 
 import { classifyMachineUsdOrder } from "./machineUsdOrder.mjs";
 import {
@@ -64,20 +68,32 @@ import {
   usesBrowserLocalWebAuthn,
 } from "./connectPolicy.mjs";
 import type { ConnectRequest, McpConnection, WalletRequest } from "./connectTypes.js";
+type ProviderStoreAccount = Readonly<{
+  address: `0x${string}`;
+  credential?: Readonly<{ id: string }> | undefined;
+  label?: string | undefined;
+}>;
+const emptyProviderState = Object.freeze({ activeAccount: 0, accounts: Object.freeze([]) as readonly ProviderStoreAccount[] });
+const emptyProviderStore = Object.freeze({
+  getState: () => emptyProviderState,
+  setState: (_state: { accounts: readonly ProviderStoreAccount[] }) => undefined,
+  subscribe: (_listener: () => void) => () => undefined,
+});
 const browserLocalWebAuthn = usesBrowserLocalWebAuthn(window.location.origin);
-const provider = createProvider(browserLocalWebAuthn);
-const providerStore = (provider as unknown as {
+const provider = browserLocalWebAuthn ? createLocalProvider() : undefined;
+const providerStore = provider ? (provider as unknown as {
   store: {
     getState(): { activeAccount: number; accounts: readonly ProviderStoreAccount[] };
     setState(state: { accounts: readonly ProviderStoreAccount[] }): unknown;
     subscribe(listener: () => void): () => void;
   };
-}).store;
+}).store : emptyProviderStore;
 let browserSession: Promise<BrowserAccountSession> | undefined;
 
 export async function logoutAccount() {
   try {
-    await provider.request({ method: "wallet_disconnect" });
+    if (provider) await provider.request({ method: "wallet_disconnect" });
+    else await logoutBrowserAccountSession();
   } finally {
     invalidateBrowserSession();
   }
@@ -124,11 +140,6 @@ type ConnectorAttempt = {
   token: string;
 };
 type CeremonyAttempt = Readonly<{ requestId: string }>;
-type ProviderStoreAccount = Readonly<{
-  address: `0x${string}`;
-  credential?: Readonly<{ id: string }> | undefined;
-  label?: string | undefined;
-}>;
 type WizardAccountSelection = AccountSelection;
 
 export type { ConnectRequest } from "./connectTypes.js";
@@ -220,7 +231,10 @@ export function ConnectOnboarding({
   }, [request?.id, finishConnectorAttempt]);
 
   useEffect(() => {
-    if (!request || request.type !== "walletConnect" || request.hostPrincipalExchange) return;
+    if (!request
+      || (request.type === "walletConnect" && request.hostPrincipalExchange)
+      || (request.type !== "walletConnect"
+        && (request.type !== "walletRevokeAccessKey" || browserLocalWebAuthn))) return;
     const requestId = request.id;
     void ensureBrowserSession().then((session) => {
       if (currentRequestId.current === requestId) setBrowserAccountState(session);
@@ -468,6 +482,17 @@ export function ConnectOnboarding({
     activeCeremony.current = attempt;
     setCeremonyRequestId(activeRequest.id);
     try {
+      if (activeRequest.type === "walletRevokeAccessKey" && !browserLocalWebAuthn) {
+        const session = browserAccountState;
+        if (!session || session === "reauthentication" || !session.persistent || !session.address) {
+          throw new Error("Sign in by SMS before revoking this account key.");
+        }
+        await completeRequest(
+          await requestManagedWalletRevocation(activeRequest.rpc, session.address),
+          activeRequest.id,
+        );
+        return;
+      }
       if (activeRequest.type === "walletConnect" && activeRequest.hostPrincipalExchange) {
         const hosted = await authorizeHostPrincipal(activeRequest);
         const result = sanitizeHostPrincipalWalletResult({
@@ -498,8 +523,12 @@ export function ConnectOnboarding({
         return;
       }
       const selectedMode = selectedAccount?.mode ?? accountMode;
+      const managedWallet = activeRequest.type === "walletConnect"
+        && selectedAccount?.authentication === "sms_otp"
+        && !browserLocalWebAuthn;
       const hostedAuthorization = activeRequest.type === "walletConnect"
-        && (selectedMode === "register"
+        && (managedWallet
+          || selectedMode === "register"
           || authenticatedSavedAccount)
         && walletConnectContext(activeRequest).resources.includes(hostedAuthorizationResource)
         && !walletConnectContext(activeRequest).resources.includes("urn:nanocodex:mpp:machusd:spend");
@@ -517,7 +546,9 @@ export function ConnectOnboarding({
       ) {
         registrationUserId = await prepareRegistrationSession();
       }
-      let result: undefined | { accounts: readonly Readonly<{ address: `0x${string}` }>[] };
+      let result: unknown;
+      let managedAddress: `0x${string}` | undefined;
+      let managedAuthToken: string | undefined;
       if (authenticatedSavedAccount) {
         result = { accounts: [{ address: selectedAccount!.address! }] };
       } else {
@@ -527,19 +558,48 @@ export function ConnectOnboarding({
             && selectedAccount?.discoverCredential) {
             await clearPortableCredential(connectApiUrl(activeRequest));
           }
-          result = await retainSavedPasskeyLabels(providerStore, () => provider.request(
-            (activeRequest.type === "walletConnect"
-              ? walletRequest(
+          if (managedWallet) {
+            if (hostedAuthorization) {
+              if (!selectedAccount?.address) {
+                throw new Error("The account service did not return the managed account address.");
+              }
+              managedAddress = selectedAccount.address;
+              result = { accounts: [{ address: selectedAccount.address }] };
+            } else {
+              const connected = await requestManagedWalletConnect(
+                walletRequest(
                   activeRequest,
                   selectedMode,
                   registrationUserId,
                   selectedAccount?.credentialId,
                   selectedAccount?.label,
                   selectedAccount?.discoverCredential,
-                  hostedAuthorization,
-                )
-              : activeRequest.rpc) as never,
-          ) as Promise<typeof result>);
+                  false,
+                  true,
+                ),
+                activeRequest.confirmationCode !== undefined,
+              );
+              result = connected.result;
+              managedAddress = connected.address;
+              managedAuthToken = connected.authToken;
+            }
+          } else if (provider) {
+            result = await retainSavedPasskeyLabels(providerStore, () => provider.request(
+              (activeRequest.type === "walletConnect"
+                ? walletRequest(
+                    activeRequest,
+                    selectedMode,
+                    registrationUserId,
+                    selectedAccount?.credentialId,
+                    selectedAccount?.label,
+                    selectedAccount?.discoverCredential,
+                    hostedAuthorization,
+                  )
+                : activeRequest.rpc) as never,
+            ));
+          } else {
+            throw new Error("Sign in by SMS to connect this account.");
+          }
         } finally {
           if (activeRequest.type === "walletConnect") invalidateBrowserSession();
         }
@@ -547,11 +607,12 @@ export function ConnectOnboarding({
       if (currentRequestId.current !== attempt.requestId) {
         throw new DOMException("The Connect request changed.", "AbortError");
       }
-      if (activeRequest.type === "walletConnect" && !result?.accounts[0]) {
+      if (activeRequest.type === "walletConnect"
+        && (!Array.isArray(record(result).accounts) || !record(result).accounts[0])) {
         throw new Error("Accounts did not return a connected account.");
       }
       if (activeRequest.type === "walletConnect") {
-        const account = result!.accounts[0] as Readonly<{
+        const account = record(result).accounts[0] as Readonly<{
           address: `0x${string}`;
           capabilities?: Readonly<{ auth?: Readonly<{
             connectors?: ConnectorStatuses;
@@ -562,14 +623,18 @@ export function ConnectOnboarding({
         }>;
         const auth = account.capabilities?.auth;
         if (hostedAuthorization) {
-          const hosted = await authorizeHostedRegistration(activeRequest, account.address);
+          const accountAddress = managedAddress ?? account.address;
+          if (!accountAddress || !/^0x[0-9a-fA-F]{40}$/.test(accountAddress)) {
+            throw new Error("Accounts did not return the canonical account address.");
+          }
+          const hosted = await authorizeHostedRegistration(activeRequest, accountAddress);
           const next: PendingApproval = {
-            accountAddress: account.address,
+            accountAddress,
             apiUrl: connectApiUrl(activeRequest),
             deferredChatGptImport: walletView(activeRequest).connectPolicy.chatGptCredentialImport,
             result: sanitizeCliWalletResult({
               accounts: [{
-                address: account.address,
+                address: accountAddress,
                 capabilities: {
                   auth: { approval_id: hosted.approvalId, mode: "hosted" },
                 },
@@ -596,10 +661,10 @@ export function ConnectOnboarding({
           }
           return;
         }
-        const token = auth?.token;
+        const token = managedAuthToken ?? auth?.token;
         if (!token) throw new Error("Accounts did not return an authenticated Connect session.");
         const next: PendingApproval = {
-          accountAddress: account.address,
+          accountAddress: managedAddress ?? account.address,
           apiUrl: connectApiUrl(activeRequest),
           deferredChatGptImport: walletView(activeRequest).connectPolicy.chatGptCredentialImport,
           result: activeRequest.confirmationCode
@@ -1200,7 +1265,7 @@ export function ConnectOnboarding({
         <span className="wordmark">nanocodex/connect</span>
           <span className="secure-label"><span aria-hidden="true" /> {hostPrincipalRequest
             ? "host identity"
-            : "SMS OTP + Tempo Wallet"}</span>
+            : "SMS account"}</span>
       </header> : null}
 
       {request.type === "walletConnect" ? (
@@ -1262,6 +1327,36 @@ export function ConnectOnboarding({
             ) : null}
           </div>}
         </>
+      ) : request.type === "walletRevokeAccessKey" && !browserLocalWebAuthn
+        && !managedRevocationSessionMatches(browserAccountState, request) ? (
+        <div className="dialog-content">
+          {browserAccountState === undefined ? (
+            <p role="status">Checking your account session…</p>
+          ) : (
+            <AccountChooser
+              authOrigin={isLocalDevelopmentOrigin(window.location.origin)
+                ? window.location.origin
+                : productionNanocodexOrigin}
+              description="Sign in by SMS to the account that owns this access key."
+              disabled={ceremonyActive}
+              failure={failure?.id === request.id ? failure.message : undefined}
+              onCancel={reject}
+              onChooseAccount={(account) => {
+                const requestedAddress = record(firstParam(request.rpc.params)).address;
+                if (!account.address || typeof requestedAddress !== "string"
+                  || account.address.toLowerCase() !== requestedAddress.toLowerCase()) {
+                  setFailure({
+                    id: request.id,
+                    message: "That phone is linked to a different account.",
+                  });
+                  return;
+                }
+                setFailure(undefined);
+                setBrowserAccountState({ address: account.address, id: "sms", persistent: true });
+              }}
+            />
+          )}
+        </div>
       ) : request.type === "walletRevokeAccessKey" ? (
         <>
           <div className="dialog-content">
@@ -1273,7 +1368,7 @@ export function ConnectOnboarding({
           <div className="dialog-actions">
             <button type="button" disabled={ceremonyActive} onClick={reject}>Cancel</button>
             <button type="button" disabled={ceremonyActive} onClick={() => void approve()}>
-              Revoke in Tempo Wallet
+              Revoke account key
             </button>
           </div>
         </>
@@ -1292,7 +1387,7 @@ function RevocationApproval({ request }: Readonly<{ request: WalletRequest }>) {
         <h1 id="revocation-heading">Revoke agent access</h1>
       </section>
       <section className="detail-section" aria-labelledby="revocation-details">
-        <SectionHeading id="revocation-details" label="Revocation" value="Tempo Wallet" />
+        <SectionHeading id="revocation-details" label="Revocation" value="Account key" />
         <div className="permission-rows">
           <PermissionRow label="Account" value={shortAddress(params.address)} />
           <PermissionRow label="Access key" value={shortAddress(params.accessKeyAddress)} />
@@ -1301,6 +1396,17 @@ function RevocationApproval({ request }: Readonly<{ request: WalletRequest }>) {
       </section>
     </>
   );
+}
+
+function managedRevocationSessionMatches(
+  session: BrowserAccountSession | "reauthentication" | null | undefined,
+  request: WalletRequest,
+): boolean {
+  if (!session || session === "reauthentication" || !session.persistent || !session.address) return false;
+  const requestedAddress = record(firstParam(request.rpc.params)).address;
+  return typeof requestedAddress === "string"
+    && /^0x[0-9a-fA-F]{40}$/.test(requestedAddress)
+    && session.address.toLowerCase() === requestedAddress.toLowerCase();
 }
 
 type ConnectionView = Omit<Dialog.ConnectionRequest, "auth" | "accessKey"> & Readonly<{
@@ -1442,8 +1548,8 @@ function ConnectionWizard({
         authOrigin={nanocodexOriginFor(request.apiUrl)}
         confirmationCode={confirmationCode}
         description={reauthenticationRequired
-          ? `Your session expired. Sign in by SMS, then connect your Tempo Wallet to approve ${requester}.`
-          : `Sign in by SMS, then connect your Tempo Wallet to approve ${requester}.`}
+          ? `Your session expired. Sign in by SMS, then connect your account to approve ${requester}.`
+          : `Sign in by SMS, then connect your account to approve ${requester}.`}
         disabled={disabled}
         onCancel={onCancel}
         onChooseAccount={onChooseAccount}
@@ -1955,6 +2061,7 @@ function walletRequest(
   selectedLabel?: string,
   discoverCredential?: boolean,
   hostedRegistration = false,
+  managedWallet = false,
 ) {
   const params = record(firstParam(request.rpc.params));
   const capabilities = record(params.capabilities);
@@ -1974,13 +2081,18 @@ function walletRequest(
     const auth = capabilities.auth;
     if (!auth) return auth;
     if (typeof auth === "string") {
-      return { url: auth, verify: `${apiUrl}/v1/connect/auth` };
+      return {
+        url: auth,
+        verify: `${apiUrl}/v1/connect/auth`,
+        ...(managedWallet ? { returnToken: true } : {}),
+      };
     }
     const forwarded = record(auth);
     return {
       ...forwarded,
       verify: `${apiUrl}/v1/connect/auth`,
       resources,
+      ...(managedWallet ? { returnToken: true } : {}),
     };
   })();
   return {
@@ -2024,14 +2136,12 @@ async function clearPortableCredential(apiUrl: string): Promise<void> {
   }
 }
 
-function createProvider(browserLocal: boolean) {
+function createLocalProvider() {
   return Provider.create({
-    adapter: browserLocal
-      ? webAuthn({
-          name: "Nanocodex",
-          rdns: "xyz.paradigm.nanocodex",
-        })
-      : dialog({ name: "Tempo Wallet", rdns: "xyz.tempo" }),
+    adapter: webAuthn({
+      name: "Nanocodex",
+      rdns: "xyz.paradigm.nanocodex",
+    }),
     mpp: false,
     storage: Storage.idb({ key: "nanocodex" }),
   });

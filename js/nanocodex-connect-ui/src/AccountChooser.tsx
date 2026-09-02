@@ -166,6 +166,7 @@ export function AccountChooser({
               {operation === "send" ? "Sending…" : "Send code"}
             </button>
           </div>
+          <p>By continuing, you agree to receive an automated one-time account code. Message and data rates may apply.</p>
         </form>
       ) : (
         <form className="sms-otp-form" onSubmit={(event) => {
@@ -227,7 +228,13 @@ function otpError(value: unknown, fallback: string): string {
   if (value.error === "rate_limited") return "Too many codes requested. Wait a minute and try again.";
   if (value.error === "invalid_phone") return "Enter a mobile number with its country code.";
   if (value.error === "invalid_or_expired_otp") return "That code is invalid or expired.";
+  if (value.error === "invalid_otp") return "Enter the six-digit code from the message.";
   if (value.error === "sms_delivery_failed") return "The code could not be delivered. Try again.";
+  if (value.error === "sms_verification_failed") return "The code could not be checked right now. Try again.";
+  if (value.error === "wallet_unavailable") return "Your account key could not be prepared. Try again.";
+  if (value.error === "sms_otp_unavailable" || value.error === "sms_identity_unavailable") {
+    return "Phone sign-in is temporarily unavailable. Try again.";
+  }
   return fallback;
 }
 
