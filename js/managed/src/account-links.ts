@@ -3,7 +3,7 @@ import { Kv } from "accounts/server";
 import {
   authenticate,
   authenticatePersistentAccount,
-  authenticatePersistentPasskeyAccount,
+  authenticatePersistentHostedAccount,
   isUserId,
   requireSameOriginMutation,
   type AccountAuthEnv,
@@ -11,9 +11,10 @@ import {
 
 const CONNECT_DIALOG_ORIGIN = "https://nanocodex.gakonst.workers.dev";
 const CONNECT_APP_ID = "atlas-workspace";
-const HOSTED_CONNECT_APP_ID = "nanocodex-cli";
-const HOSTED_CONNECT_APP_ORIGIN = "https://cli.nanocodex.xyz";
 const HOSTED_MPP_RESOURCE = "urn:nanocodex:mpp:machusd:spend";
+const HOSTED_AUTHORIZATION_RESOURCE = "urn:nanocodex:authorization:hosted";
+const APP_RESOURCE_PREFIX = "urn:nanocodex:app:";
+const APP_ORIGIN_RESOURCE_PREFIX = "urn:nanocodex:origin:";
 const INTERNAL_ORIGIN = "https://nanocodex.internal";
 const NANOCODEX_ORIGIN = "https://nanocodex.gakonst.workers.dev";
 const AUTHORIZATION_TTL_SECONDS = 5 * 60;
@@ -40,8 +41,8 @@ type AuthorizationCode = Readonly<{
 
 type HostedAuthorizationCode = Readonly<{
   accountAddress: string;
-  appId: typeof HOSTED_CONNECT_APP_ID;
-  appOrigin: typeof HOSTED_CONNECT_APP_ORIGIN;
+  appId: string;
+  appOrigin: string;
   resources: readonly string[];
   userId: string;
 }>;
@@ -188,7 +189,7 @@ async function authorizeHostedConnection(
   env: AccountAuthEnv,
   url: URL,
 ): Promise<Response> {
-  const account = await authenticatePersistentPasskeyAccount(request, env, url);
+  const account = await authenticatePersistentHostedAccount(request, env, url);
   if (!account) return json({ error: "unauthorized" }, { status: 401 });
   const originFailure = requireSameOriginMutation(request, url, account.principal);
   if (originFailure) return originFailure;
@@ -197,16 +198,17 @@ async function authorizeHostedConnection(
   if (!hasExactKeys(parsed, ["account_address", "app_id", "app_origin", "resources"])) {
     return json({ error: "invalid_hosted_authorization" }, { status: 400 });
   }
-  const appId = parsed.app_id === HOSTED_CONNECT_APP_ID ? HOSTED_CONNECT_APP_ID : undefined;
-  const appOrigin = parsed.app_origin === HOSTED_CONNECT_APP_ORIGIN
-    ? HOSTED_CONNECT_APP_ORIGIN
-    : undefined;
+  const appId = typeof parsed.app_id === "string" ? parsed.app_id : undefined;
+  const appOrigin = typeof parsed.app_origin === "string" ? parsed.app_origin : undefined;
   const accountAddress = parseAddress(parsed.account_address);
   const resources = parseHostedResources(parsed.resources);
-  if (!appId || !appOrigin || !accountAddress || !resources) {
+  const app = resources ? hostedApp(resources) : undefined;
+  if (!appId || !appOrigin || !accountAddress || !resources
+    || !app || app.id !== appId || app.origin !== appOrigin) {
     return json({ error: "invalid_hosted_authorization" }, { status: 400 });
   }
-  if (resources.includes(HOSTED_MPP_RESOURCE)) {
+  if (!resources.includes(HOSTED_AUTHORIZATION_RESOURCE)
+    || resources.includes(HOSTED_MPP_RESOURCE)) {
     return json({ error: "hosted_mpp_forbidden" }, { status: 400 });
   }
   if (accountAddress !== account.accountAddress) {
@@ -347,13 +349,14 @@ async function exchangeHostedAuthorizationCode(
   const code = typeof parsed.code === "string" && OPAQUE_TOKEN.test(parsed.code)
     ? parsed.code
     : undefined;
-  const appId = parsed.app_id === HOSTED_CONNECT_APP_ID ? HOSTED_CONNECT_APP_ID : undefined;
-  const appOrigin = parsed.app_origin === HOSTED_CONNECT_APP_ORIGIN
-    ? HOSTED_CONNECT_APP_ORIGIN
-    : undefined;
+  const appId = typeof parsed.app_id === "string" ? parsed.app_id : undefined;
+  const appOrigin = typeof parsed.app_origin === "string" ? parsed.app_origin : undefined;
   const accountAddress = parseAddress(parsed.account_address);
   const resources = parseHostedResources(parsed.resources);
+  const app = resources ? hostedApp(resources) : undefined;
   if (!code || !appId || !appOrigin || !accountAddress || !resources
+    || !app || app.id !== appId || app.origin !== appOrigin
+    || !resources.includes(HOSTED_AUTHORIZATION_RESOURCE)
     || resources.includes(HOSTED_MPP_RESOURCE)) {
     return json({ error: "invalid_exchange" }, { status: 400 });
   }
@@ -443,6 +446,8 @@ function validCode(value: unknown): value is AuthorizationCode {
 function validHostedCode(value: unknown): value is HostedAuthorizationCode {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const record = value as Partial<HostedAuthorizationCode>;
+  const resources = parseHostedResources(record.resources);
+  const app = resources ? hostedApp(resources) : undefined;
   return hasExactKeys(record as Record<string, unknown>, [
     "accountAddress",
     "appId",
@@ -451,10 +456,12 @@ function validHostedCode(value: unknown): value is HostedAuthorizationCode {
     "userId",
   ])
     && parseAddress(record.accountAddress) === record.accountAddress
-    && record.appId === HOSTED_CONNECT_APP_ID
-    && record.appOrigin === HOSTED_CONNECT_APP_ORIGIN
-    && parseHostedResources(record.resources) !== undefined
-    && !record.resources!.includes(HOSTED_MPP_RESOURCE)
+    && typeof record.appId === "string"
+    && typeof record.appOrigin === "string"
+    && app?.id === record.appId
+    && app.origin === record.appOrigin
+    && resources!.includes(HOSTED_AUTHORIZATION_RESOURCE)
+    && !resources!.includes(HOSTED_MPP_RESOURCE)
     && isUserId(record.userId);
 }
 
@@ -545,6 +552,29 @@ function parseHostedResources(value: unknown): string[] | undefined {
     resources.push(resource);
   }
   return resources;
+}
+
+function hostedApp(resources: readonly string[]): Readonly<{ id: string; origin: string }> | undefined {
+  const ids = resources.filter((resource) => resource.startsWith(APP_RESOURCE_PREFIX));
+  const origins = resources.filter((resource) => resource.startsWith(APP_ORIGIN_RESOURCE_PREFIX));
+  if (ids.length !== 1 || origins.length !== 1) return undefined;
+  const id = ids[0]!.slice(APP_RESOURCE_PREFIX.length);
+  let origin: string;
+  try {
+    origin = decodeURIComponent(origins[0]!.slice(APP_ORIGIN_RESOURCE_PREFIX.length));
+  } catch {
+    return undefined;
+  }
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(id)) return undefined;
+  try {
+    const url = new URL(origin);
+    if (url.origin !== origin || url.username || url.password
+      || (url.protocol !== "https:" && url.hostname !== "localhost"
+        && url.hostname !== "127.0.0.1" && url.hostname !== "[::1]")) return undefined;
+  } catch {
+    return undefined;
+  }
+  return { id, origin };
 }
 
 function equalResources(left: readonly string[], right: readonly string[]): boolean {

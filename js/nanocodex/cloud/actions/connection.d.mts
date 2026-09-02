@@ -73,7 +73,7 @@ export type AgentVisibility = Readonly<{
 export declare namespace connect {
   type Options = Readonly<{
     capabilities?: Capabilities | undefined;
-    /** Use account-hosted authorization with no access key, spending, or contract authority. */
+    /** Use account-hosted authorization with no access key, spending, or contract authority. @default "hosted" */
     authorization?: "access_key" | "hosted" | undefined;
     /** Let an owning UI close the dialog after its connected state commits. @default "auto" */
     dialog?: Readonly<{ close?: "auto" | "manual" | undefined }> | undefined;
@@ -112,6 +112,7 @@ export declare namespace reconnect {
   type Options = Readonly<{
     /** Reject a retained grant outside these app capability boundaries. */
     capabilities?: Pick<Capabilities, "agent" | "cloudAccounts"> | undefined;
+    /** Defaults to the retained connection mode, then to hosted. */
     authorization?: "access_key" | "hosted" | undefined;
     tools?: readonly NamedTool[] | undefined;
     /** Reject a retained grant issued for another permission preset. */

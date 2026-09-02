@@ -34,8 +34,9 @@ The interactive CLI receives a scoped Nanocodex Connect grant. It must not
 silently mint a general-purpose Nanocodex API key. API keys remain an explicit
 operation for CI, curl, or another machine.
 
-The flow uses Tempo Accounts/Wata `wallet_connect`. This name refers to the
-Tempo Accounts RPC method, not the WalletConnect protocol.
+The device envelope still uses Tempo Accounts/Wata `wallet_connect`; this is an
+RPC transport name, not the login mechanism. Nanocodex account login is a
+first-party SMS OTP flow owned by the managed Cloudflare Worker.
 
 ## End-to-end flow
 
@@ -49,13 +50,11 @@ Tempo Accounts RPC method, not the WalletConnect protocol.
    capabilities instead of starting a redundant ceremony. Connect deliberately
    starts a new ceremony because it changes the installation grant.
 
-3. **Prepare the requested authorization.** The CLI prepares a Tempo access key
-   so the existing signed result remains interoperable and MPP can use its
-   required spending policy. Private signing material remains on the machine.
-   A non-MPP request explicitly includes
+3. **Prepare the requested authorization.** A non-MPP request includes
    `urn:nanocodex:authorization:hosted`, allowing Connect to approve hosted
-   authority without returning or persisting that key. MPP requests omit this
-   marker and require the signed access-key result.
+   authority without returning or persisting a key. An explicit MPP request is
+   a separate stronger-auth ceremony: it omits this marker, prepares a local
+   Tempo access key, and requires the signed access-key result.
 
 4. **Register a device authorization.** The CLI starts a Wata device-code
    exchange containing one `wallet_connect` RPC request. The request declares
@@ -74,9 +73,12 @@ Tempo Accounts RPC method, not the WalletConnect protocol.
    verification URL. The CLI prints both and opens the verification URL in the
    browser when possible. `--no-open` suppresses only that automatic launch.
 
-6. **Establish the Nanocodex account.** Nanocodex Connect signs an existing user
-   in with their passkey or creates a new passkey-backed Nanocodex account. The
-   verified Tempo address is linked to that account.
+6. **Establish the Nanocodex account.** The user enters an E.164 phone number
+   and a six-digit code delivered by SMS. The managed Worker generates and
+   verifies the code, binds only an HMAC digest of the phone to the account,
+   and issues the same HttpOnly account session used by managed agents. A new
+   phone promotes the current browser account; a known phone restores its
+   existing agents, memory, and connections.
 
 7. **Run the focused action.** The browser derives its work from the signed
    `wallet_connect` request:
@@ -98,12 +100,11 @@ Tempo Accounts RPC method, not the WalletConnect protocol.
    `/connect-dialog` surface may use its own dialog behavior; it is not the CLI
    device flow.
 
-8. **Approve the installation automatically.** Once the passkey-backed account
-   is established, the device wizard signs and submits the exact pending
-   installation request without a separate account-card or approval click. If
-   exactly one saved account is available, the wizard starts that passkey
-   ceremony immediately. Account choice, passkey creation, provider OAuth, and
-   MPP policy remain interactive when they genuinely require user input. The
+8. **Approve the installation automatically.** Once the SMS-backed account is
+   established, the device wizard submits the exact pending hosted
+   installation request without a separate account-card or approval click.
+   SMS verification, provider OAuth, and MPP policy remain interactive when
+   they genuinely require user input. The
    final browser view is the completed installation CTA. The embedded
    `/connect-dialog` approval remains explicit.
 
@@ -148,10 +149,15 @@ Tempo Accounts RPC method, not the WalletConnect protocol.
 
 ## Capability and storage boundaries
 
-- Tempo Accounts/Wata owns the device-code transport, PKCE exchange,
-  `wallet_connect` envelope, and signed access-key authorization. Nanocodex
-  Connect owns the one-time hosted authorization when that explicit mode is
-  requested.
+- The managed Cloudflare Worker owns SMS OTP generation, HMAC phone identity,
+  abuse limits, account sessions, and the one-time hosted authorization.
+  Tempo Accounts/Wata owns the device-code transport, PKCE exchange,
+  `wallet_connect` envelope, and the explicit signed access-key step-up used
+  for MPP.
+- OTPs expire after five minutes, allow five guesses, enforce a 60-second
+  resend delay, and are capped per phone and per Cloudflare client IP. Twilio
+  Messaging or the `NANOCODEX_SMS_SEND` service binding only delivers the
+  message; it never decides identity or verifies a code.
 - Nanocodex Connect owns the application identity, requested Nanocodex
   resources, account linking, connector onboarding, consent UI, and scoped
   grant.

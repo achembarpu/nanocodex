@@ -11,8 +11,8 @@ or a second agent backend.
 - **Home and Durable Agent** show the browser agent and its retained thread.
 - **Attached Tools**, **Multiplayer**, and **World** demonstrate browser-hosted
   tools, a shared managed-agent room, and an agent-populated world.
-- **Account** and **Connect** handle passkey account, connection, device, and
-  request-scoped Connect journeys. The Connect dialog is served at
+- **Account** and **Connect** handle SMS OTP account login, connection, device,
+  and request-scoped Connect journeys. The Connect dialog is served at
   `/connect-dialog`; the separate Connect API routes remain behind the Worker.
 - **Docs**, **Evals**, **Source**, **Commits**, and **Changelog** present the
   product reference, evaluation evidence, and published repository data.

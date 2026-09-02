@@ -1030,7 +1030,6 @@ test("Connect grants ChatGPT and an exact local tool catalog without delegated k
   });
 
   const connection = await client.connection.connect({
-    authorization: "hosted",
     capabilities: {
       cloudAccounts: { chatgpt: true },
       agent: {
@@ -1741,6 +1740,7 @@ test("Nanocodex Connect signs one witness-bound access key and enforces its MPP 
   });
 
   let connection = await Actions.connection.connect(client, {
+    authorization: "access_key",
     capabilities: {
       auth: { resources: [
         "repositories",

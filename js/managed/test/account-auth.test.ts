@@ -6,6 +6,7 @@ import {
   routeAccountRequest,
   type AccountAuthEnv,
 } from "../src/account-auth";
+import { routeAccountLinkRequest } from "../src/account-links";
 import { routeConnectorRequest } from "../src/connectors";
 import { routeCredentialRequest } from "../src/credentials";
 
@@ -159,6 +160,200 @@ describe("account provisioning", () => {
       : Response.json(account(USER_ID, false)));
 
     await expect(ensureAccount(env, USER_ID, true)).rejects.toThrow("account provisioning failed");
+  });
+});
+
+describe("SMS OTP authentication", () => {
+  it("creates and restores one persistent account without exposing the phone number", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-02T12:00:00Z"));
+    try {
+      const local = portableEnv();
+      local.env.NANOCODEX_OTP_HMAC_KEY = "test-sms-otp-hmac-key-with-at-least-thirty-two-bytes";
+      const messages: Array<{ body: string; to: string }> = [];
+      local.env.NANOCODEX_SMS_SEND = {
+        async fetch(input: RequestInfo | URL, init?: RequestInit) {
+          const request = new Request(input, init);
+          messages.push(await request.json<{ body: string; to: string }>());
+          return new Response(null, { status: 202 });
+        },
+      } as Fetcher;
+      const origin = "https://nanocodex.example";
+
+      const first = await beginSmsOtp(local.env, origin, "+30 (690) 000-0000");
+      expect(first.response.status).toBe(202);
+      expect(first.challengeId).toMatch(/^[A-Za-z0-9_-]{43}$/);
+      expect(messages).toHaveLength(1);
+      expect(JSON.stringify([...local.values("sms-otp")])).not.toContain("+306900000000");
+      const firstCode = messages[0]!.body.match(/\b(\d{6})\b/)?.[1];
+      expect(firstCode).toBeDefined();
+
+      const wrong = await completeSmsOtp(
+        local.env,
+        origin,
+        "+306900000000",
+        first.challengeId,
+        "999999" === firstCode ? "999998" : "999999",
+      );
+      expect(wrong.status).toBe(400);
+      await expect(wrong.json()).resolves.toMatchObject({ attempts_remaining: 4 });
+
+      const verified = await completeSmsOtp(
+        local.env,
+        origin,
+        "+306900000000",
+        first.challengeId,
+        firstCode!,
+      );
+      expect(verified.status).toBe(200);
+      const firstAccount = await verified.clone().json<{
+        user: { address: string; id: string; persistent: boolean };
+      }>();
+      expect(firstAccount.user).toMatchObject({ persistent: true });
+      expect(firstAccount.user.address).toMatch(/^0x[0-9a-f]{40}$/);
+      const cookie = verified.headers.get("set-cookie")!.split(";", 1)[0]!;
+      expect(cookie).toMatch(/^nanocodex_account=s_[A-Za-z0-9_-]{43}$/);
+
+      const current = await routeAccountRequest(new Request(`${origin}/v1/me`, {
+        headers: { cookie },
+      }), local.env, new URL(`${origin}/v1/me`));
+      await expect(current!.json()).resolves.toMatchObject(firstAccount);
+
+      const resources = [
+        "urn:nanocodex:agent:run",
+        "urn:nanocodex:app:test-workspace",
+        `urn:nanocodex:origin:${encodeURIComponent("https://app.example")}`,
+        "urn:nanocodex:authorization:hosted",
+      ];
+      const authorizeUrl = new URL("/v1/connect/hosted-authorization/authorize", origin);
+      const authorized = await routeAccountLinkRequest(new Request(authorizeUrl, {
+        method: "POST",
+        headers: { cookie, "content-type": "application/json", origin },
+        body: JSON.stringify({
+          account_address: firstAccount.user.address,
+          app_id: "test-workspace",
+          app_origin: "https://app.example",
+          resources,
+        }),
+      }), local.env, authorizeUrl);
+      expect(authorized?.status).toBe(200);
+      const { code } = await authorized!.json<{ code: string }>();
+
+      const exchangeUrl = new URL("https://nanocodex.internal/connect/hosted-authorizations/exchange");
+      const exchanged = await routeAccountLinkRequest(new Request(exchangeUrl, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          account_address: firstAccount.user.address,
+          app_id: "test-workspace",
+          app_origin: "https://app.example",
+          code,
+          resources,
+        }),
+      }), local.env, exchangeUrl);
+      expect(exchanged?.status).toBe(200);
+      await expect(exchanged!.json()).resolves.toMatchObject({
+        account_address: firstAccount.user.address,
+        resources,
+        user_id: firstAccount.user.id,
+      });
+
+      const loggedOut = await routeAccountRequest(new Request(`${origin}/v1/auth/logout`, {
+        method: "POST",
+        headers: { cookie, origin },
+      }), local.env, new URL(`${origin}/v1/auth/logout`));
+      expect(loggedOut?.status).toBe(204);
+
+      vi.setSystemTime(new Date("2026-09-02T12:01:01Z"));
+      local.deleteMatching("sms-otp", "cooldown:");
+      const second = await beginSmsOtp(local.env, origin, "+306900000000", "198.51.100.2");
+      expect(second.response.status).toBe(202);
+      const secondCode = messages[1]!.body.match(/\b(\d{6})\b/)?.[1];
+      const restored = await completeSmsOtp(
+        local.env,
+        origin,
+        "+306900000000",
+        second.challengeId,
+        secondCode!,
+      );
+      await expect(restored.json()).resolves.toEqual(firstAccount);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("enforces browser origin, resend limits, and configured delivery", async () => {
+    const local = portableEnv();
+    local.env.NANOCODEX_OTP_HMAC_KEY = "test-sms-otp-hmac-key-with-at-least-thirty-two-bytes";
+    local.env.NANOCODEX_SMS_SEND = {
+      fetch() { return Promise.resolve(new Response(null, { status: 202 })); },
+    } as unknown as Fetcher;
+    const origin = "https://nanocodex.example";
+
+    const crossOrigin = await routeAccountRequest(new Request(`${origin}/v1/auth/sms/start`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: "https://evil.example" },
+      body: JSON.stringify({ phone: "+14155550123" }),
+    }), local.env, new URL(`${origin}/v1/auth/sms/start`));
+    expect(crossOrigin?.status).toBe(403);
+
+    const oversized = await routeAccountRequest(new Request(`${origin}/v1/auth/sms/start`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin },
+      body: JSON.stringify({ phone: `+1${"2".repeat(1_100)}` }),
+    }), local.env, new URL(`${origin}/v1/auth/sms/start`));
+    expect(oversized?.status).toBe(413);
+
+    const first = await beginSmsOtp(local.env, origin, "+14155550123");
+    expect(first.response.status).toBe(202);
+    const limited = await beginSmsOtp(local.env, origin, "+14155550123");
+    expect(limited.response.status).toBe(429);
+    expect(limited.response.headers.get("retry-after")).toBe("60");
+
+    const unavailable = portableEnv();
+    unavailable.env.NANOCODEX_OTP_HMAC_KEY = local.env.NANOCODEX_OTP_HMAC_KEY;
+    const failed = await beginSmsOtp(unavailable.env, origin, "+14155550124");
+    expect(failed.response.status).toBe(503);
+    unavailable.env.NANOCODEX_SMS_SEND = local.env.NANOCODEX_SMS_SEND;
+    const retried = await beginSmsOtp(unavailable.env, origin, "+14155550124");
+    expect(retried.response.status).toBe(202);
+  });
+
+  it("invalidates a challenge after five incorrect codes", async () => {
+    const local = portableEnv();
+    local.env.NANOCODEX_OTP_HMAC_KEY = "test-sms-otp-hmac-key-with-at-least-thirty-two-bytes";
+    let deliveredCode = "";
+    local.env.NANOCODEX_SMS_SEND = {
+      async fetch(input: RequestInfo | URL, init?: RequestInit) {
+        const request = new Request(input, init);
+        const message = await request.json<{ body: string }>();
+        deliveredCode = message.body.match(/\b(\d{6})\b/)?.[1] ?? "";
+        return new Response(null, { status: 202 });
+      },
+    } as unknown as Fetcher;
+    const origin = "https://nanocodex.example";
+    const started = await beginSmsOtp(local.env, origin, "+14155550124");
+    const incorrect = deliveredCode === "000000" ? "000001" : "000000";
+
+    for (let attemptsRemaining = 4; attemptsRemaining >= 0; attemptsRemaining -= 1) {
+      const response = await completeSmsOtp(
+        local.env,
+        origin,
+        "+14155550124",
+        started.challengeId,
+        incorrect,
+      );
+      expect(response.status).toBe(400);
+      await expect(response.json()).resolves.toMatchObject({ attempts_remaining: attemptsRemaining });
+    }
+    const exhausted = await completeSmsOtp(
+      local.env,
+      origin,
+      "+14155550124",
+      started.challengeId,
+      deliveredCode,
+    );
+    expect(exhausted.status).toBe(400);
   });
 });
 
@@ -691,6 +886,8 @@ function portableEnv(secret = LOCAL_HMAC_KEY): {
   env: AccountAuthEnv;
   get(name: string, key: string): unknown;
   set(name: string, key: string, value: unknown): void;
+  values(name: string): IterableIterator<unknown>;
+  deleteMatching(name: string, prefix: string): void;
 } {
   const stores = new Map<string, Map<string, unknown>>();
   const store = (name: string) => {
@@ -790,6 +987,10 @@ function portableEnv(secret = LOCAL_HMAC_KEY): {
     } as unknown as AccountAuthEnv,
     get: (name, key) => store(name).get(key),
     set: (name, key, value) => store(name).set(key, value),
+    values: (name) => store(name).values(),
+    deleteMatching: (name, prefix) => {
+      for (const key of store(name).keys()) if (key.startsWith(prefix)) store(name).delete(key);
+    },
   };
 }
 
@@ -811,6 +1012,43 @@ function loginWithPortableCookie(
       id: credentialId,
       metadata: { clientDataJSON: JSON.stringify({ challenge: "AQ" }) },
     }),
+  }), env, url) as Promise<Response>;
+}
+
+async function beginSmsOtp(
+  env: AccountAuthEnv,
+  origin: string,
+  phone: string,
+  ip = "198.51.100.1",
+): Promise<{ challengeId: string; response: Response }> {
+  const url = new URL("/v1/auth/sms/start", origin);
+  const response = await routeAccountRequest(new Request(url, {
+    method: "POST",
+    headers: {
+      "cf-connecting-ip": ip,
+      "content-type": "application/json",
+      origin,
+    },
+    body: JSON.stringify({ phone }),
+  }), env, url) as Response;
+  const body: { challenge_id?: string } = await response.clone()
+    .json<{ challenge_id?: string }>()
+    .catch(() => ({}));
+  return { challengeId: body.challenge_id ?? "", response };
+}
+
+function completeSmsOtp(
+  env: AccountAuthEnv,
+  origin: string,
+  phone: string,
+  challengeId: string,
+  code: string,
+): Promise<Response> {
+  const url = new URL("/v1/auth/sms/verify", origin);
+  return routeAccountRequest(new Request(url, {
+    method: "POST",
+    headers: { "content-type": "application/json", origin },
+    body: JSON.stringify({ challenge_id: challengeId, code, phone }),
   }), env, url) as Promise<Response>;
 }
 

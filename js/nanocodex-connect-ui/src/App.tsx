@@ -7,6 +7,7 @@ import {
   type AccountSelection,
   type StoredPasskey,
 } from "./AccountChooser.js";
+import { PasskeyAccountChooser } from "./PasskeyAccountChooser.js";
 import {
   AccountConnectionCard,
   AccountConnectionGrid,
@@ -499,14 +500,15 @@ export function ConnectOnboarding({
       }
       const selectedMode = selectedAccount?.mode ?? accountMode;
       const hostedAuthorization = activeRequest.type === "walletConnect"
-        && (selectedMode === "register" || authenticatedSavedAccount)
-        && activeRequest.confirmationCode !== undefined
+        && (selectedAccount?.authentication === "sms_otp"
+          || selectedMode === "register"
+          || authenticatedSavedAccount)
         && walletConnectContext(activeRequest).resources.includes(hostedAuthorizationResource)
         && !walletConnectContext(activeRequest).resources.includes("urn:nanocodex:mpp:machusd:spend");
       if (authenticatedSavedAccount && (!hostedAuthorization
         || selectedMode !== "login"
         || !selectedAccount?.address)) {
-        throw new Error("This saved account requires passkey authentication.");
+        throw new Error("This account requires a fresh SMS sign-in.");
       }
       setAccountMode(selectedMode);
       let registrationUserId: string | undefined;
@@ -751,7 +753,7 @@ export function ConnectOnboarding({
     mcpConnections: readonly McpConnection[];
     token: string;
   }> {
-    const resources = walletConnectContext(activeRequest).resources;
+    const { app, resources } = walletConnectContext(activeRequest);
     const websiteOrigin = nanocodexOriginFor(connectApiUrl(activeRequest));
     const authorize = await fetch(`${websiteOrigin}/v1/connect/hosted-authorization/authorize`, {
       method: "POST",
@@ -759,8 +761,8 @@ export function ConnectOnboarding({
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         account_address: accountAddress,
-        app_id: "nanocodex-cli",
-        app_origin: "https://cli.nanocodex.xyz",
+        app_id: app.id,
+        app_origin: app.origin,
         resources,
       }),
     });
@@ -777,8 +779,8 @@ export function ConnectOnboarding({
       },
       body: JSON.stringify({
         account_address: accountAddress,
-        app_id: "nanocodex-cli",
-        app_origin: "https://cli.nanocodex.xyz",
+        app_id: app.id,
+        app_origin: app.origin,
         code,
         resources,
       }),
@@ -1198,7 +1200,11 @@ export function ConnectOnboarding({
     >
       {!wizard ? <header className="dialog-header">
         <span className="wordmark">nanocodex/connect</span>
-          <span className="secure-label"><span aria-hidden="true" /> {hostPrincipalRequest ? "host identity" : "passkey"}</span>
+          <span className="secure-label"><span aria-hidden="true" /> {hostPrincipalRequest
+            ? "host identity"
+            : connectionRequest?.auth.resources.includes(hostedAuthorizationResource)
+              ? "SMS OTP"
+              : "passkey"}</span>
       </header> : null}
 
       {request.type === "walletConnect" ? (
@@ -1217,10 +1223,11 @@ export function ConnectOnboarding({
                 setWizardAccount(account);
                 void approve(
                   account,
-                  wizard
-                    && account.current === true
-                    && browserAccountState !== "reauthentication"
-                    && browserAccountState?.persistent === true,
+                  account.authentication === "sms_otp"
+                    || (wizard
+                      && account.current === true
+                        && browserAccountState !== "reauthentication"
+                        && browserAccountState?.persistent === true),
                 );
               }}
               onCancel={reject}
@@ -1301,6 +1308,7 @@ function RevocationApproval({ request }: Readonly<{ request: WalletRequest }>) {
 }
 
 type ConnectionView = Omit<Dialog.ConnectionRequest, "auth" | "accessKey"> & Readonly<{
+  apiUrl: string;
   auth: Readonly<{ message?: string; resources: readonly string[] }>;
   accessKey?: Omit<Dialog.ConnectionRequest["accessKey"], "witness"> & Readonly<{ witness?: `0x${string}` }>;
   connectPolicy: ReturnType<typeof parseConnectPolicy>;
@@ -1428,21 +1436,31 @@ function ConnectionWizard({
   const requester = presentation === "wizard" ? "Nanocodex CLI" : request.app.name;
   const hostedAuthorization = request.auth.resources.includes(hostedAuthorizationResource);
   if (!request.hostPrincipalExchange && !connectorStatuses && !accountAddress) {
-    return (
+    const requestContext = <RequestedConnectionContext
+      appVisibility={appVisibility}
+      request={request}
+      requester={requester}
+    />;
+    return hostedAuthorization ? (
       <AccountChooser
+        authOrigin={nanocodexOriginFor(request.apiUrl)}
         confirmationCode={confirmationCode}
         description={reauthenticationRequired
-          ? `Your session expired. Use a remembered passkey to reauthenticate before approving ${requester}.`
-          : `Choose the Nanocodex account that will approve ${requester}.`}
+          ? `Your session expired. Sign in by SMS before approving ${requester}.`
+          : `Sign in by SMS to choose the Nanocodex account that will approve ${requester}.`}
         disabled={disabled}
-        newAccountDetail={`Create one passkey and approve only the access requested by ${requester}.`}
         onCancel={onCancel}
         onChooseAccount={onChooseAccount}
-        requestContext={<RequestedConnectionContext
-          appVisibility={appVisibility}
-          request={request}
-          requester={requester}
-        />}
+        requestContext={requestContext}
+      />
+    ) : (
+      <PasskeyAccountChooser
+        confirmationCode={confirmationCode}
+        description={`Confirm with a passkey before approving ${requester}.`}
+        disabled={disabled}
+        onCancel={onCancel}
+        onChooseAccount={onChooseAccount}
+        requestContext={requestContext}
         storedPasskeys={storedPasskeys}
       />
     );
@@ -1464,13 +1482,13 @@ function ConnectionWizard({
                   ? `${connectorProviderLabel(focusedControl.provider)} is connected. You can return to ${requester}.`
                   : connectorAction === focusedProvider
                   ? `Continue in ${connectorProviderLabel(requiredConnectorProvider(focused.id))}. You’ll return here when the requested access is connected.`
-                  : request.hostPrincipalExchange ? "Approve with your host identity." : "Continue with your passkey."
+                  : request.hostPrincipalExchange ? "Approve with your host identity." : "Continue with SMS verification."
                 : focusedMcp
                   ? mcpConnections?.find(({ id }) => id === focusedMcp.id)?.status === "connected"
                     ? `${focusedMcp.name} is connected. You can return to ${requester}.`
                     : mcpConnectionAction === focusedMcp.id
                       ? `Continue in ${focusedMcp.name}. You’ll return here when it is connected.`
-                      : request.hostPrincipalExchange ? "Approve with your host identity." : "Continue with your passkey."
+                      : request.hostPrincipalExchange ? "Approve with your host identity." : "Continue with SMS verification."
                 : presentation === "dialog"
                   ? `Connect any missing accounts, then approve ${requester}’s requested access.`
                   : `Review ${requester}’s hosted access.`}</>}
@@ -2110,6 +2128,7 @@ function walletView(request: WalletRequest): ConnectionView {
       }
     : undefined;
   return {
+    apiUrl: connectApiUrl(request),
     id: request.id,
     type: "connect",
     app,

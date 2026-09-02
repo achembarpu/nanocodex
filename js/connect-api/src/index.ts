@@ -1137,9 +1137,8 @@ async function createHostedAuthorization(
   const appOrigin = requiredString(body.app_origin, "app_origin");
   const resources = encodedResources;
   const app = approvedAppContext(resources);
-  if (app.appId !== CLI_APP_ID || app.origin !== CLI_APP_ORIGIN
-    || appId !== app.appId || appOrigin !== app.origin) {
-    throw new ApiFailure(403, "app_identity_mismatch", "Hosted authorization is reserved for the Nanocodex CLI.");
+  if (appId !== app.appId || appOrigin !== app.origin) {
+    throw new ApiFailure(403, "app_identity_mismatch", "Hosted authorization does not match the approved app.");
   }
   if (!resources.includes(HOSTED_AUTHORIZATION_RESOURCE)
     || resources.includes("urn:nanocodex:mpp:machusd:spend")) {

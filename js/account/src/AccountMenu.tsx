@@ -365,13 +365,11 @@ export function AccountMenu({ inline = false }: Readonly<{ inline?: boolean }>) 
     return (
       <AccountChooser
         description={session.reauthenticationRequired
-          ? "Your session expired. Continue with the saved passkey to restore this account’s memory and connections."
-          : "Continue with a saved passkey, or create a new Nanocodex account."}
+          ? "Your session expired. Enter your phone number to restore this account’s memory and connections."
+          : "Enter your phone number to create or restore your Nanocodex account."}
         disabled={session.operation !== null}
         failure={session.error}
-        newAccountDetail="Create one passkey to keep your agents, memory, and connections."
         onChooseAccount={(selection) => void session.chooseAccount(selection)}
-        storedPasskeys={session.savedPasskeys}
       />
     );
   }
@@ -386,7 +384,7 @@ export function AccountMenu({ inline = false }: Readonly<{ inline?: boolean }>) 
           <AccountConnectionSection
             eyebrow="Account"
             meta={shortIdentity(session.account.id)}
-            title="Passkey identity"
+            title="SMS identity"
             titleId="account-identity-heading"
           >
             <button
@@ -600,13 +598,13 @@ export function AccountMenu({ inline = false }: Readonly<{ inline?: boolean }>) 
               <section className={inline ? "wizard-section account-identity" : "account-summary"}>
                 {inline ? (
                   <header className="wizard-section-title">
-                    <div><span>Account</span><h2>Passkey identity</h2></div>
+                    <div><span>Account</span><h2>SMS identity</h2></div>
                     <small>{shortIdentity(session.account.id)}</small>
                   </header>
                 ) : (
                   <>
-                    <span>{session.account.persistent ? "Passkey identity" : "Browser session"}</span>
-                    <span>{session.account.persistent ? "Available across devices" : "Add a passkey to keep it"}</span>
+                    <span>{session.account.persistent ? "SMS identity" : "Browser session"}</span>
+                    <span>{session.account.persistent ? "Available across devices" : "Verify your phone to keep it"}</span>
                   </>
                 )}
                 {session.account.persistent ? (
@@ -622,26 +620,12 @@ export function AccountMenu({ inline = false }: Readonly<{ inline?: boolean }>) 
               </section>
 
               {!accountPersistent ? (
-                <div className="account-auth-actions">
-                  <p>Add a passkey or use an existing one to connect services and create API keys.</p>
-                  <div className="account-auth-buttons">
-                    <button
-                      className="account-primary-action"
-                      type="button"
-                      disabled={session.operation !== null}
-                      onClick={() => void session.register()}
-                    >
-                      Add a passkey
-                    </button>
-                    <button
-                      type="button"
-                      disabled={session.operation !== null}
-                      onClick={() => void session.signIn()}
-                    >
-                      Use existing passkey
-                    </button>
-                  </div>
-                </div>
+                <AccountChooser
+                  description="Verify your phone to keep this account and unlock connections and API keys."
+                  disabled={session.operation !== null}
+                  failure={session.error}
+                  onChooseAccount={(selection) => void session.chooseAccount(selection)}
+                />
               ) : null}
 
               <div className={inline ? "account-profile-content wizard-sections" : "api-key-panel account-profile-content"}>
@@ -652,7 +636,7 @@ export function AccountMenu({ inline = false }: Readonly<{ inline?: boolean }>) 
                     <h2 id="connections-heading">Connections</h2>
                     {!inline ? <p>{accountPersistent
                       ? "Choose a service to connect it through your private broker. Connected services can be removed from the same tile."
-                      : "Add or use a passkey above to enable connections and API keys."}</p> : null}
+                      : "Verify your phone above to enable connections and API keys."}</p> : null}
                   </div>
                   {inline ? <small>Available to your agents</small> : null}
                 </div>
@@ -841,28 +825,14 @@ export function AccountMenu({ inline = false }: Readonly<{ inline?: boolean }>) 
               </div>
             </>
           ) : (
-            <div className="account-auth-actions">
-              <p>{session.reauthenticationRequired
-                ? "Your passkey session expired. Sign in to restore this account’s memory and connections."
-                : "Sign in with your passkey, or explicitly start a separate account."}</p>
-              <div className="account-auth-buttons">
-                <button
-                  className="account-primary-action"
-                  type="button"
-                  disabled={session.operation !== null}
-                  onClick={() => void session.signIn()}
-                >
-                  Sign in with passkey
-                </button>
-                <button
-                  type="button"
-                  disabled={session.operation !== null}
-                  onClick={() => void session.register()}
-                >
-                  Create new account
-                </button>
-              </div>
-            </div>
+            <AccountChooser
+              description={session.reauthenticationRequired
+                ? "Your session expired. Enter your phone number to restore this account’s memory and connections."
+                : "Enter your phone number to create or restore your Nanocodex account."}
+              disabled={session.operation !== null}
+              failure={session.error}
+              onChooseAccount={(selection) => void session.chooseAccount(selection)}
+            />
           )}
         </section>
       ) : null}

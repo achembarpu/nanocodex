@@ -24,7 +24,7 @@ storage ownership.
 
 ## Public journeys and protocol boundaries
 
-- Passkey/account and API-key routes establish the account identity that owns
+- SMS OTP/account and API-key routes establish the account identity that owns
   agents, organizations, connectors, memory, and history.
 - `/v1/agents` lists or creates agents. Agent routes create turns, read state,
   cancel or steer work, delete an agent, and support explicit durability import
@@ -53,6 +53,16 @@ protocol. `/health` is the service health endpoint.
 | `NANOCODEX_ROOMS`, `NANOCODEX_MULTIPLAYER_QUOTA` | Multiplayer state and global quota. |
 | `NANOCODEX_AUTH`, `NANOCODEX_USERS`, `NANOCODEX_API_KEYS`, `NANOCODEX_ORGANIZATIONS`, `NANOCODEX_MEMORY` | Account, key, organization, and durable-memory ownership. |
 | `NANOCODEX_HISTORY`, `HISTORY_AI_SEARCH` | R2 history archive and production history retrieval. |
+
+### SMS OTP delivery
+
+Set `NANOCODEX_OTP_HMAC_KEY` to at least 32 random bytes. Delivery can use a
+private `NANOCODEX_SMS_SEND` Service Binding accepting `{ "to", "body" }`, or
+Twilio Messaging via the `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, and
+`TWILIO_FROM_NUMBER` Worker secrets. The Worker stores phone numbers only as
+keyed HMAC digests and never logs the code or provider credentials. Keep the
+HMAC key stable; rotating it requires an identity migration or known phones
+will resolve to new accounts.
 
 `wrangler.jsonc` is the binding and migration source of truth. Development
 uses the same Worker role with local Durable Objects, local egress binding, R2,
