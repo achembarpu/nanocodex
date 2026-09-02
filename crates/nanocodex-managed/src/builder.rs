@@ -166,6 +166,7 @@ pub struct Managed<S = ManagedService> {
 enum ManagedOperation {
     Create,
     Open(String),
+    OpenFromState(String, AgentState),
 }
 
 impl Managed<ManagedService> {
@@ -184,6 +185,23 @@ impl Managed<ManagedService> {
         Self {
             service: ManagedService::new(client),
             operation: ManagedOperation::Open(agent_id.into()),
+        }
+    }
+
+    /// Opens an existing account-owned agent from one already validated state response.
+    ///
+    /// This preserves the state/event cursor fence without repeating the
+    /// authenticated state request when a caller also needs the state for
+    /// presentation hydration.
+    #[must_use]
+    pub fn open_from_state(
+        client: ManagedClient,
+        agent_id: impl Into<String>,
+        state: AgentState,
+    ) -> Self {
+        Self {
+            service: ManagedService::new(client),
+            operation: ManagedOperation::OpenFromState(agent_id.into(), state),
         }
     }
 }
@@ -264,58 +282,65 @@ impl<S> ManagedBuilder<S> {
         S::Future: Send + 'static,
         S::Error: std::error::Error + Send + Sync + 'static,
     {
-        let (agent_id, expected_session_id) = match self.managed.operation {
+        let (agent_id, expected_session_id, supplied_state) = match self.managed.operation {
             ManagedOperation::Create => {
                 match call(&mut self.managed.service, ManagedRequest::Create).await? {
                     ManagedResponse::Created(receipt) => {
-                        (receipt.agent_id, Some(receipt.session_id))
+                        (receipt.agent_id, Some(receipt.session_id), None)
                     }
                     _ => return Err(unexpected_response()),
                 }
             }
-            ManagedOperation::Open(agent_id) => (agent_id, None),
+            ManagedOperation::Open(agent_id) => (agent_id, None, None),
+            ManagedOperation::OpenFromState(agent_id, state) => (agent_id, None, Some(state)),
         };
-        let state = match call(
-            &mut self.managed.service,
-            ManagedRequest::State {
-                agent_id: agent_id.clone(),
-            },
-        )
-        .await?
-        {
-            ManagedResponse::State(state) => state,
-            _ => return Err(unexpected_response()),
-        };
-        if state.agent_id != agent_id {
-            return Err(backend_error(ManagedError::InvalidResponse(
-                "agent state identity does not match the requested agent",
-            )));
+
+        let state_and_cursor = async {
+            let state = match supplied_state {
+                Some(state) => state,
+                None => match call(
+                    &mut self.managed.service,
+                    ManagedRequest::State {
+                        agent_id: agent_id.clone(),
+                    },
+                )
+                .await?
+                {
+                    ManagedResponse::State(state) => state,
+                    _ => return Err(unexpected_response()),
+                },
+            };
+            if state.agent_id != agent_id {
+                return Err(backend_error(ManagedError::InvalidResponse(
+                    "agent state identity does not match the requested agent",
+                )));
+            }
+            if expected_session_id
+                .as_deref()
+                .is_some_and(|expected| expected != state.session_id)
+            {
+                return Err(backend_error(ManagedError::InvalidResponse(
+                    "created agent receipt and state session identities differ",
+                )));
+            }
+            if state.stream_error.is_some() {
+                return Err(backend_error(ManagedError::InvalidResponse(
+                    "agent state reports a durable stream failure",
+                )));
+            }
+            crate::sse::validate_numeric_cursor(&state.latest_event_cursor).map_err(|_| {
+                backend_error(ManagedError::InvalidResponse(
+                    "agent state latest event cursor is invalid",
+                ))
+            })?;
+            let cursor =
+                EventCursor::parse(state.latest_event_cursor.clone()).map_err(backend_error)?;
+            Ok((state, cursor))
         }
-        if expected_session_id
-            .as_deref()
-            .is_some_and(|expected| expected != state.session_id)
-        {
-            return Err(backend_error(ManagedError::InvalidResponse(
-                "created agent receipt and state session identities differ",
-            )));
-        }
-        if state.stream_error.is_some() {
-            return Err(backend_error(ManagedError::InvalidResponse(
-                "agent state reports a durable stream failure",
-            )));
-        }
-        let cursor = EventCursor::parse(state.latest_event_cursor).map_err(backend_error)?;
-        let stream = match call(
-            &mut self.managed.service,
-            ManagedRequest::Events {
-                agent_id: agent_id.clone(),
-                cursor,
-            },
-        )
-        .await?
-        {
-            ManagedResponse::Events(stream) => stream,
-            _ => return Err(unexpected_response()),
+        .await;
+        let (state, cursor) = match state_and_cursor {
+            Ok(result) => result,
+            Err(error) => return Err(error),
         };
 
         #[cfg(feature = "tools")]
@@ -333,13 +358,39 @@ impl<S> ManagedBuilder<S> {
                     Ok(_) => return Err(unexpected_response()),
                     Err(error) => return Err(error),
                 };
-                Some(
-                    AttachmentSupervisor::connect(tools, target)
-                        .await
-                        .map_err(backend_error)?,
-                )
+                Some(AttachmentSupervisor::start(tools, target).map_err(backend_error)?)
             }
             None => None,
+        };
+
+        let stream_response = match call(
+            &mut self.managed.service,
+            ManagedRequest::Events {
+                agent_id: agent_id.clone(),
+                cursor,
+            },
+        )
+        .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                #[cfg(feature = "tools")]
+                if let Some(attachment) = attachment.as_ref() {
+                    let _ = attachment.shutdown().await;
+                }
+                return Err(error);
+            }
+        };
+
+        let stream = match stream_response {
+            ManagedResponse::Events(stream) => stream,
+            _ => {
+                #[cfg(feature = "tools")]
+                if let Some(attachment) = attachment {
+                    let _ = attachment.shutdown().await;
+                }
+                return Err(unexpected_response());
+            }
         };
 
         let (runtime, events) =

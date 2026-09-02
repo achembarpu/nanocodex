@@ -296,7 +296,7 @@ pub struct AgentCapabilities {
 }
 
 /// Input for one currently active managed turn.
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ActiveTurn {
     /// Stable active turn identifier.
     pub id: String,
@@ -305,7 +305,7 @@ pub struct ActiveTurn {
 }
 
 /// Current durable state for an account-owned agent.
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct AgentState {
     /// Stable managed agent identifier.
     pub agent_id: String,

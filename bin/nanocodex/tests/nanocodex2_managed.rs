@@ -37,6 +37,7 @@ struct TestState {
     origin: String,
     failed_tool_host_attempts: usize,
     expect_local_tool: bool,
+    delay_ready_until_submission: bool,
     disconnect_after_ready: bool,
     catalogs: Arc<Mutex<Vec<serde_json::Value>>>,
 }
@@ -56,6 +57,7 @@ async fn run_uses_managed_lifecycle_with_the_configured_local_workspace() {
         origin: format!("http://{address}"),
         failed_tool_host_attempts: 0,
         expect_local_tool: true,
+        delay_ready_until_submission: true,
         disconnect_after_ready: false,
         catalogs: Arc::new(Mutex::new(Vec::new())),
     };
@@ -149,6 +151,7 @@ async fn run_reports_a_created_agent_before_lifecycle_open_failure() {
         origin: format!("http://{address}"),
         failed_tool_host_attempts: 0,
         expect_local_tool: false,
+        delay_ready_until_submission: false,
         disconnect_after_ready: false,
         catalogs: Arc::new(Mutex::new(Vec::new())),
     };
@@ -200,6 +203,7 @@ async fn run_keeps_the_durable_agent_when_local_tools_are_initially_unavailable(
         origin: format!("http://{address}"),
         failed_tool_host_attempts: usize::MAX,
         expect_local_tool: false,
+        delay_ready_until_submission: false,
         disconnect_after_ready: false,
         catalogs: Arc::new(Mutex::new(Vec::new())),
     };
@@ -268,6 +272,7 @@ async fn run_reconnects_the_same_local_host_after_a_ready_socket_disconnect() {
         origin: format!("http://{address}"),
         failed_tool_host_attempts: 0,
         expect_local_tool: false,
+        delay_ready_until_submission: false,
         disconnect_after_ready: true,
         catalogs: Arc::new(Mutex::new(Vec::new())),
     };
@@ -603,6 +608,7 @@ async fn serve_durable_tool_host(socket: WebSocket, state: DurableState) {
         origin: state.origin.clone(),
         failed_tool_host_attempts: 0,
         expect_local_tool: true,
+        delay_ready_until_submission: false,
         disconnect_after_ready: false,
         catalogs: Arc::new(Mutex::new(Vec::new())),
     };
@@ -861,6 +867,9 @@ async fn serve_tool_host(mut socket: WebSocket, state: TestState, disconnect_aft
             .collect(),
     );
     state.catalogs.lock().unwrap().push(catalog);
+    if state.delay_ready_until_submission {
+        state.completed.notified().await;
+    }
     socket
         .send(Message::Text(
             serde_json::json!({"type":"ready"}).to_string().into(),
@@ -879,7 +888,9 @@ async fn serve_tool_host(mut socket: WebSocket, state: TestState, disconnect_aft
         return;
     }
 
-    state.completed.notified().await;
+    if !state.delay_ready_until_submission {
+        state.completed.notified().await;
+    }
     socket
         .send(Message::Text(
             serde_json::json!({

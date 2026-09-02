@@ -167,8 +167,13 @@ impl ManagedClient {
     /// response-schema failure.
     pub async fn state(&self, agent_id: &str) -> Result<AgentState, ManagedError> {
         validate_id("agent", agent_id)?;
-        self.json(Method::GET, &agent_path(agent_id), None, None)
-            .await
+        let state: AgentState = self
+            .json(Method::GET, &agent_path(agent_id), None, None)
+            .await?;
+        crate::sse::validate_numeric_cursor(&state.latest_event_cursor).map_err(|_| {
+            ManagedError::InvalidResponse("agent state latest event cursor is invalid")
+        })?;
+        Ok(state)
     }
 
     /// Deletes one account-owned managed agent.

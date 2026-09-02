@@ -1410,6 +1410,8 @@ const DurableComputerSession = withWorkspace(
 export class DurableAgentSession extends DurableComputerSession {
   #agent?: CloudflareAgent.Agent;
   #agentPromise?: Promise<CloudflareAgent.Agent>;
+  #agentPrewarmTask?: Promise<void>;
+  #runtimePrewarmTouchedAt?: number;
   #agentConstruction?: AgentConstructionOwnership;
   readonly #agentConstructions = new Set<AgentConstructionOwnership>();
   #agentShutdownPromise?: Promise<void>;
@@ -1864,7 +1866,9 @@ export class DurableAgentSession extends DurableComputerSession {
         || this.#cancellationTasks.size > 0 || this.#realtimeOperations.size > 0
         || this.#pendingDeviceToolCalls.size > 0 || this.#inFlight.size > 0
         || this.#hostedTools.hasPendingCalls()
-        || this.#agentPromise !== undefined || this.#managedRealtimeSession() !== undefined
+        || this.#agentPromise !== undefined || this.#agentPrewarmTask !== undefined
+        || this.#accountMcpRefreshTask !== undefined
+        || this.#managedRealtimeSession() !== undefined
         || this.ctx.storage.sql.exec<{ count: number }>(
           "SELECT COUNT(*) AS count FROM managed_realtime_operations WHERE state = 'pending' AND blocked = 0",
         ).one().count > 0) {
@@ -2114,6 +2118,7 @@ export class DurableAgentSession extends DurableComputerSession {
           : parseCursor(requested);
       if (cursor === undefined)
         return json({ error: "invalid_cursor" }, { status: 400 });
+      this.#prewarmAgent(turnAuthorization);
       return this.#eventLog.streamWithPage(
         cursor,
         this.#eventArchive.latestCursor(this.#eventLog),
@@ -2141,6 +2146,7 @@ export class DurableAgentSession extends DurableComputerSession {
       if (!Number.isSafeInteger(limit) || limit > MAX_HISTORY_PAGE_SIZE) {
         return json({ error: "invalid_history_page" }, { status: 400 });
       }
+      this.#prewarmAgent(turnAuthorization);
       let page;
       try {
         page = await this.#eventArchive.history(this.#eventLog, before, limit);
@@ -2321,6 +2327,8 @@ export class DurableAgentSession extends DurableComputerSession {
       this.#retireDeviceHost(socket, reason || "peer closed");
     }
     closeSocket(socket, code, reason || "peer closed");
+    this.#runtimePrewarmTouchedAt = Date.now();
+    this.ctx.waitUntil(this.#scheduleNextAlarm());
   }
 
   webSocketError(socket: WebSocket): void {
@@ -2330,6 +2338,8 @@ export class DurableAgentSession extends DurableComputerSession {
       this.#retireDeviceHost(socket, "WebSocket failed");
     }
     closeSocket(socket, 1011, "WebSocket failed");
+    this.#runtimePrewarmTouchedAt = Date.now();
+    this.ctx.waitUntil(this.#scheduleNextAlarm());
   }
 
   async alarm(): Promise<void> {
@@ -2377,7 +2387,9 @@ export class DurableAgentSession extends DurableComputerSession {
     const session = this.#session();
     if ((this.#agent || this.#agentPromise)
       && session !== undefined
-      && session.last_active + this.#idleTimeoutMs() > Date.now()) {
+      && (this.#hasLiveSocket()
+        || Math.max(session.last_active, this.#runtimePrewarmTouchedAt ?? 0)
+          + this.#idleTimeoutMs() > Date.now())) {
       await this.#scheduleNextAlarm();
       return;
     }
@@ -2425,7 +2437,34 @@ export class DurableAgentSession extends DurableComputerSession {
       active_turn_details: this.#activeTurnDetails(),
       capabilities: this.#capabilities(),
     });
+    this.#prewarmAgent(authorization);
     return new Response(null, { status: 101, webSocket: client });
+  }
+
+  #prewarmAgent(authorization: TurnAuthorization): void {
+    if (!authorization.capabilities.includes("agents:write")
+      || !authorization.capabilities.includes("tools:use")) return;
+    if (authorization.connectGrant
+      && !authorization.connectGrant.connectors.includes("chatgpt")) return;
+    if (this.#deleting || this.#deleted || this.#durabilityExported
+      || this.#durabilityImportState === "pending") return;
+    this.#runtimePrewarmTouchedAt = Date.now();
+    if (this.#agentPrewarmTask) return;
+
+    const prewarm = (this.#agent || this.#agentPromise
+      ? this.#scheduleNextAlarm()
+      : this.#ensureAgent().then(() => this.#scheduleNextAlarm()))
+      .catch((error) => {
+        console.warn({
+          type: "managed.agent_prewarm_failed",
+          error_kind: errorKind(error),
+        });
+      })
+      .finally(() => {
+        if (this.#agentPrewarmTask === prewarm) this.#agentPrewarmTask = undefined;
+      });
+    this.#agentPrewarmTask = prewarm;
+    this.ctx.waitUntil(prewarm);
   }
 
   #upgradeDeviceHost(): Response {
@@ -4362,11 +4401,13 @@ export class DurableAgentSession extends DurableComputerSession {
 
   async #ensureAgent(): Promise<CloudflareAgent.Agent> {
     if (this.#durabilityExported) throw new Error("durability state was exported");
-    if (this.#deleting) throw retryableError("agent is being deleted");
+    if (this.#deleting || this.#deleted) throw retryableError("agent is being deleted");
     const session = this.#session();
     if (session?.runtime_profile === "managed") {
       await this.#refreshAccountMcpConnections(session);
     }
+    if (this.#durabilityExported) throw new Error("durability state was exported");
+    if (this.#deleting || this.#deleted) throw retryableError("agent is being deleted");
     if (this.#agentShutdownPromise) {
       try {
         await this.#agentShutdownPromise;
@@ -4466,6 +4507,7 @@ export class DurableAgentSession extends DurableComputerSession {
   #ownsAgentConstruction(construction: AgentConstructionOwnership): boolean {
     return !this.#deleting
       && !this.#deleted
+      && !this.#durabilityExported
       && this.#agentConstruction === construction
       && this.#agentPromise === construction.publication
       && this.#runtimeOwnershipGeneration === construction.runtimeGeneration
@@ -5942,9 +5984,14 @@ export class DurableAgentSession extends DurableComputerSession {
       || this.#realtimeArchive.needsSeal()) {
       targets.push(now + 1);
     }
-    if (this.#agent || this.#agentPromise || this.#turns.size > 0 || this.#pendingTurnIds.size > 0) {
+    if ((this.#agent || this.#agentPromise || this.#turns.size > 0 || this.#pendingTurnIds.size > 0)
+      && !this.#hasLiveSocket()) {
       const session = this.#session();
-      targets.push(Math.max(now + 1, (session?.last_active ?? now) + this.#idleTimeoutMs()));
+      const lastActive = Math.max(
+        session?.last_active ?? now,
+        this.#runtimePrewarmTouchedAt ?? 0,
+      );
+      targets.push(Math.max(now + 1, lastActive + this.#idleTimeoutMs()));
     }
     if (!this.#streamError) {
       for (const row of this.#managedTurns(
@@ -5978,6 +6025,10 @@ export class DurableAgentSession extends DurableComputerSession {
       return;
     }
     await this.ctx.storage.setAlarm(Math.max(now + 1, Math.min(...targets)));
+  }
+
+  #hasLiveSocket(): boolean {
+    return this.ctx.getWebSockets().some((socket) => socket.readyState === WebSocket.OPEN);
   }
 
   #capabilities(): AgentCapabilities {

@@ -97,16 +97,78 @@ impl Tools {
 }
 
 impl AttachmentConnector {
+    /// Validates the recipe and starts its complete lifecycle in the background.
+    ///
+    /// # Errors
+    ///
+    /// Fails synchronously when the selected tools cannot produce an immutable
+    /// attached catalog. Discovery and transport failures are reported through
+    /// the returned handle while its driver initializes and reconnects.
+    pub fn start(self) -> Result<(Attachment, AttachmentEvents), AttachmentError> {
+        install_default_rustls_crypto_provider();
+        let prepared = PreparedTools::prepare(&self.tools)?;
+        let (command_tx, command_rx) = mpsc::channel(8);
+        let (event_tx, event_rx) = mpsc::channel(128);
+        let (status_tx, status_rx) = watch::channel(AttachmentStatus::Connecting);
+        let (closed_tx, closed_rx) = watch::channel(None);
+        let refs = Arc::new(HandleRefs { command_tx });
+        tokio::spawn(initialize_and_run(
+            prepared,
+            self.target,
+            command_rx,
+            event_tx,
+            status_tx,
+            closed_tx,
+        ));
+        Ok((
+            Attachment {
+                refs,
+                status: status_rx,
+                closed: closed_rx,
+            },
+            AttachmentEvents { events: event_rx },
+        ))
+    }
+
     /// Prepares the exact catalog, connects, publishes it, and waits for its acknowledgement.
     ///
     /// # Errors
     ///
-    /// Fails for non-attachable selections, discovery failures, transport
-    /// failures, invalid protocol frames, or endpoint rejection before readiness.
+    /// Fails for non-attachable selections, discovery failures, invalid protocol
+    /// frames, or endpoint rejection before readiness. Transient transport
+    /// failures reconnect in the background.
     pub async fn connect(self) -> Result<(Attachment, AttachmentEvents), AttachmentError> {
-        install_default_rustls_crypto_provider();
-        let prepared = PreparedTools::prepare(&self.tools)?;
-        let runtime = Arc::new(PreparedToolRuntime::initialize(prepared).await?);
+        let (attachment, events) = self.start()?;
+        attachment.wait_until_ready().await?;
+        Ok((attachment, events))
+    }
+}
+
+async fn initialize_and_run(
+    prepared: PreparedTools,
+    target: AttachmentTarget,
+    mut command_rx: mpsc::Receiver<driver::Command>,
+    event_tx: mpsc::Sender<AttachmentEvent>,
+    status_tx: watch::Sender<AttachmentStatus>,
+    closed_tx: watch::Sender<Option<Result<(), AttachmentError>>>,
+) {
+    let runtime = tokio::select! {
+        biased;
+        command = command_rx.recv() => {
+            debug_assert!(matches!(command, Some(driver::Command::Detach) | None));
+            let _ = closed_tx.send(Some(Ok(())));
+            return;
+        }
+        initialized = PreparedToolRuntime::initialize(prepared) => match initialized {
+            Ok(runtime) => Arc::new(runtime),
+            Err(error) => {
+                let _ = closed_tx.send(Some(Err(error.into())));
+                return;
+            }
+        },
+    };
+
+    let config = (|| {
         let catalog = runtime.catalog()?;
         let tools = serde_json::to_value(catalog)
             .map_err(|error| AttachmentError::Catalog(error.to_string().into()))?;
@@ -125,27 +187,21 @@ impl AttachmentConnector {
             .ok_or_else(|| AttachmentError::Catalog("catalog tool name is missing".into()))?;
         crate::selection::validate_public_tool_catalog_names(names)
             .map_err(|error| AttachmentError::Catalog(error.to_string().into()))?;
-        let config = driver::Config {
-            endpoint: self.target.endpoint,
-            authorization: format!("Bearer {}", self.target.bearer).into(),
+        Ok::<_, AttachmentError>(driver::Config {
+            endpoint: target.endpoint,
+            authorization: format!("Bearer {}", target.bearer).into(),
             tools,
-        };
-        let (command_tx, command_rx) = mpsc::channel(8);
-        let (event_tx, event_rx) = mpsc::channel(128);
-        let (status_tx, status_rx) = watch::channel(AttachmentStatus::Connecting);
-        let (closed_tx, closed_rx) = watch::channel(None);
-        let refs = Arc::new(HandleRefs { command_tx });
-        tokio::spawn(driver::run(
-            config, runtime, command_rx, event_tx, status_tx, closed_tx,
-        ));
-        let attachment = Attachment {
-            refs,
-            status: status_rx,
-            closed: closed_rx,
-        };
-        attachment.wait_until_ready().await?;
-        Ok((attachment, AttachmentEvents { events: event_rx }))
-    }
+        })
+    })();
+    let config = match config {
+        Ok(config) => config,
+        Err(error) => {
+            runtime.shutdown().await;
+            let _ = closed_tx.send(Some(Err(error)));
+            return;
+        }
+    };
+    driver::run(config, runtime, command_rx, event_tx, status_tx, closed_tx).await;
 }
 
 fn is_literal_loopback(endpoint: &Url) -> bool {
