@@ -46,6 +46,9 @@ export function AccountChooser({
 }>) {
   const phoneId = useId();
   const codeId = useId();
+  const phoneHintId = useId();
+  const codeHintId = useId();
+  const failureId = useId();
   const [phone, setPhone] = useState("");
   const [code, setCode] = useState("");
   const [challenge, setChallenge] = useState<OtpChallenge>();
@@ -54,6 +57,11 @@ export function AccountChooser({
 
   async function sendCode() {
     if (operation) return;
+    const normalized = normalizedPhone(phone);
+    if (!normalized) {
+      setLocalFailure("Enter a valid mobile number with its country code, like +30 697 123 4567.");
+      return;
+    }
     setOperation("send");
     setLocalFailure(undefined);
     try {
@@ -61,7 +69,7 @@ export function AccountChooser({
         method: "POST",
         credentials: "include",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ phone }),
+        body: JSON.stringify({ phone: normalized }),
       });
       const body: unknown = await response.json().catch(() => undefined);
       if (!response.ok) throw new Error(otpError(body, "Couldn’t send the code."));
@@ -73,7 +81,7 @@ export function AccountChooser({
       setChallenge({
         challengeId: body.challenge_id,
         expiresAt: Date.now() + body.expires_in * 1_000,
-        phone,
+        phone: normalized,
       });
       setCode("");
     } catch (cause) {
@@ -85,6 +93,10 @@ export function AccountChooser({
 
   async function verifyCode() {
     if (!challenge || operation) return;
+    if (!/^\d{6}$/.test(code)) {
+      setLocalFailure("Enter the six-digit code from the message.");
+      return;
+    }
     setOperation("verify");
     setLocalFailure(undefined);
     try {
@@ -122,61 +134,68 @@ export function AccountChooser({
   }
 
   const unavailable = disabled || operation !== undefined;
+  const visibleFailure = localFailure ?? failure;
   return (
     <div className="wizard-page wizard-account-page">
-      <header className="wizard-intro">
-        <div className="wizard-app">
-          <h1>Sign in with your phone</h1>
-          <p>{description}</p>
-        </div>
-        {confirmationCode ? (
-          <div className="wizard-terminal-code" role="status">
-            <span>Terminal code</span>
-            <strong>{confirmationCode.slice(0, 4)}-{confirmationCode.slice(4)}</strong>
+      <section className="sms-auth-panel" aria-labelledby={`${phoneId}-heading`}>
+        <header className="wizard-intro">
+          <div className="wizard-app">
+            <span>Nanocodex account</span>
+            <h1 id={`${phoneId}-heading`}>Sign in with your phone</h1>
+            <p>{description}</p>
           </div>
+          {confirmationCode ? (
+            <div className="wizard-terminal-code" role="status">
+              <span>Terminal code</span>
+              <strong>{confirmationCode.slice(0, 4)}-{confirmationCode.slice(4)}</strong>
+            </div>
+          ) : null}
+        </header>
+
+        {visibleFailure ? (
+          <div className="account-failure" id={failureId} role="alert"><p>{visibleFailure}</p></div>
         ) : null}
-      </header>
+        {requestContext ? <div className="wizard-sections">{requestContext}</div> : null}
 
-      {failure || localFailure ? (
-        <div className="account-failure" role="alert"><p>{localFailure ?? failure}</p></div>
-      ) : null}
-      {requestContext ? <div className="wizard-sections">{requestContext}</div> : null}
-
-      {!challenge ? (
-        <form className="sms-otp-form" onSubmit={(event) => {
+        {!challenge ? (
+          <form className="sms-otp-form" noValidate onSubmit={(event) => {
           event.preventDefault();
           void sendCode();
         }}>
           <label htmlFor={phoneId}>Mobile number</label>
-          <p>Include the country code, for example +1 or +30.</p>
+          <p id={phoneHintId}>Include the country code. We’ll text you a one-time code.</p>
           <div className="sms-otp-input-row">
             <input
+              aria-describedby={`${phoneHintId}${visibleFailure ? ` ${failureId}` : ""}`}
+              aria-invalid={localFailure ? true : undefined}
               autoComplete="tel"
               autoFocus
               disabled={unavailable}
               id={phoneId}
               inputMode="tel"
               onChange={(event) => setPhone(event.target.value)}
-              placeholder="+30 69…"
+              placeholder="+30 697 123 4567"
               required
               type="tel"
               value={phone}
             />
-            <button disabled={unavailable || phone.trim().length < 8} type="submit">
+            <button disabled={unavailable} type="submit">
               {operation === "send" ? "Sending…" : "Send code"}
             </button>
           </div>
           <p>By continuing, you agree to receive an automated one-time account code. Message and data rates may apply.</p>
         </form>
       ) : (
-        <form className="sms-otp-form" onSubmit={(event) => {
+        <form className="sms-otp-form" noValidate onSubmit={(event) => {
           event.preventDefault();
           void verifyCode();
         }}>
           <label htmlFor={codeId}>6-digit code</label>
-          <p>Sent to {maskedPhone(challenge.phone)}. It expires at {new Date(challenge.expiresAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}.</p>
+          <p id={codeHintId}>Sent to {maskedPhone(challenge.phone)}. It expires at {new Date(challenge.expiresAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}.</p>
           <div className="sms-otp-input-row">
             <input
+              aria-describedby={`${codeHintId}${visibleFailure ? ` ${failureId}` : ""}`}
+              aria-invalid={localFailure ? true : undefined}
               autoComplete="one-time-code"
               autoFocus
               disabled={unavailable}
@@ -189,7 +208,7 @@ export function AccountChooser({
               required
               value={code}
             />
-            <button disabled={unavailable || code.length !== 6} type="submit">
+            <button disabled={unavailable} type="submit">
               {operation === "verify" ? "Checking…" : "Continue"}
             </button>
           </div>
@@ -205,9 +224,14 @@ export function AccountChooser({
           >Use a different number</button>
         </form>
       )}
-      {onCancel ? (
-        <button className="wizard-cancel" disabled={unavailable} onClick={onCancel} type="button">Cancel</button>
-      ) : null}
+        <div className="sms-auth-security" aria-label="Security note">
+          <span aria-hidden="true">✓</span>
+          <p>Your wallet key stays encrypted in your account vault.</p>
+        </div>
+        {onCancel ? (
+          <button className="wizard-cancel" disabled={unavailable} onClick={onCancel} type="button">Cancel</button>
+        ) : null}
+      </section>
     </div>
   );
 }
@@ -221,6 +245,11 @@ export function orderedPasskeys(storedPasskeys: readonly StoredPasskey[]): reado
 function maskedPhone(value: string): string {
   const normalized = value.replace(/\D/g, "");
   return normalized.length > 4 ? `+••• ••${normalized.slice(-4)}` : "your phone";
+}
+
+function normalizedPhone(value: string): string | undefined {
+  const normalized = value.replace(/[\s()-]/g, "");
+  return /^\+[1-9]\d{7,14}$/.test(normalized) ? normalized : undefined;
 }
 
 function otpError(value: unknown, fallback: string): string {
