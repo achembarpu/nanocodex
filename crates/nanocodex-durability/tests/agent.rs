@@ -1800,6 +1800,78 @@ async fn active_routed_input_is_retained_in_the_durable_checkpoint() -> Result<(
 }
 
 #[tokio::test]
+async fn exact_id_retry_replays_steer_at_its_original_model_boundary() -> Result<()> {
+    let store = crate::MemoryStore::new()?;
+    let failing = FailReplaceOnce {
+        inner: store.clone(),
+        expected_revision: 9,
+        failed: Arc::new(AtomicBool::new(false)),
+    };
+    let state = crate::DurableSession::open(failing, "steered-exact-id-retry").await?;
+    let generations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let started = Arc::new(AtomicBool::new(false));
+    let release_first = Arc::new(tokio::sync::Notify::new());
+    let observed_steer = Arc::new(AtomicBool::new(false));
+    let openai = OpenAi::builder("test-key")
+        .service({
+            let generations = Arc::clone(&generations);
+            let started = Arc::clone(&started);
+            let release_first = Arc::clone(&release_first);
+            let observed_steer = Arc::clone(&observed_steer);
+            move || SteeredDurableService {
+                generations: Arc::clone(&generations),
+                started: Arc::clone(&started),
+                release_first: Arc::clone(&release_first),
+                observed_steer: Arc::clone(&observed_steer),
+            }
+        })
+        .build()?;
+    let workspace = temporary_workspace("steered-exact-id-retry")?;
+    let (agent, events) = Nanocodex::builder(openai)
+        .workspace(&workspace)
+        .session_id(test_session_id())
+        .durability(state.clone())
+        .await?
+        .build()?;
+
+    let first = agent
+        .prompt(PromptRequest::new("start durable steered turn").request_id("steered-turn"))
+        .await?;
+    while !started.load(Ordering::Acquire) {
+        tokio::task::yield_now().await;
+    }
+    first.steer("retain this routed steer").await?;
+    release_first.notify_one();
+    let error = first
+        .result()
+        .await
+        .expect_err("the first terminal replacement must fail");
+    assert!(error.to_string().contains("injected replacement failure"));
+    let recovered = agent
+        .prompt(PromptRequest::new("start durable steered turn").request_id("steered-turn"))
+        .await?
+        .result()
+        .await?;
+    assert_eq!(recovered.final_message(), "steer retained");
+    assert!(observed_steer.load(Ordering::Acquire));
+    assert_eq!(
+        generations.load(Ordering::SeqCst),
+        2,
+        "retry must replay both completed model effects without changing their definitions"
+    );
+    let checkpoint = state
+        .latest_checkpoint()
+        .await?
+        .ok_or_else(|| eyre!("steered retry did not commit a checkpoint"))?;
+    assert!(checkpoint.json().contains("retain this routed steer"));
+
+    agent.shutdown().await?;
+    drop((agent, events));
+    std::fs::remove_dir_all(workspace)?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn shutdown_reclaims_a_definitely_uncommitted_queued_terminalization() -> Result<()> {
     let store = crate::MemoryStore::new()?;
     let failing = FailReplaceOnce {

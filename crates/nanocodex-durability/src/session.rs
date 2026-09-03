@@ -11,7 +11,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::{
     DurableState, EncodedPayload, Error, OperationStatus, OwnerId, OwnerToken, Result, StateStore,
-    StepStatus, StoreError, StoredState, Transition, shared_store::SharedStore,
+    SteerState, StepStatus, StoreError, StoredState, Transition, shared_store::SharedStore,
     state::RetainedCheckpoint,
 };
 
@@ -124,6 +124,12 @@ enum StoredBeginStep {
     Replay(EncodedPayload),
 }
 
+#[derive(Clone)]
+pub(crate) struct StoredSteer {
+    pub(crate) index: u32,
+    pub(crate) state: SteerState,
+}
+
 #[derive(Clone, Eq, PartialEq)]
 enum Caller {
     Direct(OwnerId),
@@ -169,6 +175,25 @@ enum Command {
     BeginAttempt {
         caller: Caller,
         operation_id: String,
+        result: oneshot::Sender<Result<()>>,
+    },
+    AcceptSteer {
+        caller: Caller,
+        operation_id: String,
+        accepted_after_model_call_index: u32,
+        input: EncodedPayload,
+        result: oneshot::Sender<Result<u32>>,
+    },
+    RetainedSteers {
+        caller: Caller,
+        operation_id: String,
+        result: oneshot::Sender<Result<Vec<StoredSteer>>>,
+    },
+    BindSteer {
+        caller: Caller,
+        operation_id: String,
+        steer_index: u32,
+        model_call_index: u32,
         result: oneshot::Sender<Result<()>>,
     },
     BeginStep {
@@ -387,6 +412,53 @@ impl Driver {
                 } => {
                     let outcome = match self.authorize(&caller) {
                         Ok(()) => self.begin_attempt(&caller, operation_id).await,
+                        Err(error) => Err(error),
+                    };
+                    drop(result.send(outcome));
+                }
+                Command::AcceptSteer {
+                    caller,
+                    operation_id,
+                    accepted_after_model_call_index,
+                    input,
+                    result,
+                } => {
+                    let outcome = match self.authorize(&caller) {
+                        Ok(()) => {
+                            self.accept_steer(
+                                &caller,
+                                operation_id,
+                                accepted_after_model_call_index,
+                                input,
+                            )
+                            .await
+                        }
+                        Err(error) => Err(error),
+                    };
+                    drop(result.send(outcome));
+                }
+                Command::RetainedSteers {
+                    caller,
+                    operation_id,
+                    result,
+                } => {
+                    let outcome = self
+                        .authorize(&caller)
+                        .and_then(|()| self.retained_steers(&caller, &operation_id));
+                    drop(result.send(outcome));
+                }
+                Command::BindSteer {
+                    caller,
+                    operation_id,
+                    steer_index,
+                    model_call_index,
+                    result,
+                } => {
+                    let outcome = match self.authorize(&caller) {
+                        Ok(()) => {
+                            self.bind_steer(&caller, operation_id, steer_index, model_call_index)
+                                .await
+                        }
                         Err(error) => Err(error),
                     };
                     drop(result.send(outcome));
@@ -722,6 +794,107 @@ impl Driver {
         }
         self.running.insert(operation_id.clone());
         Ok(())
+    }
+
+    async fn accept_steer(
+        &mut self,
+        caller: &Caller,
+        operation_id: String,
+        accepted_after_model_call_index: u32,
+        input: EncodedPayload,
+    ) -> Result<u32> {
+        self.require_claimed(caller, &operation_id)?;
+        self.require_running(&operation_id)?;
+        let steer_index = u32::try_from(
+            self.state
+                .operation(&operation_id)
+                .ok_or_else(|| {
+                    Error::InvalidState(format!("operation `{operation_id}` was not accepted"))
+                })?
+                .steers
+                .len(),
+        )
+        .ok()
+        .and_then(|length| length.checked_add(1))
+        .ok_or_else(|| {
+            Error::InvalidState(format!(
+                "operation `{operation_id}` exceeded the steer counter range"
+            ))
+        })?;
+        self.apply(Transition::SteerAccepted {
+            operation_id,
+            steer_index,
+            accepted_after_model_call_index,
+            input,
+        })
+        .await?;
+        Ok(steer_index)
+    }
+
+    fn retained_steers(&self, caller: &Caller, operation_id: &str) -> Result<Vec<StoredSteer>> {
+        self.require_claimed(caller, operation_id)?;
+        self.require_running(operation_id)?;
+        let operation = self.state.operation(operation_id).ok_or_else(|| {
+            Error::InvalidState(format!("operation `{operation_id}` was not accepted"))
+        })?;
+        operation
+            .steers
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(offset, state)| {
+                let index = u32::try_from(offset)
+                    .ok()
+                    .and_then(|offset| offset.checked_add(1))
+                    .ok_or_else(|| {
+                        Error::InvalidState(format!(
+                            "operation `{operation_id}` exceeded the steer counter range"
+                        ))
+                    })?;
+                Ok(StoredSteer { index, state })
+            })
+            .collect()
+    }
+
+    async fn bind_steer(
+        &mut self,
+        caller: &Caller,
+        operation_id: String,
+        steer_index: u32,
+        model_call_index: u32,
+    ) -> Result<()> {
+        self.require_claimed(caller, &operation_id)?;
+        self.require_running(&operation_id)?;
+        let retained = self
+            .state
+            .operation(&operation_id)
+            .and_then(|operation| {
+                steer_index.checked_sub(1).and_then(|index| {
+                    usize::try_from(index)
+                        .ok()
+                        .and_then(|index| operation.steers.get(index))
+                })
+            })
+            .ok_or_else(|| {
+                Error::InvalidState(format!(
+                    "steer {steer_index} in operation `{operation_id}` was bound before acceptance"
+                ))
+            })?;
+        match retained.model_call_index {
+            Some(retained) if retained == model_call_index => return Ok(()),
+            Some(retained) => {
+                return Err(Error::InvalidState(format!(
+                    "steer {steer_index} in operation `{operation_id}` changed model boundary from {retained} to {model_call_index}"
+                )));
+            }
+            None => {}
+        }
+        self.apply(Transition::SteerBound {
+            operation_id,
+            steer_index,
+            model_call_index,
+        })
+        .await
     }
 
     async fn begin_step(
@@ -1613,6 +1786,53 @@ impl DurableOwner {
         receive(receiver).await
     }
 
+    pub(crate) async fn accept_steer<I: Serialize + ?Sized>(
+        &self,
+        operation_id: String,
+        accepted_after_model_call_index: u32,
+        input: &I,
+    ) -> Result<u32> {
+        let (result, receiver) = oneshot::channel();
+        self.send(Command::AcceptSteer {
+            caller: self.caller()?,
+            operation_id,
+            accepted_after_model_call_index,
+            input: EncodedPayload::encode(input)?,
+            result,
+        })
+        .await?;
+        receive(receiver).await
+    }
+
+    pub(crate) async fn retained_steers(&self, operation_id: String) -> Result<Vec<StoredSteer>> {
+        let (result, receiver) = oneshot::channel();
+        self.send(Command::RetainedSteers {
+            caller: self.caller()?,
+            operation_id,
+            result,
+        })
+        .await?;
+        receive(receiver).await
+    }
+
+    pub(crate) async fn bind_steer(
+        &self,
+        operation_id: String,
+        steer_index: u32,
+        model_call_index: u32,
+    ) -> Result<()> {
+        let (result, receiver) = oneshot::channel();
+        self.send(Command::BindSteer {
+            caller: self.caller()?,
+            operation_id,
+            steer_index,
+            model_call_index,
+            result,
+        })
+        .await?;
+        receive(receiver).await
+    }
+
     pub(crate) async fn begin_step<I>(
         &self,
         operation_id: String,
@@ -1864,10 +2084,10 @@ fn spawn_driver(driver: Driver) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::{future::Future, task::Poll};
+    use std::{collections::BTreeMap, future::Future, task::Poll};
 
     use super::*;
-    use crate::MemoryStore;
+    use crate::{MemoryStore, OperationState};
 
     #[cfg(not(target_family = "wasm"))]
     #[test]
@@ -2350,5 +2570,72 @@ mod tests {
                 .unwrap(),
             2
         );
+    }
+
+    #[test]
+    fn compacted_steer_state_rejects_impossible_boundaries_and_terminal_shapes() {
+        fn steer(accepted_after: u32, bound_to: Option<u32>) -> SteerState {
+            SteerState {
+                input: EncodedPayload::encode(&"steer").unwrap(),
+                accepted_after_model_call_index: accepted_after,
+                model_call_index: bound_to,
+            }
+        }
+
+        fn operation(status: OperationStatus, steers: Vec<SteerState>) -> OperationState {
+            OperationState {
+                input: EncodedPayload::encode(&"prompt").unwrap(),
+                status,
+                steps: BTreeMap::new(),
+                steers,
+                accepted_order: 1,
+            }
+        }
+
+        fn checkpoint(operation: OperationState) -> StoredState {
+            StoredState {
+                revision: 10,
+                payload: Some(
+                    serde_json::json!({
+                        "nanocodex_durable_state": {
+                            "format": 2,
+                            "operations": BTreeMap::from([("turn".to_owned(), operation)]),
+                            "latest_checkpoint": null
+                        }
+                    })
+                    .to_string(),
+                ),
+            }
+        }
+
+        let interleaved = operation(
+            OperationStatus::Pending,
+            vec![steer(1, Some(4)), steer(2, None), steer(2, Some(4))],
+        );
+        assert!(matches!(
+            reduce(checkpoint(interleaved)),
+            Err(Error::InvalidState(message)) if message.contains("bound after an unbound steer")
+        ));
+
+        let cancelled = operation(
+            OperationStatus::Cancelled { checkpoint: None },
+            vec![steer(1, None)],
+        );
+        assert!(matches!(
+            reduce(checkpoint(cancelled)),
+            Err(Error::InvalidState(message)) if message.contains("cancelled without a checkpoint")
+        ));
+
+        let completed = operation(
+            OperationStatus::Completed {
+                checkpoint: EncodedPayload::encode(&"checkpoint").unwrap(),
+                output: EncodedPayload::encode(&"output").unwrap(),
+            },
+            vec![steer(1, Some(2))],
+        );
+        assert!(matches!(
+            reduce(checkpoint(completed)),
+            Err(Error::InvalidState(message)) if message.contains("before steer 1 was consumed")
+        ));
     }
 }

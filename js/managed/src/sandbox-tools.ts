@@ -10,6 +10,7 @@ const MAX_FILE_BYTES = 1024 * 1024;
 const MAX_OUTPUT_BYTES = 128 * 1024;
 const MAX_LIST_ENTRIES = 512;
 const WORKSPACE_MOUNT_PROBE_TIMEOUT_MS = 10_000;
+const WORKSPACE_MOUNT_HEALTH_ATTEMPTS = 3;
 const PREVIEW_CAPABILITY_TTL_MS = 60 * 60 * 1_000;
 const PREVIEW_AAD = new TextEncoder().encode("nanocodex-cloudflare-sandbox-preview-v1");
 const PREVIEW_WEBSOCKET_RESPONSE_HEADERS = new Set([
@@ -588,9 +589,18 @@ async function prepareSandboxWorkspace(
 type WorkspaceMountState = "absent" | "empty" | "occupied" | "mounted" | "mounted-unhealthy";
 
 async function workspaceMountState(sandbox: SandboxToolClient): Promise<WorkspaceMountState> {
+  let state: WorkspaceMountState = "mounted-unhealthy";
+  for (let attempt = 0; attempt < WORKSPACE_MOUNT_HEALTH_ATTEMPTS; attempt += 1) {
+    state = await workspaceMountStateOnce(sandbox);
+    if (state !== "mounted-unhealthy") return state;
+  }
+  return state;
+}
+
+async function workspaceMountStateOnce(sandbox: SandboxToolClient): Promise<WorkspaceMountState> {
   const probe = await sandbox.exec(
     "if mountpoint -q /workspace; then "
-      + "if ls -A /workspace >/dev/null 2>&1; then printf mounted; else printf mounted-unhealthy; fi; "
+      + "if stat /workspace >/dev/null; then printf mounted; else printf mounted-unhealthy; fi; "
       + "elif [ ! -e /workspace ]; then printf absent; "
       + "elif [ -d /workspace ] && [ -z \"$(find /workspace -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)\" ]; then printf empty; "
       + "else printf occupied; fi",

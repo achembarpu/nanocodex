@@ -25,8 +25,8 @@ pub use session::{Admission, AutomaticAdmission, BeginStep, DurableSession};
 #[cfg_attr(docsrs, doc(cfg(all(feature = "sqlite", not(target_family = "wasm")))))]
 pub use sqlite::SqliteStore;
 pub use state::{
-    DurableState, EncodedPayload, OperationState, OperationStatus, StepState, StepStatus,
-    Transition,
+    DurableState, EncodedPayload, OperationState, OperationStatus, SteerState, StepState,
+    StepStatus, Transition,
 };
 pub use store::{
     OwnedState, OwnerId, OwnerToken, StateStore, StoreError, StoreFuture, StoredState,

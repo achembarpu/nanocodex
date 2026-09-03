@@ -58,6 +58,19 @@ pub enum ExecutionStepAdmission {
     Replay(String),
 }
 
+/// One live steering input retained for deterministic operation recovery.
+#[derive(Clone, Debug)]
+pub struct ExecutionSteer {
+    /// Stable one-based FIFO position within the operation.
+    pub index: u32,
+    /// Model call that was current when the steering input was accepted.
+    pub accepted_after_model_call_index: u32,
+    /// Model-call ordinal before which this input was applied, when known.
+    pub model_call_index: Option<u32>,
+    /// Exact serialized [`nanocodex_oai_api::Prompt`] accepted by the turn.
+    pub input_json: String,
+}
+
 /// Serializable result retained at a completed agent boundary.
 #[derive(Clone, Deserialize, Serialize)]
 pub struct ExecutionOutput {
@@ -131,6 +144,42 @@ pub trait ExecutionPolicy: Send + Sync {
 
     /// Starts another attempt for an admitted operation.
     fn begin_attempt<'a>(&'a self, operation_id: String) -> ExecutionFuture<'a, Result<()>>;
+
+    /// Retains steering input before acknowledging it to the caller.
+    fn accept_steer<'a>(
+        &'a self,
+        _operation_id: String,
+        _accepted_after_model_call_index: u32,
+        _input_json: String,
+    ) -> ExecutionFuture<'a, Result<u32>> {
+        Box::pin(async {
+            Err(NanocodexError::ExecutionPolicyCapabilityUnsupported {
+                capability: "accept_steer",
+            })
+        })
+    }
+
+    /// Returns steering inputs retained for the current operation attempt.
+    fn retained_steers<'a>(
+        &'a self,
+        _operation_id: String,
+    ) -> ExecutionFuture<'a, Result<Vec<ExecutionSteer>>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
+    /// Binds retained steering input to the model boundary that consumes it.
+    fn bind_steer<'a>(
+        &'a self,
+        _operation_id: String,
+        _steer_index: u32,
+        _model_call_index: u32,
+    ) -> ExecutionFuture<'a, Result<()>> {
+        Box::pin(async {
+            Err(NanocodexError::ExecutionPolicyCapabilityUnsupported {
+                capability: "bind_steer",
+            })
+        })
+    }
 
     /// Begins or replays one typed external effect.
     fn begin_step<'a>(
@@ -229,6 +278,39 @@ pub trait ExecutionPolicy: Send + Sync {
     }
     /// Starts another operation attempt.
     fn begin_attempt<'a>(&'a self, operation_id: String) -> ExecutionFuture<'a, Result<()>>;
+    /// Retains steering input before acknowledging it to the caller.
+    fn accept_steer<'a>(
+        &'a self,
+        _operation_id: String,
+        _accepted_after_model_call_index: u32,
+        _input_json: String,
+    ) -> ExecutionFuture<'a, Result<u32>> {
+        Box::pin(async {
+            Err(NanocodexError::ExecutionPolicyCapabilityUnsupported {
+                capability: "accept_steer",
+            })
+        })
+    }
+    /// Returns steering inputs retained for the current operation attempt.
+    fn retained_steers<'a>(
+        &'a self,
+        _operation_id: String,
+    ) -> ExecutionFuture<'a, Result<Vec<ExecutionSteer>>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+    /// Binds retained steering input to the model boundary that consumes it.
+    fn bind_steer<'a>(
+        &'a self,
+        _operation_id: String,
+        _steer_index: u32,
+        _model_call_index: u32,
+    ) -> ExecutionFuture<'a, Result<()>> {
+        Box::pin(async {
+            Err(NanocodexError::ExecutionPolicyCapabilityUnsupported {
+                capability: "bind_steer",
+            })
+        })
+    }
     /// Begins or replays one external effect.
     fn begin_step<'a>(
         &'a self,
@@ -623,12 +705,26 @@ pub(crate) struct ExecutionSteps {
     operation_id: String,
 }
 
+#[derive(Clone)]
+pub(crate) struct QueuedSteer {
+    pub(crate) durable_index: Option<u32>,
+    pub(crate) accepted_after_model_call_index: u32,
+    pub(crate) model_call_index: Option<u32>,
+    pub(crate) prompt: nanocodex_oai_api::Prompt,
+}
+
 pub(crate) enum ExecutionStep<O> {
     Execute,
     Replay(O),
 }
 
 impl ExecutionSteps {
+    pub(crate) async fn bind_steer(&self, steer_index: u32, model_call_index: u32) -> Result<()> {
+        self.policy
+            .bind_steer(self.operation_id.clone(), steer_index, model_call_index)
+            .await
+    }
+
     pub(crate) async fn begin<I, O>(
         &self,
         step_id: impl Into<String>,
@@ -681,17 +777,61 @@ pub(crate) struct ExecutionTurn {
 }
 
 impl ExecutionTurn {
-    pub(crate) async fn begin(&self) -> Result<()> {
+    pub(crate) async fn begin(&self) -> Result<Vec<QueuedSteer>> {
         if let (Some(policy), Some(operation_id)) = (&self.policy, &self.operation_id) {
             policy.begin_attempt(operation_id.clone()).await?;
         }
-        Ok(())
+        self.retained_steers().await
     }
 
     pub(crate) fn steps(&self) -> Option<ExecutionSteps> {
         Some(ExecutionSteps {
             policy: self.policy.clone()?,
             operation_id: self.operation_id.clone()?,
+        })
+    }
+
+    pub(crate) async fn retained_steers(&self) -> Result<Vec<QueuedSteer>> {
+        let (Some(policy), Some(operation_id)) = (&self.policy, &self.operation_id) else {
+            return Ok(Vec::new());
+        };
+        policy
+            .retained_steers(operation_id.clone())
+            .await?
+            .into_iter()
+            .map(|steer| {
+                Ok(QueuedSteer {
+                    durable_index: Some(steer.index),
+                    accepted_after_model_call_index: steer.accepted_after_model_call_index,
+                    model_call_index: steer.model_call_index,
+                    prompt: decode(&steer.input_json)?,
+                })
+            })
+            .collect()
+    }
+
+    pub(crate) async fn accept_steer(
+        &self,
+        prompt: nanocodex_oai_api::Prompt,
+        accepted_after_model_call_index: u32,
+    ) -> Result<QueuedSteer> {
+        let durable_index = match (&self.policy, &self.operation_id) {
+            (Some(policy), Some(operation_id)) => Some(
+                policy
+                    .accept_steer(
+                        operation_id.clone(),
+                        accepted_after_model_call_index,
+                        encode(&prompt)?,
+                    )
+                    .await?,
+            ),
+            _ => None,
+        };
+        Ok(QueuedSteer {
+            durable_index,
+            accepted_after_model_call_index,
+            model_call_index: None,
+            prompt,
         })
     }
 

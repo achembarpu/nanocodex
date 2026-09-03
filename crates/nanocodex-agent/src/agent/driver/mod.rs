@@ -2,7 +2,7 @@ mod branch;
 mod control;
 mod telemetry;
 
-use super::execution::AdmittedExecution;
+use super::execution::{AdmittedExecution, ExecutionTurn, QueuedSteer};
 use super::*;
 pub(super) use branch::{AgentOrigin, BranchSpawner};
 pub(super) use control::DriverShutdown;
@@ -951,41 +951,45 @@ where
             let execution_turn =
                 self.execution
                     .start_turn(&prompt, thinking, execution_operation.clone());
-            if let Err(error) = execution_turn.begin().await {
-                let reopen = matches!(
-                    error.execution_policy_disposition(),
-                    Some(crate::ExecutionPolicyDisposition::Reopen)
-                );
-                if let Some(operation_id) = &execution_operation {
-                    self.execution.release_claim(operation_id).await;
+            let retained_steers = match execution_turn.begin().await {
+                Ok(steers) => steers,
+                Err(error) => {
+                    let reopen = matches!(
+                        error.execution_policy_disposition(),
+                        Some(crate::ExecutionPolicyDisposition::Reopen)
+                    );
+                    if let Some(operation_id) = &execution_operation {
+                        self.execution.release_claim(operation_id).await;
+                    }
+                    model.set_events(events);
+                    let emitted = model.emit_failed_before_start(
+                        &prompt,
+                        self.workspace.as_deref(),
+                        thinking,
+                        fast_mode,
+                        &error,
+                    );
+                    model.set_events(self.events.clone());
+                    drop(result.send(emitted.and(Err(error))));
+                    if reopen {
+                        begin_shutdown(
+                            &mut self.commands,
+                            &mut queued_turns,
+                            default_thinking,
+                            default_fast_mode,
+                        )
+                        .await;
+                        commands_open = false;
+                    }
+                    continue;
                 }
-                model.set_events(events);
-                let emitted = model.emit_failed_before_start(
-                    &prompt,
-                    self.workspace.as_deref(),
-                    thinking,
-                    fast_mode,
-                    &error,
-                );
-                model.set_events(self.events.clone());
-                drop(result.send(emitted.and(Err(error))));
-                if reopen {
-                    begin_shutdown(
-                        &mut self.commands,
-                        &mut queued_turns,
-                        default_thinking,
-                        default_fast_mode,
-                    )
-                    .await;
-                    commands_open = false;
-                }
-                continue;
-            }
+            };
             let execution_base_checkpoint = execution_operation
                 .as_ref()
                 .map(|_| latest_fork_checkpoint.clone());
             let execution_steps = execution_turn.steps();
             let (steers, steer_rx) = mpsc::channel(STEER_CAPACITY);
+            let model_call_index = Arc::new(tokio::sync::Mutex::new(1_u32));
             let (cancel, cancel_rx) = oneshot::channel();
             let (fork_snapshots, mut fork_snapshot_rx) = watch::channel(None);
             let mut fork_snapshots_open = true;
@@ -1000,7 +1004,11 @@ where
                         thinking,
                         fast_mode,
                         logical_turn_index,
-                        steer_rx,
+                        TurnSteering {
+                            receiver: steer_rx,
+                            retained: retained_steers,
+                            model_call_index: Arc::clone(&model_call_index),
+                        },
                         cancel_rx,
                         fork_snapshots,
                         execution_steps,
@@ -1086,35 +1094,59 @@ where
                                     drop(result.send(Err(NanocodexError::TurnNotSteerable)));
                                     continue;
                                 }
-                                let outcome = steers.try_send(prompt).map_err(|error| match error {
-                                    mpsc::error::TrySendError::Full(_) => {
-                                        NanocodexError::SteerQueueFull
-                                    }
-                                    mpsc::error::TrySendError::Closed(_) => {
-                                        NanocodexError::TurnNotSteerable
-                                    }
-                                });
+                                let outcome = accept_turn_steer(
+                                    &steers,
+                                    &execution_turn,
+                                    &model_call_index,
+                                    prompt,
+                                )
+                                .await;
+                                let reopen = outcome_requires_reopen(&outcome);
                                 drop(result.send(outcome));
+                                if reopen {
+                                    if let Some(cancel) = cancel.take() {
+                                        let _ = cancel.send(());
+                                    }
+                                    begin_shutdown(
+                                        &mut self.commands,
+                                        &mut queued_turns,
+                                        default_thinking,
+                                        default_fast_mode,
+                                    )
+                                    .await;
+                                    commands_open = false;
+                                    break execution.as_mut().await;
+                                }
                             }
                             Some(Command::RoutePrompt {
                                 prompt,
                                 route_result,
                                 ..
                             }) => {
-                                let outcome = steers.try_send(prompt).map_or_else(
-                                    |error| {
-                                        Err(match error {
-                                            mpsc::error::TrySendError::Full(_) => {
-                                                NanocodexError::SteerQueueFull
-                                            }
-                                            mpsc::error::TrySendError::Closed(_) => {
-                                                NanocodexError::TurnNotSteerable
-                                            }
-                                        })
-                                    },
-                                    |()| Ok(PromptRouteKind::Steered),
-                                );
+                                let outcome = accept_turn_steer(
+                                    &steers,
+                                    &execution_turn,
+                                    &model_call_index,
+                                    prompt,
+                                )
+                                .await
+                                .map(|()| PromptRouteKind::Steered);
+                                let reopen = outcome_requires_reopen(&outcome);
                                 drop(route_result.send(outcome));
+                                if reopen {
+                                    if let Some(cancel) = cancel.take() {
+                                        let _ = cancel.send(());
+                                    }
+                                    begin_shutdown(
+                                        &mut self.commands,
+                                        &mut queued_turns,
+                                        default_thinking,
+                                        default_fast_mode,
+                                    )
+                                    .await;
+                                    commands_open = false;
+                                    break execution.as_mut().await;
+                                }
                             }
                             Some(Command::Cancel { key: target, result: cancellation }) => {
                                 if target != key {
@@ -1534,6 +1566,24 @@ fn outcome_requires_reopen<T>(outcome: &Result<T>) -> bool {
             Some(crate::ExecutionPolicyDisposition::Reopen)
         )
     })
+}
+
+async fn accept_turn_steer(
+    steers: &mpsc::Sender<QueuedSteer>,
+    execution_turn: &ExecutionTurn,
+    model_call_index: &tokio::sync::Mutex<u32>,
+    prompt: Prompt,
+) -> Result<()> {
+    let permit = steers.try_reserve().map_err(|error| match error {
+        mpsc::error::TrySendError::Full(_) => NanocodexError::SteerQueueFull,
+        mpsc::error::TrySendError::Closed(_) => NanocodexError::TurnNotSteerable,
+    })?;
+    // Holding the boundary lock through persistence makes acceptance linearize
+    // before either this model-call drain or the following one.
+    let call_index = model_call_index.lock().await;
+    let steer = execution_turn.accept_steer(prompt, *call_index).await?;
+    permit.send(steer);
+    Ok(())
 }
 
 async fn commit_developer_message<S>(

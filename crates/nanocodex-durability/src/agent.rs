@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use nanocodex_agent::{
     ExecutionPolicyDisposition, NanocodexBuilder, NanocodexError, Result as AgentResult,
     execution::{
-        ExecutionAdmission, ExecutionFuture, ExecutionOutput, ExecutionPolicy,
+        ExecutionAdmission, ExecutionFuture, ExecutionOutput, ExecutionPolicy, ExecutionSteer,
         ExecutionStepAdmission,
     },
     session::SessionSnapshot,
@@ -230,6 +230,63 @@ impl ExecutionPolicy for DurableExecution {
                 .begin_attempt(operation_id)
                 .await
                 .map(|_| ())
+                .map_err(agent_error)
+        })
+    }
+
+    fn accept_steer<'a>(
+        &'a self,
+        operation_id: String,
+        accepted_after_model_call_index: u32,
+        input_json: String,
+    ) -> ExecutionFuture<'a, AgentResult<u32>> {
+        Box::pin(async move {
+            let input = raw(input_json)?;
+            self.owner()
+                .await?
+                .accept_steer(operation_id, accepted_after_model_call_index, &input)
+                .await
+                .map_err(agent_error)
+        })
+    }
+
+    fn retained_steers<'a>(
+        &'a self,
+        operation_id: String,
+    ) -> ExecutionFuture<'a, AgentResult<Vec<ExecutionSteer>>> {
+        Box::pin(async move {
+            self.owner()
+                .await?
+                .retained_steers(operation_id)
+                .await
+                .map(|steers| {
+                    steers
+                        .into_iter()
+                        .map(|steer| ExecutionSteer {
+                            index: steer.index,
+                            accepted_after_model_call_index: steer
+                                .state
+                                .accepted_after_model_call_index,
+                            model_call_index: steer.state.model_call_index,
+                            input_json: steer.state.input.json().to_owned(),
+                        })
+                        .collect()
+                })
+                .map_err(agent_error)
+        })
+    }
+
+    fn bind_steer<'a>(
+        &'a self,
+        operation_id: String,
+        steer_index: u32,
+        model_call_index: u32,
+    ) -> ExecutionFuture<'a, AgentResult<()>> {
+        Box::pin(async move {
+            self.owner()
+                .await?
+                .bind_steer(operation_id, steer_index, model_call_index)
+                .await
                 .map_err(agent_error)
         })
     }

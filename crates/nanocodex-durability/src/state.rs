@@ -72,6 +72,26 @@ pub enum Transition {
         /// Opaque typed output returned during replay.
         output: EncodedPayload,
     },
+    /// Live steering input was accepted for an active operation.
+    SteerAccepted {
+        /// Accepted operation identity.
+        operation_id: String,
+        /// Stable one-based FIFO position within the operation.
+        steer_index: u32,
+        /// Model call that was current when the steering input was accepted.
+        accepted_after_model_call_index: u32,
+        /// Exact typed steering prompt.
+        input: EncodedPayload,
+    },
+    /// Accepted steering input was bound to its consuming model boundary.
+    SteerBound {
+        /// Accepted operation identity.
+        operation_id: String,
+        /// Stable one-based FIFO position within the operation.
+        steer_index: u32,
+        /// Model-call ordinal before which the steer is applied.
+        model_call_index: u32,
+    },
     /// An operation completed and advanced the durable session checkpoint.
     OperationCompleted {
         /// Accepted operation identity.
@@ -170,6 +190,18 @@ pub struct StepState {
     pub attempts: u32,
 }
 
+/// One live steering input retained for deterministic operation recovery.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SteerState {
+    /// Exact typed steering prompt.
+    pub input: EncodedPayload,
+    /// Model call that was current when the steering input was accepted.
+    pub accepted_after_model_call_index: u32,
+    /// Model-call ordinal before which the steer is applied, once known.
+    pub model_call_index: Option<u32>,
+}
+
 /// Reduced durable operation state.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
@@ -180,6 +212,9 @@ pub struct OperationState {
     pub status: OperationStatus,
     /// Ordered durable steps by identity.
     pub steps: BTreeMap<String, StepState>,
+    /// Live steering inputs in their accepted FIFO order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub steers: Vec<SteerState>,
     pub(crate) accepted_order: u64,
 }
 
@@ -337,10 +372,45 @@ impl DurableState {
                     )));
                 }
             }
+            let mut previous_model_call_index = None;
+            let mut saw_unbound_steer = false;
+            for (offset, steer) in operation.steers.iter().enumerate() {
+                if steer.accepted_after_model_call_index == 0
+                    || steer.model_call_index.is_some_and(|model_call_index| {
+                        model_call_index <= steer.accepted_after_model_call_index
+                    })
+                {
+                    return Err(Error::InvalidState(format!(
+                        "steer {} in operation `{operation_id}` has an invalid model boundary",
+                        offset + 1
+                    )));
+                }
+                match steer.model_call_index {
+                    Some(current) => {
+                        if saw_unbound_steer {
+                            return Err(Error::InvalidState(format!(
+                                "steer {} in operation `{operation_id}` was bound after an unbound steer",
+                                offset + 1
+                            )));
+                        }
+                        if previous_model_call_index.is_some_and(|previous| current < previous) {
+                            return Err(Error::InvalidState(format!(
+                                "steer {} in operation `{operation_id}` moved before an earlier steer",
+                                offset + 1
+                            )));
+                        }
+                        previous_model_call_index = Some(current);
+                    }
+                    None => saw_unbound_steer = true,
+                }
+            }
+            if matches!(operation.status, OperationStatus::Completed { .. }) {
+                ensure_completed_steers_consumed(operation_id, operation)?;
+            }
             if matches!(
                 &operation.status,
                 OperationStatus::Cancelled { checkpoint: None }
-            ) && !operation.steps.is_empty()
+            ) && (!operation.steps.is_empty() || !operation.steers.is_empty())
             {
                 return Err(Error::InvalidState(format!(
                     "started operation `{operation_id}` was cancelled without a checkpoint"
@@ -465,6 +535,84 @@ impl DurableState {
                     }
                 }
             }
+            Transition::SteerAccepted {
+                operation_id,
+                steer_index,
+                accepted_after_model_call_index,
+                input: _,
+            } => {
+                self.ensure_prior_operations_terminal(operation_id)?;
+                if *accepted_after_model_call_index == 0 {
+                    return Err(Error::InvalidState(format!(
+                        "steer {steer_index} in operation `{operation_id}` has an invalid acceptance boundary"
+                    )));
+                }
+                let operation = self.pending_operation(operation_id)?;
+                let expected = u32::try_from(operation.steers.len())
+                    .ok()
+                    .and_then(|length| length.checked_add(1))
+                    .ok_or_else(|| {
+                        Error::InvalidState(format!(
+                            "operation `{operation_id}` exceeded the steer counter range"
+                        ))
+                    })?;
+                if *steer_index != expected {
+                    return Err(Error::InvalidState(format!(
+                        "operation `{operation_id}` expected steer {expected}, found {steer_index}"
+                    )));
+                }
+            }
+            Transition::SteerBound {
+                operation_id,
+                steer_index,
+                model_call_index,
+            } => {
+                self.ensure_prior_operations_terminal(operation_id)?;
+                if *model_call_index == 0 {
+                    return Err(Error::InvalidState(format!(
+                        "steer {steer_index} in operation `{operation_id}` has an invalid model boundary"
+                    )));
+                }
+                let operation = self.pending_operation(operation_id)?;
+                let steer = steer_index
+                    .checked_sub(1)
+                    .and_then(|index| usize::try_from(index).ok())
+                    .and_then(|index| operation.steers.get(index))
+                    .ok_or_else(|| {
+                        Error::InvalidState(format!(
+                            "steer {steer_index} in operation `{operation_id}` was bound before acceptance"
+                        ))
+                    })?;
+                if *model_call_index <= steer.accepted_after_model_call_index {
+                    return Err(Error::InvalidState(format!(
+                        "steer {steer_index} in operation `{operation_id}` cannot bind to model call {model_call_index} after acceptance at {}",
+                        steer.accepted_after_model_call_index
+                    )));
+                }
+                if steer.model_call_index.is_some() {
+                    return Err(Error::InvalidState(format!(
+                        "steer {steer_index} in operation `{operation_id}` was bound more than once"
+                    )));
+                }
+                if *steer_index > 1 {
+                    let previous_index = usize::try_from(*steer_index - 2).map_err(|_| {
+                        Error::InvalidState(format!(
+                            "steer {steer_index} in operation `{operation_id}` has an invalid index"
+                        ))
+                    })?;
+                    let previous = &operation.steers[previous_index];
+                    let Some(previous_model_call_index) = previous.model_call_index else {
+                        return Err(Error::InvalidState(format!(
+                            "steer {steer_index} in operation `{operation_id}` was bound before an earlier steer"
+                        )));
+                    };
+                    if *model_call_index < previous_model_call_index {
+                        return Err(Error::InvalidState(format!(
+                            "steer {steer_index} in operation `{operation_id}` moved before an earlier steer"
+                        )));
+                    }
+                }
+            }
             Transition::OperationCompleted { operation_id, .. } => {
                 self.ensure_prior_operations_terminal(operation_id)?;
                 let operation = self.pending_operation(operation_id)?;
@@ -477,6 +625,7 @@ impl DurableState {
                         "operation `{operation_id}` completed with an unfinished step"
                     )));
                 }
+                ensure_completed_steers_consumed(operation_id, operation)?;
             }
             Transition::OperationFailed { operation_id, .. } => {
                 self.ensure_prior_operations_terminal(operation_id)?;
@@ -489,7 +638,7 @@ impl DurableState {
                 let operation = self.pending_operation(operation_id)?;
                 if checkpoint.is_some() {
                     self.ensure_prior_operations_terminal(operation_id)?;
-                } else if !operation.steps.is_empty() {
+                } else if !operation.steps.is_empty() || !operation.steers.is_empty() {
                     return Err(Error::InvalidState(format!(
                         "started operation `{operation_id}` was cancelled without a checkpoint"
                     )));
@@ -518,6 +667,7 @@ impl DurableState {
                         input,
                         status: OperationStatus::Pending,
                         steps: BTreeMap::new(),
+                        steers: Vec::new(),
                         accepted_order: revision,
                     },
                 );
@@ -559,6 +709,33 @@ impl DurableState {
                     ))
                 })?;
                 step.status = StepStatus::Completed(output);
+            }
+            Transition::SteerAccepted {
+                operation_id,
+                steer_index: _,
+                accepted_after_model_call_index,
+                input,
+            } => {
+                self.pending_operation_mut(&operation_id)?
+                    .steers
+                    .push(SteerState {
+                        input,
+                        accepted_after_model_call_index,
+                        model_call_index: None,
+                    });
+            }
+            Transition::SteerBound {
+                operation_id,
+                steer_index,
+                model_call_index,
+            } => {
+                let operation = self.pending_operation_mut(&operation_id)?;
+                let index = usize::try_from(steer_index - 1).map_err(|_| {
+                    Error::InvalidState(format!(
+                        "steer {steer_index} in operation `{operation_id}` has an invalid index"
+                    ))
+                })?;
+                operation.steers[index].model_call_index = Some(model_call_index);
             }
             Transition::OperationCompleted {
                 operation_id,
@@ -644,12 +821,35 @@ impl DurableState {
     }
 }
 
+fn ensure_completed_steers_consumed(operation_id: &str, operation: &OperationState) -> Result<()> {
+    for (offset, steer) in operation.steers.iter().enumerate() {
+        let steer_index = offset + 1;
+        let model_call_index = steer.model_call_index.ok_or_else(|| {
+            Error::InvalidState(format!(
+                "operation `{operation_id}` completed with unbound steer {steer_index}"
+            ))
+        })?;
+        let step_id = format!("model-{model_call_index}");
+        let consumed = operation.steps.get(&step_id).is_some_and(|step| {
+            step.kind == "model_call" && matches!(step.status, StepStatus::Completed(_))
+        });
+        if !consumed {
+            return Err(Error::InvalidState(format!(
+                "operation `{operation_id}` completed before steer {steer_index} was consumed by `{step_id}`"
+            )));
+        }
+    }
+    Ok(())
+}
+
 impl Transition {
     fn operation_id(&self) -> Option<&str> {
         match self {
             Self::OperationAccepted { operation_id, .. }
             | Self::StepStarted { operation_id, .. }
             | Self::StepCompleted { operation_id, .. }
+            | Self::SteerAccepted { operation_id, .. }
+            | Self::SteerBound { operation_id, .. }
             | Self::OperationCompleted { operation_id, .. }
             | Self::OperationFailed { operation_id, .. }
             | Self::OperationCancelled { operation_id, .. } => Some(operation_id),

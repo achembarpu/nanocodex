@@ -11,7 +11,7 @@ use tool_calls::*;
 
 use std::{
     any::Any,
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     panic::AssertUnwindSafe,
     path::Path,
     sync::{Arc, Mutex},
@@ -55,7 +55,7 @@ use super::{
 };
 use crate::{
     NanocodexError, Result,
-    agent::{AgentSend, ContextSource, ExecutionSteps},
+    agent::{AgentSend, ContextSource, ExecutionSteps, execution::QueuedSteer},
     prompt_cache::ModelPromptCache,
     usage::TurnUsage,
 };
@@ -93,6 +93,12 @@ pub(crate) struct ModelRun<S> {
     force_compaction: bool,
     pending_developer_messages: Vec<ResponseItem>,
     execution_steps: Option<ExecutionSteps>,
+}
+
+pub(crate) struct TurnSteering {
+    pub(crate) receiver: tokio::sync::mpsc::Receiver<QueuedSteer>,
+    pub(crate) retained: Vec<QueuedSteer>,
+    pub(crate) model_call_index: Arc<tokio::sync::Mutex<u32>>,
 }
 
 pub(crate) enum ModelTurnOutcome {

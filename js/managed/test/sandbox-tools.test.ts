@@ -88,6 +88,33 @@ describe("Cloudflare sandbox tools", () => {
     expect(sandbox.exec.mock.calls.filter(([command]) => isMountProbe(command))).toHaveLength(3);
   });
 
+  it("retries a transient retained mount health failure during background work", async () => {
+    const sandbox = preparingSandbox("empty");
+    const probeStates: MountState[] = [
+      "empty",
+      "mounted",
+      "mounted-unhealthy",
+      "mounted",
+    ];
+    sandbox.exec.mockImplementation(async (command: string) => executionResult(
+      isMountProbe(command) ? probeStates.shift()! : "clone-visible",
+    ));
+    sandboxSdk.getSandbox.mockReturnValue(sandbox);
+    const tools = cloudflareSandboxTools(fakeNamespace(), "clone-session");
+
+    const clone = "git clone https://example.invalid/repo.git repo";
+    await tools.sandbox_start_process!.handler({ command: clone }, context);
+    const result = await tools.sandbox_exec!.handler({ command: "git -C repo status" }, context);
+
+    expect(result).toMatchObject({ success: true, stdout: "clone-visible" });
+    expect(sandbox.startProcess).toHaveBeenCalledWith(clone, {
+      cwd: "/workspace",
+      autoCleanup: true,
+    });
+    expect(sandbox.exec.mock.calls.filter(([command]) => isMountProbe(command))).toHaveLength(4);
+    expect(sandbox.mountBucket).toHaveBeenCalledTimes(1);
+  });
+
   it("remounts retained storage after a container replacement before the next command", async () => {
     const sandbox = preparingSandbox("empty");
     const events: string[] = [];
@@ -186,6 +213,9 @@ describe("Cloudflare sandbox tools", () => {
       .sandbox_exec!.handler({ command: "printf unsafe" }, context)).rejects.toThrow(message);
 
     expect(sandbox.mountBucket).not.toHaveBeenCalled();
+    expect(sandbox.exec.mock.calls.filter(([command]) => isMountProbe(command))).toHaveLength(
+      state === "mounted-unhealthy" ? 3 : 1,
+    );
   });
 
   it("preserves the local R2 mount contract", async () => {

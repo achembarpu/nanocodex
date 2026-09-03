@@ -185,7 +185,7 @@ where
         thinking: Thinking,
         fast_mode: bool,
         logical_turn: u64,
-        steers: tokio::sync::mpsc::Receiver<Prompt>,
+        steering: TurnSteering,
         mut cancel: tokio::sync::oneshot::Receiver<()>,
         fork_snapshots: watch::Sender<Option<ModelCheckpoint>>,
         execution_steps: Option<ExecutionSteps>,
@@ -219,7 +219,7 @@ where
                 task,
                 workspace,
                 logical_turn,
-                steers,
+                steering,
                 &mut cancel,
                 &fork_snapshots,
             )
@@ -403,7 +403,7 @@ where
         task: Prompt,
         requested_workspace: Option<Arc<str>>,
         logical_turn: u64,
-        steers: tokio::sync::mpsc::Receiver<Prompt>,
+        steering: TurnSteering,
         cancel: &mut tokio::sync::oneshot::Receiver<()>,
         fork_snapshots: &watch::Sender<Option<ModelCheckpoint>>,
     ) -> Result<ModelTaskOutcome> {
@@ -515,7 +515,18 @@ where
         };
 
         let outcome = {
-            let task = self.drive_session(&mut session, steers, fork_snapshots);
+            let TurnSteering {
+                receiver,
+                retained,
+                model_call_index,
+            } = steering;
+            let task = self.drive_session(
+                &mut session,
+                receiver,
+                retained,
+                model_call_index,
+                fork_snapshots,
+            );
             tokio::pin!(task);
             tokio::select! {
                 biased;
@@ -660,19 +671,28 @@ where
     pub(super) async fn drive_session(
         &mut self,
         session: &mut ModelSessionState,
-        mut steers: tokio::sync::mpsc::Receiver<Prompt>,
+        mut steers: tokio::sync::mpsc::Receiver<QueuedSteer>,
+        retained_steers: Vec<QueuedSteer>,
+        model_call_index: Arc<tokio::sync::Mutex<u32>>,
         fork_snapshots: &watch::Sender<Option<ModelCheckpoint>>,
     ) -> Result<String> {
         // Match Codex's ordering: always sample the turn's initial prompt once
         // before injecting input that arrived while that first request ran.
         let mut can_drain_steers = false;
+        let mut pending_steers = VecDeque::from(retained_steers);
         loop {
+            let call_index = self.stats.model_calls + 1;
             if can_drain_steers {
-                self.drain_steers(&mut session.conversation, &mut steers)
+                let mut current_call_index = model_call_index.lock().await;
+                *current_call_index = call_index;
+                while let Ok(steer) = steers.try_recv() {
+                    pending_steers.push_back(steer);
+                }
+                drop(current_call_index);
+                self.drain_steers(&mut session.conversation, &mut pending_steers, call_index)
                     .await?;
             }
             Self::publish_fork_snapshot(session, fork_snapshots, self.global_instructions.as_ref());
-            let call_index = self.stats.model_calls + 1;
             let model_call = self
                 .perform_model_call(call_index, &mut session.conversation, &session.factory)
                 .await?;
@@ -720,7 +740,7 @@ where
                     can_drain_steers = !compacted;
                     continue;
                 }
-                if !steers.is_empty() {
+                if !steers.is_empty() || !pending_steers.is_empty() {
                     // The completed response is retained by previous_response_id;
                     // the next delta contains only newly drained steer messages.
                     session.conversation.clear_delta();
@@ -781,11 +801,33 @@ where
     pub(super) async fn drain_steers(
         &mut self,
         conversation: &mut ConversationState,
-        steers: &mut tokio::sync::mpsc::Receiver<Prompt>,
+        pending_steers: &mut VecDeque<QueuedSteer>,
+        model_call_index: u32,
     ) -> Result<()> {
-        while let Ok(steer) = steers.try_recv() {
+        if let Some(bound) = pending_steers
+            .front()
+            .and_then(|steer| steer.model_call_index)
+            && bound < model_call_index
+        {
+            return Err(NanocodexError::InvalidExecutionPolicy(format!(
+                "retained steer was bound to model call {bound}, reached {model_call_index}"
+            )));
+        }
+        while pending_steers.front().is_some_and(|steer| {
+            steer.model_call_index == Some(model_call_index)
+                || (steer.model_call_index.is_none()
+                    && steer.accepted_after_model_call_index < model_call_index)
+        }) {
+            let steer = pending_steers
+                .pop_front()
+                .expect("eligible steering input disappeared");
+            if steer.model_call_index.is_none()
+                && let (Some(steps), Some(index)) = (&self.execution_steps, steer.durable_index)
+            {
+                steps.bind_steer(index, model_call_index).await?;
+            }
             if trace_content_enabled()
-                && let Ok(content) = serde_json::to_string(&steer)
+                && let Ok(content) = serde_json::to_string(&steer.prompt)
             {
                 info!(
                     target: "nanocodex",
@@ -794,9 +836,9 @@ where
                     "turn content"
                 );
             }
-            let instruction_bytes = steer.text_bytes();
-            let user_content = prepare_user_input(&steer.instruction).await;
-            conversation.append(prompt_messages(&steer, user_content));
+            let instruction_bytes = steer.prompt.text_bytes();
+            let user_content = prepare_user_input(&steer.prompt.instruction).await;
+            conversation.append(prompt_messages(&steer.prompt, user_content));
             self.stats.steers += 1;
             self.events.emit(
                 AgentEventKind::RunSteered,
