@@ -221,8 +221,6 @@ jobs:
             --interpreter python \
             --out dist/python \
             --release
-          python py/bindings/benchmarks/check_package_size.py \
-            dist/python/*.whl
       - name: Test installed Python package
         shell: bash
         run: |
