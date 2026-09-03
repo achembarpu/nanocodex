@@ -132,8 +132,12 @@ import {
   type DeviceHostServerMessage,
 } from "./device-host-protocol";
 import {
+  cancellationDeliveryMatchesLiveTurn,
   classifyTurnFailure,
+  managedCancellationAlarmTarget,
+  managedControlTransitionForResolution,
   materializeTurnResolution,
+  type ManagedTurnTransition,
   type TurnResolution,
   type TurnTerminal,
 } from "./turn-completion";
@@ -453,10 +457,6 @@ type ManagedRealtimeRouteResult = Readonly<{
   route: "started" | "steered";
   turn_id: string;
   voice_session_id: string;
-}>;
-
-type ManagedTransition = TurnTerminal | Extract<StreamMessage, {
-  type: "turn_cancelling" | "turn_retryable";
 }>;
 
 type TurnAuthorization = Readonly<{
@@ -1686,6 +1686,7 @@ export class DurableAgentSession extends DurableComputerSession {
   #realtimeArchiveTask?: Promise<ManagedRealtimeSealResult>;
   readonly #portabilityArchive: ManagedPortabilityArchive;
   readonly #turns = new Map<string, Turn>();
+  readonly #deliveredCancellationTurnIds = new Set<string>();
   readonly #reopenInterruptedTurnIds = new Set<string>();
   readonly #eventTurnQueue: string[] = [];
   #eventTurnId?: string;
@@ -4090,9 +4091,8 @@ export class DurableAgentSession extends DurableComputerSession {
       await this.#complete(id, turn);
     } catch (error) {
       this.#releaseEventTurn(id);
-      if (this.#turns.get(id) === turn) this.#turns.delete(id);
       this.#turnInputs.delete(id);
-      turn.dispose();
+      this.#disposeManagedTurn(id, turn);
       if (this.#deleting) return;
       const failure = classifyTurnFailure(id, error);
       this.#commitManagedResolution(id, failure);
@@ -4308,6 +4308,9 @@ export class DurableAgentSession extends DurableComputerSession {
     if (this.#deleting || this.#cancellationTasks.has(id)) return;
     const task = Promise.resolve().then(() => this.#cancelManagedTurn(id));
     this.#cancellationTasks.set(id, task);
+    // Retain a durable recovery lease even if this isolate is lost while the
+    // live cancellation call is in flight.
+    this.ctx.waitUntil(this.#scheduleNextAlarm());
     const observed = task.catch((error) => {
       console.warn({ type: "managed.turn_cancellation_failed", error_kind: errorKind(error) });
     }).finally(async () => {
@@ -4333,8 +4336,17 @@ export class DurableAgentSession extends DurableComputerSession {
       const cancellingAdmission = row.state === "cancelling";
       row = await this.#admitManagedTurn(row, true);
       if (isTerminalState(row.state)) return;
-      if (cancellingAdmission) return;
       turn = this.#turns.get(id);
+      if (cancellingAdmission) {
+        if (cancellationDeliveryMatchesLiveTurn({
+          cancelling: this.#managedTurn(id)?.state === "cancelling",
+          deliveredTurn: turn,
+          liveTurn: this.#turns.get(id),
+        })) {
+          this.#deliveredCancellationTurnIds.add(id);
+        }
+        return;
+      }
     }
     if (!turn) {
       await this.#scheduleNextAlarm();
@@ -4342,6 +4354,13 @@ export class DurableAgentSession extends DurableComputerSession {
     }
     try {
       await turn.cancel();
+      if (cancellationDeliveryMatchesLiveTurn({
+        cancelling: this.#managedTurn(id)?.state === "cancelling",
+        deliveredTurn: turn,
+        liveTurn: this.#turns.get(id),
+      })) {
+        this.#deliveredCancellationTurnIds.add(id);
+      }
     } catch (error) {
       if (this.#managedTurn(id)?.state === "cancelling") {
         this.#commitManagedResolution(id, classifyTurnFailure(id, error));
@@ -4429,8 +4448,7 @@ export class DurableAgentSession extends DurableComputerSession {
       return this.#managedTurn(row.id) ?? row;
     } catch (error) {
       this.#releaseEventTurn(row.id);
-      if (turn && this.#turns.get(row.id) === turn) this.#turns.delete(row.id);
-      turn?.dispose();
+      if (turn) this.#disposeManagedTurn(row.id, turn);
       this.#pendingTurnIds.delete(row.id);
       this.#turnInputs.delete(row.id);
       if (this.#deleting) return this.#managedTurn(row.id) ?? row;
@@ -4787,6 +4805,7 @@ export class DurableAgentSession extends DurableComputerSession {
     this.#events?.off();
     this.#events = undefined;
     this.#turns.clear();
+    this.#deliveredCancellationTurnIds.clear();
     this.#inFlight.clear();
     this.#admissionTasks.clear();
     this.#cancellationTasks.clear();
@@ -4874,9 +4893,13 @@ export class DurableAgentSession extends DurableComputerSession {
       if (current.retry_at !== null && current.retry_at > observedAt) break;
       if (current.state === "cancelling") {
         const cancellation = this.#cancellationTasks.get(row.id);
+        if (this.#deliveredCancellationTurnIds.has(current.id)) {
+          if (this.#turns.has(current.id)) break;
+          this.#deliveredCancellationTurnIds.delete(current.id);
+        }
+        if (cancellation) break;
         try {
-          if (cancellation) await cancellation;
-          else await this.#cancelManagedTurn(current.id);
+          await this.#cancelManagedTurn(current.id);
         } catch (error) {
           // Cancellation failure is already projected into the durable row.
           // Keep the ordered recovery pump alive so it can retain that retry.
@@ -5656,7 +5679,11 @@ export class DurableAgentSession extends DurableComputerSession {
       }
       reopenAgent = materialized.reopenAgent;
       try {
-        this.#commitManagedResolution(id, materialized);
+        if (materialized.kind === "terminal") {
+          this.#commitManagedTurnTerminal(id, materialized.terminal);
+        } else {
+          this.#commitManagedResolution(id, materialized);
+        }
       } catch (error) {
         if (this.#deleting) return;
         try {
@@ -5670,10 +5697,9 @@ export class DurableAgentSession extends DurableComputerSession {
         }
       }
     } finally {
-      this.#turns.delete(id);
       this.#reopenInterruptedTurnIds.delete(id);
       this.#turnInputs.delete(id);
-      turn.dispose();
+      this.#disposeManagedTurn(id, turn);
       if (!this.#deleting) {
         if (reopenAgent) await this.#reopenAgent(id);
         this.#scheduleRecovery();
@@ -5682,31 +5708,31 @@ export class DurableAgentSession extends DurableComputerSession {
     }
   }
 
-  #commitManagedResolution(id: string, resolution: TurnResolution): ManagedTurnRow {
-    const row = this.#managedTurn(id);
-    if (resolution.kind === "retry") {
-      return this.#commitManagedMessage(id, row?.state === "cancelling" ? {
-        type: "turn_cancelling",
-        id,
-        error: resolution.error,
-      } : {
-        type: "turn_retryable",
-        id,
-        error: resolution.error,
-      });
+  #disposeManagedTurn(id: string, turn: Turn): void {
+    if (this.#turns.get(id) === turn) {
+      this.#turns.delete(id);
+      this.#deliveredCancellationTurnIds.delete(id);
     }
-    const failure = resolution.terminal;
-    if (row?.state === "cancelling" && failure.type !== "turn_cancelled") {
-      return this.#commitManagedMessage(id, {
-        type: "turn_cancelling",
-        id,
-        error: "error" in failure ? failure.error : "cancellation did not settle",
-      });
-    }
-    return this.#commitManagedMessage(id, failure);
+    turn.dispose();
   }
 
-  #commitManagedMessage(id: string, requested: ManagedTransition): ManagedTurnRow {
+  #commitManagedResolution(
+    id: string,
+    resolution: TurnResolution,
+  ): ManagedTurnRow {
+    const row = this.#managedTurn(id);
+    return this.#commitManagedMessage(id, managedControlTransitionForResolution(
+      id,
+      row?.state === "cancelling",
+      resolution,
+    ));
+  }
+
+  #commitManagedTurnTerminal(id: string, terminal: TurnTerminal): ManagedTurnRow {
+    return this.#commitManagedMessage(id, terminal);
+  }
+
+  #commitManagedMessage(id: string, requested: ManagedTurnTransition): ManagedTurnRow {
     const original = this.#managedTurn(id);
     if (!original) throw new Error(`managed turn ${id} does not exist`);
     const now = Date.now();
@@ -5720,7 +5746,7 @@ export class DurableAgentSession extends DurableComputerSession {
         return;
       }
 
-      let message: ManagedTransition = requested;
+      let message: ManagedTurnTransition = requested;
       let state = managedStateForMessage(message);
       if (row.state === "cancelling" && message.type === "turn_retryable") {
         message = {
@@ -6294,6 +6320,7 @@ export class DurableAgentSession extends DurableComputerSession {
     await shutdown;
     await Promise.allSettled([...this.#inFlight]);
     this.#turns.clear();
+    this.#deliveredCancellationTurnIds.clear();
     this.#reopenInterruptedTurnIds.clear();
     this.#eventTurnQueue.length = 0;
     this.#eventTurnId = undefined;
@@ -6747,9 +6774,19 @@ export class DurableAgentSession extends DurableComputerSession {
         "WHERE state IN ('accepted', 'cancelling') ORDER BY created_at",
       )) {
         if (row.state === "cancelling") {
-          if (!this.#cancellationTasks.has(row.id)) {
-            targets.push(row.retry_at ?? now + 1);
+          const cancellationInFlight = this.#cancellationTasks.has(row.id);
+          const deliveredToLiveTurn = this.#deliveredCancellationTurnIds.has(row.id)
+            && this.#turns.has(row.id);
+          if (this.#deliveredCancellationTurnIds.has(row.id) && !deliveredToLiveTurn) {
+            this.#deliveredCancellationTurnIds.delete(row.id);
           }
+          targets.push(managedCancellationAlarmTarget({
+            now,
+            retryAt: row.retry_at,
+            cancellationInFlight,
+            deliveredToLiveTurn,
+            recoveryLeaseMs: MAX_RETRY_DELAY_MS,
+          }));
           break;
         }
         const admissionOwned = this.#turns.has(row.id)
@@ -7052,7 +7089,7 @@ function isTerminalState(state: ManagedTurnState): boolean {
   return state === "completed" || state === "cancelled" || state === "failed";
 }
 
-function managedStateForMessage(message: ManagedTransition): ManagedTurnState {
+function managedStateForMessage(message: ManagedTurnTransition): ManagedTurnState {
   switch (message.type) {
     case "turn_cancelling": return "cancelling";
     case "turn_completed": return "completed";

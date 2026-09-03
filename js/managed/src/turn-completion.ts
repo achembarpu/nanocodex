@@ -10,6 +10,59 @@ export type TurnResolution =
   | Readonly<{ kind: "terminal"; terminal: TurnTerminal; reopenAgent: false }>
   | Readonly<{ kind: "retry"; error: string; reopenAgent: boolean }>;
 
+export type ManagedTurnTransition = TurnTerminal | Extract<ServerMessage, {
+  type: "turn_cancelling" | "turn_retryable";
+}>;
+
+export function managedControlTransitionForResolution(
+  id: string,
+  cancelling: boolean,
+  resolution: TurnResolution,
+): ManagedTurnTransition {
+  if (resolution.kind === "retry") {
+    return cancelling ? {
+      type: "turn_cancelling",
+      id,
+      error: resolution.error,
+    } : {
+      type: "turn_retryable",
+      id,
+      error: resolution.error,
+    };
+  }
+  const terminal = resolution.terminal;
+  if (cancelling && terminal.type !== "turn_cancelled") {
+    return {
+      type: "turn_cancelling",
+      id,
+      error: "error" in terminal ? terminal.error : "cancellation did not settle",
+    };
+  }
+  return terminal;
+}
+
+export function managedCancellationAlarmTarget(options: Readonly<{
+  now: number;
+  retryAt: number | null;
+  cancellationInFlight: boolean;
+  deliveredToLiveTurn: boolean;
+  recoveryLeaseMs: number;
+}>): number {
+  return options.cancellationInFlight || options.deliveredToLiveTurn
+    ? options.now + options.recoveryLeaseMs
+    : options.retryAt ?? options.now + 1;
+}
+
+export function cancellationDeliveryMatchesLiveTurn<T>(options: Readonly<{
+  cancelling: boolean;
+  deliveredTurn: T | undefined;
+  liveTurn: T | undefined;
+}>): boolean {
+  return options.cancelling
+    && options.deliveredTurn !== undefined
+    && options.deliveredTurn === options.liveTurn;
+}
+
 export async function materializeTurnResolution(
   id: string,
   turn: Turn,

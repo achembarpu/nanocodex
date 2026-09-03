@@ -1,7 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 
 import type { Turn, TurnResult, TurnUsage } from "nanocodex";
-import { classifyTurnFailure, materializeTurnResolution } from "../src/turn-completion";
+import {
+  cancellationDeliveryMatchesLiveTurn,
+  classifyTurnFailure,
+  managedCancellationAlarmTarget,
+  managedControlTransitionForResolution,
+  materializeTurnResolution,
+} from "../src/turn-completion";
 
 const usage = {
   input_tokens: 10,
@@ -146,6 +152,86 @@ describe("materializeTurnResolution", () => {
       error: message,
       reopenAgent,
     });
+  });
+});
+
+describe("managed cancellation projection", () => {
+  it("acknowledges only the exact live cancelling turn", () => {
+    const deliveredTurn = {};
+
+    expect(cancellationDeliveryMatchesLiveTurn({
+      cancelling: true,
+      deliveredTurn,
+      liveTurn: deliveredTurn,
+    })).toBe(true);
+    expect(cancellationDeliveryMatchesLiveTurn({
+      cancelling: true,
+      deliveredTurn,
+      liveTurn: {},
+    })).toBe(false);
+    expect(cancellationDeliveryMatchesLiveTurn({
+      cancelling: false,
+      deliveredTurn,
+      liveTurn: deliveredTurn,
+    })).toBe(false);
+    expect(cancellationDeliveryMatchesLiveTurn({
+      cancelling: true,
+      deliveredTurn: undefined,
+      liveTurn: undefined,
+    })).toBe(false);
+  });
+
+  it("keeps a nonterminal cancellation failure retryable", () => {
+    expect(managedControlTransitionForResolution("turn-retry", true, {
+      kind: "retry",
+      error: "durability store unavailable",
+      reopenAgent: false,
+    })).toEqual({
+      type: "turn_cancelling",
+      id: "turn-retry",
+      error: "durability store unavailable",
+    });
+  });
+
+  it("does not mistake a control-path terminal classification for the turn result", () => {
+    expect(managedControlTransitionForResolution("turn-control", true, {
+      kind: "terminal",
+      terminal: { type: "turn_failed", id: "turn-control", error: "cancel control failed" },
+      reopenAgent: false,
+    })).toEqual({
+      type: "turn_cancelling",
+      id: "turn-control",
+      error: "cancel control failed",
+    });
+  });
+
+  it.each([
+    { cancellationInFlight: true, deliveredToLiveTurn: false },
+    { cancellationInFlight: false, deliveredToLiveTurn: true },
+  ])("retains a bounded recovery alarm while cancellation is waiting", (waiting) => {
+    expect(managedCancellationAlarmTarget({
+      now: 10_000,
+      retryAt: null,
+      ...waiting,
+      recoveryLeaseMs: 60_000,
+    })).toBe(70_000);
+  });
+
+  it("keeps a cold cancellation eligible for its durable retry", () => {
+    expect(managedCancellationAlarmTarget({
+      now: 10_000,
+      retryAt: 12_500,
+      cancellationInFlight: false,
+      deliveredToLiveTurn: false,
+      recoveryLeaseMs: 60_000,
+    })).toBe(12_500);
+    expect(managedCancellationAlarmTarget({
+      now: 10_000,
+      retryAt: null,
+      cancellationInFlight: false,
+      deliveredToLiveTurn: false,
+      recoveryLeaseMs: 60_000,
+    })).toBe(10_001);
   });
 });
 
