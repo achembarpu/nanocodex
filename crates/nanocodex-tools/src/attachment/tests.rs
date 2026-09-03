@@ -135,6 +135,13 @@ async fn fast_ready_disconnects_keep_exponential_reconnect_backoff() {
     assert!(accepted[2].0.duration_since(accepted[1].0) >= Duration::from_millis(170));
     assert!(accepted[3].0.duration_since(accepted[2].0) >= Duration::from_millis(350));
     assert!(accepted.windows(2).all(|pair| pair[0].1 == pair[1].1));
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while attachment.status() != AttachmentStatus::Disconnected {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
     attachment.detach().await.unwrap();
 }
 
