@@ -43,8 +43,8 @@ use nanocodex_agent::{
     AgentEvents, Nanocodex, NanocodexError, Turn, TurnControl, TurnResult, events::AgentEvent,
 };
 use nanocodex_managed::{
-    AgentList, EventCursor, ManagedClient, ManagedError, ManagedEvent, ManagedEventData,
-    PromptContent, PromptInput,
+    AgentList, AgentSettings, EventCursor, ManagedClient, ManagedError, ManagedEvent,
+    ManagedEventData, PromptContent, PromptInput, ReasoningMode as ManagedReasoningMode, Thinking,
 };
 use std::{
     collections::{HashMap, HashSet, VecDeque},
@@ -60,6 +60,12 @@ type Admission = (PaneId, TurnId, Result<Turn, NanocodexError>);
 type Completion = (PaneId, TurnId, Result<TurnResult, NanocodexError>);
 type SteerCompletion = (PaneId, components::QueueId, Result<(), NanocodexError>);
 type CancelCompletion = (PaneId, Vec<TurnId>, Option<String>);
+type SettingsCompletion = (
+    PaneId,
+    String,
+    &'static str,
+    Result<AgentSettings, ManagedError>,
+);
 type HistoryProjection = (Vec<Arc<TranscriptRecord>>, u64, Vec<RecentPrompt>);
 type ConnectedAgent = (
     Nanocodex,
@@ -68,11 +74,13 @@ type ConnectedAgent = (
     PathBuf,
     Vec<ManagedEvent>,
     Option<String>,
+    AgentSettings,
+    bool,
 );
 
 #[derive(Clone)]
 enum RetryTarget {
-    Create,
+    Create(AgentSettings),
     Agent(String),
 }
 
@@ -100,12 +108,31 @@ enum ConnectionResult {
     Disconnected(Result<(), NanocodexError>),
 }
 
+#[derive(Clone, Copy)]
+enum SettingsMutation {
+    Complete(AgentSettings),
+    Thinking(Thinking),
+    FastMode(bool),
+}
+
+impl SettingsMutation {
+    fn failure_subject(self) -> &'static str {
+        match self {
+            Self::Complete(_) => "select model",
+            Self::Thinking(_) => "change thinking effort",
+            Self::FastMode(_) => "change fast mode",
+        }
+    }
+}
+
 struct DriverRuntime {
     client: ManagedClient,
     agent: Option<Nanocodex>,
     events: Option<AgentEvents>,
     events_open: bool,
     agent_id: String,
+    settings: AgentSettings,
+    pending_settings: Option<AgentSettings>,
     workspace: PathBuf,
     sequence: u64,
     next_turn: u64,
@@ -119,6 +146,8 @@ struct DriverRuntime {
     completions: JoinSet<Completion>,
     steers: JoinSet<SteerCompletion>,
     cancellations: JoinSet<CancelCompletion>,
+    settings_updates: JoinSet<SettingsCompletion>,
+    settings_queue: VecDeque<(PaneId, String, SettingsMutation)>,
     shells: JoinSet<(PaneId, ShellExecution)>,
     active_shells: usize,
     shell_context: Vec<String>,
@@ -146,6 +175,10 @@ impl DriverRuntime {
 
     fn start_submission(&mut self, pane: PaneId, id: TurnId, prompt: Submission) {
         let prompt = inject_shell_context(&mut self.shell_context, prompt);
+        if !self.settings_updates.is_empty() || !self.settings_queue.is_empty() {
+            self.pending_submission = Some((pane, id, prompt));
+            return;
+        }
         let Some(agent) = self.agent.clone() else {
             self.pending_submission = Some((pane, id, prompt));
             if self.connection.is_empty()
@@ -162,19 +195,49 @@ impl DriverRuntime {
         });
     }
 
+    fn queue_settings(&mut self, pane: PaneId, mutation: SettingsMutation) {
+        self.settings_queue
+            .push_back((pane, self.agent_id.clone(), mutation));
+        self.start_next_settings_update();
+    }
+
+    fn start_next_settings_update(&mut self) {
+        if !self.settings_updates.is_empty() {
+            return;
+        }
+        let Some((pane, agent_id, mutation)) = self.settings_queue.pop_front() else {
+            return;
+        };
+        let client = self.client.clone();
+        self.settings_updates.spawn(async move {
+            let result = match mutation {
+                SettingsMutation::Complete(settings) => {
+                    client.set_settings(&agent_id, settings).await
+                }
+                SettingsMutation::Thinking(thinking) => {
+                    client.set_thinking(&agent_id, thinking).await
+                }
+                SettingsMutation::FastMode(enabled) => {
+                    client.set_fast_mode(&agent_id, enabled).await
+                }
+            };
+            (pane, agent_id, mutation.failure_subject(), result)
+        });
+    }
+
     fn spawn_connection(&mut self, purpose: ConnectionPurpose, target: RetryTarget) {
         if matches!(purpose, ConnectionPurpose::Startup) {
             self.retry_target = Some(target.clone());
         }
         let client = self.client.clone();
-        let agent_id = match target {
-            RetryTarget::Create => None,
-            RetryTarget::Agent(agent_id) => Some(agent_id),
+        let (agent_id, settings) = match target {
+            RetryTarget::Create(settings) => (None, settings),
+            RetryTarget::Agent(agent_id) => (Some(agent_id), AgentSettings::default()),
         };
         self.connection.spawn(async move {
             ConnectionResult::Agent {
                 purpose,
-                result: connect_agent(client, agent_id).await,
+                result: connect_agent(client, agent_id, settings).await,
             }
         });
     }
@@ -185,6 +248,8 @@ impl DriverRuntime {
             && self.completions.is_empty()
             && self.steers.is_empty()
             && self.cancellations.is_empty()
+            && self.settings_updates.is_empty()
+            && self.settings_queue.is_empty()
             && self.active_shells == 0
             && self.pending_submission.is_none()
             && self.cancel_after_admission.is_empty()
@@ -218,12 +283,15 @@ impl DriverRuntime {
 async fn connect_agent(
     client: ManagedClient,
     agent_id: Option<String>,
+    create_settings: AgentSettings,
 ) -> Result<ConnectedAgent, ConnectionFailure> {
-    let (opened, history, retry) = match agent_id {
+    let created = agent_id.is_none();
+    let (opened, history, retry, settings) = match agent_id {
         None => (
-            super::open_workspace_agent_from(&client, None, None).await,
+            super::open_workspace_agent_with_settings(&client, None, None, create_settings).await,
             None,
-            RetryTarget::Create,
+            RetryTarget::Create(create_settings),
+            create_settings,
         ),
         Some(agent_id) => {
             let state = client
@@ -240,11 +308,17 @@ async fn connect_agent(
                         retry: RetryTarget::Agent(agent_id.clone()),
                     }
                 })?;
+            let settings = state.settings;
             let opening =
                 super::open_workspace_agent_from(&client, Some(agent_id.clone()), Some(state));
             let history = load_event_history(&client, &agent_id, &cursor);
             let (opened, history) = tokio::join!(opening, history);
-            (opened, Some(history), RetryTarget::Agent(agent_id))
+            (
+                opened,
+                Some(history),
+                RetryTarget::Agent(agent_id),
+                settings,
+            )
         }
     };
     let (agent, events, agent_id, workspace) =
@@ -257,7 +331,9 @@ async fn connect_agent(
             Some(format!("Durable event history is unavailable: {error}")),
         ),
     };
-    Ok((agent, events, agent_id, workspace, history, warning))
+    Ok((
+        agent, events, agent_id, workspace, history, warning, settings, created,
+    ))
 }
 
 pub(crate) async fn run(
@@ -280,10 +356,14 @@ async fn run_inner(
         .map_err(|error| ManagedError::Configuration(error.to_string()))?
         .workspace()
         .to_path_buf();
-    let mut root = RootNode::new(&workspace, ReasoningEffort::Medium);
+    let initial_settings = AgentSettings::default();
+    let initial_effort = effort_from_thinking(initial_settings.thinking);
+    let initial_reasoning_mode = reasoning_mode_from_managed(initial_settings.reasoning_mode);
+    let mut root = RootNode::new(&workspace, initial_effort);
     root.set_fork_available(false);
-    root.set_reasoning_modes(ReasoningMode::Standard, ReasoningMode::Standard);
-    root.set_model(Model::Sol);
+    root.set_reasoning_modes(initial_reasoning_mode, initial_reasoning_mode);
+    root.set_fast_mode(initial_settings.fast_mode);
+    root.set_model(initial_settings.model);
 
     let mut theme = Theme::default();
     if let Some(scheme) = detect_system_scheme() {
@@ -299,6 +379,8 @@ async fn run_inner(
         events: None,
         events_open: false,
         agent_id: String::new(),
+        settings: initial_settings,
+        pending_settings: None,
         workspace: workspace.clone(),
         sequence: 1,
         next_turn: 1,
@@ -312,6 +394,8 @@ async fn run_inner(
         completions: JoinSet::new(),
         steers: JoinSet::new(),
         cancellations: JoinSet::new(),
+        settings_updates: JoinSet::new(),
+        settings_queue: VecDeque::new(),
         shells: JoinSet::new(),
         active_shells: 0,
         shell_context: Vec::new(),
@@ -341,7 +425,10 @@ async fn run_inner(
             runtime.spawn_connection(ConnectionPurpose::Startup, RetryTarget::Agent(agent_id));
         }
         None => {
-            runtime.spawn_connection(ConnectionPurpose::Startup, RetryTarget::Create);
+            runtime.spawn_connection(
+                ConnectionPurpose::Startup,
+                RetryTarget::Create(AgentSettings::default()),
+            );
         }
     }
     let mut stopping = false;
@@ -419,8 +506,14 @@ async fn run_inner(
                             };
                             stopping = apply_update(update, &mut app, &mut runtime, &mut terminal, &mut scheduler).await?;
                         }
-                        ConnectionResult::Agent { purpose, result: Ok((agent, events, agent_id, workspace, history, warning)) } => {
+                        ConnectionResult::Agent { purpose, result: Ok((agent, events, agent_id, workspace, history, warning, settings, created)) } => {
                             runtime.retry_target = None;
+                            let requested_startup_settings = if created {
+                                runtime.pending_settings.take()
+                            } else {
+                                None
+                            };
+                            let display_settings = requested_startup_settings.unwrap_or(settings);
                             let (mut records, mut sequence, mut prompts) =
                                 match history_projection(history, &agent_id, &workspace) {
                                     Ok(projection) => projection,
@@ -457,6 +550,7 @@ async fn run_inner(
                             runtime.events = Some(events);
                             runtime.events_open = true;
                             runtime.agent_id = agent_id;
+                            runtime.settings = settings;
                             runtime.workspace = workspace;
                             runtime.sequence = sequence;
                             runtime.next_turn = runtime.next_turn.max(sequence);
@@ -468,28 +562,54 @@ async fn run_inner(
                             let update = match purpose {
                                 ConnectionPurpose::New(pane) => app.update(AppEvent::NewSessionReady {
                                     pane,
-                                    effort: ReasoningEffort::Medium,
-                                    reasoning_mode: ReasoningMode::Standard,
-                                    fast_mode: false,
-                                    model: Model::Sol,
+                                    effort: effort_from_thinking(display_settings.thinking),
+                                    reasoning_mode: reasoning_mode_from_managed(display_settings.reasoning_mode),
+                                    fast_mode: display_settings.fast_mode,
+                                    model: display_settings.model,
                                     draft_reset: DraftReset::Clear,
                                     skills: Arc::from([]),
                                 }),
+                                ConnectionPurpose::Startup
+                                    if created && runtime.pending_submission.is_none() =>
+                                {
+                                    app.update(AppEvent::NewSessionReady {
+                                        pane,
+                                        effort: effort_from_thinking(display_settings.thinking),
+                                        reasoning_mode: reasoning_mode_from_managed(
+                                            display_settings.reasoning_mode,
+                                        ),
+                                        fast_mode: display_settings.fast_mode,
+                                        model: display_settings.model,
+                                        draft_reset: DraftReset::Preserve,
+                                        skills: Arc::from([]),
+                                    })
+                                }
                                 ConnectionPurpose::Startup | ConnectionPurpose::Resume(_) => {
-                                    let projection = RootNode::project_session(ReasoningEffort::Medium, records);
+                                    let effort = effort_from_thinking(settings.thinking);
+                                    let reasoning_mode =
+                                        reasoning_mode_from_managed(settings.reasoning_mode);
+                                    let projection = RootNode::project_session(effort, records);
                                     app.update(AppEvent::SessionRestored {
                                         pane,
                                         projection: Box::new(projection),
-                                        effort: ReasoningEffort::Medium,
-                                        reasoning_mode: ReasoningMode::Standard,
-                                        preferred_reasoning_mode: ReasoningMode::Standard,
-                                        fast_mode: false,
-                                        model: Model::Sol,
+                                        effort,
+                                        reasoning_mode,
+                                        preferred_reasoning_mode: reasoning_mode,
+                                        fast_mode: settings.fast_mode,
+                                        model: settings.model,
                                         skills: Arc::from([]),
                                     })
                                 }
                             };
                             request_render(update, &mut scheduler);
+                            if let Some(requested) = requested_startup_settings
+                                && requested != settings
+                            {
+                                runtime.queue_settings(
+                                    pane,
+                                    SettingsMutation::Complete(requested),
+                                );
+                            }
                             if let Some(warning) = warning {
                                 request_render(app.update(AppEvent::NotifyError {
                                     pane: PaneId::Main,
@@ -507,6 +627,19 @@ async fn run_inner(
                             let message = format!("Could not connect to the managed agent: {}", failure.error);
                             if matches!(purpose, ConnectionPurpose::Startup) {
                                 runtime.retry_target = Some(failure.retry);
+                                if runtime.pending_settings.is_some() {
+                                    request_render(
+                                        app.update(AppEvent::SettingsHydrated {
+                                            pane: PaneId::Main,
+                                            effort: effort_from_thinking(
+                                                runtime.settings.thinking,
+                                            ),
+                                            fast_mode: runtime.settings.fast_mode,
+                                            model: runtime.settings.model,
+                                        }),
+                                        &mut scheduler,
+                                    );
+                                }
                             }
                             let update = match purpose {
                                 ConnectionPurpose::Startup => app.update(AppEvent::NotifyError {
@@ -544,6 +677,42 @@ async fn run_inner(
                             }), &mut scheduler);
                         }
                         ConnectionResult::Disconnected(Ok(())) => {}
+                    }
+                }
+            }
+            result = runtime.settings_updates.join_next(), if !runtime.settings_updates.is_empty() => {
+                if let Some(result) = result {
+                    let (pane, agent_id, failure_subject, outcome) = result.map_err(|error| {
+                        ManagedError::Configuration(format!("settings task failed: {error}"))
+                    })?;
+                    if agent_id == runtime.agent_id {
+                        match outcome {
+                            Ok(settings) => runtime.settings = settings,
+                            Err(error) => request_render(
+                                app.update(AppEvent::NotifyError {
+                                    pane,
+                                    error: format!("Could not {failure_subject}: {error}"),
+                                }),
+                                &mut scheduler,
+                            ),
+                        }
+                    }
+                    runtime.start_next_settings_update();
+                    if runtime.settings_updates.is_empty() && runtime.settings_queue.is_empty() {
+                        request_render(
+                            app.update(AppEvent::SettingsHydrated {
+                                pane,
+                                effort: effort_from_thinking(runtime.settings.thinking),
+                                fast_mode: runtime.settings.fast_mode,
+                                model: runtime.settings.model,
+                            }),
+                            &mut scheduler,
+                        );
+                        if runtime.active_shells == 0
+                            && let Some((pane, id, prompt)) = runtime.pending_submission.take()
+                        {
+                            runtime.start_submission(pane, id, prompt);
+                        }
                     }
                 }
             }
@@ -718,6 +887,7 @@ async fn apply_update(
             }
             AppEffect::ClosePane(_) => {}
             AppEffect::Pane { pane, effect } => {
+                // Keep the hosted effect boundary visually separate from app-level routing.
                 match effect {
                     RootEffect::Submit(prompt) | RootEffect::ContinueSubagent(prompt) => {
                         let id = TurnId::new(runtime.next_turn);
@@ -877,21 +1047,32 @@ async fn apply_update(
                     }
                     RootEffect::ResumeSession(agent_id) => {
                         if !runtime.idle() {
-                            absorb(app.update(AppEvent::SessionLoadFailed {
-                            pane,
-                            error: "Finish or interrupt the active work before switching agents.".to_owned(),
-                        }), &mut effects, scheduler);
+                            absorb(
+                            app.update(AppEvent::SessionLoadFailed {
+                                pane,
+                                error:
+                                    "Finish or interrupt the active work before switching agents."
+                                        .to_owned(),
+                            }),
+                            &mut effects,
+                            scheduler,
+                        );
                             continue;
                         }
                         let client = runtime.client.clone();
                         runtime.connection.spawn(async move {
                             ConnectionResult::Agent {
                                 purpose: ConnectionPurpose::Resume(pane),
-                                result: connect_agent(client, Some(agent_id)).await,
+                                result: connect_agent(
+                                    client,
+                                    Some(agent_id),
+                                    AgentSettings::default(),
+                                )
+                                .await,
                             }
                         });
                     }
-                    RootEffect::NewSession(_) => {
+                    RootEffect::NewSession(model) => {
                         if !runtime.idle() {
                             absorb(
                                 app.update(AppEvent::NewSessionFailed {
@@ -903,11 +1084,18 @@ async fn apply_update(
                             );
                             continue;
                         }
+                        let root = app.root(pane).expect("new-session pane must exist");
+                        let settings = AgentSettings {
+                            model,
+                            thinking: thinking_from_effort(root.composer().effort()),
+                            reasoning_mode: managed_reasoning_mode(root.preferred_reasoning_mode()),
+                            fast_mode: root.composer().fast_mode(),
+                        };
                         let client = runtime.client.clone();
                         runtime.connection.spawn(async move {
                             ConnectionResult::Agent {
                                 purpose: ConnectionPurpose::New(pane),
-                                result: connect_agent(client, None).await,
+                                result: connect_agent(client, None, settings).await,
                             }
                         });
                     }
@@ -980,19 +1168,70 @@ async fn apply_update(
                         }
                     }
                     RootEffect::OpenConfigEditor | RootEffect::ReloadConfig => {
-                        absorb(app.update(AppEvent::ConfigReloadFailed {
-                        pane,
-                        error: "Nanocodex2 is configured by the hosted account and environment.".to_owned(),
-                    }), &mut effects, scheduler);
+                        absorb(
+                        app.update(AppEvent::ConfigReloadFailed {
+                            pane,
+                            error:
+                                "Nanocodex2 is configured by the hosted account and environment."
+                                    .to_owned(),
+                        }),
+                        &mut effects,
+                        scheduler,
+                    );
                     }
-                    RootEffect::SetModel(_)
-                    | RootEffect::SetEffort { .. }
-                    | RootEffect::SetFastMode(_)
-                    | RootEffect::SetMaxSubagents(_) => {
+                    RootEffect::SetModel(model) => {
+                        let root = app.root(pane).expect("model-selection pane must exist");
+                        let requested = AgentSettings {
+                            model,
+                            thinking: thinking_from_effort(root.composer().effort()),
+                            reasoning_mode: managed_reasoning_mode(root.preferred_reasoning_mode()),
+                            fast_mode: root.composer().fast_mode(),
+                        };
+                        if runtime.agent.is_none() {
+                            runtime.settings = requested;
+                            runtime.pending_settings = Some(requested);
+                            if let Some(RetryTarget::Create(settings)) =
+                                runtime.retry_target.as_mut()
+                            {
+                                *settings = requested;
+                            }
+                            continue;
+                        }
+                        runtime.queue_settings(pane, SettingsMutation::Complete(requested));
+                    }
+                    RootEffect::SetEffort { effort, .. } => {
+                        let thinking = thinking_from_effort(effort);
+                        if runtime.agent.is_none() {
+                            runtime.settings.thinking = thinking;
+                            runtime.pending_settings = Some(runtime.settings);
+                            if let Some(RetryTarget::Create(settings)) =
+                                runtime.retry_target.as_mut()
+                            {
+                                settings.thinking = thinking;
+                            }
+                            continue;
+                        }
+                        runtime.queue_settings(pane, SettingsMutation::Thinking(thinking));
+                    }
+                    RootEffect::SetFastMode(enabled) => {
+                        if runtime.agent.is_none() {
+                            runtime.settings.fast_mode = enabled;
+                            runtime.pending_settings = Some(runtime.settings);
+                            if let Some(RetryTarget::Create(settings)) =
+                                runtime.retry_target.as_mut()
+                            {
+                                settings.fast_mode = enabled;
+                            }
+                            continue;
+                        }
+                        runtime.queue_settings(pane, SettingsMutation::FastMode(enabled));
+                    }
+                    RootEffect::SetMaxSubagents(_) => {
                         absorb(
                             app.update(AppEvent::NotifyError {
                                 pane,
-                                error: "This setting is controlled by the hosted agent.".to_owned(),
+                                error: "Hosted subagent limits are not exposed by this client."
+                                    .to_owned(),
                             }),
                             &mut effects,
                             scheduler,
@@ -1226,6 +1465,40 @@ fn inject_shell_context(context: &mut Vec<String>, prompt: Submission) -> Submis
     let prefix = context.join("\n\n");
     context.clear();
     prompt.prepend_text(prefix)
+}
+
+const fn thinking_from_effort(effort: ReasoningEffort) -> Thinking {
+    match effort {
+        ReasoningEffort::Low => Thinking::Low,
+        ReasoningEffort::Medium => Thinking::Medium,
+        ReasoningEffort::High => Thinking::High,
+        ReasoningEffort::Xhigh => Thinking::Xhigh,
+        ReasoningEffort::Max => Thinking::Max,
+    }
+}
+
+const fn effort_from_thinking(thinking: Thinking) -> ReasoningEffort {
+    match thinking {
+        Thinking::None | Thinking::Low => ReasoningEffort::Low,
+        Thinking::Medium => ReasoningEffort::Medium,
+        Thinking::High => ReasoningEffort::High,
+        Thinking::Xhigh => ReasoningEffort::Xhigh,
+        Thinking::Max => ReasoningEffort::Max,
+    }
+}
+
+const fn managed_reasoning_mode(mode: ReasoningMode) -> ManagedReasoningMode {
+    match mode {
+        ReasoningMode::Standard => ManagedReasoningMode::Standard,
+        ReasoningMode::Pro => ManagedReasoningMode::Pro,
+    }
+}
+
+const fn reasoning_mode_from_managed(mode: ManagedReasoningMode) -> ReasoningMode {
+    match mode {
+        ManagedReasoningMode::Standard => ReasoningMode::Standard,
+        ManagedReasoningMode::Pro => ReasoningMode::Pro,
+    }
 }
 
 fn is_image_paste(event: &Event) -> bool {

@@ -25,6 +25,7 @@ import {
 
 const STARTUP_TIMEOUT_MS = 10_000;
 const INTERNAL_RUNTIME = Symbol.for("nanocodex.cloudflare.internalRuntime");
+const INTERNAL_CONFIGURATION = Symbol.for("nanocodex.cloudflare.internalConfiguration");
 const EPHEMERAL_APPLICATION_OPTIONS = new Set([
   "fastMode",
   "instructions",
@@ -301,12 +302,14 @@ async function createOwned(module, resolved, options, hostAgent, lifecycle) {
     durabilityId,
     eventPersistence = "durable",
     [INTERNAL_RUNTIME]: internalRuntime,
+    [INTERNAL_CONFIGURATION]: internalConfiguration,
     ...agentOptions
   } = configured;
   if (internalRuntime !== undefined
     && (!internalRuntime || typeof internalRuntime !== "object" || Array.isArray(internalRuntime))) {
     throw new TypeError("Cloudflare Agent internal runtime options must be an object");
   }
+  validateInternalConfiguration(internalConfiguration);
   const eventSocket = eventPersistence === "durable"
     ? createCloudflareEventSocket(context)
     : undefined;
@@ -338,6 +341,12 @@ async function createOwned(module, resolved, options, hostAgent, lifecycle) {
   try {
     agent = await hostAgent.create({
       ...agentOptions,
+      ...(internalConfiguration === undefined ? {} : {
+        model: internalConfiguration.model,
+        thinking: internalConfiguration.thinking,
+        reasoningMode: internalConfiguration.reasoning_mode,
+        fastMode: internalConfiguration.fast_mode,
+      }),
       module,
       toolMode: internalRuntime?.toolMode ?? "direct",
       codeEvaluator: internalRuntime?.codeEvaluator,
@@ -518,6 +527,23 @@ function applicationOptions(options) {
     );
   }
   return options;
+}
+
+function validateInternalConfiguration(configuration) {
+  if (configuration === undefined) return;
+  if (!configuration || typeof configuration !== "object" || Array.isArray(configuration)
+    || Reflect.ownKeys(configuration).some((key) => ![
+      "model",
+      "thinking",
+      "reasoning_mode",
+      "fast_mode",
+    ].includes(key))
+    || !["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"].includes(configuration.model)
+    || !["none", "low", "medium", "high", "xhigh", "max"].includes(configuration.thinking)
+    || !["standard", "pro"].includes(configuration.reasoning_mode)
+    || typeof configuration.fast_mode !== "boolean") {
+    throw new TypeError("Cloudflare Agent internal configuration is invalid");
+  }
 }
 
 function ephemeralApplicationOptions(options) {

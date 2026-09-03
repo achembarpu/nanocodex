@@ -19,13 +19,16 @@ use ratatui::{
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-const ACTIONS: [Action; 6] = [
+const ACTIONS: [Action; 9] = [
+    Action::Effort,
+    Action::FastMode,
     Action::Theme,
     Action::NewSession,
     Action::ResumeSession,
     Action::Keybindings,
     Action::DebugContext,
     Action::Reflection,
+    Action::Model,
 ];
 const KEY_BINDINGS: [(&str, &str); 3] = [("↑↓", "move"), ("enter/tab", "open"), ("esc", "close")];
 const SEARCH_LABEL: &str = "Search: ";
@@ -38,12 +41,17 @@ pub(super) enum ActionsEvent {
 pub(super) struct ActionAvailability {
     pub(super) new_session: bool,
     pub(super) fork: bool,
+    pub(super) fast_mode: bool,
+    pub(super) model: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum Action {
     Handoff,
     Review,
+    Effort,
+    Model,
+    FastMode,
     Theme,
     NewSession,
     ResumeSession,
@@ -248,6 +256,8 @@ impl ActionsMenu {
     const fn is_enabled(&self, action: Action) -> bool {
         match action {
             Action::Handoff | Action::Review | Action::Reflection => self.availability.new_session,
+            Action::Effort | Action::FastMode => true,
+            Action::Model => self.availability.model,
             Action::Theme => true,
             Action::NewSession => self.availability.new_session,
             Action::ResumeSession => self.availability.new_session,
@@ -277,6 +287,8 @@ impl ActionsMenu {
             Action::Reflection if !self.availability.new_session => {
                 "Reflect on session · finish active work first"
             }
+            Action::FastMode if self.availability.fast_mode => "Disable fast mode",
+            Action::Model if !self.availability.model => "Select model · start a new session first",
             _ => action.label(),
         }
     }
@@ -287,6 +299,9 @@ impl Action {
         match self {
             Self::Handoff => "Prepare handoff",
             Self::Review => "Review changes",
+            Self::Effort => "Change effort",
+            Self::Model => "Select model",
+            Self::FastMode => "Enable fast mode",
             Self::Theme => "Select theme",
             Self::NewSession => "New session",
             Self::ResumeSession => "Resume session",
@@ -303,6 +318,9 @@ impl Action {
         match self {
             Self::Handoff => Some("handoff"),
             Self::Review => Some("review"),
+            Self::Effort => Some("thinking"),
+            Self::Model => Some("intelligence"),
+            Self::FastMode => Some("priority"),
             Self::Theme => Some("appearance"),
             Self::NewSession => Some("clear"),
             Self::ResumeSession => Some("restore"),
@@ -378,4 +396,76 @@ fn visible_query_tail(query: &str, width: usize) -> &str {
         }
     }
     query
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Action, ActionAvailability, ActionsEffect, ActionsEvent, ActionsMenu, Component};
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+
+    fn availability(fast_mode: bool, model: bool) -> ActionAvailability {
+        ActionAvailability {
+            new_session: true,
+            fork: true,
+            fast_mode,
+            model,
+        }
+    }
+
+    #[test]
+    fn fast_mode_uses_priority_alias_and_dynamic_label() {
+        assert_eq!(Action::FastMode.alias(), Some("priority"));
+        let enabled = ActionsMenu::new(availability(true, true));
+        assert_eq!(enabled.display_label(Action::FastMode), "Disable fast mode");
+        let disabled = ActionsMenu::new(availability(false, true));
+        assert_eq!(disabled.display_label(Action::FastMode), "Enable fast mode");
+    }
+
+    #[test]
+    fn priority_search_triggers_fast_mode() {
+        let mut menu = ActionsMenu::new(availability(false, true));
+        menu.update(ActionsEvent::Terminal(Event::Key(KeyEvent::new(
+            KeyCode::Char('p'),
+            KeyModifiers::NONE,
+        ))));
+        menu.update(ActionsEvent::Terminal(Event::Key(KeyEvent::new(
+            KeyCode::Char('r'),
+            KeyModifiers::NONE,
+        ))));
+        menu.update(ActionsEvent::Terminal(Event::Key(KeyEvent::new(
+            KeyCode::Char('i'),
+            KeyModifiers::NONE,
+        ))));
+        menu.update(ActionsEvent::Terminal(Event::Key(KeyEvent::new(
+            KeyCode::Char('o'),
+            KeyModifiers::NONE,
+        ))));
+        menu.update(ActionsEvent::Terminal(Event::Key(KeyEvent::new(
+            KeyCode::Char('r'),
+            KeyModifiers::NONE,
+        ))));
+        menu.update(ActionsEvent::Terminal(Event::Key(KeyEvent::new(
+            KeyCode::Char('i'),
+            KeyModifiers::NONE,
+        ))));
+        menu.update(ActionsEvent::Terminal(Event::Key(KeyEvent::new(
+            KeyCode::Char('t'),
+            KeyModifiers::NONE,
+        ))));
+        let update = menu.update(ActionsEvent::Terminal(Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        ))));
+        assert_eq!(update.effects, [ActionsEffect::Trigger(Action::FastMode)]);
+    }
+
+    #[test]
+    fn model_action_is_disabled_after_session_starts() {
+        let menu = ActionsMenu::new(availability(false, false));
+        assert_eq!(
+            menu.display_label(Action::Model),
+            "Select model · start a new session first"
+        );
+        assert!(!menu.is_enabled(Action::Model));
+    }
 }

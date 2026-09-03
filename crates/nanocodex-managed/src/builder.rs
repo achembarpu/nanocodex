@@ -6,7 +6,8 @@ use std::{
 };
 
 use nanocodex_agent::{
-    AgentEvents, BuilderBackend, Nanocodex, NanocodexError, backend::BackendRuntime,
+    AgentEvents, BuilderBackend, Model, Nanocodex, NanocodexError, ReasoningMode, Thinking,
+    backend::BackendRuntime,
 };
 use tower::{Layer, Service, ServiceExt};
 
@@ -16,8 +17,8 @@ use nanocodex_tools::{Tools, attachment::AttachmentTarget};
 #[cfg(feature = "tools")]
 use crate::attachment::AttachmentSupervisor;
 use crate::{
-    AgentReceipt, AgentState, EventCursor, ManagedClient, ManagedError, ManagedEvents, PromptInput,
-    TurnAction, TurnView,
+    AgentReceipt, AgentSettings, AgentState, EventCursor, ManagedClient, ManagedError,
+    ManagedEvents, PromptInput, TurnAction, TurnView,
     driver::{ManagedAgent, ManagedDriver},
     websocket::ManagedSocket,
 };
@@ -27,7 +28,10 @@ use crate::{
 #[non_exhaustive]
 pub enum ManagedRequest {
     /// Creates a new account-owned agent.
-    Create,
+    Create {
+        /// Initial model and reasoning policy.
+        settings: AgentSettings,
+    },
     /// Reads current durable agent state.
     State {
         /// Stable managed agent identifier.
@@ -65,6 +69,34 @@ pub enum ManagedRequest {
         /// Server-owned turn identifier.
         turn_id: String,
     },
+    /// Selects the model before the first accepted turn.
+    SetModel {
+        /// Stable managed agent identifier.
+        agent_id: String,
+        /// New hosted model.
+        model: Model,
+    },
+    /// Selects the reasoning mode before the first accepted turn.
+    SetReasoningMode {
+        /// Stable managed agent identifier.
+        agent_id: String,
+        /// New reasoning execution mode.
+        reasoning_mode: ReasoningMode,
+    },
+    /// Changes reasoning effort for subsequently accepted turns.
+    SetThinking {
+        /// Stable managed agent identifier.
+        agent_id: String,
+        /// New reasoning effort.
+        thinking: Thinking,
+    },
+    /// Changes priority processing for subsequently accepted turns.
+    SetFastMode {
+        /// Stable managed agent identifier.
+        agent_id: String,
+        /// Whether priority processing is enabled.
+        enabled: bool,
+    },
     /// Resolves the authenticated reverse-tool attachment target.
     #[cfg(feature = "tools")]
     AttachmentTarget {
@@ -89,6 +121,8 @@ pub enum ManagedResponse {
     Steered(TurnAction),
     /// Receipt for a cancel operation.
     Cancelled(TurnAction),
+    /// Complete settings after a successful mutation.
+    Settings(AgentSettings),
     /// Authenticated reverse-tool attachment target.
     #[cfg(feature = "tools")]
     AttachmentTarget(AttachmentTarget),
@@ -140,10 +174,14 @@ impl Service<ManagedRequest> for ManagedService {
         let transport = self.transport;
         Box::pin(async move {
             match request {
-                ManagedRequest::Create => match transport {
-                    ManagedTransport::Http => client.create().await.map(ManagedResponse::Created),
+                ManagedRequest::Create { settings } => match transport {
+                    ManagedTransport::Http => client
+                        .create_with_settings(settings)
+                        .await
+                        .map(ManagedResponse::Created),
                     ManagedTransport::WebSocket => {
-                        let (receipt, live, events) = ManagedSocket::create(client.clone()).await?;
+                        let (receipt, live, events) =
+                            ManagedSocket::create(client.clone(), settings).await?;
                         *socket.lock().await = Some(ManagedLiveSocket {
                             agent_id: receipt.agent_id.clone(),
                             socket: live,
@@ -234,6 +272,25 @@ impl Service<ManagedRequest> for ManagedService {
                     .cancel(&agent_id, &turn_id)
                     .await
                     .map(ManagedResponse::Cancelled),
+                ManagedRequest::SetModel { agent_id, model } => client
+                    .set_model(&agent_id, model)
+                    .await
+                    .map(ManagedResponse::Settings),
+                ManagedRequest::SetReasoningMode {
+                    agent_id,
+                    reasoning_mode,
+                } => client
+                    .set_reasoning_mode(&agent_id, reasoning_mode)
+                    .await
+                    .map(ManagedResponse::Settings),
+                ManagedRequest::SetThinking { agent_id, thinking } => client
+                    .set_thinking(&agent_id, thinking)
+                    .await
+                    .map(ManagedResponse::Settings),
+                ManagedRequest::SetFastMode { agent_id, enabled } => client
+                    .set_fast_mode(&agent_id, enabled)
+                    .await
+                    .map(ManagedResponse::Settings),
                 #[cfg(feature = "tools")]
                 ManagedRequest::AttachmentTarget { agent_id } => client
                     .attachment_target(&agent_id)
@@ -252,7 +309,7 @@ pub struct Managed<S = ManagedService> {
 
 #[derive(Clone, Debug)]
 enum ManagedOperation {
-    Create,
+    Create(AgentSettings),
     Open(String),
     OpenFromState(String, AgentState),
 }
@@ -263,7 +320,7 @@ impl Managed<ManagedService> {
     pub fn create(client: ManagedClient) -> Self {
         Self {
             service: ManagedService::new(client, ManagedTransport::Http),
-            operation: ManagedOperation::Create,
+            operation: ManagedOperation::Create(AgentSettings::default()),
         }
     }
 
@@ -272,7 +329,7 @@ impl Managed<ManagedService> {
     pub fn create_live(client: ManagedClient) -> Self {
         Self {
             service: ManagedService::new(client, ManagedTransport::WebSocket),
-            operation: ManagedOperation::Create,
+            operation: ManagedOperation::Create(AgentSettings::default()),
         }
     }
 
@@ -322,6 +379,20 @@ impl Managed<ManagedService> {
             service: ManagedService::new(client, ManagedTransport::WebSocket),
             operation: ManagedOperation::OpenFromState(agent_id.into(), state),
         }
+    }
+}
+
+impl<S> Managed<S> {
+    /// Replaces the initial settings on a managed create recipe.
+    ///
+    /// This has no effect on open recipes; existing agents hydrate their
+    /// settings from durable state and use explicit setting mutations.
+    #[must_use]
+    pub fn with_settings(mut self, settings: AgentSettings) -> Self {
+        if matches!(self.operation, ManagedOperation::Create(_)) {
+            self.operation = ManagedOperation::Create(settings);
+        }
+        self
     }
 }
 
@@ -402,8 +473,13 @@ impl<S> ManagedBuilder<S> {
         S::Error: std::error::Error + Send + Sync + 'static,
     {
         let (agent_id, expected_session_id, supplied_state) = match self.managed.operation {
-            ManagedOperation::Create => {
-                match call(&mut self.managed.service, ManagedRequest::Create).await? {
+            ManagedOperation::Create(settings) => {
+                match call(
+                    &mut self.managed.service,
+                    ManagedRequest::Create { settings },
+                )
+                .await?
+                {
                     ManagedResponse::Created(receipt) => (
                         receipt.agent_id,
                         Some(receipt.session_id),

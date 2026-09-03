@@ -22,6 +22,7 @@ pub use builder::{Managed, ManagedBuilder, ManagedRequest, ManagedResponse, Mana
 pub use client::{ManagedClient, ManagedClientBuilder};
 pub use driver::ManagedAgent;
 pub use error::ManagedError;
+pub use nanocodex_agent::{Model, ReasoningMode, Thinking};
 pub use sse::{
     EventCursor, ManagedEventFuture, ManagedEventSource, ManagedEventStream, ManagedEvents,
 };

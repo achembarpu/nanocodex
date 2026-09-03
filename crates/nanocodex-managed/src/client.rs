@@ -9,12 +9,14 @@ use serde::{Deserialize, de::DeserializeOwned};
 use url::{Host, Url};
 use zeroize::Zeroize;
 
+use nanocodex_oai_api::{Model, ReasoningMode, Thinking};
+
 use crate::{
-    AgentList, AgentReceipt, AgentState, EventCursor, EventHistoryPage, FindSessionsRequest,
-    FindSessionsResponse, ManagedApiKey, ManagedError, ManagedEventStream, MemoryKey,
-    MemoryListResponse, MemoryRecord, PromptInput, ReadSessionBody, ReadSessionRequest,
-    ReadSessionResponse, TurnAction, TurnSteer, TurnSubmission, TurnView,
-    error::MAX_RESPONSE_BYTES,
+    AgentList, AgentReceipt, AgentSettings, AgentSettingsPatch, AgentSettingsResponse, AgentState,
+    EventCursor, EventHistoryPage, FindSessionsRequest, FindSessionsResponse, ManagedApiKey,
+    ManagedError, ManagedEventStream, MemoryKey, MemoryListResponse, MemoryRecord, PromptInput,
+    ReadSessionBody, ReadSessionRequest, ReadSessionResponse, TurnAction, TurnSteer,
+    TurnSubmission, TurnView, error::MAX_RESPONSE_BYTES,
 };
 
 const MAX_HISTORY_PAGE: u16 = 256;
@@ -145,6 +147,16 @@ impl ManagedClient {
         self.json(Method::POST, "v1/agents", None, None).await
     }
 
+    pub(crate) async fn create_with_settings(
+        &self,
+        settings: AgentSettings,
+    ) -> Result<AgentReceipt, ManagedError> {
+        let body = serde_json::to_vec(&serde_json::json!({ "settings": settings }))
+            .map_err(|_| ManagedError::InvalidResponse("failed to encode agent settings"))?;
+        self.json(Method::POST, "v1/agents", Some(&body), None)
+            .await
+    }
+
     /// Lists account-owned managed agents.
     ///
     /// # Errors
@@ -169,6 +181,131 @@ impl ManagedClient {
             ManagedError::InvalidResponse("agent state latest event cursor is invalid")
         })?;
         Ok(state)
+    }
+
+    /// Replaces the complete managed settings policy.
+    ///
+    /// Model and reasoning mode are accepted by the service only before the
+    /// first turn. Prefer [`Self::set_thinking`] and [`Self::set_fast_mode`]
+    /// for settings that remain dynamic later in the lifecycle.
+    ///
+    /// # Errors
+    ///
+    /// Returns an identifier-validation, transport, HTTP, size, or
+    /// response-schema failure. The service also rejects immutable settings
+    /// after the first turn has been accepted.
+    pub async fn set_settings(
+        &self,
+        agent_id: &str,
+        settings: AgentSettings,
+    ) -> Result<AgentSettings, ManagedError> {
+        self.patch_settings(agent_id, AgentSettingsPatch::from(settings))
+            .await
+    }
+
+    /// Selects the hosted model before this agent's first accepted turn.
+    ///
+    /// # Errors
+    ///
+    /// Returns an identifier-validation, transport, HTTP, size, or
+    /// response-schema failure, including the service's immutable-setting
+    /// rejection after first-turn admission.
+    pub async fn set_model(
+        &self,
+        agent_id: &str,
+        model: Model,
+    ) -> Result<AgentSettings, ManagedError> {
+        self.patch_settings(
+            agent_id,
+            AgentSettingsPatch {
+                model: Some(model),
+                ..AgentSettingsPatch::default()
+            },
+        )
+        .await
+    }
+
+    /// Selects the reasoning execution mode before the first accepted turn.
+    ///
+    /// # Errors
+    ///
+    /// Returns an identifier-validation, transport, HTTP, size, or
+    /// response-schema failure, including the service's immutable-setting
+    /// rejection after first-turn admission.
+    pub async fn set_reasoning_mode(
+        &self,
+        agent_id: &str,
+        reasoning_mode: ReasoningMode,
+    ) -> Result<AgentSettings, ManagedError> {
+        self.patch_settings(
+            agent_id,
+            AgentSettingsPatch {
+                reasoning_mode: Some(reasoning_mode),
+                ..AgentSettingsPatch::default()
+            },
+        )
+        .await
+    }
+
+    /// Changes the reasoning effort for subsequently accepted turns.
+    ///
+    /// # Errors
+    ///
+    /// Returns an identifier-validation, transport, HTTP, size, or
+    /// response-schema failure.
+    pub async fn set_thinking(
+        &self,
+        agent_id: &str,
+        thinking: Thinking,
+    ) -> Result<AgentSettings, ManagedError> {
+        self.patch_settings(
+            agent_id,
+            AgentSettingsPatch {
+                thinking: Some(thinking),
+                ..AgentSettingsPatch::default()
+            },
+        )
+        .await
+    }
+
+    /// Enables or disables priority processing for subsequently accepted turns.
+    ///
+    /// # Errors
+    ///
+    /// Returns an identifier-validation, transport, HTTP, size, or
+    /// response-schema failure.
+    pub async fn set_fast_mode(
+        &self,
+        agent_id: &str,
+        enabled: bool,
+    ) -> Result<AgentSettings, ManagedError> {
+        self.patch_settings(
+            agent_id,
+            AgentSettingsPatch {
+                fast_mode: Some(enabled),
+                ..AgentSettingsPatch::default()
+            },
+        )
+        .await
+    }
+
+    async fn patch_settings(
+        &self,
+        agent_id: &str,
+        patch: AgentSettingsPatch,
+    ) -> Result<AgentSettings, ManagedError> {
+        validate_id("agent", agent_id)?;
+        let body = serde_json::to_vec(&patch)
+            .map_err(|_| ManagedError::InvalidResponse("failed to encode agent settings"))?;
+        let response: AgentSettingsResponse = self
+            .json(
+                Method::PATCH,
+                &format!("{}/settings", agent_path(agent_id)),
+                Some(&body),
+                None,
+            )
+            .await?;
+        Ok(response.settings)
     }
 
     /// Deletes one account-owned managed agent.

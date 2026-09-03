@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use nanocodex_oai_api::events::AgentEvent;
+use nanocodex_oai_api::{Model, ReasoningMode, Thinking, events::AgentEvent};
 use serde::{
     Deserialize, Deserializer, Serialize,
     de::{self, DeserializeOwned},
@@ -298,6 +298,153 @@ pub struct AgentCapabilities {
     pub sandbox_escalation: bool,
 }
 
+/// Model and reasoning policy owned by one managed agent.
+///
+/// Model and reasoning mode may only be changed before the first turn is
+/// accepted. Thinking and fast mode may be changed throughout the lifecycle;
+/// an awaited update applies to subsequently admitted prompts.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentSettings {
+    /// Hosted model selected for this agent.
+    #[serde(with = "model_serde")]
+    pub model: Model,
+    /// Requested reasoning effort.
+    pub thinking: Thinking,
+    /// Requested reasoning execution mode.
+    #[serde(with = "reasoning_mode_serde")]
+    pub reasoning_mode: ReasoningMode,
+    /// Whether subsequently accepted turns use priority processing.
+    pub fast_mode: bool,
+}
+
+impl Default for AgentSettings {
+    fn default() -> Self {
+        Self {
+            model: Model::Sol,
+            thinking: Thinking::High,
+            reasoning_mode: ReasoningMode::Standard,
+            fast_mode: false,
+        }
+    }
+}
+
+#[derive(Default, Serialize)]
+pub(crate) struct AgentSettingsPatch {
+    #[serde(skip_serializing_if = "Option::is_none", with = "optional_model_serde")]
+    pub(crate) model: Option<Model>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) thinking: Option<Thinking>,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        with = "optional_reasoning_mode_serde"
+    )]
+    pub(crate) reasoning_mode: Option<ReasoningMode>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) fast_mode: Option<bool>,
+}
+
+impl From<AgentSettings> for AgentSettingsPatch {
+    fn from(settings: AgentSettings) -> Self {
+        Self {
+            model: Some(settings.model),
+            thinking: Some(settings.thinking),
+            reasoning_mode: Some(settings.reasoning_mode),
+            fast_mode: Some(settings.fast_mode),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AgentSettingsResponse {
+    pub(crate) settings: AgentSettings,
+}
+
+mod optional_model_serde {
+    use nanocodex_oai_api::Model;
+    use serde::Serializer;
+
+    pub(super) fn serialize<S>(model: &Option<Model>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(
+            model
+                .expect("skipped optional model must be present")
+                .as_str(),
+        )
+    }
+}
+
+mod optional_reasoning_mode_serde {
+    use nanocodex_oai_api::ReasoningMode;
+    use serde::Serializer;
+
+    pub(super) fn serialize<S>(
+        mode: &Option<ReasoningMode>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(
+            mode.expect("skipped optional reasoning mode must be present")
+                .as_str(),
+        )
+    }
+}
+
+mod model_serde {
+    use nanocodex_oai_api::Model;
+    use serde::{Deserialize, Deserializer, Serializer, de};
+
+    pub(super) fn serialize<S>(model: &Model, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(model.as_str())
+    }
+
+    pub(super) fn deserialize<'de, D>(deserializer: D) -> Result<Model, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        match String::deserialize(deserializer)?.as_str() {
+            "gpt-5.6-sol" => Ok(Model::Sol),
+            "gpt-5.6-terra" => Ok(Model::Terra),
+            "gpt-5.6-luna" => Ok(Model::Luna),
+            value => Err(de::Error::unknown_variant(
+                value,
+                &["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"],
+            )),
+        }
+    }
+}
+
+mod reasoning_mode_serde {
+    use nanocodex_oai_api::ReasoningMode;
+    use serde::{Deserialize, Deserializer, Serializer, de};
+
+    pub(super) fn serialize<S>(mode: &ReasoningMode, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(mode.as_str())
+    }
+
+    pub(super) fn deserialize<'de, D>(deserializer: D) -> Result<ReasoningMode, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        match String::deserialize(deserializer)?.as_str() {
+            "standard" => Ok(ReasoningMode::Standard),
+            "pro" => Ok(ReasoningMode::Pro),
+            value => Err(de::Error::unknown_variant(value, &["standard", "pro"])),
+        }
+    }
+}
+
 /// Input for one currently active managed turn.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ActiveTurn {
@@ -330,6 +477,8 @@ pub struct AgentState {
     pub connected_clients: u64,
     /// Server-advertised managed capabilities.
     pub capabilities: AgentCapabilities,
+    /// Current model and reasoning policy.
+    pub settings: AgentSettings,
     /// Latest durable event cursor.
     pub latest_event_cursor: String,
     /// Current durable stream failure, when present.
@@ -447,6 +596,63 @@ impl<'de> Deserialize<'de> for ManagedEvent {
             turn_id: metadata.turn_id,
             data,
         })
+    }
+}
+
+#[cfg(test)]
+mod settings_tests {
+    use nanocodex_oai_api::{Model, ReasoningMode, Thinking};
+    use serde_json::json;
+
+    use super::{AgentSettings, AgentSettingsPatch};
+
+    #[test]
+    fn settings_use_canonical_managed_protocol_values() {
+        assert_eq!(
+            serde_json::to_value(AgentSettings::default()).expect("settings should serialize"),
+            json!({
+                "model": "gpt-5.6-sol",
+                "thinking": "high",
+                "reasoning_mode": "standard",
+                "fast_mode": false
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<AgentSettings>(json!({
+                "model": "gpt-5.6-terra",
+                "thinking": "xhigh",
+                "reasoning_mode": "pro",
+                "fast_mode": true
+            }))
+            .expect("canonical settings should deserialize"),
+            AgentSettings {
+                model: Model::Terra,
+                thinking: Thinking::Xhigh,
+                reasoning_mode: ReasoningMode::Pro,
+                fast_mode: true,
+            }
+        );
+    }
+
+    #[test]
+    fn settings_reject_aliases_and_patch_only_selected_fields() {
+        assert!(
+            serde_json::from_value::<AgentSettings>(json!({
+                "model": "sol",
+                "thinking": "high",
+                "reasoning_mode": "standard",
+                "fast_mode": false
+            }))
+            .is_err()
+        );
+        assert_eq!(
+            serde_json::to_value(AgentSettingsPatch {
+                model: Some(Model::Luna),
+                ..AgentSettingsPatch::default()
+            })
+            .expect("settings patch should serialize"),
+            json!({"model": "gpt-5.6-luna"})
+        );
     }
 }
 

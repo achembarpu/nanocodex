@@ -559,6 +559,7 @@ fn agent_state_value(latest_event_cursor: &str) -> serde_json::Value {
             "workspace": "private-hosted-tools-v1",
             "sandbox_escalation": true
         },
+        "settings": agent_settings(),
         "latest_event_cursor": latest_event_cursor,
         "stream_error": null
     })
@@ -868,6 +869,7 @@ async fn agent_state(State(state): State<TestState>, headers: HeaderMap) -> impl
                 "workspace": "private-hosted-tools-v1",
                 "sandbox_escalation": true
             },
+            "settings": agent_settings(),
             "latest_event_cursor": "0",
             "stream_error": null
         }),
@@ -953,6 +955,7 @@ async fn failed_create_live_socket(
                         "active_turns": [],
                         "active_turn_details": [],
                         "capabilities": agent_capabilities(),
+                        "settings": agent_settings(),
                         "latest_event_cursor": "not-a-cursor"
                     })
                     .to_string()
@@ -1001,6 +1004,7 @@ async fn send_ready(socket: &mut WebSocket, cursor: &str, restored: bool) {
                 "active_turns": [],
                 "active_turn_details": [],
                 "capabilities": agent_capabilities(),
+                "settings": agent_settings(),
                 "latest_event_cursor": cursor
             })
             .to_string()
@@ -1008,6 +1012,15 @@ async fn send_ready(socket: &mut WebSocket, cursor: &str, restored: bool) {
         ))
         .await
         .unwrap();
+}
+
+fn agent_settings() -> serde_json::Value {
+    serde_json::json!({
+        "model": "gpt-5.6-sol",
+        "thinking": "high",
+        "reasoning_mode": "standard",
+        "fast_mode": false
+    })
 }
 
 fn agent_capabilities() -> serde_json::Value {

@@ -1,5 +1,6 @@
 import type { AgentEvent, PromptInput, TurnUsage } from "nanocodex";
 import type { HistoryCitation } from "./history-search";
+import type { ManagedAgentSettings } from "./agent-settings";
 
 export type ClientCommand =
   | { type: "prompt"; id: string; input: PromptInput }
@@ -34,7 +35,7 @@ export type AgentCapabilities = Readonly<{
 }>;
 
 export type ServerMessage = (
-  | { type: "ready"; session_id: string; restored: boolean; active_turns: string[]; active_turn_details: ActiveTurn[]; capabilities: AgentCapabilities; latest_event_cursor: string }
+  | { type: "ready"; session_id: string; restored: boolean; active_turns: string[]; active_turn_details: ActiveTurn[]; capabilities: AgentCapabilities; latest_event_cursor: string; settings: ManagedAgentSettings }
   | { type: "agent_created"; agent_id: string; capabilities: AgentCapabilities }
   | { type: "turn_accepted"; id: string; input: PromptInput; replayed: boolean }
   | { type: "turn_cancelling"; id: string; error?: string; retry_at?: number }
@@ -44,7 +45,7 @@ export type ServerMessage = (
   | { type: "turn_failed"; id: string; error: string }
   | { type: "event"; event: AgentEvent }
   | { type: "stream_failed"; error: string }
-  | { type: "status"; active_turns: string[]; active_turn_details: ActiveTurn[]; agent_loaded: boolean; connected_clients: number }
+  | { type: "status"; active_turns: string[]; active_turn_details: ActiveTurn[]; agent_loaded: boolean; connected_clients: number; settings: ManagedAgentSettings }
   | { type: "pong"; nonce?: string }
   | { type: "error"; code: string; message: string }
 ) & { cursor?: string; created_at?: number; turn_id?: string | null };

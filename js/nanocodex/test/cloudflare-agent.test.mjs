@@ -202,7 +202,10 @@ test("Cloudflare Agent owns credentials, transport, and durability options", asy
     create(module, durableOwner(new MemoryStorage()), { transport: {} }),
     /does not accept transport/,
   );
-  for (const name of ["model", "reasoningMode", "filesystem", "mcp", "codeEvaluator", "toolMode"]) {
+  for (const name of [
+    "model", "thinking", "reasoningMode", "fastMode",
+    "filesystem", "mcp", "codeEvaluator", "toolMode",
+  ]) {
     await assert.rejects(
       create(module, durableOwner(new MemoryStorage()), { [name]: "forbidden" }),
       new RegExp(`does not accept ${name}`),
@@ -245,6 +248,41 @@ test("Cloudflare Agent owns credentials, transport, and durability options", asy
     }),
     /requires Durable Object SQLite storage/,
   );
+});
+
+test("Cloudflare Agent accepts complete hosted policy only through its internal configuration", async () => {
+  const module = await readFile(new URL("../pkg-web/nanocodex_bg.wasm", import.meta.url));
+  const owner = durableOwner(new MemoryStorage());
+  let captured;
+  const configured = bindAgent(module, {
+    async create(options) {
+      captured = options;
+      return HostAgent.create(options);
+    },
+  });
+  const agent = await configured.create(owner, {
+    [Symbol.for("nanocodex.cloudflare.internalConfiguration")]: {
+      model: "gpt-5.6-terra",
+      thinking: "xhigh",
+      reasoning_mode: "pro",
+      fast_mode: true,
+    },
+  });
+
+  assert.equal(captured.model, "gpt-5.6-terra");
+  assert.equal(captured.thinking, "xhigh");
+  assert.equal(captured.reasoningMode, "pro");
+  assert.equal(captured.fastMode, true);
+  await agent.session.shutdown();
+
+  await assert.rejects(configured.create(owner, {
+    [Symbol.for("nanocodex.cloudflare.internalConfiguration")]: {
+      model: "gpt-5.6-terra",
+      thinking: "xhigh",
+      reasoning_mode: "pro",
+      fast_mode: "true",
+    },
+  }), /internal configuration is invalid/);
 });
 
 test("Cloudflare ephemeral Agent owns transport without durable state", async () => {

@@ -11,11 +11,13 @@ use axum::{
     extract::{Path, Query, State},
     http::{HeaderMap, Response, StatusCode},
     response::IntoResponse,
-    routing::{get, post},
+    routing::{get, patch, post},
 };
 use futures_util::{FutureExt, stream};
-use nanocodex_agent::{AgentEvents, Nanocodex, PromptRequest, TurnControl, TurnResult};
-use nanocodex_managed::{Managed, ManagedApiKey, ManagedClient, ManagedError};
+use nanocodex_agent::{
+    AgentEvents, Model, Nanocodex, PromptRequest, ReasoningMode, Thinking, TurnControl, TurnResult,
+};
+use nanocodex_managed::{AgentSettings, Managed, ManagedApiKey, ManagedClient, ManagedError};
 use nanocodex_oai_api::events::AgentEventKind;
 use serde_json::{Value, json};
 use tokio::sync::{Notify, mpsc};
@@ -41,6 +43,9 @@ struct FixtureInner {
     retained_events: Mutex<Vec<Bytes>>,
     submissions: Mutex<Vec<Submission>>,
     actions: Mutex<Vec<Action>>,
+    create_bodies: Mutex<Vec<Value>>,
+    settings: Mutex<Value>,
+    operations: Mutex<Vec<&'static str>>,
     changed: Notify,
 }
 
@@ -69,6 +74,9 @@ impl Fixture {
                 retained_events: Mutex::new(Vec::new()),
                 submissions: Mutex::new(Vec::new()),
                 actions: Mutex::new(Vec::new()),
+                create_bodies: Mutex::new(Vec::new()),
+                settings: Mutex::new(default_settings()),
+                operations: Mutex::new(Vec::new()),
                 changed: Notify::new(),
             }),
         }
@@ -115,6 +123,7 @@ async fn public_managed_lifecycle_preserves_durable_identity_control_and_replay(
         let app = Router::new()
             .route("/v1/agents", post(create_agent))
             .route("/v1/agents/{agent_id}", get(agent_state))
+            .route("/v1/agents/{agent_id}/settings", patch(update_settings))
             .route("/v1/agents/{agent_id}/events", get(events))
             .route("/v1/agents/{agent_id}/turns", post(submit_turn))
             .route(
@@ -143,14 +152,34 @@ async fn public_managed_lifecycle_preserves_durable_identity_control_and_replay(
         )
         .expect("loopback managed client should build");
 
-        let (agent, mut events): (Nanocodex, AgentEvents) =
-            Nanocodex::builder(Managed::create(client.clone()))
-                .build()
-                .await
-                .expect("public managed create should build");
+        let (agent, mut events): (Nanocodex, AgentEvents) = Nanocodex::builder(
+            Managed::create(client.clone()).with_settings(AgentSettings {
+                model: Model::Terra,
+                thinking: Thinking::Medium,
+                reasoning_mode: ReasoningMode::Pro,
+                fast_mode: true,
+            }),
+        )
+        .build()
+        .await
+        .expect("public managed create should build");
         assert_eq!(agent.session_id().to_string(), SESSION_ID);
         assert_eq!(events.request_id(), SESSION_ID);
         fixture.wait_for_event_cursor("40").await;
+
+        let settings = client
+            .set_model(AGENT_ID, Model::Luna)
+            .await
+            .expect("model should remain mutable before first admission");
+        assert_eq!(settings.model, Model::Luna);
+        agent
+            .set_thinking(Thinking::Xhigh)
+            .await
+            .expect("thinking should update through the driver");
+        agent
+            .set_fast_mode(false)
+            .await
+            .expect("fast mode should update through the driver");
 
         let mut turn = agent
             .prompt(PromptRequest::new("live prompt").request_id(ACTIVE_REQUEST_ID))
@@ -307,6 +336,33 @@ async fn public_managed_lifecycle_preserves_durable_identity_control_and_replay(
         assert!(submissions[1].body.get("id").is_none());
         drop(submissions);
 
+        assert_eq!(
+            lock(&fixture.inner.operations).as_slice(),
+            [
+                "create", "settings", "settings", "settings", "submit", "submit"
+            ]
+        );
+        assert_eq!(
+            lock(&fixture.inner.create_bodies).as_slice(),
+            [json!({
+                "settings": {
+                    "model": "gpt-5.6-terra",
+                    "thinking": "medium",
+                    "reasoning_mode": "pro",
+                    "fast_mode": true
+                }
+            })]
+        );
+        assert_eq!(
+            lock(&fixture.inner.settings).clone(),
+            json!({
+                "model": "gpt-5.6-luna",
+                "thinking": "xhigh",
+                "reasoning_mode": "pro",
+                "fast_mode": false
+            })
+        );
+
         let actions = lock(&fixture.inner.actions);
         assert_eq!(actions.len(), 3);
         assert_eq!(actions[0].kind, "steer");
@@ -340,8 +396,21 @@ async fn public_managed_lifecycle_preserves_durable_identity_control_and_replay(
     .expect("public managed lifecycle test should remain bounded");
 }
 
-async fn create_agent(State(fixture): State<Fixture>, headers: HeaderMap) -> Response<Body> {
+async fn create_agent(
+    State(fixture): State<Fixture>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response<Body> {
     authorize(&fixture, &headers);
+    let body: Value = serde_json::from_slice(&body).expect("create settings should be JSON");
+    assert_eq!(body.as_object().map(serde_json::Map::len), Some(1));
+    let settings = body
+        .get("settings")
+        .cloned()
+        .expect("create should carry complete settings");
+    *lock(&fixture.inner.settings) = settings;
+    lock(&fixture.inner.create_bodies).push(body);
+    lock(&fixture.inner.operations).push("create");
     json_response(
         StatusCode::CREATED,
         json!({
@@ -370,10 +439,35 @@ async fn agent_state(
         reads.push(agent_id);
         if reads.len() == 1 { "40" } else { "43" }
     };
-    json_response(
-        StatusCode::OK,
-        agent_state_json(AGENT_ID, latest_event_cursor),
-    )
+    let mut state = agent_state_json(AGENT_ID, latest_event_cursor);
+    state["settings"] = lock(&fixture.inner.settings).clone();
+    json_response(StatusCode::OK, state)
+}
+
+async fn update_settings(
+    State(fixture): State<Fixture>,
+    Path(agent_id): Path<String>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response<Body> {
+    authorize(&fixture, &headers);
+    assert_eq!(agent_id, AGENT_ID);
+    assert!(body.as_object().is_some_and(|body| !body.is_empty()));
+    assert!(body.as_object().is_some_and(|body| body.keys().all(|key| {
+        matches!(
+            key.as_str(),
+            "model" | "thinking" | "reasoning_mode" | "fast_mode"
+        )
+    })));
+    let mut settings = lock(&fixture.inner.settings);
+    for (key, value) in body
+        .as_object()
+        .expect("settings request was checked as an object")
+    {
+        settings[key] = value.clone();
+    }
+    lock(&fixture.inner.operations).push("settings");
+    json_response(StatusCode::OK, json!({"settings": settings.clone()}))
 }
 
 fn agent_state_json(agent_id: &str, latest_event_cursor: &str) -> Value {
@@ -394,6 +488,12 @@ fn agent_state_json(agent_id: &str, latest_event_cursor: &str) -> Value {
             "live_cancel": true,
             "workspace": "cloud",
             "sandbox_escalation": false
+        },
+        "settings": {
+            "model": "gpt-5.6-sol",
+            "thinking": "high",
+            "reasoning_mode": "standard",
+            "fast_mode": false
         },
         "latest_event_cursor": latest_event_cursor,
         "stream_error": null
@@ -449,6 +549,7 @@ async fn submit_turn(
         idempotency_key: idempotency_key.clone(),
         body,
     });
+    lock(&fixture.inner.operations).push("submit");
     match idempotency_key.as_str() {
         ACTIVE_REQUEST_ID => json_response(
             StatusCode::ACCEPTED,
@@ -587,6 +688,15 @@ fn exact_usage() -> Value {
         "total_tokens": 124,
         "estimated_cost": null,
         "cost_status": "usage_not_reported"
+    })
+}
+
+fn default_settings() -> Value {
+    json!({
+        "model": "gpt-5.6-sol",
+        "thinking": "high",
+        "reasoning_mode": "standard",
+        "fast_mode": false
     })
 }
 

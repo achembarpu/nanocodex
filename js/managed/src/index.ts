@@ -127,6 +127,16 @@ import {
   type TurnTerminal,
 } from "./turn-completion";
 import {
+  DEFAULT_AGENT_SETTINGS,
+  agentSettingsQuery,
+  parseAgentCreateBody,
+  parseAgentSettingsPatch,
+  parseAgentSettingsQuery,
+  parseCompleteAgentSettings,
+  type ManagedAgentSettings,
+  type ManagedAgentSettingsPatch,
+} from "./agent-settings";
+import {
   bindAgentCredential,
   routeCredentialRequest,
   unbindAgentCredential,
@@ -282,6 +292,7 @@ type SessionRow = {
   authorization_epoch: number;
   public_origin: string;
   runtime_profile: AgentRuntimeProfile;
+  accepted_turns: number;
   completed_turns: number;
   last_active: number;
   stream_error: string | null;
@@ -295,6 +306,7 @@ type SessionInitialization = {
   authorization_epoch?: unknown;
   public_origin?: unknown;
   runtime_profile?: unknown;
+  settings?: unknown;
 };
 
 type DeviceHostAttachment = {
@@ -335,6 +347,13 @@ type SessionStatusRow = {
   completed_turns: number;
   last_active: number;
   stream_error: string | null;
+};
+
+type AgentSettingsRow = {
+  model: ManagedAgentSettings["model"];
+  thinking: ManagedAgentSettings["thinking"];
+  reasoning_mode: ManagedAgentSettings["reasoning_mode"];
+  fast_mode: number;
 };
 
 type ManagedTurnState =
@@ -512,6 +531,7 @@ type ManagedSessionPortability = Readonly<{
   last_active: number;
   stream_error: string | null;
   title: string;
+  settings: ManagedAgentSettings;
 }>;
 
 type ManagedDurabilityImport = Readonly<{
@@ -781,8 +801,13 @@ async function managedFetch(
     const history = await routeHistoryRequest(request, env, url);
     if (history) return history;
     if (request.method === "GET" && url.pathname === "/v1/agents/live") {
-      if (url.search !== ""
-        || request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
+      let settings: ManagedAgentSettings;
+      try {
+        settings = parseAgentSettingsQuery(url.searchParams);
+      } catch {
+        return json({ error: "invalid_request" }, { status: 400 });
+      }
+      if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
         return new Response("Expected WebSocket upgrade", { status: 426 });
       }
       const creationStartedAt = performance.now();
@@ -805,8 +830,10 @@ async function managedFetch(
       forwardPrincipalAssertions(headers, principal);
       headers.set(SESSION_CREATE_ID_ASSERTION, agentId);
       const stub = env.NANOCODEX_SESSIONS.getByName(agentId);
+      const internalQuery = agentSettingsQuery(settings);
+      internalQuery.set("public_origin", url.origin);
       const response = await stub.fetch(
-        `https://session.internal/create-live?public_origin=${encodeURIComponent(url.origin)}`,
+        `https://session.internal/create-live?${internalQuery}`,
         new Request(request, { headers }),
       );
       observeManagedPrincipal(env, "managed.agent.live_created", principal, {
@@ -906,19 +933,15 @@ async function managedFetch(
         return json({ error: "invalid_idempotency_key" }, { status: 400 });
       }
       let durabilityArchive: unknown;
+      let creationSettings = DEFAULT_AGENT_SETTINGS;
+      let settingsProvided = false;
       try {
-        const encoded = await request.text();
-        if (encoded.trim()) {
-          const body = JSON.parse(encoded) as { durability?: unknown };
-          if (!body || typeof body !== "object" || Array.isArray(body)
-            || Object.keys(body).some((key) => key !== "durability")
-            || body.durability === undefined) {
-            return json({ error: "invalid_durability_import" }, { status: 400 });
-          }
-          durabilityArchive = body.durability;
-        }
-      } catch {
-        return json({ error: "invalid_durability_import" }, { status: 400 });
+        const body = parseAgentCreateBody(await request.text());
+        durabilityArchive = body.durability;
+        creationSettings = body.settings;
+        settingsProvided = body.settingsProvided;
+      } catch (error) {
+        return json({ error: "invalid_request", message: errorMessage(error) }, { status: 400 });
       }
       if (durabilityArchive !== undefined
         && !principal.capabilities.includes("agents:portability")) {
@@ -934,6 +957,15 @@ async function managedFetch(
               === "nanocodex-managed-durability-state-v1") {
             managedArchive = validateManagedDurabilityArchive(durabilityArchive);
             durabilityStateId = managedArchive.durability.stateId;
+            const importedSettings = managedArchive.managed_session.settings
+              ?? DEFAULT_AGENT_SETTINGS;
+            if (settingsProvided && !sameAgentSettings(creationSettings, importedSettings)) {
+              return json({
+                error: "invalid_request",
+                message: "settings must match the imported managed agent",
+              }, { status: 400 });
+            }
+            creationSettings = importedSettings;
           } else {
             durabilityStateId = portableDurabilityStateId(durabilityArchive);
           }
@@ -1039,6 +1071,7 @@ async function managedFetch(
             team_id: principal.teamId,
             authorization_epoch: principal.authorizationEpoch,
             public_origin: url.origin,
+            settings: creationSettings,
           }),
         }, ownershipTimeoutMs, "agent initialization"),
         initializeMemoryScope(memory, principal.organizationId),
@@ -1172,6 +1205,7 @@ async function managedFetch(
             capabilities: AGENT_CAPABILITIES,
             latest_event_cursor: "1",
             stream_error: null,
+            settings: creationSettings,
           },
         } : {}),
       }, {
@@ -1272,6 +1306,22 @@ async function managedFetch(
       return stub.fetch("https://session.internal/durability/export", {
         method: "POST",
         headers: sessionHeaders,
+      });
+    }
+    if (resource === "settings") {
+      if (request.method !== "PATCH") {
+        return json({ error: "method_not_allowed" }, { status: 405 });
+      }
+      if (url.search !== "") return json({ error: "invalid_request" }, { status: 400 });
+      if (!principal.capabilities.includes("agents:write")) {
+        return json({ error: "forbidden" }, { status: 403 });
+      }
+      const originFailure = requireSameOriginMutation(request, url, principal);
+      if (originFailure) return originFailure;
+      return stub.fetch("https://session.internal/settings", {
+        method: "PATCH",
+        headers: sessionHeaders,
+        body: request.body,
       });
     }
     if (resource === "turns") {
@@ -1554,6 +1604,8 @@ export class DurableAgentSession extends DurableComputerSession {
   readonly #inFlight = new Set<Promise<unknown>>();
   #realtimeEventBuffer?: AgentEvent[];
   #realtimeRouteTail: Promise<void> = Promise.resolve();
+  #settingsMutationTail: Promise<void> = Promise.resolve();
+  readonly #settingsRequests = new Set<Promise<Response>>();
   #recoveryTask?: Promise<void>;
   #recoveryRequested = false;
   #historyProjectionTask?: Promise<void>;
@@ -1594,6 +1646,16 @@ export class DurableAgentSession extends DurableComputerSession {
         runtime_profile TEXT CHECK (runtime_profile IN ('managed', 'multiplayer')),
         state TEXT NOT NULL CHECK (state IN ('active', 'deleted'))
       );
+      CREATE TABLE IF NOT EXISTS managed_agent_settings (
+        singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+        model TEXT NOT NULL CHECK (model IN ('gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna')),
+        thinking TEXT NOT NULL CHECK (thinking IN ('none', 'low', 'medium', 'high', 'xhigh', 'max')),
+        reasoning_mode TEXT NOT NULL CHECK (reasoning_mode IN ('standard', 'pro')),
+        fast_mode INTEGER NOT NULL CHECK (fast_mode IN (0, 1))
+      );
+      INSERT OR IGNORE INTO managed_agent_settings
+        (singleton, model, thinking, reasoning_mode, fast_mode)
+      VALUES (1, 'gpt-5.6-sol', 'high', 'standard', 0);
       CREATE TABLE IF NOT EXISTS managed_turns (
         id TEXT PRIMARY KEY,
         request_key TEXT,
@@ -1929,6 +1991,9 @@ export class DurableAgentSession extends DurableComputerSession {
       return new Response(null, { status: 204 });
     }
     if (request.method === "POST" && url.pathname === "/durability/import") {
+      if (this.#settingsRequests.size > 0) {
+        return json({ error: "durability_import_conflict" }, { status: 409 });
+      }
       if (this.#durabilityImportTask) {
         return json({ error: "durability_import_pending" }, {
           status: 409,
@@ -2194,6 +2259,9 @@ export class DurableAgentSession extends DurableComputerSession {
         headers: { "cache-control": "no-store" },
       });
     }
+    if (request.method === "PATCH" && url.pathname === "/settings") {
+      return this.#trackSettingsPatch(request);
+    }
     if (request.method === "POST" && url.pathname === "/turns") {
       if (this.#durabilityExported) {
         return json({ error: "durability_exported" }, { status: 409 });
@@ -2256,6 +2324,7 @@ export class DurableAgentSession extends DurableComputerSession {
         capabilities: this.#capabilities(),
         latest_event_cursor: this.#eventArchive.latestCursor(this.#eventLog),
         stream_error: session.stream_error,
+        settings: this.#settings(),
       });
     }
     if (request.method === "DELETE" && url.pathname === "/session") {
@@ -2424,6 +2493,21 @@ export class DurableAgentSession extends DurableComputerSession {
     const asserted = forwardedPrincipal(request.headers);
     const sessionId = request.headers.get(SESSION_CREATE_ID_ASSERTION);
     const publicOrigin = url.searchParams.get("public_origin");
+    let settings: ManagedAgentSettings;
+    try {
+      const keys = [...url.searchParams.keys()];
+      if (keys.some((key) => ![
+        "public_origin", "model", "thinking", "reasoning_mode", "fast_mode",
+      ].includes(key))
+        || url.searchParams.getAll("public_origin").length !== 1) {
+        throw new TypeError("invalid live creation query");
+      }
+      const settingsQuery = new URLSearchParams(url.searchParams);
+      settingsQuery.delete("public_origin");
+      settings = parseAgentSettingsQuery(settingsQuery);
+    } catch {
+      return json({ error: "invalid_request" }, { status: 400 });
+    }
     if (!asserted
       || typeof sessionId !== "string"
       || !SESSION_ID.test(sessionId)
@@ -2447,6 +2531,7 @@ export class DurableAgentSession extends DurableComputerSession {
       team_id: asserted.teamId,
       authorization_epoch: asserted.authorizationEpoch,
       public_origin: publicOrigin,
+      settings,
     });
     if (!initialized.ok) return initialized;
 
@@ -2473,6 +2558,12 @@ export class DurableAgentSession extends DurableComputerSession {
     const authorizationEpoch = initialization.authorization_epoch;
     const publicOrigin = initialization.public_origin;
     const runtimeProfile = initialization.runtime_profile ?? "managed";
+    let settings: ManagedAgentSettings;
+    try {
+      settings = parseCompleteAgentSettings(initialization.settings);
+    } catch {
+      return new Response(null, { status: 400 });
+    }
     const managedCoordinates = runtimeProfile === "managed"
       && typeof organizationId === "string" && isUserId(organizationId)
       && typeof teamId === "string" && isUserId(teamId)
@@ -2551,6 +2642,13 @@ export class DurableAgentSession extends DurableComputerSession {
           );
         }
         if (retained) {
+          if (!sameAgentSettings(this.#settings(), settings)) {
+            throw new ManagedRequestError(
+              409,
+              "agent_initialized",
+              "the agent is already initialized with different settings",
+            );
+          }
           this.ctx.storage.sql.exec(
             "UPDATE session_state SET public_origin = ? WHERE singleton = 1",
             publicOrigin,
@@ -2571,6 +2669,7 @@ export class DurableAgentSession extends DurableComputerSession {
           runtimeProfile,
           Date.now(),
         );
+        this.#storeSettings(settings);
         event = this.#eventLog.append({
           type: "agent_created",
           agent_id: sessionId,
@@ -2625,6 +2724,7 @@ export class DurableAgentSession extends DurableComputerSession {
       active_turn_details: this.#activeTurnDetails(),
       capabilities: this.#capabilities(),
       latest_event_cursor: latestCursor,
+      settings: this.#settings(),
     });
     if (cursor !== latestCursor) void this.#replayClientSocket(server, cursor);
     this.#prewarmAgent(authorization);
@@ -3020,6 +3120,7 @@ export class DurableAgentSession extends DurableComputerSession {
         active_turn_details: this.#activeTurnDetails(),
         agent_loaded: this.#agent !== undefined,
         connected_clients: this.ctx.getWebSockets().length,
+        settings: this.#settings(),
       });
       return;
     }
@@ -3047,7 +3148,11 @@ export class DurableAgentSession extends DurableComputerSession {
         return;
       }
       try {
+        await this.#settingsMutationTail;
         this.#assertDurabilityAdmissionActive();
+        if (this.#turns.get(command.id) !== turn) {
+          throw retryableError("turn ownership changed while applying settings");
+        }
         await turn.steer({ input: command.input });
       } catch (error) {
         this.#send(socket, { type: "error", code: "steer_failed", message: errorMessage(error) });
@@ -3074,6 +3179,44 @@ export class DurableAgentSession extends DurableComputerSession {
     } catch (error) {
       const failure = managedHttpError(error);
       this.#send(socket, { type: "error", code: failure.code, message: failure.message });
+    }
+  }
+
+  #trackSettingsPatch(request: Request): Promise<Response> {
+    const previous = this.#settingsMutationTail.catch(() => {});
+    let release!: () => void;
+    const reservation = new Promise<void>((resolve) => { release = resolve; });
+    this.#settingsMutationTail = previous.then(() => reservation);
+    const task = this.#patchSettings(request, previous).finally(release);
+    this.#settingsRequests.add(task);
+    void task.finally(() => this.#settingsRequests.delete(task)).catch(() => {});
+    return this.#track(task);
+  }
+
+  async #patchSettings(request: Request, previous: Promise<void>): Promise<Response> {
+    try {
+      this.#assertSettingsLifecycle();
+    } catch (error) {
+      return managedErrorResponse(error, "settings_update_failed");
+    }
+    if (!this.#sessionId()) return json({ error: "not_found" }, { status: 404 });
+    let patch: ManagedAgentSettingsPatch;
+    try {
+      patch = parseAgentSettingsPatch(JSON.parse(
+        await readBoundedRequestText(request, 2_048),
+      ));
+    } catch (error) {
+      return json({
+        error: error instanceof SyntaxError ? "invalid_json" : "invalid_request",
+        message: errorMessage(error),
+      }, { status: 400 });
+    }
+    try {
+      await previous;
+      this.#assertSettingsLifecycle();
+      return json({ settings: await this.#applySettingsPatch(patch) });
+    } catch (error) {
+      return managedErrorResponse(error, "settings_update_failed");
     }
   }
 
@@ -3293,6 +3436,7 @@ export class DurableAgentSession extends DurableComputerSession {
         kind,
         requestHash,
         async () => {
+          await this.#settingsMutationTail;
           const agent = await this.#ensureAgent();
           if (this.#deleting || this.#agent !== agent) {
             throw retryableError(
@@ -3548,6 +3692,10 @@ export class DurableAgentSession extends DurableComputerSession {
     requestHash: string,
     authorization: TurnAuthorization,
   ): Promise<ManagedRealtimeRouteResult> {
+    await this.#settingsMutationTail;
+    if (this.#deleting || this.#agent !== agent) {
+      throw retryableError("agent ownership changed while applying settings");
+    }
     const input = request.input!;
     this.#assertRealtimeRouteAvailable();
     let release!: () => void;
@@ -3657,7 +3805,11 @@ export class DurableAgentSession extends DurableComputerSession {
         );
       }
       validatePromptInput(value.input);
+      await this.#settingsMutationTail;
       this.#assertDurabilityAdmissionActive();
+      if (this.#turns.get(id) !== turn) {
+        throw retryableError("turn ownership changed while applying settings");
+      }
       await turn.steer({ input: value.input as PromptInput });
       return json({ turn_id: id, state: "steering" }, { status: 202 });
     } catch (error) {
@@ -3859,6 +4011,7 @@ export class DurableAgentSession extends DurableComputerSession {
     explicitId = true,
     authorization: TurnAuthorization = { capabilities: [] },
   ): Promise<ManagedTurnSubmission> {
+    await this.#settingsMutationTail;
     if (this.#deleting || this.#deleted) {
       throw new ManagedRequestError(409, "agent_deleting", "the agent is being deleted");
     }
@@ -4119,6 +4272,7 @@ export class DurableAgentSession extends DurableComputerSession {
   }
 
   async #startManagedTurn(row: ManagedTurnRow, replayed: boolean): Promise<ManagedTurnRow> {
+    await this.#settingsMutationTail;
     const latest = this.#managedTurn(row.id);
     if (!latest || isTerminalState(latest.state)) return latest ?? row;
     if (latest.retry_at !== null && latest.retry_at > Date.now()) {
@@ -4901,6 +5055,7 @@ export class DurableAgentSession extends DurableComputerSession {
       );
     };
     const internalRuntime = Symbol.for("nanocodex.cloudflare.internalRuntime");
+    const internalConfiguration = Symbol.for("nanocodex.cloudflare.internalConfiguration");
     const hostedProvider = multiplayer ? undefined : this.#hostedTools.provider();
     const codeEvaluatorStartedAt = performance.now();
     const hostedRuntime = hostedProvider === undefined ? undefined : {
@@ -5059,6 +5214,7 @@ export class DurableAgentSession extends DurableComputerSession {
       if (hostedRuntime !== undefined) {
         Object.defineProperty(agentOptions, internalRuntime, { value: hostedRuntime });
       }
+      Object.defineProperty(agentOptions, internalConfiguration, { value: this.#settings() });
       phaseStartedAt = performance.now();
       agent = await CloudflareAgent.create(this, agentOptions);
       cloudflareAgentMs = performance.now() - phaseStartedAt;
@@ -5819,6 +5975,7 @@ export class DurableAgentSession extends DurableComputerSession {
       },
       managed_session: {
         ...sessionState,
+        settings: this.#settings(),
         title: conversationTitle(sessionState.first_prompt),
       },
       managed_turn_receipts: turns.identity,
@@ -5905,6 +6062,7 @@ export class DurableAgentSession extends DurableComputerSession {
         adoption.session.last_active,
         adoption.session.stream_error,
       );
+      this.#storeSettings(adoption.session.settings);
       this.ctx.storage.sql.exec(
         `INSERT INTO managed_portability_restoration (
            singleton, source_storage_id, events_digest, realtime_digest, turn_receipts_digest
@@ -6012,10 +6170,156 @@ export class DurableAgentSession extends DurableComputerSession {
   #session(): SessionRow | undefined {
     return this.ctx.storage.sql.exec<SessionRow>(
       `SELECT session_id, owner_id, organization_id, team_id, authorization_epoch, public_origin,
-              runtime_profile, completed_turns, last_active, stream_error
+              runtime_profile, accepted_turns, completed_turns, last_active, stream_error
        FROM session_state WHERE singleton = 1`,
       )
       .toArray()[0];
+  }
+
+  #settings(): ManagedAgentSettings {
+    const row = this.ctx.storage.sql.exec<AgentSettingsRow>(
+      `SELECT model, thinking, reasoning_mode, fast_mode
+       FROM managed_agent_settings WHERE singleton = 1`,
+    ).one();
+    return {
+      model: row.model,
+      thinking: row.thinking,
+      reasoning_mode: row.reasoning_mode,
+      fast_mode: row.fast_mode !== 0,
+    };
+  }
+
+  #storeSettings(settings: ManagedAgentSettings): void {
+    this.ctx.storage.sql.exec(
+      `UPDATE managed_agent_settings
+       SET model = ?, thinking = ?, reasoning_mode = ?, fast_mode = ?
+       WHERE singleton = 1`,
+      settings.model,
+      settings.thinking,
+      settings.reasoning_mode,
+      settings.fast_mode ? 1 : 0,
+    );
+  }
+
+  async #applySettingsPatch(
+    patch: ManagedAgentSettingsPatch,
+  ): Promise<ManagedAgentSettings> {
+    this.#assertSettingsLifecycle();
+    const session = this.#session();
+    if (!session) throw new ManagedRequestError(404, "not_found", "agent is not initialized");
+    const current = this.#settings();
+    const settings = { ...current, ...patch };
+    const immutableRequested = Object.hasOwn(patch, "model")
+      || Object.hasOwn(patch, "reasoning_mode");
+    if (immutableRequested && session.accepted_turns !== 0) {
+      throw new ManagedRequestError(
+        409,
+        "settings_locked",
+        "model and reasoning_mode cannot change after the first accepted turn",
+      );
+    }
+    if (immutableRequested && this.#immutableSettingsBusy()) {
+      throw new ManagedRequestError(
+        409,
+        "settings_busy",
+        "model and reasoning_mode cannot change while agent work is active",
+      );
+    }
+
+    this.#storeSettings(settings);
+    try {
+      if (immutableRequested) {
+        await this.#shutdownAgent(true);
+        this.#assertSettingsLifecycle();
+        const agent = await this.#ensureAgent();
+        this.#assertSettingsLifecycle();
+        if (this.#agent !== agent) {
+          throw retryableError("agent became unavailable while applying settings");
+        }
+        return settings;
+      }
+
+      if (this.#agentPrewarmTask) await this.#agentPrewarmTask;
+      this.#assertSettingsLifecycle();
+      const agent = this.#agentPromise === undefined
+        ? this.#agent
+        : await this.#agentPromise;
+      if (agent !== undefined) {
+        const generation = this.#runtimeOwnershipGeneration;
+        const assertOwned = () => {
+          this.#assertSettingsLifecycle();
+          if (this.#agent !== agent || this.#runtimeOwnershipGeneration !== generation) {
+            throw retryableError("agent ownership changed while applying settings");
+          }
+        };
+        assertOwned();
+        if (Object.hasOwn(patch, "thinking")) {
+          await agent.session.setThinking(settings.thinking);
+          assertOwned();
+        }
+        if (Object.hasOwn(patch, "fast_mode")) {
+          await agent.session.setFastMode(settings.fast_mode);
+          assertOwned();
+        }
+      }
+      return settings;
+    } catch (error) {
+      return this.#rollbackSettings(current, error);
+    }
+  }
+
+  async #rollbackSettings(previous: ManagedAgentSettings, cause: unknown): Promise<never> {
+    const failures: unknown[] = [cause];
+    try {
+      this.#storeSettings(previous);
+    } catch (error) {
+      failures.push(error);
+    }
+    try {
+      await this.#shutdownAgent(true);
+    } catch (error) {
+      failures.push(error);
+    }
+    if (!this.#deleting && !this.#deleted && !this.#durabilityExported
+      && this.#durabilityImportState !== "pending" && this.#sessionId()) {
+      try {
+        const restored = await this.#ensureAgent();
+        if (this.#agent !== restored) {
+          throw new Error("rolled back Agent runtime lost ownership");
+        }
+      } catch (error) {
+        failures.push(error);
+      }
+    }
+    if (failures.length === 1) throw cause;
+    throw new AggregateError(failures, "settings update and rollback failed");
+  }
+
+  #assertSettingsLifecycle(): void {
+    if (this.#deleting || this.#deleted) {
+      throw new ManagedRequestError(409, "agent_deleting", "the agent is being deleted");
+    }
+    if (this.#durabilityExported || this.#durabilityImportState === "pending"
+      || this.#durabilityImportTask !== undefined) {
+      throw new ManagedRequestError(
+        409,
+        "durability_transfer_pending",
+        "durability transfer fenced settings",
+      );
+    }
+  }
+
+  #immutableSettingsBusy(): boolean {
+    return this.#turns.size > 0
+      || this.#pendingTurnIds.size > 0
+      || this.#admissionTasks.size > 0
+      || this.#recoverableTurnCount() > 0
+      || this.#cancellationTasks.size > 0
+      || this.#realtimeOperations.size > 0
+      || this.#managedRealtimeSession() !== undefined
+      || this.#realtimeEventBuffer !== undefined
+      || this.#pendingDeviceToolCalls.size > 0
+      || this.#hostedTools.hasPendingCalls();
   }
 
   #initializationOwnership(): SessionInitializationOwnership | undefined {
@@ -6465,6 +6769,16 @@ function promptInputText(input: PromptInput): string {
   }).join("\n");
 }
 
+function sameAgentSettings(
+  left: ManagedAgentSettings,
+  right: ManagedAgentSettings,
+): boolean {
+  return left.model === right.model
+    && left.thinking === right.thinking
+    && left.reasoning_mode === right.reasoning_mode
+    && left.fast_mode === right.fast_mode;
+}
+
 function dispatchInputChunks(input: string): string[] {
   const chunks: string[] = [];
   for (let offset = 0; offset < input.length;) {
@@ -6797,7 +7111,7 @@ function validManagedRealtimePortability(value: unknown): value is ManagedRealti
 
 function validManagedSessionPortability(value: unknown): value is ManagedSessionPortability {
   return isRecord(value) && exactKeys(value, [
-    "accepted_turns", "completed_turns", "first_prompt", "last_active", "stream_error", "title",
+    "accepted_turns", "completed_turns", "first_prompt", "last_active", "settings", "stream_error", "title",
   ])
     && nonnegativeSafeInteger(value.accepted_turns)
     && nonnegativeSafeInteger(value.completed_turns)
@@ -6805,8 +7119,20 @@ function validManagedSessionPortability(value: unknown): value is ManagedSession
     && typeof value.first_prompt === "string"
     && nonnegativeSafeInteger(value.last_active)
     && (value.stream_error === null || typeof value.stream_error === "string")
+    && validAgentSettings(value.settings)
     && typeof value.title === "string"
     && value.title === conversationTitle(value.first_prompt);
+}
+
+function validAgentSettings(value: unknown): value is ManagedAgentSettings {
+  if (!isRecord(value) || !exactKeys(value, [
+    "fast_mode", "model", "reasoning_mode", "thinking",
+  ])) return false;
+  try {
+    return Object.keys(parseAgentSettingsPatch(value)).length === 4;
+  } catch {
+    return false;
+  }
 }
 
 function validManagedPortableArchiveIdentity(value: unknown): value is ManagedPortableArchiveIdentity {

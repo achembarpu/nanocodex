@@ -45,6 +45,14 @@ pub(crate) enum Command {
         BackendTurnKey,
         tokio::sync::oneshot::Sender<nanocodex_agent::Result<()>>,
     ),
+    SetThinking(
+        Thinking,
+        tokio::sync::oneshot::Sender<nanocodex_agent::Result<()>>,
+    ),
+    SetFastMode(
+        bool,
+        tokio::sync::oneshot::Sender<nanocodex_agent::Result<()>>,
+    ),
     Disconnect,
     Shutdown,
 }
@@ -189,12 +197,18 @@ impl LifecycleBackend for ManagedAgent {
         )
     }
 
-    fn set_thinking(&self, _thinking: Thinking) -> BackendFuture<nanocodex_agent::Result<()>> {
-        unsupported("set_thinking")
+    fn set_thinking(&self, thinking: Thinking) -> BackendFuture<nanocodex_agent::Result<()>> {
+        let commands = self.commands.clone();
+        Box::pin(async move {
+            Self::request(commands, |result| Command::SetThinking(thinking, result)).await
+        })
     }
 
-    fn set_fast_mode(&self, _enabled: bool) -> BackendFuture<nanocodex_agent::Result<()>> {
-        unsupported("set_fast_mode")
+    fn set_fast_mode(&self, enabled: bool) -> BackendFuture<nanocodex_agent::Result<()>> {
+        let commands = self.commands.clone();
+        Box::pin(async move {
+            Self::request(commands, |result| Command::SetFastMode(enabled, result)).await
+        })
     }
 
     fn compact(&self) -> BackendFuture<nanocodex_agent::Result<()>> {
@@ -336,6 +350,12 @@ where
                     }
                     Some(Command::Cancel(key, result)) => {
                         drop(result.send(self.cancel(key).await));
+                    }
+                    Some(Command::SetThinking(thinking, result)) => {
+                        drop(result.send(self.set_thinking(thinking).await));
+                    }
+                    Some(Command::SetFastMode(enabled, result)) => {
+                        drop(result.send(self.set_fast_mode(enabled).await));
                     }
                     Some(Command::Shutdown) => break self.shutdown_active().await,
                     Some(Command::Disconnect) | None => break Ok(()),
@@ -484,6 +504,42 @@ where
             .cloned()
             .ok_or(NanocodexError::TurnNotCancellable)?;
         self.cancel_turn(turn_id).await
+    }
+
+    async fn set_thinking(&mut self, thinking: Thinking) -> nanocodex_agent::Result<()> {
+        match call(
+            &mut self.service,
+            ManagedRequest::SetThinking {
+                agent_id: self.agent_id.clone(),
+                thinking,
+            },
+        )
+        .await?
+        {
+            ManagedResponse::Settings(settings) if settings.thinking == thinking => Ok(()),
+            ManagedResponse::Settings(_) => Err(NanocodexError::BackendContract {
+                detail: "managed thinking update acknowledged a different setting",
+            }),
+            _ => Err(unexpected_response()),
+        }
+    }
+
+    async fn set_fast_mode(&mut self, enabled: bool) -> nanocodex_agent::Result<()> {
+        match call(
+            &mut self.service,
+            ManagedRequest::SetFastMode {
+                agent_id: self.agent_id.clone(),
+                enabled,
+            },
+        )
+        .await?
+        {
+            ManagedResponse::Settings(settings) if settings.fast_mode == enabled => Ok(()),
+            ManagedResponse::Settings(_) => Err(NanocodexError::BackendContract {
+                detail: "managed fast-mode update acknowledged a different setting",
+            }),
+            _ => Err(unexpected_response()),
+        }
     }
 
     async fn shutdown_active(&mut self) -> nanocodex_agent::Result<()> {

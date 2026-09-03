@@ -143,6 +143,12 @@ pub(crate) enum AppEvent {
         model: Model,
         skills: Arc<[Skill]>,
     },
+    SettingsHydrated {
+        pane: PaneId,
+        effort: ReasoningEffort,
+        fast_mode: bool,
+        model: Model,
+    },
     NotifyError {
         pane: PaneId,
         error: String,
@@ -368,6 +374,19 @@ impl AppNode {
                     fast_mode,
                     model,
                     skills,
+                },
+            ),
+            AppEvent::SettingsHydrated {
+                pane,
+                effort,
+                fast_mode,
+                model,
+            } => self.update_root(
+                pane,
+                RootEvent::SettingsHydrated {
+                    effort,
+                    fast_mode,
+                    model,
                 },
             ),
             AppEvent::NotifyError { pane, error } => {

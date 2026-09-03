@@ -19,7 +19,9 @@ use ratatui::{
 use unicode_width::UnicodeWidthStr;
 
 const FOOTER: [(&str, &str); 2] = [("↑↓", "scroll"), ("esc", "close")];
-const BINDINGS: [(&str, &str); 25] = [
+const BINDINGS: [(&str, &str); 27] = [
+    ("ctrl+s", "change reasoning effort"),
+    ("ctrl+d", "select model · before first prompt"),
     ("ctrl+g", "edit prompt in $EDITOR"),
     ("ctrl+r", "recent prompts"),
     ("ctrl+z", "restore the last cleared draft"),
@@ -182,7 +184,7 @@ mod tests {
     #[test]
     fn popup_documents_context_sensitive_composer_shortcuts() {
         let mut help = KeybindingsHelp::default();
-        let mut terminal = Terminal::new(TestBackend::new(80, 29)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(80, 31)).unwrap();
 
         terminal
             .draw(|frame| help.render(frame, frame.area(), &Theme::default()))
@@ -196,6 +198,10 @@ mod tests {
             .map(|cells| cells.iter().map(|cell| cell.symbol()).collect::<String>())
             .collect::<Vec<_>>();
         for expected in [
+            "ctrl+s",
+            "change reasoning effort",
+            "ctrl+d",
+            "select model · before first prompt",
             "ctrl/cmd+v",
             "ctrl+r",
             "ctrl+z",

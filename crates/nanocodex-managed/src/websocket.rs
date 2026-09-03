@@ -9,9 +9,9 @@ use tokio_tungstenite::{
 };
 
 use crate::{
-    ActiveTurn, AgentCapabilities, AgentReceipt, AgentState, EventCursor, ManagedClient,
-    ManagedError, ManagedEvent, ManagedEventData, ManagedEventFuture, ManagedEventSource,
-    PromptInput, TurnState, TurnView,
+    ActiveTurn, AgentCapabilities, AgentReceipt, AgentSettings, AgentState, EventCursor,
+    ManagedClient, ManagedError, ManagedEvent, ManagedEventData, ManagedEventFuture,
+    ManagedEventSource, PromptInput, TurnState, TurnView,
     client::{agent_path, validate_id, validate_idempotency_key},
 };
 
@@ -73,16 +73,24 @@ struct ReadyMessage {
     active_turns: Vec<String>,
     active_turn_details: Vec<ActiveTurn>,
     capabilities: AgentCapabilities,
+    settings: AgentSettings,
     latest_event_cursor: String,
 }
 
 impl ManagedSocket {
     pub(crate) async fn create(
         client: ManagedClient,
+        settings: AgentSettings,
     ) -> Result<(AgentReceipt, Self, ManagedSocketEvents), ManagedError> {
         let mut endpoint = client.url("v1/agents/live")?;
         set_websocket_scheme(&mut endpoint)?;
+        append_create_settings(&mut endpoint, settings);
         let (connected, ready) = connect_endpoint(&client, endpoint.clone(), None, "0").await?;
+        if ready.settings != settings {
+            return Err(live_error(
+                "managed WebSocket ready settings do not match creation request",
+            ));
+        }
         let agent_id = ready.session_id.clone();
         validate_id("agent", &agent_id)?;
         let cursor = EventCursor::parse(ready.latest_event_cursor.clone())?;
@@ -109,6 +117,7 @@ impl ManagedSocket {
                 agent_loaded: false,
                 connected_clients: 1,
                 capabilities: ready.capabilities,
+                settings: ready.settings,
                 latest_event_cursor: ready.latest_event_cursor,
                 stream_error: None,
             }),
@@ -162,6 +171,18 @@ impl ManagedSocket {
             .await
             .map_err(|_| live_error("managed WebSocket stopped during submission"))?
     }
+}
+
+fn append_create_settings(endpoint: &mut url::Url, settings: AgentSettings) {
+    endpoint
+        .query_pairs_mut()
+        .append_pair("model", settings.model.as_str())
+        .append_pair("thinking", settings.thinking.as_str())
+        .append_pair("reasoning_mode", settings.reasoning_mode.as_str())
+        .append_pair(
+            "fast_mode",
+            if settings.fast_mode { "true" } else { "false" },
+        );
 }
 
 impl ManagedSocketEvents {
@@ -492,4 +513,65 @@ async fn connect_endpoint(
 
 fn live_error(message: impl Into<String>) -> ManagedError {
     ManagedError::InvalidEvent(message.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use nanocodex_oai_api::{Model, ReasoningMode, Thinking};
+    use serde_json::json;
+
+    use super::{ReadyMessage, append_create_settings};
+    use crate::AgentSettings;
+
+    #[test]
+    fn create_live_uses_exact_canonical_settings_query() {
+        let mut endpoint = url::Url::parse("wss://managed.example/v1/agents/live")
+            .expect("fixture URL should parse");
+        append_create_settings(
+            &mut endpoint,
+            AgentSettings {
+                model: Model::Terra,
+                thinking: Thinking::Max,
+                reasoning_mode: ReasoningMode::Pro,
+                fast_mode: true,
+            },
+        );
+        assert_eq!(
+            endpoint.query(),
+            Some("model=gpt-5.6-terra&thinking=max&reasoning_mode=pro&fast_mode=true")
+        );
+    }
+
+    #[test]
+    fn ready_settings_are_required_and_typed() {
+        let mut ready = json!({
+            "type": "ready",
+            "session_id": "agent-1",
+            "restored": false,
+            "active_turns": [],
+            "active_turn_details": [],
+            "capabilities": {
+                "durable_turns": true,
+                "resumable_events": true,
+                "live_steer": true,
+                "live_cancel": true,
+                "workspace": "cloud",
+                "sandbox_escalation": false
+            },
+            "latest_event_cursor": "0"
+        });
+        assert!(serde_json::from_value::<ReadyMessage>(ready.clone()).is_err());
+
+        ready["settings"] = json!({
+            "model": "gpt-5.6-luna",
+            "thinking": "low",
+            "reasoning_mode": "standard",
+            "fast_mode": true
+        });
+        let parsed: ReadyMessage =
+            serde_json::from_value(ready).expect("ready settings should deserialize");
+        assert_eq!(parsed.settings.model, Model::Luna);
+        assert_eq!(parsed.settings.thinking, Thinking::Low);
+        assert!(parsed.settings.fast_mode);
+    }
 }

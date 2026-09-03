@@ -26,7 +26,8 @@ use clap::{Args, Parser, Subcommand, builder::NonEmptyStringValueParser};
 use host::HostConfig;
 use nanocodex_agent::{AgentEvents, Nanocodex, NanocodexError, PromptRequest, Turn, TurnResult};
 use nanocodex_managed::{
-    AgentState, EventCursor, Managed, ManagedApiKey, ManagedClient, ManagedError, PromptInput,
+    AgentSettings, AgentState, EventCursor, Managed, ManagedApiKey, ManagedClient, ManagedError,
+    PromptInput,
 };
 use nanocodex_tools::{Tools, WorkspaceTools};
 
@@ -261,6 +262,15 @@ async fn open_workspace_agent_from(
     agent_id: Option<String>,
     state: Option<AgentState>,
 ) -> Result<(Nanocodex, AgentEvents, String, std::path::PathBuf), ManagedError> {
+    open_workspace_agent_with_settings(client, agent_id, state, AgentSettings::default()).await
+}
+
+async fn open_workspace_agent_with_settings(
+    client: &ManagedClient,
+    agent_id: Option<String>,
+    state: Option<AgentState>,
+    settings: AgentSettings,
+) -> Result<(Nanocodex, AgentEvents, String, std::path::PathBuf), ManagedError> {
     let config =
         HostConfig::load().map_err(|error| ManagedError::Configuration(error.to_string()))?;
     let workspace = config.workspace().to_path_buf();
@@ -270,7 +280,7 @@ async fn open_workspace_agent_from(
         .build()
         .map_err(|error| ManagedError::Configuration(error.to_string()))?;
     let backend = match (agent_id, state) {
-        (None, None) => Managed::create_live(client.clone()),
+        (None, None) => Managed::create_live(client.clone()).with_settings(settings),
         (Some(agent_id), Some(state)) => {
             Managed::open_live_from_state(client.clone(), agent_id, state)
         }

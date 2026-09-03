@@ -175,6 +175,11 @@ pub(crate) enum RootEvent {
         model: Model,
         skills: Arc<[Skill]>,
     },
+    SettingsHydrated {
+        effort: ReasoningEffort,
+        fast_mode: bool,
+        model: Model,
+    },
     NotifyError(String),
     NotifySuccess(String),
     ConfirmReviewDownload,
@@ -448,7 +453,6 @@ impl RootNode {
         self.preferred_reasoning_mode = mode;
     }
 
-    #[cfg(test)]
     pub(crate) const fn preferred_reasoning_mode(&self) -> ReasoningMode {
         self.preferred_reasoning_mode
     }
@@ -823,6 +827,12 @@ impl RootNode {
         if is_control_key(&event, 'o') {
             return self.update_transcript(TranscriptEvent::ToggleExpandAll);
         }
+        if is_control_key(&event, 's') {
+            return self.open_effort();
+        }
+        if is_control_key(&event, 'd') {
+            return self.open_model();
+        }
         if is_control_key(&event, 'r') {
             return self.load_recent_prompts();
         }
@@ -866,7 +876,8 @@ impl RootNode {
         {
             let position = Position::new(mouse.column, mouse.row);
             match self.composer.component().chrome_target(position) {
-                Some(ComposerChromeTarget::Effort | ComposerChromeTarget::Model) => {}
+                Some(ComposerChromeTarget::Effort) => return self.open_effort(),
+                Some(ComposerChromeTarget::Model) => return self.open_model(),
                 Some(ComposerChromeTarget::Subagents) => {
                     self.subagents.open_tree();
                     self.overlay = Some(Overlay::Subagents(SubagentOverlay::Tree));
@@ -952,6 +963,8 @@ impl RootNode {
                 ActionAvailability {
                     new_session: new_session_enabled,
                     fork: self.can_fork(),
+                    fast_mode: self.composer.component().fast_mode(),
+                    model: self.thread == ThreadState::New,
                 },
             ))));
             return ComponentUpdate::render(RenderRequest::Immediate);
@@ -1406,6 +1419,21 @@ impl RootNode {
         let update = actions.update(ActionsEvent::Terminal(event));
         match update.effects.into_iter().next() {
             Some(ActionsEffect::Dismiss) => self.overlay = None,
+            Some(ActionsEffect::Trigger(Action::Effort)) => {
+                return self.open_effort();
+            }
+            Some(ActionsEffect::Trigger(Action::Model)) => {
+                return self.open_model();
+            }
+            Some(ActionsEffect::Trigger(Action::FastMode)) => {
+                self.overlay = None;
+                let enabled = !self.composer.component().fast_mode();
+                self.set_fast_mode(enabled);
+                return ComponentUpdate {
+                    effects: vec![RootEffect::SetFastMode(enabled)],
+                    render: RenderRequest::Immediate,
+                };
+            }
             Some(ActionsEffect::Trigger(Action::Theme)) => {
                 self.overlay = Some(Overlay::Theme(Node::new(ThemeSelector::new(
                     self.theme_mode,
@@ -2645,6 +2673,30 @@ impl Component for RootNode {
                 );
                 self.set_model(model);
                 self.set_skills(skills);
+                ComponentUpdate::render(RenderRequest::Immediate)
+            }
+            RootEvent::SettingsHydrated {
+                effort,
+                fast_mode,
+                model,
+            } => {
+                self.interactive = true;
+                self.transcript.component_mut().set_effort(effort);
+                self.subagents.set_effort(effort);
+                let _ = self
+                    .composer
+                    .component_mut()
+                    .update(ComposerEvent::SetEffort(effort));
+                let _ = self
+                    .composer
+                    .component_mut()
+                    .update(ComposerEvent::Activity {
+                        active: false,
+                        status: None,
+                        now: Instant::now(),
+                    });
+                self.set_fast_mode(fast_mode);
+                self.set_model(model);
                 ComponentUpdate::render(RenderRequest::Immediate)
             }
             RootEvent::NotifyError(message) => {
