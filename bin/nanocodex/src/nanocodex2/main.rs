@@ -406,6 +406,7 @@ async fn await_turn(
     tokio::pin!(interrupt);
     loop {
         tokio::select! {
+            biased;
             result = &mut turn => {
                 let result = result.map_err(agent_error)?;
                 while let Some(event) = events.try_recv_timed() {
@@ -413,19 +414,25 @@ async fn await_turn(
                 }
                 return Ok(Some(result));
             }
-            event = events.recv() => match event {
-                Some(event) => {
-                    write_json_line(&event)?;
-                }
-                None => return Err(ManagedError::Configuration(
-                    "agent event stream stopped before turn completion".to_owned(),
-                )),
-            },
             signal = &mut interrupt => {
                 signal.map_err(|error| ManagedError::Configuration(
                     format!("failed to listen for Ctrl-C: {error}")
                 ))?;
                 return Ok(None);
+            },
+            event = events.recv() => match event {
+                Some(event) => {
+                    write_json_line(&event)?;
+                }
+                None => return tokio::select! {
+                    result = &mut turn => result.map(Some).map_err(agent_error),
+                    signal = &mut interrupt => {
+                        signal.map_err(|error| ManagedError::Configuration(
+                            format!("failed to listen for Ctrl-C: {error}")
+                        ))?;
+                        Ok(None)
+                    },
+                },
             },
         }
     }
