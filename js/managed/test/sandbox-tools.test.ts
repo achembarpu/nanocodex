@@ -42,6 +42,59 @@ describe("Cloudflare sandbox tools", () => {
     expect(sandbox.exec).toHaveBeenCalledWith("uname -a", {
       cwd: "/workspace",
     });
+    expect(sandbox.exec.mock.calls.filter(([command]) => isWorkspaceFlush(command))).toHaveLength(2);
+  });
+
+  it("acknowledges workspace writes only after the retained mount flushes", async () => {
+    const sandbox = fakeSandbox();
+    const order: string[] = [];
+    sandbox.writeFile.mockImplementation(async () => { order.push("write"); });
+    sandbox.exec.mockImplementation(async (command: string) => {
+      expect(command).toBe("sync -f /workspace");
+      order.push("flush");
+      return executionResult("");
+    });
+    const tools = createCloudflareSandboxTools(async () => sandbox);
+
+    await expect(tools.sandbox_write_file!.handler({
+      path: "proof.txt",
+      content: "retained",
+    }, context)).resolves.toEqual({ path: "/workspace/proof.txt", bytes_written: 8 });
+
+    expect(order).toEqual(["write", "flush"]);
+  });
+
+  it("fails a workspace mutation when its retained flush fails", async () => {
+    const sandbox = fakeSandbox();
+    sandbox.exec.mockResolvedValue({
+      success: false,
+      exitCode: 1,
+      stdout: "",
+      stderr: "transport failed",
+      duration: 1,
+    });
+    const tools = createCloudflareSandboxTools(async () => sandbox);
+
+    await expect(tools.sandbox_write_file!.handler({
+      path: "proof.txt",
+      content: "not-yet-durable",
+    }, context)).rejects.toThrow("failed to flush the retained workspace: transport failed");
+  });
+
+  it("attempts to flush partial writes when foreground execution rejects", async () => {
+    const sandbox = fakeSandbox();
+    const executionError = new Error("command transport stopped");
+    sandbox.exec
+      .mockRejectedValueOnce(executionError)
+      .mockResolvedValueOnce(executionResult(""));
+    const tools = createCloudflareSandboxTools(async () => sandbox);
+
+    await expect(tools.sandbox_exec!.handler({ command: "generate files" }, context))
+      .rejects.toBe(executionError);
+    expect(sandbox.exec.mock.calls).toEqual([
+      ["generate files", { cwd: "/workspace" }],
+      ["sync -f /workspace", { cwd: "/" }],
+    ]);
   });
 
   it("prepares one shared sandbox once across concurrent parent and child tool sets", async () => {
@@ -103,11 +156,14 @@ describe("Cloudflare sandbox tools", () => {
     const tools = cloudflareSandboxTools(fakeNamespace(), "clone-session");
 
     const clone = "git clone https://example.invalid/repo.git repo";
-    await tools.sandbox_start_process!.handler({ command: clone }, context);
+    const started = await tools.sandbox_start_process!.handler({ command: clone }, context);
     const result = await tools.sandbox_exec!.handler({ command: "git -C repo status" }, context);
 
+    expect(started).toMatchObject({ command: clone });
     expect(result).toMatchObject({ success: true, stdout: "clone-visible" });
-    expect(sandbox.startProcess).toHaveBeenCalledWith(clone, {
+    expect(sandbox.startProcess).toHaveBeenCalledWith(expect.stringContaining(
+      `${clone}\n)\nstatus=$?\nsync -f /workspace`,
+    ), {
       cwd: "/workspace",
       autoCleanup: false,
     });
@@ -139,6 +195,10 @@ describe("Cloudflare sandbox tools", () => {
           sandbox.getMountState() === "mounted" ? retainedMarker : "ephemeral-marker",
         );
       }
+      if (isWorkspaceFlush(command)) {
+        events.push("flush");
+        return executionResult("");
+      }
       throw new Error(`unexpected command: ${command}`);
     });
     sandboxSdk.getSandbox.mockReturnValue(sandbox);
@@ -156,10 +216,12 @@ describe("Cloudflare sandbox tools", () => {
       "mount",
       "probe",
       "write-marker",
+      "flush",
       "probe",
       "mount",
       "probe",
       "read-marker",
+      "flush",
     ]);
     expect(sandbox.mountBucket).toHaveBeenCalledTimes(2);
   });
@@ -251,6 +313,25 @@ describe("Cloudflare sandbox tools", () => {
     });
     const process = await sandbox.startProcess.mock.results[0]!.value;
     expect(process.waitForPort).toHaveBeenCalledWith(3_000, undefined);
+  });
+
+  it("flushes a background process before exit without exposing its wrapper", async () => {
+    const sandbox = fakeSandbox();
+    const tools = createCloudflareSandboxTools(async () => sandbox);
+    const command = "cargo test --workspace";
+
+    await expect(tools.sandbox_start_process!.handler({ command }, context))
+      .resolves.toMatchObject({ command });
+    const wrapped = sandbox.startProcess.mock.calls[0]![0];
+    expect(wrapped).toContain(`${command}\n)\nstatus=$?\nsync -f /workspace`);
+
+    sandbox.getProcess.mockResolvedValue(fakeProcess({
+      command: wrapped,
+      status: "completed",
+      exitCode: 0,
+    }));
+    await expect(tools.sandbox_get_process!.handler({ process_id: "process" }, context))
+      .resolves.toMatchObject({ command, status: "completed", terminal: true });
   });
 
   it("retrieves authoritative background process state and bounded logs", async () => {
@@ -353,6 +434,7 @@ describe("Cloudflare sandbox tools", () => {
       kill_requested: true,
     });
     expect(process.kill).toHaveBeenCalledOnce();
+    expect(process.waitForExit).toHaveBeenCalledOnce();
     expect(process.getStatus).toHaveBeenCalledOnce();
   });
 
@@ -641,6 +723,7 @@ type FakeLookupProcess = {
   getStatus(): Promise<"starting" | "running" | "completed" | "failed" | "killed" | "error">;
   getLogs(): Promise<{ stdout: string; stderr: string }>;
   waitForPort(port: number, options?: { timeout?: number }): Promise<void>;
+  waitForExit(timeout?: number): Promise<{ exitCode: number }>;
 };
 
 function fakeSandbox() {
@@ -680,6 +763,7 @@ function fakeProcess(overrides: Partial<Pick<
     getStatus: vi.fn(async (): Promise<FakeLookupProcess["status"]> => "running"),
     getLogs: vi.fn(async () => ({ stdout: "", stderr: "" })),
     waitForPort: vi.fn(async () => {}),
+    waitForExit: vi.fn(async () => ({ exitCode: 0 })),
     ...overrides,
   };
 }
@@ -703,6 +787,10 @@ type MountState = "absent" | "empty" | "occupied" | "mounted" | "mounted-unhealt
 
 function isMountProbe(command: unknown): boolean {
   return typeof command === "string" && command.startsWith("if mountpoint -q /workspace");
+}
+
+function isWorkspaceFlush(command: unknown): boolean {
+  return command === "sync -f /workspace";
 }
 
 function executionResult(stdout: string) {

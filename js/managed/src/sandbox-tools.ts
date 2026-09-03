@@ -5,6 +5,13 @@ import { isPrivateEgressHeader } from "./managed-egress";
 import type { Sandbox } from "./sandbox-runtime";
 
 const WORKSPACE = "/workspace";
+const WORKSPACE_FLUSH_COMMAND = "sync -f /workspace";
+const BACKGROUND_COMMAND_PREFIX = "# nanocodex retained process\n(\n";
+const BACKGROUND_COMMAND_SUFFIX = "\n)\nstatus=$?\n"
+  + `${WORKSPACE_FLUSH_COMMAND}\n`
+  + "flush_status=$?\n"
+  + "if [ \"$status\" -ne 0 ]; then exit \"$status\"; fi\n"
+  + "exit \"$flush_status\"";
 const MAX_COMMAND_CHARS = 32 * 1024;
 const MAX_FILE_BYTES = 1024 * 1024;
 const MAX_OUTPUT_BYTES = 128 * 1024;
@@ -65,6 +72,7 @@ type SandboxProcess = {
   getStatus(): Promise<SandboxProcessStatus>;
   getLogs(): Promise<{ stdout: string; stderr: string }>;
   waitForPort(port: number, options?: { timeout?: number }): Promise<void>;
+  waitForExit(timeout?: number): Promise<{ exitCode: number }>;
 };
 
 const sandboxPreparations = new WeakMap<
@@ -197,12 +205,17 @@ export function createCloudflareSandboxTools(
         const command = requiredString(value.command, "command", MAX_COMMAND_CHARS);
         const cwd = workspacePath(optionalString(value.cwd, "cwd") ?? ".");
         const timeout = optionalPositiveInteger(value.timeout_ms, "timeout_ms");
+        const sandbox = await createSandbox();
         return withSandboxRpcResult(
-          (await createSandbox()).exec(command, {
+          sandbox.exec(command, {
             cwd,
             ...(timeout === undefined ? {} : { timeout }),
+          }).catch(async (error: unknown) => {
+            try { await flushWorkspace(sandbox); } catch { /* Preserve the execution failure. */ }
+            throw error;
           }),
-          (result) => {
+          async (result) => {
+            await flushWorkspace(sandbox);
             return {
               success: result.success,
               exit_code: result.exitCode,
@@ -257,7 +270,10 @@ export function createCloudflareSandboxTools(
           "ready_timeout_ms",
         );
         return withSandboxRpcResult(
-          (await createSandbox()).startProcess(command, { cwd, autoCleanup: false }),
+          (await createSandbox()).startProcess(durableBackgroundCommand(command), {
+            cwd,
+            autoCleanup: false,
+          }),
           async (process) => {
             if (readyPort !== undefined) {
               await process.waitForPort(
@@ -268,7 +284,7 @@ export function createCloudflareSandboxTools(
             return {
               process_id: process.id,
               pid: process.pid,
-              command: process.command,
+              command,
               status: await process.getStatus(),
               ...(readyPort === undefined ? {} : { ready_port: readyPort }),
             };
@@ -282,19 +298,26 @@ export function createCloudflareSandboxTools(
       handler: async (input) => {
         const value = objectInput(input);
         const processId = requiredProcessId(value.process_id);
+        const sandbox = await createSandbox();
         return withSandboxRpcResult(
-          (await createSandbox()).getProcess(processId),
+          sandbox.getProcess(processId),
           async (process) => {
             if (process === null) return { found: false, process_id: processId };
             const terminal = isTerminalProcessStatus(process.status);
-            const output = terminal || value.include_output === true
-              ? boundedOutput(await process.getLogs())
-              : undefined;
+            let output;
+            if (terminal || value.include_output === true) {
+              const logs = process.getLogs();
+              const durableCompletion = process.status === "completed"
+                && isDurableBackgroundCommand(process.command);
+              output = boundedOutput(await (terminal && !durableCompletion
+                ? Promise.all([logs, flushWorkspace(sandbox)]).then(([result]) => result)
+                : logs));
+            }
             return {
               found: true,
               process_id: process.id,
               pid: process.pid,
-              command: process.command,
+              command: presentedBackgroundCommand(process.command),
               status: process.status,
               terminal,
               exit_code: process.exitCode ?? null,
@@ -309,27 +332,30 @@ export function createCloudflareSandboxTools(
       parameters: processIdParameters(),
       handler: async (input) => {
         const processId = requiredProcessId(objectInput(input).process_id);
+        const sandbox = await createSandbox();
         return withSandboxRpcResult(
-          (await createSandbox()).getProcess(processId),
+          sandbox.getProcess(processId),
           async (process) => {
             if (process === null) return { found: false, process_id: processId };
-            if (isTerminalProcessStatus(process.status)) {
-              return {
-                found: true,
-                process_id: process.id,
-                status: process.status,
-                terminal: true,
-                kill_requested: false,
-              };
+            let status = process.status;
+            const killRequested = !isTerminalProcessStatus(status);
+            if (killRequested) {
+              await process.kill();
+              await process.waitForExit();
+              status = await process.getStatus();
+              if (!isTerminalProcessStatus(status)) {
+                throw new Error("sandbox process remained active after exit was observed");
+              }
             }
-            await process.kill();
-            const status = await process.getStatus();
+            const durableCompletion = status === "completed"
+              && isDurableBackgroundCommand(process.command);
+            if (!durableCompletion) await flushWorkspace(sandbox);
             return {
               found: true,
               process_id: process.id,
               status,
-              terminal: isTerminalProcessStatus(status),
-              kill_requested: true,
+              terminal: true,
+              kill_requested: killRequested,
             };
           },
         );
@@ -352,7 +378,9 @@ export function createCloudflareSandboxTools(
         const content = requiredContent(value.content);
         const bytes = new TextEncoder().encode(content).byteLength;
         if (bytes > MAX_FILE_BYTES) throw new Error("content exceeds 1 MiB");
-        await (await createSandbox()).writeFile(path, content, { encoding: "utf-8" });
+        const sandbox = await createSandbox();
+        await sandbox.writeFile(path, content, { encoding: "utf-8" });
+        await flushWorkspace(sandbox);
         return { path, bytes_written: bytes };
       },
     },
@@ -880,6 +908,28 @@ async function withSandboxRpcResult<T, R>(
   } finally {
     disposeSandboxRpcValue(value);
   }
+}
+
+async function flushWorkspace(sandbox: SandboxToolClient): Promise<void> {
+  const result = await sandbox.exec(WORKSPACE_FLUSH_COMMAND, { cwd: "/" });
+  if (!result.success || result.exitCode !== 0) {
+    const detail = result.stderr.trim() || result.stdout.trim();
+    throw new Error(`failed to flush the retained workspace${detail ? `: ${detail}` : ""}`);
+  }
+}
+
+function durableBackgroundCommand(command: string): string {
+  return BACKGROUND_COMMAND_PREFIX + command + BACKGROUND_COMMAND_SUFFIX;
+}
+
+function presentedBackgroundCommand(command: string): string {
+  if (!isDurableBackgroundCommand(command)) return command;
+  return command.slice(BACKGROUND_COMMAND_PREFIX.length, -BACKGROUND_COMMAND_SUFFIX.length);
+}
+
+function isDurableBackgroundCommand(command: string): boolean {
+  return command.startsWith(BACKGROUND_COMMAND_PREFIX)
+    && command.endsWith(BACKGROUND_COMMAND_SUFFIX);
 }
 
 function disposeSandboxRpcValue(value: unknown): void {
