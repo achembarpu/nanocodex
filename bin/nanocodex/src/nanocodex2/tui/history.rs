@@ -58,6 +58,13 @@ impl HistoryWindow {
         self.events = events;
         Ok(())
     }
+
+    pub(super) fn prepend_window(&mut self, mut older: Self) {
+        older.events.append(&mut self.events);
+        self.events = older.events;
+        self.before = older.before;
+        self.has_more = older.has_more;
+    }
 }
 
 pub(super) fn live_managed_projection(
@@ -133,7 +140,7 @@ pub(super) fn history_projection(
     let mut sequences = HashMap::new();
     let mut next_sequence = 1;
     let (records, recent) = history_projection_with_sequences(
-        history,
+        &history,
         agent_id,
         workspace,
         &mut sequences,
@@ -143,7 +150,43 @@ pub(super) fn history_projection(
 }
 
 pub(super) fn history_projection_with_sequences(
-    history: Vec<ManagedEvent>,
+    history: &[ManagedEvent],
+    agent_id: &str,
+    workspace: &Path,
+    sequences: &mut HashMap<String, u64>,
+    next_sequence: &mut u64,
+) -> Result<(Vec<Arc<TranscriptRecord>>, Vec<RecentPrompt>), ManagedError> {
+    history_projection_range_with_sequences(
+        history,
+        false,
+        agent_id,
+        workspace,
+        sequences,
+        next_sequence,
+    )
+}
+
+pub(super) fn older_history_projection_with_sequences(
+    older: &[ManagedEvent],
+    coherent_tail: bool,
+    agent_id: &str,
+    workspace: &Path,
+    sequences: &mut HashMap<String, u64>,
+    next_sequence: &mut u64,
+) -> Result<(Vec<Arc<TranscriptRecord>>, Vec<RecentPrompt>), ManagedError> {
+    history_projection_range_with_sequences(
+        older,
+        coherent_tail,
+        agent_id,
+        workspace,
+        sequences,
+        next_sequence,
+    )
+}
+
+fn history_projection_range_with_sequences(
+    history: &[ManagedEvent],
+    coherent_tail: bool,
     agent_id: &str,
     workspace: &Path,
     sequences: &mut HashMap<String, u64>,
@@ -151,69 +194,94 @@ pub(super) fn history_projection_with_sequences(
 ) -> Result<(Vec<Arc<TranscriptRecord>>, Vec<RecentPrompt>), ManagedError> {
     let mut records = Vec::new();
     let mut recent = Vec::new();
+    let initial_next_sequence = *next_sequence;
+    let mut inserted_cursors = Vec::new();
     let coherent_start = history
         .iter()
         .position(|event| matches!(event.data, ManagedEventData::TurnAccepted { .. }))
-        .unwrap_or(0);
-    for (index, event) in history.into_iter().enumerate().skip(coherent_start) {
-        let sequence = *sequences.entry(event.cursor.clone()).or_insert_with(|| {
+        .unwrap_or(if coherent_tail { history.len() } else { 0 });
+    for (index, event) in history.iter().enumerate().skip(coherent_start) {
+        let sequence = if let Some(sequence) = sequences.get(&event.cursor) {
+            *sequence
+        } else {
             let sequence = *next_sequence;
             *next_sequence = next_sequence.saturating_add(1);
+            sequences.insert(event.cursor.clone(), sequence);
+            inserted_cursors.push(event.cursor.clone());
             sequence
-        });
+        };
         let timestamp = managed_timestamp(event.created_at, index);
-        match event.data {
-            ManagedEventData::TurnAccepted { input, .. } => {
-                let text = prompt_input_text(&input);
-                let record = TranscriptRecord::from_local(
-                    sequence,
-                    timestamp,
-                    LocalEvent::UserSubmitted {
-                        id: TurnId::new(sequence),
-                        text: text.clone(),
-                    },
-                )
-                .map_err(|error| {
-                    ManagedError::Configuration(format!("TUI history error: {error}"))
-                })?;
-                recent.push(RecentPrompt {
-                    text,
-                    recorded_at_unix_ms: timestamp,
-                    session_id: agent_id.to_owned(),
-                    workspace: workspace.to_path_buf(),
-                });
-                records.push(Arc::new(record));
+        let projected = (|| -> Result<_, ManagedError> {
+            match &event.data {
+                ManagedEventData::TurnAccepted { input, .. } => {
+                    let text = prompt_input_text(&input);
+                    let record = TranscriptRecord::from_local(
+                        sequence,
+                        timestamp,
+                        LocalEvent::UserSubmitted {
+                            id: TurnId::new(sequence),
+                            text: text.clone(),
+                        },
+                    )
+                    .map_err(|error| {
+                        ManagedError::Configuration(format!("TUI history error: {error}"))
+                    })?;
+                    let prompt = RecentPrompt {
+                        text,
+                        recorded_at_unix_ms: timestamp,
+                        session_id: agent_id.to_owned(),
+                        workspace: workspace.to_path_buf(),
+                    };
+                    Ok(Some((Arc::new(record), Some(prompt))))
+                }
+                ManagedEventData::Event { event } => {
+                    let event: AgentEvent = serde_json::from_str(event.get()).map_err(|error| {
+                        ManagedError::Configuration(format!(
+                            "invalid retained agent event in TUI history: {error}"
+                        ))
+                    })?;
+                    Ok(Some((
+                        Arc::new(TranscriptRecord::from_agent(sequence, timestamp, event)),
+                        None,
+                    )))
+                }
+                ManagedEventData::TurnFailed { error, .. }
+                | ManagedEventData::TurnRetryable { error, .. } => {
+                    let record = TranscriptRecord::from_local(
+                        sequence,
+                        timestamp,
+                        LocalEvent::WorkerTurnFinished {
+                            id: TurnId::new(sequence),
+                            error: Some(error.clone()),
+                        },
+                    )
+                    .map_err(|error| {
+                        ManagedError::Configuration(format!("TUI history error: {error}"))
+                    })?;
+                    Ok(Some((Arc::new(record), None)))
+                }
+                ManagedEventData::AgentCreated { .. }
+                | ManagedEventData::TurnCancelling { .. }
+                | ManagedEventData::TurnCompleted { .. }
+                | ManagedEventData::TurnCancelled { .. }
+                | ManagedEventData::StreamFailed { .. } => Ok(None),
             }
-            ManagedEventData::Event { event } => {
-                let event: AgentEvent = serde_json::from_str(event.get()).map_err(|error| {
-                    ManagedError::Configuration(format!(
-                        "invalid retained agent event in TUI history: {error}"
-                    ))
-                })?;
-                records.push(Arc::new(TranscriptRecord::from_agent(
-                    sequence, timestamp, event,
-                )));
+        })();
+        match projected {
+            Ok(Some((record, prompt))) => {
+                records.push(record);
+                if let Some(prompt) = prompt {
+                    recent.push(prompt);
+                }
             }
-            ManagedEventData::TurnFailed { error, .. }
-            | ManagedEventData::TurnRetryable { error, .. } => {
-                let record = TranscriptRecord::from_local(
-                    sequence,
-                    timestamp,
-                    LocalEvent::WorkerTurnFinished {
-                        id: TurnId::new(sequence),
-                        error: Some(error),
-                    },
-                )
-                .map_err(|error| {
-                    ManagedError::Configuration(format!("TUI history error: {error}"))
-                })?;
-                records.push(Arc::new(record));
+            Ok(None) => {}
+            Err(error) => {
+                for cursor in inserted_cursors {
+                    sequences.remove(&cursor);
+                }
+                *next_sequence = initial_next_sequence;
+                return Err(error);
             }
-            ManagedEventData::AgentCreated { .. }
-            | ManagedEventData::TurnCancelling { .. }
-            | ManagedEventData::TurnCompleted { .. }
-            | ManagedEventData::TurnCancelled { .. }
-            | ManagedEventData::StreamFailed { .. } => {}
         }
     }
     recent.reverse();

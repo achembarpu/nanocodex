@@ -24,12 +24,12 @@ mod transcript;
 
 use self::{
     components::{
-        AppEffect, AppEvent, AppNode, ComponentUpdate, DraftReset, RenderRequest, RootEffect,
-        RootNode,
+        AppEffect, AppEvent, AppNode, ComponentUpdate, DraftReset, RenderRequest,
+        RestoredSessionProjection, RootEffect, RootNode,
     },
     history::{
         HistoryWindow, history_projection, history_projection_with_sequences,
-        live_managed_projection, unix_ms,
+        live_managed_projection, older_history_projection_with_sequences, unix_ms,
     },
     pane::PaneId,
     prompt::Submission,
@@ -76,6 +76,13 @@ type HistoryCompletion = (
     u64,
     String,
     Result<EventHistoryPage, ManagedError>,
+);
+type HistoryReplayCompletion = (
+    PaneId,
+    String,
+    u64,
+    String,
+    Result<PreparedHistoryReplay, ManagedError>,
 );
 type ConnectedAgent = (
     Nanocodex,
@@ -233,17 +240,90 @@ struct DriverRuntime {
     settings_queue: VecDeque<(PaneId, String, SettingsMutation)>,
     shells: JoinSet<(PaneId, ShellExecution)>,
     history_loads: JoinSet<HistoryCompletion>,
+    history_replays: JoinSet<HistoryReplayCompletion>,
     history_generation: u64,
     history: HistoryWindow,
     history_sequences: HashMap<String, u64>,
+    history_records: Vec<Arc<TranscriptRecord>>,
     live_records: Vec<Arc<TranscriptRecord>>,
-    live_prompts: Vec<RecentPrompt>,
     active_shells: usize,
     shell_context: Vec<String>,
     pending_submission: Option<(PaneId, TurnId, Submission)>,
     recent_prompts: Vec<RecentPrompt>,
     connection: JoinSet<ConnectionResult>,
     retry_target: Option<RetryTarget>,
+}
+
+struct PreparedHistoryReplay {
+    older_history: HistoryWindow,
+    sequences: HashMap<String, u64>,
+    next_sequence: u64,
+    history_records: Vec<Arc<TranscriptRecord>>,
+    older_prompts: Vec<RecentPrompt>,
+    projection: Box<RestoredSessionProjection>,
+}
+
+fn project_open_history(
+    effort: ReasoningEffort,
+    history_records: &[Arc<TranscriptRecord>],
+    live_records: &[Arc<TranscriptRecord>],
+) -> RestoredSessionProjection {
+    let mut records = Vec::with_capacity(history_records.len().saturating_add(live_records.len()));
+    records.extend(history_records.iter().cloned());
+    records.extend(live_records.iter().cloned());
+    RootNode::project_open_session(effort, records)
+}
+
+fn prepare_history_replay(
+    page: EventHistoryPage,
+    mut sequences: HashMap<String, u64>,
+    next_sequence: u64,
+    mut history_records: Vec<Arc<TranscriptRecord>>,
+    live_records: Vec<Arc<TranscriptRecord>>,
+    coherent_tail: bool,
+    agent_id: &str,
+    workspace: &Path,
+    effort: ReasoningEffort,
+) -> Result<PreparedHistoryReplay, ManagedError> {
+    let mut older_history = HistoryWindow::default();
+    older_history.prepend(page)?;
+    let mut projected_next_sequence = next_sequence;
+    let (mut older_records, older_prompts) = older_history_projection_with_sequences(
+        &older_history.events,
+        coherent_tail,
+        agent_id,
+        workspace,
+        &mut sequences,
+        &mut projected_next_sequence,
+    )?;
+    older_records.append(&mut history_records);
+    let history_records = older_records;
+    let projection = Box::new(project_open_history(
+        effort,
+        &history_records,
+        &live_records,
+    ));
+    Ok(PreparedHistoryReplay {
+        older_history,
+        sequences,
+        next_sequence: projected_next_sequence,
+        history_records,
+        older_prompts,
+        projection,
+    })
+}
+
+fn history_replay_matches(
+    agent_id: &str,
+    generation: u64,
+    requested_before: &str,
+    runtime_agent_id: &str,
+    runtime_generation: u64,
+    runtime_before: Option<&str>,
+) -> bool {
+    agent_id == runtime_agent_id
+        && generation == runtime_generation
+        && runtime_before == Some(requested_before)
 }
 
 impl DriverRuntime {
@@ -575,11 +655,12 @@ async fn run_inner(
         settings_queue: VecDeque::new(),
         shells: JoinSet::new(),
         history_loads: JoinSet::new(),
+        history_replays: JoinSet::new(),
         history_generation: 0,
         history: HistoryWindow::default(),
         history_sequences: HashMap::new(),
+        history_records: Vec::new(),
         live_records: Vec::new(),
-        live_prompts: Vec::new(),
         active_shells: 0,
         shell_context: Vec::new(),
         pending_submission: None,
@@ -617,6 +698,66 @@ async fn run_inner(
     let mut stopping = false;
 
     while !stopping {
+        // Keep runtime and component state stable while the pure replay projection runs. Events
+        // remain queued in their receivers and JoinSets, then are applied once after the replay is
+        // installed; rebuilding the entire Root for every arrival would duplicate work, while
+        // applying already-observed records again would duplicate component side effects.
+        if !runtime.history_replays.is_empty() {
+            let Some(result) = runtime.history_replays.join_next().await else {
+                continue;
+            };
+            match result {
+                Err(error) => {
+                    request_render(
+                        app.update(AppEvent::NotifyError {
+                            pane: PaneId::Main,
+                            error: format!(
+                                "Older durable history replay task stopped unexpectedly: {error}"
+                            ),
+                        }),
+                        &mut scheduler,
+                    );
+                }
+                Ok((pane, agent_id, generation, requested_before, result))
+                    if history_replay_matches(
+                        &agent_id,
+                        generation,
+                        &requested_before,
+                        &runtime.agent_id,
+                        runtime.history_generation,
+                        runtime.history.before.as_deref(),
+                    ) =>
+                {
+                    match result {
+                        Err(error) => request_render(
+                            app.update(AppEvent::NotifyError {
+                                pane,
+                                error: format!("Could not replay older durable history: {error}"),
+                            }),
+                            &mut scheduler,
+                        ),
+                        Ok(mut prepared) => {
+                            runtime.history.prepend_window(prepared.older_history);
+                            runtime.history_sequences = prepared.sequences;
+                            runtime.sequence = runtime.sequence.max(prepared.next_sequence);
+                            runtime.next_turn = runtime.next_turn.max(runtime.sequence);
+                            runtime.history_records = prepared.history_records;
+                            runtime.recent_prompts.append(&mut prepared.older_prompts);
+                            request_render(
+                                app.update(AppEvent::HistoryReplayed {
+                                    pane,
+                                    projection: prepared.projection,
+                                }),
+                                &mut scheduler,
+                            );
+                        }
+                    }
+                }
+                Ok(_) => {}
+            }
+            continue;
+        }
+
         if scheduler.is_due(Instant::now()) {
             terminal
                 .draw(|frame| app.render(frame))
@@ -673,8 +814,6 @@ async fn run_inner(
                         )? {
                             runtime.live_records.push(Arc::clone(&record));
                             if let Some(prompt) = prompt {
-                                runtime.live_prompts.insert(0, prompt.clone());
-                                runtime.live_prompts.truncate(100);
                                 runtime.recent_prompts.insert(0, prompt);
                                 runtime.recent_prompts.truncate(100);
                             }
@@ -786,15 +925,16 @@ async fn run_inner(
                             let display_settings = requested_startup_settings.unwrap_or(settings);
                             runtime.history_generation = runtime.history_generation.wrapping_add(1);
                             runtime.history_loads.abort_all();
+                            runtime.history_replays.abort_all();
                             if !matches!(purpose, ConnectionPurpose::Startup) {
                                 runtime.history_sequences.clear();
+                                runtime.history_records.clear();
                                 runtime.live_records.clear();
-                                runtime.live_prompts.clear();
                                 runtime.sequence = 1;
                             }
-                            let (mut records, mut prompts) =
+                            let (history_records, mut prompts) =
                                 match history_projection_with_sequences(
-                                    history.events.clone(),
+                                    &history.events,
                                     &agent_id,
                                     &workspace,
                                     &mut runtime.history_sequences,
@@ -809,9 +949,10 @@ async fn run_inner(
                                         (Vec::new(), Vec::new())
                                     }
                                 };
+                            let mut records = history_records.clone();
                             if matches!(purpose, ConnectionPurpose::Startup) {
                                 records.extend(runtime.live_records.iter().cloned());
-                                let mut live_prompts = runtime.live_prompts.clone();
+                                let mut live_prompts = std::mem::take(&mut runtime.recent_prompts);
                                 live_prompts.append(&mut prompts);
                                 prompts = live_prompts;
                             }
@@ -830,6 +971,7 @@ async fn run_inner(
                             runtime.next_turn = runtime.next_turn.max(runtime.sequence);
                             runtime.recent_prompts = prompts;
                             runtime.history = history;
+                            runtime.history_records = history_records;
                             let pane = match purpose {
                                 ConnectionPurpose::Startup => PaneId::Main,
                                 ConnectionPurpose::Resume(pane) | ConnectionPurpose::New(pane) => pane,
@@ -1222,9 +1364,14 @@ async fn run_inner(
                             }), &mut scheduler);
                         }
                         Ok((pane, agent_id, generation, requested_before, result))
-                            if agent_id == runtime.agent_id
-                                && generation == runtime.history_generation
-                                && runtime.history.before.as_deref() == Some(&requested_before) => match result {
+                            if history_replay_matches(
+                                &agent_id,
+                                generation,
+                                &requested_before,
+                                &runtime.agent_id,
+                                runtime.history_generation,
+                                runtime.history.before.as_deref(),
+                            ) => match result {
                             Err(error) => {
                                 request_render(app.update(AppEvent::NotifyError {
                                     pane,
@@ -1232,51 +1379,31 @@ async fn run_inner(
                                 }), &mut scheduler);
                             }
                             Ok(page) => {
-                                let mut candidate_history = runtime.history.clone();
-                                match candidate_history.prepend(page) {
-                                Err(error) => {
-                                    request_render(app.update(AppEvent::NotifyError {
-                                        pane,
-                                        error: format!("Could not load older durable history: {error}"),
-                                    }), &mut scheduler);
-                                }
-                                Ok(()) => {
-                                    let mut candidate_sequences = runtime.history_sequences.clone();
-                                    let mut candidate_sequence = runtime.sequence;
-                                    match history_projection_with_sequences(
-                                        candidate_history.events.clone(),
-                                        &runtime.agent_id,
-                                        &runtime.workspace,
-                                        &mut candidate_sequences,
-                                        &mut candidate_sequence,
-                                    ) {
-                                        Err(error) => request_render(app.update(AppEvent::NotifyError {
-                                            pane,
-                                            error: format!("Could not replay older durable history: {error}"),
-                                        }), &mut scheduler),
-                                        Ok((mut records, mut prompts)) => {
-                                            runtime.history = candidate_history;
-                                            runtime.history_sequences = candidate_sequences;
-                                            runtime.sequence = candidate_sequence;
-                                            runtime.next_turn = runtime.next_turn.max(runtime.sequence);
-                                            records.extend(runtime.live_records.iter().cloned());
-                                            let mut live_prompts = runtime.live_prompts.clone();
-                                            live_prompts.append(&mut prompts);
-                                            runtime.recent_prompts = live_prompts;
-                                            let projection = RootNode::project_open_session(
-                                                effort_from_thinking(runtime.settings.thinking),
-                                                records,
-                                            );
-                                            request_render(app.update(AppEvent::HistoryReplayed {
-                                                pane,
-                                                projection: Box::new(projection),
-                                            }), &mut scheduler);
-                                        }
-                                    }
-                                }
+                                let coherent_tail = runtime.history.events.iter().any(|event| {
+                                    matches!(event.data, ManagedEventData::TurnAccepted { .. })
+                                });
+                                let sequences = runtime.history_sequences.clone();
+                                let history_records = runtime.history_records.clone();
+                                let live_records = runtime.live_records.clone();
+                                let next_sequence = runtime.sequence;
+                                let workspace = runtime.workspace.clone();
+                                let effort = effort_from_thinking(runtime.settings.thinking);
+                                runtime.history_replays.spawn_blocking(move || {
+                                    let result = prepare_history_replay(
+                                        page,
+                                        sequences,
+                                        next_sequence,
+                                        history_records,
+                                        live_records,
+                                        coherent_tail,
+                                        &agent_id,
+                                        &workspace,
+                                        effort,
+                                    );
+                                    (pane, agent_id, generation, requested_before, result)
+                                });
                             }
                             },
-                        },
                         Ok(_) => {}
                     }
                 }
@@ -1545,6 +1672,7 @@ async fn apply_update(
                     RootEffect::LoadOlderHistory => {
                         if runtime.history.has_more
                             && runtime.history_loads.is_empty()
+                            && runtime.history_replays.is_empty()
                             && let Some(before) = runtime.history.before.clone()
                         {
                             let client = runtime.client.clone();
@@ -1936,9 +2064,11 @@ fn terminal_error(error: io::Error) -> ManagedError {
 mod tests {
     use super::{
         HistoryWindow, ManagedActiveTurns, cursor_at_or_before, decimal_successor,
-        history_projection, history_projection_with_sequences, live_managed_projection,
-        session_summaries, take_waiting_steer_failures,
+        history_projection, history_projection_with_sequences, history_replay_matches,
+        live_managed_projection, prepare_history_replay, session_summaries,
+        take_waiting_steer_failures,
     };
+    use crate::config::ReasoningEffort;
     use crate::tui::{components::QueueId, pane::PaneId, prompt::Submission, transcript::TurnId};
     use nanocodex_managed::{
         AgentList, AgentSummary, EventHistoryPage, ManagedEvent, ManagedEventData, PromptInput,
@@ -2222,8 +2352,9 @@ mod tests {
     fn replay_keeps_loaded_event_sequences_stable_when_older_events_arrive() {
         let mut sequences = HashMap::new();
         let mut next_sequence = 1;
+        let recent_history = vec![managed_turn("5", "recent")];
         let (recent, _) = history_projection_with_sequences(
-            vec![managed_turn("5", "recent")],
+            &recent_history,
             "agent-1",
             Path::new("/workspace"),
             &mut sequences,
@@ -2232,8 +2363,9 @@ mod tests {
         .unwrap();
         let recent_sequence = recent[0].sequence();
 
+        let replayed_history = vec![managed_turn("3", "older"), managed_turn("5", "recent")];
         let (replayed, _) = history_projection_with_sequences(
-            vec![managed_turn("3", "older"), managed_turn("5", "recent")],
+            &replayed_history,
             "agent-1",
             Path::new("/workspace"),
             &mut sequences,
@@ -2244,6 +2376,261 @@ mod tests {
         assert_eq!(replayed[1].sequence(), recent_sequence);
         assert_ne!(replayed[0].sequence(), recent_sequence);
         assert_eq!(next_sequence, 3);
+    }
+
+    #[test]
+    fn history_replay_fence_requires_exact_agent_generation_and_cursor() {
+        assert!(history_replay_matches(
+            "agent-1",
+            7,
+            "42",
+            "agent-1",
+            7,
+            Some("42"),
+        ));
+        assert!(!history_replay_matches(
+            "agent-old",
+            7,
+            "42",
+            "agent-1",
+            7,
+            Some("42"),
+        ));
+        assert!(!history_replay_matches(
+            "agent-1",
+            6,
+            "42",
+            "agent-1",
+            7,
+            Some("42"),
+        ));
+        assert!(!history_replay_matches(
+            "agent-1",
+            7,
+            "41",
+            "agent-1",
+            7,
+            Some("42"),
+        ));
+    }
+
+    #[test]
+    fn history_page_replay_combines_retained_and_live_records_with_disjoint_sequences() {
+        let history = HistoryWindow {
+            events: vec![managed_turn("5", "retained")],
+            before: Some("5".to_owned()),
+            has_more: true,
+        };
+        let mut sequences = HashMap::new();
+        let mut next_sequence = 1;
+        let (history_records, _) = history_projection_with_sequences(
+            &history.events,
+            "agent-1",
+            Path::new("/workspace"),
+            &mut sequences,
+            &mut next_sequence,
+        )
+        .unwrap();
+        let (live_before, _) = live_managed_projection(
+            managed_turn("6", "before replay"),
+            "agent-1",
+            Path::new("/workspace"),
+            &mut next_sequence,
+        )
+        .unwrap()
+        .unwrap();
+        let prepared = match prepare_history_replay(
+            EventHistoryPage {
+                data: vec![managed_turn("3", "older")],
+                has_more: false,
+                latest_cursor: "6".to_owned(),
+            },
+            sequences,
+            next_sequence,
+            history_records,
+            vec![live_before],
+            true,
+            "agent-1",
+            Path::new("/workspace"),
+            ReasoningEffort::Medium,
+        ) {
+            Ok(prepared) => prepared,
+            Err(error) => panic!("history replay failed: {error}"),
+        };
+
+        let projected_sequences = prepared
+            .history_records
+            .iter()
+            .map(|record| record.sequence())
+            .chain(std::iter::once(2))
+            .collect::<Vec<_>>();
+        assert_eq!(projected_sequences.len(), 3);
+        assert_eq!(
+            projected_sequences
+                .iter()
+                .copied()
+                .collect::<HashSet<_>>()
+                .len(),
+            projected_sequences.len(),
+        );
+        assert_eq!(
+            prepared
+                .older_prompts
+                .iter()
+                .map(|prompt| prompt.text.as_str())
+                .collect::<Vec<_>>(),
+            ["older"],
+        );
+    }
+
+    #[test]
+    fn failed_page_projection_restores_window_and_sequence_assignments() {
+        let history = HistoryWindow {
+            events: vec![managed_turn("5", "retained")],
+            before: Some("5".to_owned()),
+            has_more: true,
+        };
+        let sequences = HashMap::from([("5".to_owned(), 1)]);
+        let invalid = ManagedEvent {
+            cursor: "4".to_owned(),
+            created_at: Some(1_750_000_000.0),
+            turn_id: Some("turn-3".to_owned()),
+            data: ManagedEventData::Event {
+                event: to_raw_value(&json!({ "not": "an agent event" })).unwrap(),
+            },
+        };
+
+        let error = match prepare_history_replay(
+            EventHistoryPage {
+                data: vec![managed_turn("3", "older"), invalid],
+                has_more: false,
+                latest_cursor: "5".to_owned(),
+            },
+            sequences.clone(),
+            2,
+            Vec::new(),
+            Vec::new(),
+            true,
+            "agent-1",
+            Path::new("/workspace"),
+            ReasoningEffort::Medium,
+        ) {
+            Ok(_) => panic!("invalid page unexpectedly projected"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("invalid retained agent event"));
+        assert_eq!(history.before.as_deref(), Some("5"));
+        assert!(history.has_more);
+        assert_eq!(history.events.len(), 1);
+        assert_eq!(history.events[0].cursor, "5");
+        assert_eq!(sequences, HashMap::from([("5".to_owned(), 1)]));
+    }
+
+    #[test]
+    fn successive_older_pages_project_only_the_new_page_and_keep_sequences_stable() {
+        let retained = vec![managed_turn("5", "retained")];
+        let mut sequences = HashMap::new();
+        let mut next_sequence = 1;
+        let (history_records, _) = history_projection_with_sequences(
+            &retained,
+            "agent-1",
+            Path::new("/workspace"),
+            &mut sequences,
+            &mut next_sequence,
+        )
+        .unwrap();
+        let retained_sequence = history_records[0].sequence();
+
+        let first = prepare_history_replay(
+            EventHistoryPage {
+                data: vec![managed_turn("3", "older")],
+                has_more: true,
+                latest_cursor: "5".to_owned(),
+            },
+            sequences,
+            next_sequence,
+            history_records,
+            Vec::new(),
+            true,
+            "agent-1",
+            Path::new("/workspace"),
+            ReasoningEffort::Medium,
+        )
+        .unwrap();
+        let first_older_sequence = first.history_records[0].sequence();
+        let second = prepare_history_replay(
+            EventHistoryPage {
+                data: vec![managed_turn("1", "oldest")],
+                has_more: false,
+                latest_cursor: "5".to_owned(),
+            },
+            first.sequences,
+            first.next_sequence,
+            first.history_records,
+            Vec::new(),
+            true,
+            "agent-1",
+            Path::new("/workspace"),
+            ReasoningEffort::Medium,
+        )
+        .unwrap();
+
+        assert_eq!(second.history_records.len(), 3);
+        assert_eq!(second.history_records[1].sequence(), first_older_sequence);
+        assert_eq!(second.history_records[2].sequence(), retained_sequence);
+        assert_eq!(
+            second
+                .older_prompts
+                .iter()
+                .map(|prompt| prompt.text.as_str())
+                .collect::<Vec<_>>(),
+            ["oldest"],
+        );
+    }
+
+    #[test]
+    fn older_page_without_a_prompt_is_ignored_after_a_coherent_tail() {
+        let retained = vec![managed_turn("5", "retained")];
+        let mut sequences = HashMap::new();
+        let mut next_sequence = 1;
+        let (history_records, _) = history_projection_with_sequences(
+            &retained,
+            "agent-1",
+            Path::new("/workspace"),
+            &mut sequences,
+            &mut next_sequence,
+        )
+        .unwrap();
+        let partial = ManagedEvent {
+            cursor: "4".to_owned(),
+            created_at: Some(1_750_000_000.0),
+            turn_id: Some("older-turn".to_owned()),
+            data: ManagedEventData::Event {
+                event: to_raw_value(&json!({ "not": "an agent event" })).unwrap(),
+            },
+        };
+
+        let prepared = prepare_history_replay(
+            EventHistoryPage {
+                data: vec![partial],
+                has_more: false,
+                latest_cursor: "5".to_owned(),
+            },
+            sequences,
+            next_sequence,
+            history_records,
+            Vec::new(),
+            true,
+            "agent-1",
+            Path::new("/workspace"),
+            ReasoningEffort::Medium,
+        )
+        .unwrap();
+
+        assert_eq!(prepared.history_records.len(), 1);
+        assert!(prepared.older_prompts.is_empty());
+        assert_eq!(prepared.sequences.len(), 1);
     }
 
     #[test]

@@ -32,7 +32,10 @@ use components::{AppEffect, AppEvent, AppNode, RenderRequest, RootEffect, RootNo
 use config::ReasoningEffort;
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
-use history::{HistoryWindow, history_projection, history_projection_with_sequences};
+use history::{
+    HistoryWindow, history_projection, history_projection_with_sequences,
+    older_history_projection_with_sequences,
+};
 use nanocodex_agent::events::{AgentEvent, AgentEventKind};
 use nanocodex_managed::{EventHistoryPage, ManagedEvent, ManagedEventData, PromptInput};
 use pane::PaneId;
@@ -151,6 +154,7 @@ struct PrependRun {
     older_page: EventHistoryPage,
     sequences: HashMap<String, u64>,
     next_sequence: u64,
+    records: Vec<Arc<TranscriptRecord>>,
     stable_cursor: String,
     stable_sequence: u64,
     harness: Harness,
@@ -169,7 +173,7 @@ impl PrependRun {
         let mut sequences = HashMap::new();
         let mut next_sequence = 1;
         let (records, _) = history_projection_with_sequences(
-            case.loaded.clone(),
+            &case.loaded,
             AGENT_ID,
             Path::new(WORKSPACE),
             &mut sequences,
@@ -185,7 +189,7 @@ impl PrependRun {
             .cursor
             .clone();
         let stable_sequence = sequences[&stable_cursor];
-        let mut harness = Harness::from_records(records, WIDTH, HEIGHT);
+        let mut harness = Harness::from_records(records.clone(), WIDTH, HEIGHT);
         harness.render();
         assert_eq!(harness.page_up(), 0);
         harness.render();
@@ -208,6 +212,7 @@ impl PrependRun {
             },
             sequences,
             next_sequence,
+            records,
             stable_cursor,
             stable_sequence,
             harness,
@@ -215,17 +220,26 @@ impl PrependRun {
     }
 
     fn complete(mut self) -> (ReplayOutcome, Harness) {
+        let coherent_tail = self
+            .window
+            .events
+            .iter()
+            .any(|event| matches!(event.data, ManagedEventData::TurnAccepted { .. }));
+        let older_len = self.older_page.data.len();
         self.window
             .prepend(self.older_page)
             .expect("older page should prepend");
-        let (records, _) = history_projection_with_sequences(
-            self.window.events.clone(),
+        let (mut older_records, _) = older_history_projection_with_sequences(
+            &self.window.events[..older_len],
+            coherent_tail,
             AGENT_ID,
             Path::new(WORKSPACE),
             &mut self.sequences,
             &mut self.next_sequence,
         )
         .expect("prepended history should reproject");
+        older_records.append(&mut self.records);
+        let records = older_records;
         let record_count = records.len();
         let projection = RootNode::project_open_session(ReasoningEffort::Medium, records);
         let update = self.harness.app.update(AppEvent::HistoryReplayed {
@@ -535,16 +549,10 @@ fn prepend_replay_benchmarks(criterion: &mut Criterion) {
             |bencher, case| {
                 bencher.iter_batched(
                     || PrependRun::setup(case),
-                    |run| {
-                        let (outcome, harness) = run.complete();
-                        black_box((
-                            outcome.event_count,
-                            outcome.record_count,
-                            outcome.stable_sequence_preserved,
-                            outcome.render_requested,
-                            harness,
-                        ));
-                    },
+                    // Return the complete replay so Criterion drops the large
+                    // model after the timed routine rather than charging its
+                    // teardown to page completion.
+                    |run| black_box(run.complete()),
                     BatchSize::LargeInput,
                 );
             },
