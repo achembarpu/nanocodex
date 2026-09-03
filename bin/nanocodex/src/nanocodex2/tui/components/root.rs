@@ -141,6 +141,7 @@ pub(crate) enum RootEvent {
     #[cfg(test)]
     ContextTokens(u64),
     Transcript(Arc<TranscriptRecord>),
+    ExternalTranscript(Arc<TranscriptRecord>),
     AgentStreamClosed,
     Subagent(AgentUpdate),
     ReplaceDraft(String),
@@ -155,6 +156,7 @@ pub(crate) enum RootEvent {
     WorkerTurnFinished {
         terminal_expected: bool,
     },
+    ManagedActiveTurns(usize),
     ShellFinished,
     TurnsCancelled,
     ForkReady,
@@ -322,6 +324,7 @@ pub(crate) struct RootNode {
     composer_content_area: Rect,
     queue_area: Rect,
     in_flight_turns: usize,
+    managed_active_turns: usize,
     unmatched_worker_turns: usize,
     unmatched_agent_turns: usize,
     in_flight_shells: usize,
@@ -363,6 +366,7 @@ impl RootNode {
             composer_content_area: Rect::default(),
             queue_area: Rect::default(),
             in_flight_turns: 0,
+            managed_active_turns: 0,
             unmatched_worker_turns: 0,
             unmatched_agent_turns: 0,
             in_flight_shells: 0,
@@ -587,7 +591,7 @@ impl RootNode {
         fast_mode: bool,
         mut projection: RestoredSessionProjection,
     ) {
-        let preserve_active_submission = self.in_flight_turns > 0
+        let preserve_active_submission = self.has_active_turns()
             || !self.queue.component().is_empty()
             || self.queue.component().has_pending_steer();
         if preserve_active_submission {
@@ -890,7 +894,7 @@ impl RootNode {
                 self.key_confirmation = None;
                 return self.update_transcript(TranscriptEvent::BlurExpandables);
             }
-            if self.in_flight_turns > 0 {
+            if self.has_active_turns() {
                 return self.update_key_confirmation(ConfirmationAction::Interrupt, Instant::now());
             }
             let cleared = self
@@ -933,7 +937,7 @@ impl RootNode {
             }
         }
         if is_queue_shortcut(&event)
-            && self.in_flight_turns > 0
+            && self.has_active_turns()
             && !self.queue.component().focused()
             && !self.transcript.component().expandables_focused()
             && !self.composer.component().draft().trim().is_empty()
@@ -972,7 +976,7 @@ impl RootNode {
         if self.queue.component().focused() {
             return self.update_queue(event);
         }
-        if self.in_flight_turns > 0
+        if self.has_active_turns()
             && self.composer.component().draft().is_empty()
             && !self.queue.component().is_empty()
             && !self.queue.component().has_pending_steer()
@@ -1009,7 +1013,7 @@ impl RootNode {
             && self.composer.component().draft().is_empty()
             && is_actions_trigger(&event)
         {
-            let new_session_enabled = self.in_flight_turns == 0
+            let new_session_enabled = !self.has_active_turns()
                 && self.in_flight_shells == 0
                 && self.blocking_task.is_none()
                 && self.queue.component().is_empty();
@@ -1669,7 +1673,7 @@ impl RootNode {
     }
 
     fn open_new_session(&mut self) -> ComponentUpdate<RootEffect> {
-        if self.in_flight_turns > 0
+        if self.has_active_turns()
             || self.in_flight_shells > 0
             || !self.queue.component().is_empty()
         {
@@ -2129,7 +2133,7 @@ impl RootNode {
             render = render.max(self.update_transcript(TranscriptEvent::FollowTail).render);
         }
         let effects = match update.effect {
-            Some(ComposerEffect::Submit(prompt)) if self.in_flight_turns > 0 => {
+            Some(ComposerEffect::Submit(prompt)) if self.has_active_turns() => {
                 let (id, prompt) = self.queue.component_mut().begin_steer(prompt);
                 vec![RootEffect::Steer { id, prompt }]
             }
@@ -2155,7 +2159,7 @@ impl RootNode {
             None => Vec::new(),
         };
 
-        if delivered && self.in_flight_turns > 0 {
+        if delivered && self.has_active_turns() {
             let activity = self
                 .composer
                 .component_mut()
@@ -2231,7 +2235,7 @@ impl RootNode {
     fn turn_finished(&mut self) -> ComponentUpdate<RootEffect> {
         self.in_flight_turns = self.in_flight_turns.saturating_sub(1);
         let mut update = self.submit_next_queued();
-        if self.in_flight_turns == 0 {
+        if !self.has_active_turns() {
             let activity = self
                 .composer
                 .component_mut()
@@ -2274,6 +2278,55 @@ impl RootNode {
         self.submit_next_queued()
     }
 
+    fn managed_active_turns(&mut self, count: usize) -> ComponentUpdate<RootEffect> {
+        self.managed_active_turns = count;
+        let active = self.has_active_turns();
+        let mut update = if active {
+            ComponentUpdate::render(RenderRequest::Immediate)
+        } else {
+            self.submit_next_queued()
+        };
+        let activity = self
+            .composer
+            .component_mut()
+            .update(ComposerEvent::Activity {
+                active,
+                status: active.then(|| "Thinking…".to_owned()),
+                now: Instant::now(),
+            });
+        if activity.changed {
+            update.render = update.render.max(RenderRequest::Immediate);
+        }
+        update.render = update.render.max(self.sync_live_controls());
+        update
+    }
+
+    fn agent_stream_closed(&mut self) -> ComponentUpdate<RootEffect> {
+        self.managed_active_turns = 0;
+        self.interactive = false;
+        self.key_confirmation = None;
+        let active = self.has_active_turns();
+        let mut update = self.update_transcript(TranscriptEvent::AgentStreamClosed);
+        let activity = self.update_composer(
+            ComposerEvent::Activity {
+                active,
+                status: active.then(|| "Thinking…".to_owned()),
+                now: Instant::now(),
+            },
+            RenderRequest::Immediate,
+        );
+        update.effects.extend(activity.effects);
+        update.render = update.render.max(activity.render);
+        if !active {
+            let timers =
+                self.update_composer(ComposerEvent::TurnsCleared, RenderRequest::Immediate);
+            update.effects.extend(timers.effects);
+            update.render = update.render.max(timers.render);
+        }
+        update.render = update.render.max(self.sync_live_controls());
+        update
+    }
+
     fn steer_admitted(&mut self, id: QueueId) -> ComponentUpdate<RootEffect> {
         let applied = self.queue.component_mut().steer_admitted(id);
         self.finish_applied_steer(applied)
@@ -2308,7 +2361,7 @@ impl RootNode {
     }
 
     fn submit_next_queued(&mut self) -> ComponentUpdate<RootEffect> {
-        if self.in_flight_turns > 0 || self.queue.component().has_pending_steer() {
+        if self.has_active_turns() || self.queue.component().has_pending_steer() {
             return ComponentUpdate::render(RenderRequest::Immediate);
         }
         let prompts = self.queue.component_mut().drain_ready();
@@ -2331,15 +2384,20 @@ impl RootNode {
     }
 
     fn sync_live_controls(&mut self) -> RenderRequest {
+        let active = self.has_active_turns();
         let update = self
             .composer
             .component_mut()
-            .update(ComposerEvent::LiveControls(self.in_flight_turns > 0));
+            .update(ComposerEvent::LiveControls(active));
         if update.changed {
             RenderRequest::Immediate
         } else {
             RenderRequest::None
         }
+    }
+
+    const fn has_active_turns(&self) -> bool {
+        self.in_flight_turns > 0 || self.managed_active_turns > 0
     }
 
     fn update_transcript(&mut self, event: TranscriptEvent) -> ComponentUpdate<RootEffect> {
@@ -2492,7 +2550,7 @@ impl RootNode {
         if let Some(id) = completion
             && subagents_changed
             && self.subagents.is_direct_child(id)
-            && self.in_flight_turns == 0
+            && !self.has_active_turns()
             && self.blocking_task.is_none()
             && self.interactive
         {
@@ -2503,6 +2561,51 @@ impl RootNode {
                 .push(RootEffect::ContinueSubagent(subagent_completion_prompt(id)));
         }
         result
+    }
+
+    fn transcript_record(
+        &mut self,
+        record: Arc<TranscriptRecord>,
+        track_local_turn: bool,
+    ) -> ComponentUpdate<RootEffect> {
+        if let Some(prompt) = recent_prompt(&record) {
+            self.recent_prompts.push(prompt);
+        }
+        let steer_applied = record.kind() == "run.steered";
+        let turn_finished =
+            track_local_turn && matches!(record.kind(), "run.completed" | "run.failed");
+        let turn_timer = turn_timer_event(&record);
+        let observation = self.context_diagnostics.observe(&record);
+        if let Some(Overlay::ContextDiagnostics(panel)) = &mut self.overlay {
+            panel
+                .component_mut()
+                .replace(self.context_diagnostics.clone());
+        }
+        let mut update = self.update_transcript(TranscriptEvent::Record(record));
+        if let Some(event) = turn_timer {
+            let timer = self.update_composer(event, RenderRequest::Streaming);
+            update.effects.extend(timer.effects);
+            update.render = update.render.max(timer.render);
+        }
+        if let Some(tokens) = observation.completed_tokens {
+            let context = self.update_composer(
+                ComposerEvent::ContextTokens(tokens),
+                RenderRequest::Streaming,
+            );
+            update.effects.extend(context.effects);
+            update.render = update.render.max(context.render);
+        }
+        if steer_applied {
+            let applied = self.steer_applied();
+            update.effects.extend(applied.effects);
+            update.render = update.render.max(applied.render);
+        }
+        if turn_finished {
+            let finished = self.agent_turn_finished();
+            update.effects.extend(finished.effects);
+            update.render = update.render.max(finished.render);
+        }
+        update
     }
 }
 
@@ -2542,53 +2645,9 @@ impl Component for RootNode {
                 ComposerEvent::ContextTokens(tokens),
                 RenderRequest::Streaming,
             ),
-            RootEvent::Transcript(record) => {
-                if let Some(prompt) = recent_prompt(&record) {
-                    self.recent_prompts.push(prompt);
-                }
-                let steer_applied = record.kind() == "run.steered";
-                let turn_finished = matches!(record.kind(), "run.completed" | "run.failed");
-                let turn_timer = turn_timer_event(&record);
-                let observation = self.context_diagnostics.observe(&record);
-                if let Some(Overlay::ContextDiagnostics(panel)) = &mut self.overlay {
-                    panel
-                        .component_mut()
-                        .replace(self.context_diagnostics.clone());
-                }
-                let mut update = self.update_transcript(TranscriptEvent::Record(record));
-                if let Some(event) = turn_timer {
-                    let timer = self.update_composer(event, RenderRequest::Streaming);
-                    update.effects.extend(timer.effects);
-                    update.render = update.render.max(timer.render);
-                }
-                if let Some(tokens) = observation.completed_tokens {
-                    let context = self.update_composer(
-                        ComposerEvent::ContextTokens(tokens),
-                        RenderRequest::Streaming,
-                    );
-                    update.effects.extend(context.effects);
-                    update.render = update.render.max(context.render);
-                }
-                if steer_applied {
-                    let applied = self.steer_applied();
-                    update.effects.extend(applied.effects);
-                    update.render = update.render.max(applied.render);
-                }
-                if turn_finished {
-                    let finished = self.agent_turn_finished();
-                    update.effects.extend(finished.effects);
-                    update.render = update.render.max(finished.render);
-                }
-                update
-            }
-            RootEvent::AgentStreamClosed => {
-                let mut update = self.update_transcript(TranscriptEvent::AgentStreamClosed);
-                let timer =
-                    self.update_composer(ComposerEvent::TurnsCleared, RenderRequest::Immediate);
-                update.effects.extend(timer.effects);
-                update.render = update.render.max(timer.render);
-                update
-            }
+            RootEvent::Transcript(record) => self.transcript_record(record, true),
+            RootEvent::ExternalTranscript(record) => self.transcript_record(record, false),
+            RootEvent::AgentStreamClosed => self.agent_stream_closed(),
             RootEvent::Subagent(update) => self.apply_subagent_update(update),
             RootEvent::ReplaceDraft(draft) => {
                 self.update_composer(ComposerEvent::ReplaceDraft(draft), RenderRequest::Immediate)
@@ -2727,6 +2786,7 @@ impl Component for RootNode {
             RootEvent::WorkerTurnFinished { terminal_expected } => {
                 self.worker_turn_finished(terminal_expected)
             }
+            RootEvent::ManagedActiveTurns(count) => self.managed_active_turns(count),
             RootEvent::ShellFinished => {
                 self.in_flight_shells = self.in_flight_shells.saturating_sub(1);
                 ComponentUpdate::none()
@@ -3249,8 +3309,11 @@ mod history_tests {
 mod live_control_tests {
     use super::{Component, RootEffect, RootEvent, RootNode};
     use crate::config::ReasoningEffort;
+    use crate::tui::transcript::TranscriptRecord;
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
-    use std::path::Path;
+    use nanocodex::agent::events::{AgentEvent, AgentEventKind};
+    use serde_json::{json, value::to_raw_value};
+    use std::{path::Path, sync::Arc};
 
     fn key(code: KeyCode) -> RootEvent {
         RootEvent::Terminal(Event::Key(KeyEvent::new(code, KeyModifiers::NONE)))
@@ -3290,6 +3353,21 @@ mod live_control_tests {
         );
         assert_eq!(root.in_flight_turns, 1);
         assert_eq!(root.queue.component().len(), 1);
+        assert!(root.queue.component().has_pending_steer());
+    }
+
+    #[test]
+    fn attached_active_enter_steers_without_starting_a_local_turn() {
+        let mut root = root_with_draft("change attached direction");
+        let _ = root.update(RootEvent::ManagedActiveTurns(1));
+
+        let update = root.update(key(KeyCode::Enter));
+
+        assert!(
+            matches!(update.effects.as_slice(), [RootEffect::Steer { prompt, .. }] if prompt.display_text() == "change attached direction")
+        );
+        assert_eq!(root.in_flight_turns, 0);
+        assert_eq!(root.managed_active_turns, 1);
         assert!(root.queue.component().has_pending_steer());
     }
 
@@ -3340,7 +3418,7 @@ mod live_control_tests {
     }
 
     #[test]
-    fn escape_only_offers_stop_for_a_locally_active_turn() {
+    fn escape_offers_stop_for_a_locally_active_turn() {
         let mut idle = root_with_draft("");
         assert!(idle.update(key(KeyCode::Esc)).effects.is_empty());
         assert!(idle.key_confirmation.is_none());
@@ -3354,5 +3432,77 @@ mod live_control_tests {
             active.update(key(KeyCode::Esc)).effects.as_slice(),
             [RootEffect::CancelTurns]
         ));
+    }
+
+    #[test]
+    fn escape_offers_stop_for_an_attached_active_turn() {
+        let mut root = root_with_draft("");
+        let _ = root.update(RootEvent::ManagedActiveTurns(1));
+
+        assert!(root.update(key(KeyCode::Esc)).effects.is_empty());
+        assert!(root.key_confirmation.is_some());
+        assert!(matches!(
+            root.update(key(KeyCode::Esc)).effects.as_slice(),
+            [RootEffect::CancelTurns]
+        ));
+    }
+
+    #[test]
+    fn external_run_failed_does_not_match_a_local_worker_completion() {
+        let mut root = root_with_draft("");
+        root.in_flight_turns = 1;
+        root.unmatched_worker_turns = 1;
+        let record = TranscriptRecord::from_agent(
+            1,
+            1,
+            AgentEvent {
+                protocol_version: 1,
+                request_id: Arc::from("attached-1"),
+                seq: 1,
+                kind: AgentEventKind::RunFailed,
+                payload: to_raw_value(&json!({"error": "attached failure"}))
+                    .unwrap()
+                    .into(),
+            },
+        );
+
+        let update = root.update(RootEvent::ExternalTranscript(Arc::new(record)));
+
+        assert!(update.effects.is_empty());
+        assert_eq!(root.in_flight_turns, 1);
+        assert_eq!(root.unmatched_worker_turns, 1);
+        assert_eq!(root.unmatched_agent_turns, 0);
+    }
+
+    #[test]
+    fn closed_managed_stream_blocks_submission_without_promoting_the_queue() {
+        let mut root = root_with_draft("do not submit");
+        root.queue.component_mut().push("still queued".to_owned());
+        let _ = root.update(RootEvent::ManagedActiveTurns(1));
+
+        let disconnected = root.update(RootEvent::AgentStreamClosed);
+        let enter = root.update(key(KeyCode::Enter));
+
+        assert!(disconnected.effects.is_empty());
+        assert!(enter.effects.is_empty());
+        assert!(!root.interactive);
+        assert_eq!(root.managed_active_turns, 0);
+        assert_eq!(root.queue.component().len(), 1);
+        assert_eq!(root.composer.component().draft(), "do not submit");
+    }
+
+    #[test]
+    fn closed_managed_stream_preserves_local_activity_state() {
+        let mut root = root_with_draft("");
+        root.in_flight_turns = 1;
+        let _ = root.update(RootEvent::ManagedActiveTurns(1));
+
+        let update = root.update(RootEvent::AgentStreamClosed);
+
+        assert!(update.effects.is_empty());
+        assert!(!root.interactive);
+        assert_eq!(root.managed_active_turns, 0);
+        assert!(root.has_active_turns());
+        assert_eq!(root.in_flight_turns, 1);
     }
 }

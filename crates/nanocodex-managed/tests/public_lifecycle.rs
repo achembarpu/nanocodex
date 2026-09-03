@@ -36,8 +36,6 @@ use nanocodex_tools::{
 
 const AGENT_ID: &str = "agent-public-lifecycle";
 const SESSION_ID: &str = "019fc927-b280-79a7-8445-1b9996ad2fb0";
-const ACTIVE_TURN_ID: &str = "server-turn-active";
-const RETAINED_TURN_ID: &str = "server-turn-retained";
 const ACTIVE_REQUEST_ID: &str = "caller-request-active";
 const RETAINED_REQUEST_ID: &str = "caller-request-retained";
 const CANCELLED_REQUEST_ID: &str = "caller-request-cancelled";
@@ -303,7 +301,7 @@ async fn public_managed_lifecycle_preserves_durable_identity_control_and_replay(
         );
 
         fixture
-            .send_event(accepted_event(41, ACTIVE_TURN_ID, "live prompt"))
+            .send_event(accepted_event(41, ACTIVE_REQUEST_ID, "live prompt"))
             .await;
         fixture
             .send_event(nested_event(
@@ -344,7 +342,7 @@ async fn public_managed_lifecycle_preserves_durable_identity_control_and_replay(
         );
 
         fixture
-            .send_event(completed_event(44, ACTIVE_TURN_ID, "live answer"))
+            .send_event(completed_event(44, ACTIVE_REQUEST_ID, "live answer"))
             .await;
         let result: TurnResult = turn
             .await
@@ -476,11 +474,15 @@ async fn public_managed_lifecycle_preserves_durable_identity_control_and_replay(
                 })
             );
             assert_eq!(submissions[1].idempotency_key, ACTIVE_REQUEST_ID);
-            assert_eq!(submissions[1].body, json!({"input": "live prompt"}));
-            assert!(submissions[1].body.get("id").is_none());
+            assert_eq!(
+                submissions[1].body,
+                json!({"id": ACTIVE_REQUEST_ID, "input": "live prompt"})
+            );
             assert_eq!(submissions[2].idempotency_key, RETAINED_REQUEST_ID);
-            assert_eq!(submissions[2].body, json!({"input": "retained prompt"}));
-            assert!(submissions[2].body.get("id").is_none());
+            assert_eq!(
+                submissions[2].body,
+                json!({"id": RETAINED_REQUEST_ID, "input": "retained prompt"})
+            );
         }
 
         assert_eq!(
@@ -519,18 +521,18 @@ async fn public_managed_lifecycle_preserves_durable_identity_control_and_replay(
             assert_eq!(actions[0].body, None);
             assert_eq!(actions[1].kind, "steer");
             assert_eq!(actions[1].agent_id, AGENT_ID);
-            assert_eq!(actions[1].turn_id, ACTIVE_TURN_ID);
+            assert_eq!(actions[1].turn_id, ACTIVE_REQUEST_ID);
             assert_eq!(
                 actions[1].body,
                 Some(json!({"input": "follow-up steering"}))
             );
             assert_eq!(actions[2].kind, "cancel");
             assert_eq!(actions[2].agent_id, AGENT_ID);
-            assert_eq!(actions[2].turn_id, ACTIVE_TURN_ID);
+            assert_eq!(actions[2].turn_id, ACTIVE_REQUEST_ID);
             assert_eq!(actions[2].body, None);
             assert_eq!(actions[3].kind, "cancel");
             assert_eq!(actions[3].agent_id, AGENT_ID);
-            assert_eq!(actions[3].turn_id, ACTIVE_TURN_ID);
+            assert_eq!(actions[3].turn_id, ACTIVE_REQUEST_ID);
             assert_eq!(actions[3].body, None);
         }
 
@@ -721,6 +723,10 @@ async fn submit_turn(
         .and_then(|value| value.to_str().ok())
         .expect("submission should carry an idempotency key")
         .to_owned();
+    assert_eq!(
+        body.get("id").and_then(Value::as_str),
+        Some(idempotency_key.as_str())
+    );
     lock(&fixture.inner.submissions).push(Submission {
         idempotency_key: idempotency_key.clone(),
         body,
@@ -729,7 +735,14 @@ async fn submit_turn(
     match idempotency_key.as_str() {
         ACTIVE_REQUEST_ID => json_response(
             StatusCode::ACCEPTED,
-            turn_view(ACTIVE_TURN_ID, "accepted", "live prompt", "41", None, None),
+            turn_view(
+                ACTIVE_REQUEST_ID,
+                "accepted",
+                "live prompt",
+                "41",
+                None,
+                None,
+            ),
         ),
         CANCELLED_REQUEST_ID => {
             let terminal = json!({
@@ -751,7 +764,7 @@ async fn submit_turn(
         RETAINED_REQUEST_ID => {
             let terminal = json!({
                 "type": "turn_completed",
-                "id": RETAINED_TURN_ID,
+                "id": RETAINED_REQUEST_ID,
                 "final_message": "retained answer",
                 "usage": exact_usage(),
                 "citations": [],
@@ -760,7 +773,7 @@ async fn submit_turn(
             json_response(
                 StatusCode::OK,
                 turn_view(
-                    RETAINED_TURN_ID,
+                    RETAINED_REQUEST_ID,
                     "completed",
                     "retained prompt",
                     "43",
@@ -841,7 +854,7 @@ fn nested_event(cursor: u64, kind: &str, payload: Value) -> Bytes {
     let envelope = json!({
         "cursor": cursor.to_string(),
         "created_at": cursor,
-        "turn_id": ACTIVE_TURN_ID,
+        "turn_id": ACTIVE_REQUEST_ID,
         "type": "event",
         "event": {
             "protocol_version": 1,

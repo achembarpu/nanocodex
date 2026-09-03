@@ -423,7 +423,7 @@ where
             &mut self.service,
             ManagedRequest::Submit {
                 agent_id: self.agent_id.clone(),
-                turn_id: cancel_on_admission.then(|| request_id.clone()),
+                turn_id: Some(request_id.clone()),
                 idempotency_key: request_id.clone(),
                 input,
             },

@@ -41,6 +41,10 @@ pub(crate) enum AppEvent {
         pane: PaneId,
         record: Arc<TranscriptRecord>,
     },
+    ExternalTranscript {
+        pane: PaneId,
+        record: Arc<TranscriptRecord>,
+    },
     AgentStreamClosed(PaneId),
     Subagent {
         pane: PaneId,
@@ -81,6 +85,10 @@ pub(crate) enum AppEvent {
     WorkerTurnFinished {
         pane: PaneId,
         terminal_expected: bool,
+    },
+    ManagedActiveTurns {
+        pane: PaneId,
+        count: usize,
     },
     ShellFinished(PaneId),
     TurnsCancelled(PaneId),
@@ -231,6 +239,9 @@ impl AppNode {
             AppEvent::Transcript { pane, record } => {
                 self.update_root(pane, RootEvent::Transcript(record))
             }
+            AppEvent::ExternalTranscript { pane, record } => {
+                self.update_root(pane, RootEvent::ExternalTranscript(record))
+            }
             AppEvent::AgentStreamClosed(pane) => {
                 self.update_root(pane, RootEvent::AgentStreamClosed)
             }
@@ -286,6 +297,9 @@ impl AppNode {
                 pane,
                 terminal_expected,
             } => self.update_root(pane, RootEvent::WorkerTurnFinished { terminal_expected }),
+            AppEvent::ManagedActiveTurns { pane, count } => {
+                self.update_root(pane, RootEvent::ManagedActiveTurns(count))
+            }
             AppEvent::ShellFinished(pane) => self.update_root(pane, RootEvent::ShellFinished),
             AppEvent::TurnsCancelled(pane) => self.update_root(pane, RootEvent::TurnsCancelled),
             AppEvent::SteerAdmitted { pane, id } => {

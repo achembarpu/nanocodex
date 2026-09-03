@@ -4,6 +4,7 @@
 //! Displayable prompt text paired with model-only image content.
 
 use nanocodex::agent::input::{Prompt, UserInput};
+use nanocodex_managed::{PromptContent as ManagedPromptContent, PromptInput as ManagedPromptInput};
 use std::{fmt, ops::Range};
 
 #[derive(Clone, Eq, PartialEq)]
@@ -99,6 +100,29 @@ impl Submission {
         }
         Prompt::content(content)
     }
+
+    pub(crate) fn managed_prompt(&self) -> ManagedPromptInput {
+        let mut content = Vec::new();
+        let mut cursor = 0;
+        for image in &self.images {
+            if cursor < image.range.start {
+                content.push(ManagedPromptContent::Text {
+                    text: self.text[cursor..image.range.start].to_owned(),
+                });
+            }
+            content.push(ManagedPromptContent::Image {
+                image_url: image.data_url.clone(),
+                detail: None,
+            });
+            cursor = image.range.end;
+        }
+        if cursor < self.text.len() {
+            content.push(ManagedPromptContent::Text {
+                text: self.text[cursor..].to_owned(),
+            });
+        }
+        ManagedPromptInput::Content(content)
+    }
 }
 
 impl fmt::Debug for Submission {
@@ -121,6 +145,9 @@ impl From<String> for Submission {
 mod tests {
     use super::Submission;
     use nanocodex::agent::input::{PromptInput, UserInput};
+    use nanocodex_managed::{
+        PromptContent as ManagedPromptContent, PromptInput as ManagedPromptInput,
+    };
 
     #[test]
     fn multimodal_prompt_replaces_markers_with_ordered_images() {
@@ -138,5 +165,22 @@ mod tests {
             matches!(&content[1], UserInput::Image { image_url, .. } if image_url.ends_with(",a"))
         );
         assert!(matches!(&content[2], UserInput::Text { text } if text == " after"));
+    }
+
+    #[test]
+    fn managed_prompt_preserves_multimodal_order_for_exact_steering() {
+        let submission = Submission::multimodal(
+            "before [Image #1] after".to_owned(),
+            [(7..17, "data:image/png;base64,a".to_owned())],
+        );
+        let ManagedPromptInput::Content(content) = submission.managed_prompt() else {
+            panic!("multimodal submissions should use managed content input");
+        };
+
+        assert!(matches!(&content[0], ManagedPromptContent::Text { text } if text == "before "));
+        assert!(
+            matches!(&content[1], ManagedPromptContent::Image { image_url, .. } if image_url.ends_with(",a"))
+        );
+        assert!(matches!(&content[2], ManagedPromptContent::Text { text } if text == " after"));
     }
 }

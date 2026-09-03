@@ -44,10 +44,10 @@ use crate::{config::ReasoningEffort, config::ReasoningMode, host::HostConfig};
 use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
 use futures_util::{StreamExt, future::join_all};
 use nanocodex::Model;
-use nanocodex_agent::{Nanocodex, NanocodexError, Turn, TurnControl, TurnResult};
+use nanocodex_agent::{Nanocodex, NanocodexError, PromptRequest, Turn, TurnControl, TurnResult};
 use nanocodex_managed::{
-    AgentList, AgentSettings, EventCursor, EventHistoryPage, ManagedClient, ManagedError,
-    ManagedEvent, ReasoningMode as ManagedReasoningMode, Thinking,
+    AgentList, AgentSettings, AgentState, EventCursor, EventHistoryPage, ManagedClient,
+    ManagedError, ManagedEvent, ManagedEventData, ReasoningMode as ManagedReasoningMode, Thinking,
 };
 use std::{
     collections::{HashMap, HashSet, VecDeque},
@@ -61,9 +61,9 @@ use tokio::{sync::mpsc, task::JoinSet};
 
 type Admission = (PaneId, TurnId, Result<Turn, NanocodexError>);
 type Completion = (PaneId, TurnId, Result<TurnResult, NanocodexError>);
-type SteerCompletion = (PaneId, components::QueueId, Result<(), NanocodexError>);
+type SteerCompletion = (PaneId, components::QueueId, Result<(), String>);
 type WaitingSteer = (PaneId, components::QueueId, Submission);
-type CancelCompletion = (PaneId, Vec<TurnId>, Option<String>);
+type CancelCompletion = (PaneId, Vec<TurnId>, Vec<String>, Option<String>);
 type SettingsCompletion = (
     PaneId,
     String,
@@ -86,7 +86,74 @@ type ConnectedAgent = (
     Option<String>,
     AgentSettings,
     bool,
+    ManagedActiveTurns,
 );
+
+#[derive(Clone, Debug, Default)]
+struct ManagedActiveTurns {
+    ids: HashSet<String>,
+    live_steer: bool,
+    live_cancel: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ManagedObservation {
+    active_changed: bool,
+    external: bool,
+}
+
+impl ManagedActiveTurns {
+    fn from_state(state: &AgentState) -> Self {
+        Self {
+            ids: state.active_turns.iter().cloned().collect(),
+            live_steer: state.capabilities.live_steer,
+            live_cancel: state.capabilities.live_cancel,
+        }
+    }
+
+    fn observe(
+        &mut self,
+        event: &ManagedEvent,
+        local_ids: &HashMap<TurnId, String>,
+    ) -> ManagedObservation {
+        let before = self.ids.len();
+        let external = event.turn_id.as_ref().is_some_and(|id| {
+            self.ids.contains(id) && !local_ids.values().any(|local_id| local_id == id)
+        });
+        match &event.data {
+            ManagedEventData::TurnAccepted { id, .. }
+                if !local_ids.values().any(|local_id| local_id == id) =>
+            {
+                self.ids.insert(id.clone());
+            }
+            ManagedEventData::TurnCompleted { id, .. }
+            | ManagedEventData::TurnCancelled { id }
+            | ManagedEventData::TurnFailed { id, .. } => {
+                self.ids.remove(id);
+            }
+            _ => {}
+        }
+        ManagedObservation {
+            active_changed: self.ids.len() != before,
+            external,
+        }
+    }
+
+    fn remove(&mut self, id: &str) -> bool {
+        self.ids.remove(id)
+    }
+
+    fn steer_target(&self) -> Result<&str, &'static str> {
+        if !self.live_steer {
+            return Err("this managed agent does not allow live steering");
+        }
+        match self.ids.len() {
+            1 => Ok(self.ids.iter().next().expect("one active managed turn")),
+            0 => Err("no attached managed turn is active"),
+            _ => Err("more than one attached managed turn is active; steering is ambiguous"),
+        }
+    }
+}
 
 const HISTORY_PAGE_SIZE: u16 = 256;
 
@@ -150,9 +217,12 @@ struct DriverRuntime {
     next_turn: u64,
     next_shell: u64,
     controls: HashMap<TurnId, TurnControl>,
+    local_managed_turns: HashMap<TurnId, String>,
+    managed_active_turns: ManagedActiveTurns,
     admitting: HashSet<TurnId>,
     cancel_after_admission: HashSet<TurnId>,
     cancelling_controls: HashSet<TurnId>,
+    cancelling_managed_turns: HashSet<String>,
     cancellation_failed: bool,
     admissions: JoinSet<Admission>,
     completions: JoinSet<Completion>,
@@ -203,9 +273,14 @@ impl DriverRuntime {
             }
             return;
         };
+        let managed_request_id = uuid::Uuid::now_v7().to_string();
+        self.local_managed_turns
+            .insert(id, managed_request_id.clone());
         self.admitting.insert(id);
         self.admissions.spawn(async move {
-            let turn = agent.prompt(prompt.agent_prompt()).await;
+            let turn = agent
+                .prompt(PromptRequest::new(prompt.agent_prompt()).request_id(managed_request_id))
+                .await;
             (pane, id, turn)
         });
     }
@@ -259,6 +334,7 @@ impl DriverRuntime {
 
     fn idle(&self) -> bool {
         self.controls.is_empty()
+            && self.managed_active_turns.ids.is_empty()
             && self.admissions.is_empty()
             && self.completions.is_empty()
             && self.steers.is_empty()
@@ -270,6 +346,7 @@ impl DriverRuntime {
             && self.pending_submission.is_none()
             && self.cancel_after_admission.is_empty()
             && self.cancelling_controls.is_empty()
+            && self.cancelling_managed_turns.is_empty()
             && self.connection.is_empty()
     }
 
@@ -291,7 +368,38 @@ impl DriverRuntime {
                 .filter_map(Result::err)
                 .map(|error| error.to_string())
                 .next();
-            (pane, ids, error)
+            (pane, ids, Vec::new(), error)
+        });
+    }
+
+    fn cancel_managed_turns(&mut self, pane: PaneId, turn_ids: Vec<String>) {
+        if turn_ids.is_empty() {
+            return;
+        }
+        self.cancelling_managed_turns
+            .extend(turn_ids.iter().cloned());
+        let client = self.client.clone();
+        let agent_id = self.agent_id.clone();
+        self.cancellations.spawn(async move {
+            let results = join_all(turn_ids.iter().map(|turn_id| {
+                let client = client.clone();
+                let agent_id = agent_id.clone();
+                let turn_id = turn_id.clone();
+                async move {
+                    client
+                        .cancel(&agent_id, &turn_id)
+                        .await
+                        .map_err(|error| error.to_string())
+                        .and_then(|action| {
+                            (action.turn_id == turn_id).then_some(()).ok_or_else(|| {
+                                "managed cancel acknowledged a different turn".to_owned()
+                            })
+                        })
+                }
+            }))
+            .await;
+            let error = results.into_iter().find_map(Result::err);
+            (pane, Vec::new(), turn_ids, error)
         });
     }
 }
@@ -315,7 +423,7 @@ async fn connect_agent(
 ) -> Result<ConnectedAgent, ConnectionFailure> {
     let created = agent_id.is_none();
     let (managed_event_sender, managed_events) = mpsc::unbounded_channel();
-    let (opened, history, history_before, retry, settings) = match agent_id {
+    let (opened, history, history_before, retry, settings, active_turns) = match agent_id {
         None => {
             let opened = super::open_workspace_agent_with_settings(
                 &client,
@@ -331,6 +439,7 @@ async fn connect_agent(
                 None,
                 RetryTarget::Create(create_settings),
                 create_settings,
+                ManagedActiveTurns::default(),
             )
         }
         Some(agent_id) => {
@@ -349,6 +458,7 @@ async fn connect_agent(
                     }
                 })?;
             let settings = state.settings;
+            let active_turns = ManagedActiveTurns::from_state(&state);
             let opening = super::open_workspace_agent_from(
                 &client,
                 Some(agent_id.clone()),
@@ -369,6 +479,7 @@ async fn connect_agent(
                 Some(before),
                 RetryTarget::Agent(agent_id),
                 settings,
+                active_turns,
             )
         }
     };
@@ -394,6 +505,7 @@ async fn connect_agent(
         warning,
         settings,
         created,
+        active_turns,
     ))
 }
 
@@ -447,9 +559,12 @@ async fn run_inner(
         next_turn: 1,
         next_shell: 1,
         controls: HashMap::new(),
+        local_managed_turns: HashMap::new(),
+        managed_active_turns: ManagedActiveTurns::default(),
         admitting: HashSet::new(),
         cancel_after_admission: HashSet::new(),
         cancelling_controls: HashSet::new(),
+        cancelling_managed_turns: HashSet::new(),
         cancellation_failed: false,
         admissions: JoinSet::new(),
         completions: JoinSet::new(),
@@ -538,6 +653,18 @@ async fn run_inner(
             }, if runtime.managed_events_open => {
                 match event {
                     Some(event) => {
+                        let observation = runtime
+                            .managed_active_turns
+                            .observe(&event, &runtime.local_managed_turns);
+                        if observation.active_changed {
+                            request_render(
+                                app.update(AppEvent::ManagedActiveTurns {
+                                    pane: PaneId::Main,
+                                    count: runtime.managed_active_turns.ids.len(),
+                                }),
+                                &mut scheduler,
+                            );
+                        }
                         if let Some((record, prompt)) = live_managed_projection(
                             event,
                             &runtime.agent_id,
@@ -551,10 +678,17 @@ async fn run_inner(
                                 runtime.recent_prompts.insert(0, prompt);
                                 runtime.recent_prompts.truncate(100);
                             }
-                            let update = app.update(AppEvent::Transcript {
-                                pane: PaneId::Main,
-                                record,
-                            });
+                            let update = if observation.external {
+                                app.update(AppEvent::ExternalTranscript {
+                                    pane: PaneId::Main,
+                                    record,
+                                })
+                            } else {
+                                app.update(AppEvent::Transcript {
+                                    pane: PaneId::Main,
+                                    record,
+                                })
+                            };
                             stopping = apply_update(
                                 update,
                                 &mut app,
@@ -567,7 +701,13 @@ async fn run_inner(
                     }
                     None => {
                         runtime.managed_events_open = false;
-                        request_render(app.update(AppEvent::AgentStreamClosed(PaneId::Main)), &mut scheduler);
+                        runtime.managed_active_turns.ids.clear();
+                        runtime.managed_active_turns.live_steer = false;
+                        runtime.managed_active_turns.live_cancel = false;
+                        request_render(
+                            app.update(AppEvent::AgentStreamClosed(PaneId::Main)),
+                            &mut scheduler,
+                        );
                     }
                 }
             }
@@ -636,7 +776,7 @@ async fn run_inner(
                             };
                             stopping = apply_update(update, &mut app, &mut runtime, &mut terminal, &mut scheduler).await?;
                         }
-                        ConnectionResult::Agent { purpose, result: Ok((agent, managed_events, agent_id, workspace, history, warning, settings, created)) } => {
+                        ConnectionResult::Agent { purpose, result: Ok((agent, managed_events, agent_id, workspace, history, warning, settings, created, active_turns)) } => {
                             runtime.retry_target = None;
                             let requested_startup_settings = if created {
                                 runtime.pending_settings.take()
@@ -685,6 +825,8 @@ async fn run_inner(
                             runtime.agent_id = agent_id;
                             runtime.settings = settings;
                             runtime.workspace = workspace;
+                            runtime.managed_active_turns = active_turns;
+                            runtime.cancelling_managed_turns.clear();
                             runtime.next_turn = runtime.next_turn.max(runtime.sequence);
                             runtime.recent_prompts = prompts;
                             runtime.history = history;
@@ -735,6 +877,13 @@ async fn run_inner(
                                 }
                             };
                             request_render(update, &mut scheduler);
+                            request_render(
+                                app.update(AppEvent::ManagedActiveTurns {
+                                    pane,
+                                    count: runtime.managed_active_turns.ids.len(),
+                                }),
+                                &mut scheduler,
+                            );
                             if let Some(requested) = requested_startup_settings
                                 && requested != settings
                             {
@@ -903,6 +1052,19 @@ async fn run_inner(
                     match admission {
                         Ok(turn) => {
                             let control = turn.control();
+                            if let Some(managed_turn_id) = turn.request_id() {
+                                debug_assert_eq!(
+                                    runtime.local_managed_turns.get(&id).map(String::as_str),
+                                    Some(managed_turn_id),
+                                    "managed prompt must preserve its caller-owned request ID"
+                                );
+                                if runtime.managed_active_turns.remove(managed_turn_id) {
+                                    updates.push(app.update(AppEvent::ManagedActiveTurns {
+                                        pane,
+                                        count: runtime.managed_active_turns.ids.len(),
+                                    }));
+                                }
+                            }
                             runtime.controls.insert(id, control.clone());
                             let record = runtime.local_record(LocalEvent::WorkerTurnAccepted { id })?;
                             updates.push(app.update(AppEvent::Transcript { pane, record }));
@@ -920,13 +1082,17 @@ async fn run_inner(
                                 {
                                     let control = control.clone();
                                     runtime.steers.spawn(async move {
-                                        let result = control.steer(prompt.agent_prompt()).await;
+                                        let result = control
+                                            .steer(prompt.agent_prompt())
+                                            .await
+                                            .map_err(|error| error.to_string());
                                         (pane, id, result)
                                     });
                                 }
                             }
                         }
                         Err(error) => {
+                            runtime.local_managed_turns.remove(&id);
                             let record = runtime.local_record(LocalEvent::WorkerTurnFinished {
                                 id,
                                 error: Some(error.to_string()),
@@ -947,6 +1113,7 @@ async fn run_inner(
                         && runtime.cancel_after_admission.is_empty()
                         && runtime.cancellations.is_empty()
                         && runtime.cancelling_controls.is_empty()
+                        && runtime.cancelling_managed_turns.is_empty()
                     {
                         let update = if runtime.cancellation_failed {
                             runtime.cancellation_failed = false;
@@ -966,6 +1133,7 @@ async fn run_inner(
                 if let Some(result) = result {
                     let (pane, id, outcome) = result.map_err(|error| ManagedError::Configuration(format!("turn task failed: {error}")))?;
                     runtime.controls.remove(&id);
+                    runtime.local_managed_turns.remove(&id);
                     let error = outcome.err().map(|error| error.to_string());
                     let record = runtime.local_record(LocalEvent::WorkerTurnFinished { id, error })?;
                     request_render(app.update(AppEvent::Transcript { pane, record }), &mut scheduler);
@@ -988,12 +1156,15 @@ async fn run_inner(
             }
             result = runtime.cancellations.join_next(), if !runtime.cancellations.is_empty() => {
                 if let Some(result) = result {
-                    let (pane, ids, error) = result.map_err(|error| ManagedError::Configuration(format!("cancel task failed: {error}")))?;
+                    let (pane, ids, managed_ids, error) = result.map_err(|error| ManagedError::Configuration(format!("cancel task failed: {error}")))?;
                     for id in &ids {
                         runtime.cancelling_controls.remove(id);
                     }
+                    for id in &managed_ids {
+                        runtime.cancelling_managed_turns.remove(id);
+                    }
                     runtime.cancellation_failed |= error.is_some();
-                    let count = ids.len();
+                    let count = ids.len().saturating_add(managed_ids.len());
                     let record = runtime.local_record(LocalEvent::WorkerTurnsInterrupted {
                         count,
                         error: error.clone(),
@@ -1002,6 +1173,7 @@ async fn run_inner(
                     if runtime.cancel_after_admission.is_empty()
                         && runtime.cancellations.is_empty()
                         && runtime.cancelling_controls.is_empty()
+                        && runtime.cancelling_managed_turns.is_empty()
                     {
                         let update = if runtime.cancellation_failed {
                             runtime.cancellation_failed = false;
@@ -1187,9 +1359,56 @@ async fn apply_update(
                     RootEffect::Steer { id, prompt } => {
                         if let Some(control) = runtime.controls.values().next().cloned() {
                             runtime.steers.spawn(async move {
-                                let result = control.steer(prompt.agent_prompt()).await;
+                                let result = control
+                                    .steer(prompt.agent_prompt())
+                                    .await
+                                    .map_err(|error| error.to_string());
                                 (pane, id, result)
                             });
+                        } else if !runtime.managed_active_turns.ids.is_empty() {
+                            let target = runtime
+                                .managed_active_turns
+                                .steer_target()
+                                .map(ToOwned::to_owned);
+                            let outcome = match target {
+                                Ok(turn_id) => {
+                                    let client = runtime.client.clone();
+                                    let agent_id = runtime.agent_id.clone();
+                                    let input = prompt.managed_prompt();
+                                    runtime.steers.spawn(async move {
+                                        let result = client
+                                            .steer(&agent_id, &turn_id, &input)
+                                            .await
+                                            .map_err(|error| error.to_string())
+                                            .and_then(|action| {
+                                                (action.turn_id == turn_id).then_some(()).ok_or_else(
+                                                    || {
+                                                        "managed steer acknowledged a different turn"
+                                                            .to_owned()
+                                                    },
+                                                )
+                                            });
+                                        (pane, id, result)
+                                    });
+                                    Ok(())
+                                }
+                                Err(error) => Err(error.to_owned()),
+                            };
+                            if let Err(error) = outcome {
+                                absorb(
+                                    app.update(AppEvent::NotifyError {
+                                        pane,
+                                        error: format!("Could not steer turn: {error}"),
+                                    }),
+                                    &mut effects,
+                                    scheduler,
+                                );
+                                absorb(
+                                    app.update(AppEvent::SteerFailed { pane, id }),
+                                    &mut effects,
+                                    scheduler,
+                                );
+                            }
                         } else if !runtime.admitting.is_empty()
                             || runtime.pending_submission.is_some()
                         {
@@ -1216,6 +1435,7 @@ async fn apply_update(
                     RootEffect::CancelTurns => {
                         if runtime.cancellations.is_empty()
                             && runtime.cancelling_controls.is_empty()
+                            && runtime.cancelling_managed_turns.is_empty()
                         {
                             runtime.cancellation_failed = false;
                         }
@@ -1263,9 +1483,31 @@ async fn apply_update(
                             .map(|(id, control)| (*id, control.clone()))
                             .collect::<Vec<_>>();
                         runtime.cancel_controls(pane, controls);
+                        if runtime.managed_active_turns.live_cancel {
+                            let managed_turns = runtime
+                                .managed_active_turns
+                                .ids
+                                .iter()
+                                .filter(|id| !runtime.cancelling_managed_turns.contains(*id))
+                                .cloned()
+                                .collect();
+                            runtime.cancel_managed_turns(pane, managed_turns);
+                        } else if !runtime.managed_active_turns.ids.is_empty() {
+                            runtime.cancellation_failed = true;
+                            absorb(
+                                app.update(AppEvent::NotifyError {
+                                    pane,
+                                    error: "This managed agent does not allow live cancellation."
+                                        .to_owned(),
+                                }),
+                                &mut effects,
+                                scheduler,
+                            );
+                        }
                         if runtime.cancel_after_admission.is_empty()
                             && runtime.cancellations.is_empty()
                             && runtime.cancelling_controls.is_empty()
+                            && runtime.cancelling_managed_turns.is_empty()
                         {
                             absorb(
                                 app.update(AppEvent::TurnsCancelled(pane)),
@@ -1693,17 +1935,17 @@ fn terminal_error(error: io::Error) -> ManagedError {
 #[cfg(test)]
 mod tests {
     use super::{
-        HistoryWindow, cursor_at_or_before, decimal_successor, history_projection,
-        history_projection_with_sequences, live_managed_projection, session_summaries,
-        take_waiting_steer_failures,
+        HistoryWindow, ManagedActiveTurns, cursor_at_or_before, decimal_successor,
+        history_projection, history_projection_with_sequences, live_managed_projection,
+        session_summaries, take_waiting_steer_failures,
     };
-    use crate::tui::{components::QueueId, pane::PaneId, prompt::Submission};
+    use crate::tui::{components::QueueId, pane::PaneId, prompt::Submission, transcript::TurnId};
     use nanocodex_managed::{
         AgentList, AgentSummary, EventHistoryPage, ManagedEvent, ManagedEventData, PromptInput,
     };
     use serde_json::{json, value::to_raw_value};
     use std::{
-        collections::{BTreeMap, HashMap, VecDeque},
+        collections::{BTreeMap, HashMap, HashSet, VecDeque},
         path::Path,
     };
 
@@ -1729,6 +1971,121 @@ mod tests {
             [QueueId::new(8), QueueId::new(7)]
         );
         assert!(waiting.is_empty());
+    }
+
+    #[test]
+    fn managed_active_turns_reconcile_cursor_order_idempotently() {
+        let mut active = ManagedActiveTurns {
+            ids: HashSet::from(["attached-1".to_owned()]),
+            live_steer: true,
+            live_cancel: true,
+        };
+        let accepted = managed_turn("1", "new prompt");
+
+        assert!(active.observe(&accepted, &HashMap::new()).active_changed);
+        assert_eq!(
+            active.ids,
+            HashSet::from(["attached-1".to_owned(), "turn-1".to_owned()])
+        );
+        assert!(!active.observe(&accepted, &HashMap::new()).active_changed);
+
+        let terminal = ManagedEvent {
+            cursor: "2".to_owned(),
+            created_at: Some(1_750_000_001.0),
+            turn_id: Some("attached-1".to_owned()),
+            data: ManagedEventData::TurnCancelled {
+                id: "attached-1".to_owned(),
+            },
+        };
+        assert!(active.observe(&terminal, &HashMap::new()).active_changed);
+        assert_eq!(active.ids, HashSet::from(["turn-1".to_owned()]));
+        assert!(!active.observe(&terminal, &HashMap::new()).active_changed);
+    }
+
+    #[test]
+    fn managed_active_turns_do_not_claim_known_local_admissions() {
+        let mut active = ManagedActiveTurns {
+            ids: HashSet::new(),
+            live_steer: true,
+            live_cancel: true,
+        };
+        let local = HashMap::from([(TurnId::new(1), "turn-1".to_owned())]);
+
+        let observation = active.observe(&managed_turn("1", "local"), &local);
+        assert!(!observation.active_changed);
+        assert!(!observation.external);
+        assert!(active.ids.is_empty());
+    }
+
+    #[test]
+    fn local_request_fence_survives_terminal_event_before_admission_returns() {
+        let mut active = ManagedActiveTurns {
+            ids: HashSet::new(),
+            live_steer: true,
+            live_cancel: true,
+        };
+        let local = HashMap::from([(TurnId::new(1), "turn-1".to_owned())]);
+        let accepted = managed_turn("1", "local");
+        let failed = ManagedEvent {
+            cursor: "2".to_owned(),
+            created_at: Some(1_750_000_001.0),
+            turn_id: Some("turn-1".to_owned()),
+            data: ManagedEventData::TurnFailed {
+                id: "turn-1".to_owned(),
+                error: "failed before admission returned".to_owned(),
+            },
+        };
+
+        assert!(!active.observe(&accepted, &local).active_changed);
+        let observation = active.observe(&failed, &local);
+        assert!(!observation.active_changed);
+        assert!(!observation.external);
+        assert!(active.ids.is_empty());
+    }
+
+    #[test]
+    fn external_ownership_is_captured_before_turn_failed_removes_active_id() {
+        let mut active = ManagedActiveTurns {
+            ids: HashSet::from(["attached-1".to_owned()]),
+            live_steer: true,
+            live_cancel: true,
+        };
+        let failed = ManagedEvent {
+            cursor: "2".to_owned(),
+            created_at: Some(1_750_000_001.0),
+            turn_id: Some("attached-1".to_owned()),
+            data: ManagedEventData::TurnFailed {
+                id: "attached-1".to_owned(),
+                error: "attached failure".to_owned(),
+            },
+        };
+
+        let observation = active.observe(&failed, &HashMap::new());
+        assert!(observation.external);
+        assert!(observation.active_changed);
+        assert!(!active.ids.contains("attached-1"));
+    }
+
+    #[test]
+    fn attached_steering_requires_one_capable_target() {
+        let mut active = ManagedActiveTurns {
+            ids: HashSet::from(["attached-1".to_owned()]),
+            live_steer: true,
+            live_cancel: true,
+        };
+        assert_eq!(active.steer_target().unwrap(), "attached-1");
+
+        active.ids.insert("attached-2".to_owned());
+        assert_eq!(
+            active.steer_target().unwrap_err(),
+            "more than one attached managed turn is active; steering is ambiguous"
+        );
+        active.ids.remove("attached-2");
+        active.live_steer = false;
+        assert_eq!(
+            active.steer_target().unwrap_err(),
+            "this managed agent does not allow live steering"
+        );
     }
 
     #[test]
