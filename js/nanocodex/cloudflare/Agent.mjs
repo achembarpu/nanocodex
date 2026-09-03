@@ -4,6 +4,8 @@ import {
   commitCloudflareAgentSession,
   installHostBridge,
   loadDurabilityRuntime,
+  mayBindCloudflareSubagentSession,
+  mayReleaseCloudflareSubagentSession,
   observeAgentRelease,
   prepareCloudflareAgentSession,
   releaseAgentSession,
@@ -111,6 +113,7 @@ export function destroy(owner) {
         stateId,
       );
     }
+    storage.sql.exec("DELETE FROM nanocodex_cloudflare_subagents");
     clearCloudflareEventSocket(context);
   });
 }
@@ -340,6 +343,10 @@ async function createOwned(module, resolved, options, hostAgent, lifecycle) {
   });
 
   const sessionReservation = prepareCloudflareAgentSession(sessionId, subject);
+  const subagentSessions = cloudflareSubagentSessions(
+    context.storage,
+    sessionReservation,
+  );
   let agent;
   let watcher;
   let unwatch;
@@ -357,6 +364,7 @@ async function createOwned(module, resolved, options, hostAgent, lifecycle) {
       codeEvaluator: internalRuntime?.codeEvaluator,
       [Symbol.for("nanocodex.browser.internalRuntime")]: {
         toolProviders: internalRuntime?.toolProviders,
+        subagentSessions,
         [CLOUDFLARE_SESSION_RESERVATION]: sessionReservation,
       },
       transport,
@@ -619,6 +627,44 @@ function initializeAgentStorage(storage) {
       state_id TEXT NOT NULL UNIQUE
     )
   `);
+  storage.sql.exec(`
+    CREATE TABLE IF NOT EXISTS nanocodex_cloudflare_subagents (
+      session_id TEXT PRIMARY KEY,
+      agent_id TEXT NOT NULL UNIQUE,
+      descriptor_json TEXT NOT NULL
+    )
+  `);
+}
+
+function cloudflareSubagentSessions(storage, reservation) {
+  return Object.freeze({
+    restore() {
+      const restored = storage.sql.exec(
+        "SELECT descriptor_json FROM nanocodex_cloudflare_subagents",
+      ).toArray().map(({ descriptor_json }) => Object.freeze(JSON.parse(descriptor_json)));
+      return Object.freeze(restored);
+    },
+    bind(sessionId, descriptor) {
+      if (!mayBindCloudflareSubagentSession(reservation)) return;
+      storage.sql.exec(
+        `INSERT INTO nanocodex_cloudflare_subagents
+           (session_id, agent_id, descriptor_json) VALUES (?, ?, ?)
+         ON CONFLICT (session_id) DO UPDATE SET
+           agent_id = excluded.agent_id,
+           descriptor_json = excluded.descriptor_json`,
+        sessionId,
+        descriptor.agentId,
+        JSON.stringify(descriptor),
+      );
+    },
+    release(sessionId) {
+      if (!mayReleaseCloudflareSubagentSession(reservation)) return;
+      storage.sql.exec(
+        "DELETE FROM nanocodex_cloudflare_subagents WHERE session_id = ?",
+        sessionId,
+      );
+    },
+  });
 }
 
 function storedSessionId(storage) {

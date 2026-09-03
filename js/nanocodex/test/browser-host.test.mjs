@@ -209,7 +209,12 @@ test("browser host directly dispatches tools without dynamic code evaluation", a
 });
 
 test("browser host gives inherited tools the Rust-owned subagent descriptor", async () => {
+  const sessionLifecycle = [];
   const host = createBrowserHost({
+    subagentSessions: {
+      bind: (sessionId, descriptor) => sessionLifecycle.push(["bind", sessionId, descriptor]),
+      release: (sessionId) => sessionLifecycle.push(["release", sessionId]),
+    },
     toolMode: "direct",
     tools: {
       identity: {
@@ -226,6 +231,9 @@ test("browser host gives inherited tools the Rust-owned subagent descriptor", as
     task: "Act as Fern.",
   };
   host.bindSubagentSession("child-session", descriptor);
+  host.bindSubagentSession("child-session", { ...descriptor });
+  assert.deepEqual(sessionLifecycle, [["bind", "child-session", descriptor]]);
+  assert.equal(Object.isFrozen(sessionLifecycle[0][2]), true);
 
   const child = JSON.parse(await host.executeTool(
     "identity", "{}", "child-session", "call-child",
@@ -244,6 +252,11 @@ test("browser host gives inherited tools the Rust-owned subagent descriptor", as
   assert.deepEqual(nested.nested_calls[0].structured_result, descriptor);
 
   host.releaseSession("child-session");
+  host.releaseSession("child-session");
+  assert.deepEqual(sessionLifecycle, [
+    ["bind", "child-session", descriptor],
+    ["release", "child-session"],
+  ]);
   const released = JSON.parse(await host.executeTool(
     "identity", "{}", "child-session", "call-released",
   ));

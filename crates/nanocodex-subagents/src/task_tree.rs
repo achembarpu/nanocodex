@@ -36,6 +36,22 @@ impl TaskTree {
         session_id: String,
         parent: Option<AgentId>,
     ) -> std::io::Result<()> {
+        if id.get() == 0 {
+            return Err(std::io::Error::other("agent ID must be greater than zero"));
+        }
+        if id.get() == u64::MAX {
+            return Err(std::io::Error::other(
+                "agent ID must be less than the maximum u64 value",
+            ));
+        }
+        if self.nodes.contains_key(&id) {
+            return Err(std::io::Error::other(format!("duplicate agent_id {id}")));
+        }
+        if self.agent_for_session(&session_id).is_some() {
+            return Err(std::io::Error::other(format!(
+                "duplicate subagent session ID {session_id}"
+            )));
+        }
         if let Some(parent) = parent
             && !self.nodes.contains_key(&parent)
         {
@@ -45,6 +61,7 @@ impl TaskTree {
         }
 
         self.nodes.insert(id, TaskNode { session_id, parent });
+        self.next_id = self.next_id.max(id.get());
         Ok(())
     }
 

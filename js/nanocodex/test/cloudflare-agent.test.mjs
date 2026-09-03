@@ -26,6 +26,7 @@ class MemoryStorage {
     this.events = [];
     this.stateRevisions = new Map();
     this.owners = new Map();
+    this.subagents = new Map();
     this.meta = { total_bytes: 0, stream_error: null };
     this.sessionId = undefined;
     this.stateId = undefined;
@@ -75,6 +76,17 @@ class MemoryStorage {
     } else if (statement.startsWith("INSERT INTO nanocodex_cloudflare_durability")) {
       if (this.stateId !== undefined) throw new Error("duplicate Cloudflare durability identity");
       this.stateId = args[0];
+    } else if (statement.startsWith(
+      "SELECT descriptor_json FROM nanocodex_cloudflare_subagents",
+    )) {
+      this.onSubagentLoad?.();
+      rows = [...this.subagents.values()]
+        .map(({ descriptorJson }) => ({ descriptor_json: descriptorJson }));
+    } else if (statement.startsWith("INSERT INTO nanocodex_cloudflare_subagents")) {
+      this.subagents.set(args[0], { agentId: args[1], descriptorJson: args[2] });
+    } else if (statement.startsWith("DELETE FROM nanocodex_cloudflare_subagents")) {
+      if (args.length > 0) this.subagents.delete(args[0]);
+      else this.subagents.clear();
     } else if (statement.startsWith("SELECT owner_id, fence FROM nanocodex_durable_owners")) {
       const owner = this.owners.get(args[0]);
       rows = owner === undefined ? [] : [{ owner_id: owner.ownerId, fence: owner.fence }];
@@ -384,6 +396,125 @@ test("Cloudflare Agent reconstruction takes over the same durable owner after fe
   await reopened.session.shutdown();
 });
 
+test("Cloudflare Agent reconstructs interrupted subagents without stale-owner cleanup races", async () => {
+  const module = await readFile(new URL("../pkg-web/nanocodex_bg.wasm", import.meta.url));
+  const storage = new MemoryStorage();
+  const binding = egressBinding();
+  const identity = (source) => ({
+    identity: {
+      parameters: { type: "object", additionalProperties: false },
+      handler: (_input, context) => ({ source, subagent: context.subagent ?? null }),
+    },
+  });
+  const first = await create(
+    module,
+    durableOwner(storage, binding, FIRST_OBJECT_ID),
+    { tools: identity("predecessor") },
+  );
+  const bridge = globalThis.nanocodexHost;
+  const predecessorBinds = [];
+  globalThis.nanocodexHost = Object.freeze({
+    ...bridge,
+    bindSubagentSession(...args) {
+      predecessorBinds.push(args);
+      return bridge.bindSubagentSession(...args);
+    },
+  });
+  let started;
+  let continued;
+  try {
+    started = await Subagents.spawn(first, {
+      role: "durability-check",
+      task: "Remain available until the owner is reconstructed.",
+      outputSchema: { type: "object" },
+    });
+    continued = await Subagents.spawn(first, {
+      role: "forwarding-check",
+      task: "Prove descriptor forwarding continues after one callback failure.",
+      outputSchema: { type: "object" },
+    });
+  } finally {
+    globalThis.nanocodexHost = bridge;
+  }
+  await eventually(() => assert.equal(storage.subagents.size, 2));
+  assert.equal(predecessorBinds.length, 2);
+  const descriptor = [...storage.subagents.values()]
+    .map(({ descriptorJson }) => JSON.parse(descriptorJson))
+    .find((candidate) => candidate.agentId === String(started.agent_id));
+  const continuedDescriptor = [...storage.subagents.values()]
+    .map(({ descriptorJson }) => JSON.parse(descriptorJson))
+    .find((candidate) => candidate.agentId === String(continued.agent_id));
+  const predecessorBind = predecessorBinds.find((args) => args[2] === descriptor.sessionId);
+  const predecessorFence = storage.owners.get(storage.stateId).fence;
+  storage.onSubagentLoad = () => assert.ok(
+    BigInt(storage.owners.get(storage.stateId).fence) > BigInt(predecessorFence),
+    "restored descriptors must load only after the replacement acquires its durability fence",
+  );
+
+  const reconstructed = await create(
+    module,
+    durableOwner(storage, binding, FIRST_OBJECT_ID),
+    { tools: identity("replacement") },
+  );
+  storage.onSubagentLoad = undefined;
+  const listed = await Subagents.list(reconstructed, {
+    includeCompleted: true,
+    includeSelf: true,
+  });
+  const restored = listed.agents.find((entry) => entry.agent_id === started.agent_id);
+  assert.deepEqual(restored?.status, { state: "interrupted" });
+  assert.deepEqual(
+    listed.agents.find((entry) => entry.agent_id === continued.agent_id)?.status,
+    { state: "interrupted" },
+  );
+  assert.equal(descriptor.agentId, String(started.agent_id));
+
+  let routed = JSON.parse(await globalThis.nanocodexHost.executeTool(
+    "identity", "{}", descriptor.sessionId, "replacement-before-stale-release",
+  ));
+  assert.equal(routed.structured_result.source, "replacement");
+  assert.deepEqual(routed.structured_result.subagent, descriptor);
+  routed = JSON.parse(await globalThis.nanocodexHost.executeTool(
+    "identity", "{}", continuedDescriptor.sessionId, "continued-after-bind-failure",
+  ));
+  assert.equal(routed.structured_result.source, "replacement");
+  assert.deepEqual(routed.structured_result.subagent, continuedDescriptor);
+
+  const staleDescriptor = { ...descriptor, role: "stale-predecessor-rebind" };
+  bridge.bindSubagentSession(
+    predecessorBind[0],
+    predecessorBind[1],
+    predecessorBind[2],
+    JSON.stringify(staleDescriptor),
+  );
+  assert.equal(
+    storage.subagents.get(descriptor.sessionId).descriptorJson,
+    JSON.stringify(descriptor),
+  );
+  assert.equal(storage.subagents.size, 2);
+  routed = JSON.parse(await globalThis.nanocodexHost.executeTool(
+    "identity", "{}", descriptor.sessionId, "replacement-after-stale-bind",
+  ));
+  assert.equal(routed.structured_result.source, "replacement");
+  assert.deepEqual(routed.structured_result.subagent, descriptor);
+
+  await first.session.shutdown();
+  routed = JSON.parse(await globalThis.nanocodexHost.executeTool(
+    "identity", "{}", descriptor.sessionId, "replacement-after-stale-release",
+  ));
+  assert.equal(routed.structured_result.source, "replacement");
+  assert.equal(storage.subagents.size, 2);
+
+  await reconstructed.session.shutdown();
+  assert.equal(storage.subagents.size, 0);
+  assert.throws(
+    () => globalThis.nanocodexHost.executeTool(
+      "identity", "{}", descriptor.sessionId, "after-planned-release",
+    ),
+    /no Nanocodex host is active/,
+  );
+});
+
 test("Cloudflare Agent reconstruction rejects a different durable owner before fencing", async () => {
   const module = await readFile(new URL("../pkg-web/nanocodex_bg.wasm", import.meta.url));
   const storage = new MemoryStorage();
@@ -405,6 +536,12 @@ test("failed reconstruction keeps the prior same-owner reservation fail closed",
   const storage = new MemoryStorage();
   const binding = egressBinding();
   const first = await create(module, durableOwner(storage, binding, FIRST_OBJECT_ID));
+  const started = await Subagents.spawn(first, {
+    role: "retry-proof",
+    task: "Remain reconstructable after setup failure.",
+    outputSchema: { type: "object" },
+  });
+  await eventually(() => assert.equal(storage.subagents.size, 1));
   const failing = bindAgent(module, {
     async create(options) {
       const agent = await HostAgent.create(options);
@@ -423,6 +560,7 @@ test("failed reconstruction keeps the prior same-owner reservation fail closed",
     failing.create(durableOwner(storage, binding, FIRST_OBJECT_ID)),
     /reconstruction setup failed/,
   );
+  assert.equal(storage.subagents.size, 1);
   await assert.rejects(
     create(module, durableOwner(storage, binding, SECOND_OBJECT_ID)),
     /session ID is already active/,
@@ -432,8 +570,14 @@ test("failed reconstruction keeps the prior same-owner reservation fail closed",
     module,
     durableOwner(storage, binding, FIRST_OBJECT_ID),
   );
+  const restored = await Subagents.list(reconstructed, { includeCompleted: true });
+  assert.deepEqual(
+    restored.agents.find((entry) => entry.agent_id === started.agent_id)?.status,
+    { state: "interrupted" },
+  );
   first.dispose();
   await reconstructed.session.shutdown();
+  assert.equal(storage.subagents.size, 0);
 });
 
 test("Cloudflare Agent rejects a takeover while its predecessor is not committed", async () => {
@@ -794,6 +938,16 @@ test("Cloudflare Agent destroy owns idempotent adapter cleanup", async () => {
   const staleOwner = { ...storage.owners.get(stateId) };
   assert.equal(staleOwner.fence, "2");
   storage.chunks.push({ stateId, revision: "1", chunkIndex: 0, payload: "retained" });
+  storage.subagents.set("child-session", {
+    agentId: "1",
+    descriptorJson: JSON.stringify({
+      agentId: "1",
+      parentAgentId: null,
+      sessionId: "child-session",
+      role: "stale",
+      task: "Do not survive destroy.",
+    }),
+  });
   destroy(owner);
   const destroyedOwner = storage.owners.get(stateId);
   assert.equal(destroyedOwner.fence, "3");
@@ -812,6 +966,7 @@ test("Cloudflare Agent destroy owns idempotent adapter cleanup", async () => {
   assert.equal(storage.chunks.length, 0);
   assert.equal(storage.stateRevisions.size, 0);
   assert.equal(storage.events.length, 0);
+  assert.equal(storage.subagents.size, 0);
 });
 
 function deferred() {
@@ -822,4 +977,18 @@ function deferred() {
     reject = onReject;
   });
   return { promise, reject, resolve };
+}
+
+async function eventually(assertion) {
+  let error;
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    try {
+      await assertion();
+      return;
+    } catch (candidate) {
+      error = candidate;
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+  }
+  throw error;
 }

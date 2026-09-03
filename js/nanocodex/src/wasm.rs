@@ -42,10 +42,10 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::{JsFuture, spawn_local};
 
 use nanocodex_subagents::{
-    AgentDirectoryEntry, AgentId as SubagentId, AgentStatus as SubagentStatus, AgentSummary,
-    AgentTask, AgentUpdate as SubagentUpdate, MessageId as SubagentMessageId, MessagePriority,
-    MessagePurpose, Registry as SubagentRegistry, ScopedAgentUpdate, SubagentControl,
-    start_agent_with, start_agents_observed,
+    AgentDescriptor, AgentDirectoryEntry, AgentId as SubagentId, AgentStatus as SubagentStatus,
+    AgentSummary, AgentTask, AgentUpdate as SubagentUpdate, MessageId as SubagentMessageId,
+    MessagePriority, MessagePurpose, Registry as SubagentRegistry, ScopedAgentUpdate,
+    SubagentControl, start_agent_with, start_agents_observed,
 };
 use nanocodex_voice_protocol::{
     BrowserVoiceEffects, BrowserVoiceProtocol, REALTIME_END_INSTRUCTIONS,
@@ -91,6 +91,9 @@ pub async fn prune_durable_receipts(
 
 #[wasm_bindgen]
 extern "C" {
+    #[wasm_bindgen(catch, js_namespace = console, js_name = error)]
+    fn host_console_error(message: &str, error: &JsValue) -> Result<(), JsValue>;
+
     #[wasm_bindgen(js_namespace = ["globalThis", "nanocodexHost"], js_name = emitEvent)]
     fn host_emit_event(
         session_id: &str,
@@ -174,11 +177,20 @@ extern "C" {
     #[wasm_bindgen(catch, js_namespace = ["globalThis", "nanocodexHost"], js_name = subscriptionRequest)]
     fn host_subscription_request(subscription_id: &str, request: &str) -> Result<Promise, JsValue>;
 
-    #[wasm_bindgen(js_namespace = ["globalThis", "nanocodexHost"], js_name = bindSubagentSession)]
-    fn host_bind_subagent_session(root_session_id: &str, session_id: &str, context_json: &str);
+    #[wasm_bindgen(catch, js_namespace = ["globalThis", "nanocodexHost"], js_name = bindSubagentSession)]
+    fn host_bind_subagent_session(
+        host_definition_id: u32,
+        root_session_id: &str,
+        session_id: &str,
+        context_json: &str,
+    ) -> Result<(), JsValue>;
 
-    #[wasm_bindgen(js_namespace = ["globalThis", "nanocodexHost"], js_name = releaseSubagentSession)]
-    fn host_release_subagent_session(session_id: &str);
+    #[wasm_bindgen(catch, js_namespace = ["globalThis", "nanocodexHost"], js_name = releaseSubagentSession)]
+    fn host_release_subagent_session(
+        host_definition_id: u32,
+        root_session_id: &str,
+        session_id: &str,
+    ) -> Result<(), JsValue>;
 }
 
 struct JavaScriptSubscriptionHost {
@@ -734,11 +746,43 @@ struct WasmConfig {
     subagents: Option<WasmSubagentsConfig>,
 }
 
-#[derive(Clone, Copy, Deserialize)]
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct WasmSubagentsConfig {
     #[serde(default = "default_max_subagents")]
     max_concurrency: usize,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct WasmRestoredSubagent {
+    agent_id: String,
+    parent_agent_id: Option<String>,
+    session_id: String,
+    role: String,
+    task: String,
+}
+
+impl WasmRestoredSubagent {
+    fn descriptor(self) -> Result<AgentDescriptor, JsValue> {
+        Ok(AgentDescriptor {
+            id: self
+                .agent_id
+                .parse()
+                .map_err(|error| js_error(format!("invalid restored agentId: {error}")))?,
+            parent: self
+                .parent_agent_id
+                .map(|id| {
+                    id.parse().map_err(|error| {
+                        js_error(format!("invalid restored parentAgentId: {error}"))
+                    })
+                })
+                .transpose()?,
+            session_id: self.session_id,
+            role: self.role,
+            task: self.task,
+        })
+    }
 }
 
 #[derive(Deserialize)]
@@ -928,6 +972,7 @@ pub struct WasmNanocodex {
 
 #[derive(Clone)]
 struct WasmSubagents {
+    host_definition_id: u32,
     registry: Arc<SubagentRegistry>,
     control: SubagentControl,
     parents: Arc<Mutex<HashMap<String, AgentHandle>>>,
@@ -976,6 +1021,7 @@ impl Drop for WasmBatchParentCleanup {
 
 impl WasmSubagents {
     fn new(
+        host_definition_id: u32,
         registry: Arc<SubagentRegistry>,
         control: SubagentControl,
         updates: tokio::sync::mpsc::UnboundedReceiver<ScopedAgentUpdate>,
@@ -984,12 +1030,14 @@ impl WasmSubagents {
         let sessions = Rc::new(RefCell::new(HashMap::new()));
         let event_forwarders = Rc::new(Cell::new(0));
         forward_subagent_updates(
+            host_definition_id,
             updates,
             Rc::clone(&sessions),
             Rc::clone(&event_forwarders),
             Arc::clone(&parents),
         );
         Self {
+            host_definition_id,
             registry,
             control,
             parents,
@@ -1024,9 +1072,34 @@ impl WasmSubagents {
         });
     }
 
+    async fn restore(
+        &self,
+        root_session_id: &str,
+        descriptors: Vec<AgentDescriptor>,
+    ) -> Result<(), JsValue> {
+        self.registry
+            .restore(root_session_id, descriptors.clone())
+            .await
+            .map_err(js_error)?;
+        for descriptor in &descriptors {
+            bind_subagent_session(
+                self.host_definition_id,
+                &self.sessions,
+                root_session_id,
+                descriptor,
+            )?;
+        }
+        Ok(())
+    }
+
     async fn close_all(&self, root_session_id: &str) -> std::io::Result<()> {
         self.control.close_all(root_session_id).await?;
-        release_subagent_scope(&self.sessions, &self.parents, root_session_id);
+        release_subagent_scope(
+            self.host_definition_id,
+            &self.sessions,
+            &self.parents,
+            root_session_id,
+        );
         self.remove_parent(root_session_id);
         Ok(())
     }
@@ -1065,6 +1138,7 @@ impl WasmNanocodex {
         validate(&config)?;
 
         let model = config.model.parse::<Model>().map_err(js_error)?;
+        let host_definition_id = config.host_definition_id;
         let thinking = config.thinking.parse::<Thinking>().map_err(js_error)?;
         let reasoning_mode = config
             .reasoning_mode
@@ -1090,10 +1164,7 @@ impl WasmNanocodex {
             .without_defaults()
             .build()
             .map_err(js_error)?;
-        let tools = bind_host(
-            tools,
-            JavaScriptCodeModeHost::new(config.host_definition_id),
-        );
+        let tools = bind_host(tools, JavaScriptCodeModeHost::new(host_definition_id));
         let (mut builder, subagents) = if let Some(subagents) = config.subagents {
             let (registry, control, updates) =
                 nanocodex_subagents::channel(subagents.max_concurrency);
@@ -1114,7 +1185,13 @@ impl WasmNanocodex {
                     }
                     nanocodex_subagents::install_tools(tools.clone(), agent, tool_registry.clone())
                 }),
-                Some(WasmSubagents::new(registry, control, updates, parents)),
+                Some(WasmSubagents::new(
+                    host_definition_id,
+                    registry,
+                    control,
+                    updates,
+                    parents,
+                )),
             )
         } else {
             (RustNanocodex::builder(openai).tools(tools), None)
@@ -1174,6 +1251,29 @@ impl WasmNanocodex {
     #[must_use]
     pub fn session_id(&self) -> String {
         self.inner.session_id().to_string()
+    }
+
+    /// Restores persisted logical children after the JavaScript owner acquires
+    /// its durability generation and activates the replacement host.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed descriptors, disabled subagents, duplicate restoration,
+    /// or an invalid persisted topology.
+    #[wasm_bindgen(js_name = restoreSubagents)]
+    pub async fn restore_subagents(&self, descriptors_json: &str) -> Result<(), JsValue> {
+        let descriptors = serde_json::from_str::<Vec<WasmRestoredSubagent>>(descriptors_json)
+            .map_err(|error| js_error(format!("invalid restored subagents: {error}")))?
+            .into_iter()
+            .map(WasmRestoredSubagent::descriptor)
+            .collect::<Result<Vec<_>, _>>()?;
+        let subagents = self
+            .subagents
+            .as_ref()
+            .ok_or_else(|| js_error("this agent was not created with the subagent extension"))?;
+        subagents
+            .restore(self.inner.session_id(), descriptors)
+            .await
     }
 
     /// Enables or disables the optional JavaScript event crossing for this handle.
@@ -2671,6 +2771,7 @@ fn forward_events(mut events: AgentEvents, forwarding: Rc<Cell<bool>>) {
 }
 
 fn forward_subagent_updates(
+    host_definition_id: u32,
     mut updates: tokio::sync::mpsc::UnboundedReceiver<ScopedAgentUpdate>,
     sessions: Rc<RefCell<HashMap<(String, SubagentId), String>>>,
     event_forwarders: Rc<Cell<usize>>,
@@ -2681,21 +2782,14 @@ fn forward_subagent_updates(
             let root_session_id = scoped.root_session_id;
             match scoped.update {
                 SubagentUpdate::Added(descriptor) => {
-                    let context = serde_json::json!({
-                        "agentId": descriptor.id.to_string(),
-                        "parentAgentId": descriptor.parent.map(|id| id.to_string()),
-                        "sessionId": &descriptor.session_id,
-                        "role": &descriptor.role,
-                        "task": &descriptor.task,
-                    });
-                    host_bind_subagent_session(
+                    if let Err(error) = bind_subagent_session(
+                        host_definition_id,
+                        &sessions,
                         &root_session_id,
-                        &descriptor.session_id,
-                        &context.to_string(),
-                    );
-                    sessions
-                        .borrow_mut()
-                        .insert((root_session_id, descriptor.id), descriptor.session_id);
+                        &descriptor,
+                    ) {
+                        report_subagent_host_error("binding a subagent session", &error);
+                    }
                 }
                 SubagentUpdate::Event { id, event } => {
                     if event_forwarders.get() > 0
@@ -2714,10 +2808,16 @@ fn forward_subagent_updates(
                     id,
                     status: SubagentStatus::Closed,
                 } => {
-                    let session_id = sessions.borrow_mut().remove(&(root_session_id, id));
+                    let session_id = sessions.borrow_mut().remove(&(root_session_id.clone(), id));
                     if let Some(session_id) = session_id {
                         remove_subagent_parent(&parents, &session_id);
-                        host_release_subagent_session(&session_id);
+                        if let Err(error) = host_release_subagent_session(
+                            host_definition_id,
+                            &root_session_id,
+                            &session_id,
+                        ) {
+                            report_subagent_host_error("releasing a subagent session", &error);
+                        }
                     }
                 }
                 SubagentUpdate::Status { .. } | SubagentUpdate::Message(_) => {}
@@ -2726,16 +2826,47 @@ fn forward_subagent_updates(
         let session_ids = sessions
             .borrow_mut()
             .drain()
-            .map(|(_, session_id)| session_id)
+            .map(|((root_session_id, _), session_id)| (root_session_id, session_id))
             .collect::<Vec<_>>();
-        for session_id in session_ids {
+        for (root_session_id, session_id) in session_ids {
             remove_subagent_parent(&parents, &session_id);
-            host_release_subagent_session(&session_id);
+            if let Err(error) =
+                host_release_subagent_session(host_definition_id, &root_session_id, &session_id)
+            {
+                report_subagent_host_error("releasing a subagent session", &error);
+            }
         }
     });
 }
 
+fn bind_subagent_session(
+    host_definition_id: u32,
+    sessions: &Rc<RefCell<HashMap<(String, SubagentId), String>>>,
+    root_session_id: &str,
+    descriptor: &AgentDescriptor,
+) -> Result<(), JsValue> {
+    let context = serde_json::json!({
+        "agentId": descriptor.id.to_string(),
+        "parentAgentId": descriptor.parent.map(|id| id.to_string()),
+        "sessionId": &descriptor.session_id,
+        "role": &descriptor.role,
+        "task": &descriptor.task,
+    });
+    host_bind_subagent_session(
+        host_definition_id,
+        root_session_id,
+        &descriptor.session_id,
+        &context.to_string(),
+    )?;
+    sessions.borrow_mut().insert(
+        (root_session_id.to_owned(), descriptor.id),
+        descriptor.session_id.clone(),
+    );
+    Ok(())
+}
+
 fn release_subagent_scope(
+    host_definition_id: u32,
     sessions: &Rc<RefCell<HashMap<(String, SubagentId), String>>>,
     parents: &Arc<Mutex<HashMap<String, AgentHandle>>>,
     root_session_id: &str,
@@ -2753,8 +2884,19 @@ fn release_subagent_scope(
     };
     for session_id in session_ids {
         remove_subagent_parent(parents, &session_id);
-        host_release_subagent_session(&session_id);
+        if let Err(error) =
+            host_release_subagent_session(host_definition_id, root_session_id, &session_id)
+        {
+            report_subagent_host_error("releasing a subagent session", &error);
+        }
     }
+}
+
+fn report_subagent_host_error(operation: &str, error: &JsValue) {
+    drop(host_console_error(
+        &format!("Nanocodex failed while {operation}; later subagent updates will continue"),
+        error,
+    ));
 }
 
 fn remove_subagent_parent(parents: &Arc<Mutex<HashMap<String, AgentHandle>>>, session_id: &str) {
@@ -2831,6 +2973,7 @@ fn validate(config: &WasmConfig) -> Result<(), JsValue> {
     }
     if config
         .subagents
+        .as_ref()
         .is_some_and(|subagents| subagents.max_concurrency == 0)
     {
         return Err(js_error("subagents.max_concurrency must be at least 1"));

@@ -54,7 +54,10 @@ export function createBrowserHost(options = {}) {
       : () => Promise.reject(new Error(
           "browser Code Mode requires a child Worker or an explicit codeEvaluator",
         )));
-  const code = createCodeRuntime(options.tools, { evaluate: codeEvaluator });
+  const code = createCodeRuntime(options.tools, {
+    evaluate: codeEvaluator,
+    subagentSessions: options.subagentSessions,
+  });
   const toolProviders = options.toolProviders ?? [];
   if (!Array.isArray(toolProviders)) {
     throw new TypeError("toolProviders must be an array");

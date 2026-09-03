@@ -409,6 +409,101 @@ impl RegistryState {
         Ok(())
     }
 
+    fn restore(
+        &mut self,
+        root_session_id: &str,
+        descriptors: Vec<AgentDescriptor>,
+    ) -> std::io::Result<Vec<AgentDescriptor>> {
+        if root_session_id.trim().is_empty() {
+            return Err(std::io::Error::other(
+                "restored subagent root session ID must not be empty",
+            ));
+        }
+        if descriptors.is_empty() {
+            return Ok(Vec::new());
+        }
+        if self.scopes.contains_key(root_session_id) {
+            return Err(std::io::Error::other(format!(
+                "subagent scope already exists for {root_session_id}"
+            )));
+        }
+
+        let mut ids = std::collections::HashSet::new();
+        let mut session_ids = std::collections::HashSet::new();
+        for descriptor in &descriptors {
+            if descriptor.session_id.trim().is_empty() {
+                return Err(std::io::Error::other(
+                    "restored subagent session ID must not be empty",
+                ));
+            }
+            if descriptor.session_id == root_session_id {
+                return Err(std::io::Error::other(
+                    "restored subagent session ID must differ from its root session ID",
+                ));
+            }
+            if !ids.insert(descriptor.id) {
+                return Err(std::io::Error::other(format!(
+                    "duplicate restored agent_id {}",
+                    descriptor.id
+                )));
+            }
+            if !session_ids.insert(descriptor.session_id.clone())
+                || self.root_by_session.contains_key(&descriptor.session_id)
+            {
+                return Err(std::io::Error::other(format!(
+                    "duplicate restored subagent session ID {}",
+                    descriptor.session_id
+                )));
+            }
+        }
+
+        let mut restored = Self::default();
+        let mut pending = descriptors;
+        let mut ordered = Vec::new();
+        while !pending.is_empty() {
+            let before = pending.len();
+            let mut deferred = Vec::new();
+            for descriptor in pending {
+                let parent_ready = descriptor.parent.is_none_or(|parent| {
+                    restored
+                        .scopes
+                        .get(root_session_id)
+                        .is_some_and(|scope| scope.sessions.contains_key(&parent))
+                });
+                if !parent_ready {
+                    deferred.push(descriptor);
+                    continue;
+                }
+                restored.insert(
+                    root_session_id.to_owned(),
+                    descriptor.id,
+                    descriptor.session_id.clone(),
+                    restored_tombstone(descriptor.clone()),
+                )?;
+                ordered.push(descriptor);
+            }
+            if deferred.len() == before {
+                return Err(std::io::Error::other(
+                    "restored subagent topology has an unknown parent or cycle",
+                ));
+            }
+            pending = deferred;
+        }
+
+        let mut scope = restored
+            .scopes
+            .remove(root_session_id)
+            .ok_or_else(|| std::io::Error::other("restored subagent scope disappeared"))?;
+        for session in scope.sessions.values_mut() {
+            session.last_used = self.next_access();
+        }
+        for (session_id, retained_root) in restored.root_by_session {
+            self.root_by_session.insert(session_id, retained_root);
+        }
+        self.scopes.insert(root_session_id.to_owned(), scope);
+        Ok(ordered)
+    }
+
     fn validate_insert(
         &self,
         root_session_id: &str,
@@ -921,6 +1016,35 @@ impl Registry {
             .await
             .root_by_session
             .contains_key(session_id)
+    }
+
+    /// Restores persisted logical children as interrupted, nonresident tombstones.
+    ///
+    /// This preserves handles returned by an earlier runtime without claiming
+    /// that in-memory child execution survived reconstruction.
+    pub async fn restore(
+        &self,
+        root_session_id: &str,
+        descriptors: Vec<AgentDescriptor>,
+    ) -> std::io::Result<()> {
+        let restored = self
+            .state
+            .lock()
+            .await
+            .restore(root_session_id, descriptors)?;
+        for descriptor in restored {
+            let id = descriptor.id;
+            self.send(root_session_id, AgentUpdate::Added(descriptor));
+            self.send(
+                root_session_id,
+                AgentUpdate::Status {
+                    id,
+                    status: AgentStatus::Interrupted,
+                },
+            );
+        }
+        self.changed();
+        Ok(())
     }
 
     pub(super) async fn reserve(&self, session_id: &str) -> std::io::Result<AgentReservation> {
@@ -1655,6 +1779,26 @@ fn complete_session(session: &mut ChildSession, output: Option<Value>) -> AgentS
     AgentStatus::Completed { output }
 }
 
+fn restored_tombstone(descriptor: AgentDescriptor) -> ChildSession {
+    ChildSession {
+        descriptor,
+        event_task: None,
+        harness: None,
+        harness_task: None,
+        status: AgentStatus::Interrupted,
+        active: false,
+        output_validator: jsonschema::validator_for(&Value::Bool(false))
+            .expect("the false JSON Schema is valid"),
+        next_turn_token: 0,
+        active_turn_token: None,
+        steering: false,
+        submitted_output: None,
+        last_output: None,
+        last_used: 0,
+        evicted: true,
+    }
+}
+
 fn first_error(results: Vec<std::io::Result<()>>) -> std::io::Result<()> {
     results.into_iter().find(Result::is_err).unwrap_or(Ok(()))
 }
@@ -1868,6 +2012,159 @@ mod tests {
             [AgentId::new(1), AgentId::new(2), AgentId::new(3)]
         );
         assert_eq!(registry.reserve("root").await.unwrap().id, AgentId::new(4));
+    }
+
+    #[tokio::test]
+    async fn restored_tombstones_preserve_topology_wait_updates_and_allocation() {
+        let (updates, mut receiver) = mpsc::unbounded_channel();
+        let registry = Registry::new(updates, 3);
+        let parent = AgentDescriptor {
+            id: AgentId::new(2),
+            session_id: "parent-session".to_owned(),
+            role: "parent".to_owned(),
+            task: "coordinate".to_owned(),
+            parent: None,
+        };
+        let child = AgentDescriptor {
+            id: AgentId::new(7),
+            session_id: "child-session".to_owned(),
+            role: "child".to_owned(),
+            task: "investigate".to_owned(),
+            parent: Some(parent.id),
+        };
+
+        registry
+            .restore("root", vec![child.clone(), parent.clone()])
+            .await
+            .unwrap();
+
+        let directory = registry.directory("root", true, false).await;
+        assert_eq!(directory.len(), 2);
+        let restored_parent = directory
+            .iter()
+            .find(|entry| entry.agent_id == parent.id)
+            .unwrap();
+        assert_eq!(restored_parent.parent_agent_id, None);
+        assert_eq!(restored_parent.status, AgentStatus::Interrupted);
+        assert!(!restored_parent.can_message);
+        assert!(restored_parent.can_manage);
+        let restored_child = directory
+            .iter()
+            .find(|entry| entry.agent_id == child.id)
+            .unwrap();
+        assert_eq!(restored_child.parent_agent_id, Some(parent.id));
+        assert_eq!(restored_child.status, AgentStatus::Interrupted);
+        assert!(!restored_child.can_message);
+        assert!(restored_child.can_manage);
+
+        let (summaries, timed_out) = registry
+            .wait("root", &[parent.id, child.id], Duration::from_millis(1))
+            .await
+            .unwrap();
+        assert!(!timed_out);
+        assert!(
+            summaries
+                .iter()
+                .all(|summary| summary.status == AgentStatus::Interrupted)
+        );
+        assert_eq!(registry.reserve("root").await.unwrap().id, AgentId::new(8));
+
+        for expected in [&parent, &child] {
+            let added = receiver.try_recv().unwrap();
+            assert_eq!(added.root_session_id, "root");
+            let AgentUpdate::Added(descriptor) = added.update else {
+                panic!("expected an Added update");
+            };
+            assert_eq!(descriptor, *expected);
+            let interrupted = receiver.try_recv().unwrap();
+            assert_eq!(interrupted.root_session_id, "root");
+            let AgentUpdate::Status { id, status } = interrupted.update else {
+                panic!("expected a Status update");
+            };
+            assert_eq!(id, expected.id);
+            assert_eq!(status, AgentStatus::Interrupted);
+        }
+        assert!(receiver.try_recv().is_err());
+
+        let closed = registry.close_all("root").await.unwrap();
+        assert_eq!(
+            closed
+                .iter()
+                .map(|summary| (summary.agent_id, &summary.status))
+                .collect::<Vec<_>>(),
+            [
+                (child.id, &AgentStatus::Closed),
+                (parent.id, &AgentStatus::Closed),
+            ]
+        );
+        for expected_status in [AgentStatus::Closing, AgentStatus::Closed] {
+            for expected_id in [child.id, parent.id] {
+                let update = receiver.try_recv().unwrap();
+                let AgentUpdate::Status { id, status } = update.update else {
+                    panic!("expected a cleanup Status update");
+                };
+                assert_eq!(update.root_session_id, "root");
+                assert_eq!(id, expected_id);
+                assert_eq!(status, expected_status);
+            }
+        }
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn invalid_restored_topologies_are_rejected_atomically() {
+        let descriptor = |id: u64, session_id: &str, parent: Option<u64>| AgentDescriptor {
+            id: AgentId::new(id),
+            session_id: session_id.to_owned(),
+            role: "worker".to_owned(),
+            task: "work".to_owned(),
+            parent: parent.map(AgentId::new),
+        };
+        let cases = [
+            (
+                vec![descriptor(0, "zero", None)],
+                "agent ID must be greater than zero",
+            ),
+            (
+                vec![descriptor(u64::MAX, "maximum", None)],
+                "agent ID must be less than the maximum u64 value",
+            ),
+            (
+                vec![descriptor(1, "first", None), descriptor(1, "second", None)],
+                "duplicate restored agent_id 1",
+            ),
+            (
+                vec![
+                    descriptor(1, "duplicate-session", None),
+                    descriptor(2, "duplicate-session", None),
+                ],
+                "duplicate restored subagent session ID duplicate-session",
+            ),
+            (
+                vec![descriptor(1, "orphan", Some(9))],
+                "unknown parent or cycle",
+            ),
+            (
+                vec![
+                    descriptor(1, "cycle-a", Some(2)),
+                    descriptor(2, "cycle-b", Some(1)),
+                ],
+                "unknown parent or cycle",
+            ),
+        ];
+
+        for (descriptors, expected_error) in cases {
+            let (updates, mut receiver) = mpsc::unbounded_channel();
+            let registry = Registry::new(updates, 3);
+            let error = registry.restore("root", descriptors).await.unwrap_err();
+            assert!(
+                error.to_string().contains(expected_error),
+                "unexpected error: {error}"
+            );
+            assert!(registry.directory("root", true, false).await.is_empty());
+            assert_eq!(registry.reserve("root").await.unwrap().id, AgentId::new(1));
+            assert!(receiver.try_recv().is_err());
+        }
     }
 
     #[tokio::test]

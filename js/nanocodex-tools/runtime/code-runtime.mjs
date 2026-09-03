@@ -20,6 +20,7 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
   let nextCallId = 1;
   const toolByName = new Map();
   const subagentsBySession = new Map();
+  const subagentSessions = extras.subagentSessions;
 
   function addTools(configuration = {}) {
     const added = {};
@@ -343,6 +344,7 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
   }
 
   function releaseSession(sessionId) {
+    if (subagentsBySession.has(sessionId)) subagentSessions?.release?.(sessionId);
     stores.delete(sessionId);
     subagentsBySession.delete(sessionId);
     router.releaseSession(sessionId);
@@ -389,7 +391,10 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
     executeCodeObserved,
     executeTool,
     bindSubagentSession(sessionId, context) {
-      subagentsBySession.set(sessionId, Object.freeze({ ...context }));
+      const descriptor = Object.freeze({ ...context });
+      if (sameSubagentDescriptor(subagentsBySession.get(sessionId), descriptor)) return;
+      subagentSessions?.bind?.(sessionId, descriptor);
+      subagentsBySession.set(sessionId, descriptor);
     },
     nextCodeUpdate,
     cancel,
@@ -397,6 +402,15 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
     releaseSession,
     reset,
   });
+}
+
+function sameSubagentDescriptor(left, right) {
+  return left !== undefined
+    && left.agentId === right.agentId
+    && left.parentAgentId === right.parentAgentId
+    && left.sessionId === right.sessionId
+    && left.role === right.role
+    && left.task === right.task;
 }
 
 async function evaluateNative(source, environment) {

@@ -5,6 +5,7 @@ use nanocodex_agent::events::AgentEvent;
 use serde::{Deserialize, Serialize};
 use std::{
     fmt,
+    str::FromStr,
     sync::atomic::{AtomicU64, Ordering},
 };
 
@@ -24,11 +25,23 @@ impl AgentId {
         *counter = counter.saturating_add(1);
         Self(*counter)
     }
+
+    pub(super) const fn get(self) -> u64 {
+        self.0
+    }
 }
 
 impl fmt::Display for AgentId {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.fmt(formatter)
+    }
+}
+
+impl FromStr for AgentId {
+    type Err = std::num::ParseIntError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        value.parse().map(Self)
     }
 }
 

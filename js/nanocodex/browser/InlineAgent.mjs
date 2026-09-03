@@ -61,6 +61,7 @@ export async function create(options = {}) {
     codeEvaluator,
   } = options;
   const toolProviders = internalRuntime?.toolProviders;
+  const subagentSessions = internalRuntime?.subagentSessions;
   const cloudflareReservation = internalRuntime?.[CLOUDFLARE_SESSION_RESERVATION];
   const stableSessionId = sessionId ?? createSessionId();
   const {
@@ -95,6 +96,7 @@ export async function create(options = {}) {
     filesystemTools,
     tools: hostTools,
     toolProviders,
+    subagentSessions,
     toolMode,
     mcp: mcp === false
       ? undefined
@@ -107,7 +109,7 @@ export async function create(options = {}) {
   });
   let durabilityOwner;
   let creationStarted = false;
-  hostDefinitionId = registerDefinitionHost(host);
+  hostDefinitionId = registerDefinitionHost(host, cloudflareReservation);
   activateHost(host);
   const runtime = defineRuntime({
     key: "browser-wasm",
@@ -115,6 +117,7 @@ export async function create(options = {}) {
     type: "browser",
     async create(config) {
       creationStarted = true;
+      let raw;
       try {
         if (durability !== undefined || durabilityId !== undefined) {
           durabilityOwner = (await loadDurabilityRuntime()).own(
@@ -141,7 +144,7 @@ export async function create(options = {}) {
           ...config,
           durabilityHostId: durabilityOwner?.id,
         }));
-        const raw = subscription === undefined
+        raw = subscription === undefined
           ? await Nanocodex.create(configJson)
           : await Nanocodex.createWithChatGpt(
               configJson,
@@ -149,11 +152,30 @@ export async function create(options = {}) {
             );
         if (cloudflareReservation !== undefined) {
           activateCloudflareAgentSession(cloudflareReservation);
+          const restoredSubagents = subagentSessions?.restore?.() ?? [];
+          if (restoredSubagents.length > 0) {
+            await raw.restoreSubagents(JSON.stringify(restoredSubagents));
+          }
         }
         return raw;
       } catch (error) {
-        durabilityOwner?.abandon();
-        await host.dispose();
+        const cleanupErrors = [];
+        if (raw !== undefined) {
+          try { await raw.shutdown(); }
+          catch (cleanupError) { cleanupErrors.push(cleanupError); }
+          try { raw.free(); }
+          catch (cleanupError) { cleanupErrors.push(cleanupError); }
+        }
+        try { durabilityOwner?.abandon(); }
+        catch (cleanupError) { cleanupErrors.push(cleanupError); }
+        try { await host.dispose(); }
+        catch (cleanupError) { cleanupErrors.push(cleanupError); }
+        if (cleanupErrors.length > 0) {
+          throw new AggregateError(
+            [error, ...cleanupErrors],
+            "browser Agent creation and cleanup both failed",
+          );
+        }
         throw error;
       }
     },

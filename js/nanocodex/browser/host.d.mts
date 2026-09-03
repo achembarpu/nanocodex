@@ -2,6 +2,7 @@ import type {
   CodeEvaluator,
   McpServers,
   MppSession,
+  SubagentToolContext,
   ToolMap,
 } from "../types.mjs";
 import type { Workspace } from "./workspace.mjs";
@@ -67,6 +68,12 @@ export function createBrowserHost(options?: {
   mcp?: McpServers;
   codeEvaluator?: CodeEvaluator;
   toolMode?: "code" | "direct";
+  /** @internal Durable host lifecycle for Rust-owned subagent descriptors. */
+  subagentSessions?: {
+    restore(): readonly SubagentToolContext[];
+    bind(sessionId: string, descriptor: SubagentToolContext): void;
+    release(sessionId: string): void;
+  };
   maxQueuedMessages?: number;
   maxQueuedBytes?: number;
   maxBufferedSendBytes?: number;
