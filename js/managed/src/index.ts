@@ -4399,10 +4399,10 @@ export class DurableAgentSession extends DurableComputerSession {
       turn = agent.turn.prompt({
         id: row.id,
         input: JSON.parse(dispatchInputJson) as PromptInput,
-      });
+        cancelOnAdmission: dispatchable.state === "cancelling",
+      } as Parameters<typeof agent.turn.prompt>[0] & { cancelOnAdmission: boolean });
       this.#turns.set(row.id, turn);
-      const cancellation = dispatchable.state === "cancelling" ? turn.cancel() : undefined;
-      const [durableId] = await Promise.all([turn.accepted(), cancellation]);
+      const durableId = await turn.accepted();
       if (durableId !== undefined && durableId !== row.id) {
         throw new Error(`durable admission returned unexpected turn id ${durableId}`);
       }
@@ -4422,7 +4422,7 @@ export class DurableAgentSession extends DurableComputerSession {
         row.id,
       );
       this.ctx.waitUntil(this.#track(this.#complete(row.id, turn)));
-      if (cancellation === undefined
+      if (dispatchable.state !== "cancelling"
         && this.#managedTurn(row.id)?.state === "cancelling") {
         this.#scheduleCancellation(row.id);
       }

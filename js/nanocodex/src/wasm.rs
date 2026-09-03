@@ -1335,6 +1335,7 @@ impl WasmNanocodex {
         &self,
         instruction: &str,
         operation_id: Option<String>,
+        cancel_on_admission: Option<bool>,
     ) -> Result<WasmTurn, JsValue> {
         validate_operation_id(operation_id.as_deref())?;
         if instruction.trim().is_empty() {
@@ -1344,6 +1345,7 @@ impl WasmNanocodex {
             self.inner.clone(),
             Prompt::new(instruction),
             operation_id,
+            cancel_on_admission.unwrap_or(false),
         ))
     }
 
@@ -1357,12 +1359,14 @@ impl WasmNanocodex {
         &self,
         content_json: &str,
         operation_id: Option<String>,
+        cancel_on_admission: Option<bool>,
     ) -> Result<WasmTurn, JsValue> {
         validate_operation_id(operation_id.as_deref())?;
         Ok(WasmTurn::accept(
             self.inner.clone(),
             parse_browser_prompt(content_json)?,
             operation_id,
+            cancel_on_admission.unwrap_or(false),
         ))
     }
 
@@ -2409,7 +2413,12 @@ impl WasmTurn {
 }
 
 impl WasmTurn {
-    fn accept(agent: RustNanocodex, prompt: Prompt, operation_id: Option<String>) -> Self {
+    fn accept(
+        agent: RustNanocodex,
+        prompt: Prompt,
+        operation_id: Option<String>,
+        cancel_on_admission: bool,
+    ) -> Self {
         let state = Rc::new(RefCell::new(TurnState {
             accepted: None,
             control: None,
@@ -2421,6 +2430,9 @@ impl WasmTurn {
             let mut request = PromptRequest::new(prompt);
             if let Some(operation_id) = operation_id {
                 request = request.request_id(operation_id);
+            }
+            if cancel_on_admission {
+                request = request.cancel_on_admission();
             }
             let accepted = agent.prompt(request).await;
             match accepted {

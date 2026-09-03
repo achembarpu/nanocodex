@@ -411,14 +411,19 @@ where
                 "managed pending turn capacity is exhausted".to_owned(),
             ));
         }
+        let cancel_on_admission = prompt.cancel_on_admission;
         let input = managed_prompt(prompt.prompt)?;
         let request_id = prompt
             .request_id
             .unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
+        if cancel_on_admission {
+            self.cancel_turn(request_id.clone()).await?;
+        }
         let turn = match call(
             &mut self.service,
             ManagedRequest::Submit {
                 agent_id: self.agent_id.clone(),
+                turn_id: cancel_on_admission.then(|| request_id.clone()),
                 idempotency_key: request_id.clone(),
                 input,
             },

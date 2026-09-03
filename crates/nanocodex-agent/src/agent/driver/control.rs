@@ -121,6 +121,43 @@ pub(super) fn queued_execution_operation(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(super) fn queued_prompt(
+    key: TurnKey,
+    prompt: Prompt,
+    execution_operation: Option<String>,
+    cancel_on_admission: bool,
+    thinking: Thinking,
+    fast_mode: bool,
+    parent: Option<tracing::Span>,
+    events: EventSink,
+    result: oneshot::Sender<Result<TurnResult>>,
+) -> QueuedTurn {
+    if cancel_on_admission {
+        QueuedTurn::Cancelled {
+            prompt,
+            execution_operation,
+            cancellation_committed: false,
+            thinking,
+            fast_mode,
+            parent,
+            events,
+            result,
+        }
+    } else {
+        QueuedTurn::Pending {
+            key,
+            prompt,
+            execution_operation,
+            thinking,
+            fast_mode,
+            parent,
+            events,
+            result,
+        }
+    }
+}
+
 pub(super) fn cancel_queued_turn(
     queued_turns: &mut VecDeque<QueuedTurn>,
     target: TurnKey,
@@ -212,6 +249,7 @@ pub(super) async fn begin_shutdown(
                 prompt,
                 execution_operation,
                 accepted: None,
+                cancel_on_admission,
                 thinking,
                 fast_mode,
                 parent,
@@ -219,16 +257,17 @@ pub(super) async fn begin_shutdown(
                 result,
             } => {
                 let execution_operation = execution_operation.map(ExecutionOperation::into_id);
-                queued_turns.push_back(QueuedTurn::Pending {
+                queued_turns.push_back(queued_prompt(
                     key,
                     prompt,
                     execution_operation,
-                    thinking: thinking.unwrap_or(default_thinking),
-                    fast_mode: fast_mode.unwrap_or(default_fast_mode),
+                    cancel_on_admission,
+                    thinking.unwrap_or(default_thinking),
+                    fast_mode.unwrap_or(default_fast_mode),
                     parent,
                     events,
                     result,
-                });
+                ));
             }
             Command::RoutePrompt {
                 route_result,

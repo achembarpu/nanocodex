@@ -227,7 +227,11 @@ impl Nanocodex {
     /// Returns an error for an empty prompt or request ID, when identified
     /// work is submitted without a configured policy, or if the driver stopped.
     pub async fn prompt(&self, request: impl Into<PromptRequest>) -> Result<Turn> {
-        let PromptRequest { prompt, request_id } = request.into();
+        let PromptRequest {
+            prompt,
+            request_id,
+            cancel_on_admission,
+        } = request.into();
         prompt
             .validate()
             .map_err(|error| NanocodexError::InvalidRequest(error.to_string()))?;
@@ -247,6 +251,7 @@ impl Nanocodex {
                 key,
                 prompt,
                 request_id,
+                cancel_on_admission,
                 events,
             })
             .await?;
@@ -288,6 +293,7 @@ impl Nanocodex {
                 key,
                 prompt,
                 request_id: None,
+                cancel_on_admission: false,
                 events,
             })
             .await

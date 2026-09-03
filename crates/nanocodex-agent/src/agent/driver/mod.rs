@@ -8,7 +8,7 @@ pub(super) use branch::{AgentOrigin, BranchSpawner};
 pub(super) use control::DriverShutdown;
 use control::{
     TurnDefaults, begin_shutdown, cancel_queued_turn, handle_idle_command,
-    mark_all_queued_turns_cancelled, queued_execution_operation,
+    mark_all_queued_turns_cancelled, queued_execution_operation, queued_prompt,
 };
 use telemetry::{ReasoningSettings, agent_compact_span, agent_turn_span, emit_replayed_terminal};
 
@@ -110,6 +110,7 @@ where
                                 execution_operation: execution_operation
                                     .map(ExecutionOperation::Admitted),
                                 accepted: None,
+                                cancel_on_admission: false,
                                 thinking: Some(thinking),
                                 fast_mode: Some(fast_mode),
                                 parent,
@@ -299,6 +300,7 @@ where
                 prompt,
                 execution_operation,
                 accepted: _,
+                cancel_on_admission,
                 thinking,
                 fast_mode,
                 parent,
@@ -523,6 +525,7 @@ where
                                         prompt,
                                         execution_operation,
                                         accepted: _,
+                                        cancel_on_admission,
                                         thinking: _,
                                         fast_mode: _,
                                         parent,
@@ -531,16 +534,17 @@ where
                                     }) => {
                                         let execution_operation =
                                             execution_operation.map(ExecutionOperation::into_id);
-                                        queued_turns.push_back(QueuedTurn::Pending {
+                                        queued_turns.push_back(queued_prompt(
                                             key,
                                             prompt,
                                             execution_operation,
-                                            thinking: default_thinking,
-                                            fast_mode: default_fast_mode,
+                                            cancel_on_admission,
+                                            default_thinking,
+                                            default_fast_mode,
                                             parent,
                                             events,
                                             result,
-                                        });
+                                        ));
                                     }
                                     Some(command @ Command::RoutePrompt { .. }) => {
                                         let mut reopen = false;
@@ -549,6 +553,7 @@ where
                                             prompt,
                                             execution_operation,
                                             accepted: _,
+                                            cancel_on_admission,
                                             thinking: _,
                                             fast_mode: _,
                                             parent,
@@ -579,17 +584,17 @@ where
                                             }
                                             continue;
                                         };
-                                        queued_turns.push_back(QueuedTurn::Pending {
+                                        queued_turns.push_back(queued_prompt(
                                             key,
                                             prompt,
-                                            execution_operation:
-                                                execution_operation.map(ExecutionOperation::into_id),
-                                            thinking: default_thinking,
-                                            fast_mode: default_fast_mode,
+                                            execution_operation.map(ExecutionOperation::into_id),
+                                            cancel_on_admission,
+                                            default_thinking,
+                                            default_fast_mode,
                                             parent,
                                             events,
                                             result,
-                                        });
+                                        ));
                                     }
                                     Some(Command::Compact { parent, result }) => {
                                         compact_replaced = true;
@@ -897,6 +902,20 @@ where
             let execution_operation = execution_operation.map(ExecutionOperation::into_id);
             let thinking = thinking.unwrap_or(default_thinking);
             let fast_mode = fast_mode.unwrap_or(default_fast_mode);
+            if cancel_on_admission {
+                queued_turns.push_front(queued_prompt(
+                    key,
+                    prompt,
+                    execution_operation,
+                    true,
+                    thinking,
+                    fast_mode,
+                    parent,
+                    events,
+                    result,
+                ));
+                continue;
+            }
             turn_index += 1;
             logical_turn_index = logical_turn_index.saturating_add(1);
             let prompt_content = tracing::enabled!(
@@ -1041,6 +1060,7 @@ where
                                 prompt,
                                 execution_operation,
                                 accepted: _,
+                                cancel_on_admission,
                                 thinking: _,
                                 fast_mode: _,
                                 parent,
@@ -1049,16 +1069,17 @@ where
                             }) => {
                                 let execution_operation =
                                     execution_operation.map(ExecutionOperation::into_id);
-                                queued_turns.push_back(QueuedTurn::Pending {
+                                queued_turns.push_back(queued_prompt(
                                     key,
                                     prompt,
                                     execution_operation,
-                                    thinking: default_thinking,
-                                    fast_mode: default_fast_mode,
+                                    cancel_on_admission,
+                                    default_thinking,
+                                    default_fast_mode,
                                     parent,
                                     events,
                                     result,
-                                });
+                                ));
                             }
                             Some(Command::Steer { key: target, prompt, result }) => {
                                 if target != key {
@@ -1590,6 +1611,7 @@ async fn accept_execution_command(
         prompt,
         execution_operation: Some(operation),
         accepted: Some(accepted),
+        cancel_on_admission,
         thinking,
         fast_mode,
         parent,
@@ -1625,6 +1647,7 @@ async fn accept_execution_command(
                 prompt,
                 execution_operation: Some(ExecutionOperation::Admitted(operation_id)),
                 accepted: None,
+                cancel_on_admission,
                 thinking,
                 fast_mode,
                 parent,
@@ -1720,6 +1743,7 @@ async fn accept_idle_route(
             prompt,
             execution_operation: None,
             accepted: None,
+            cancel_on_admission: false,
             thinking: None,
             fast_mode: None,
             parent,
@@ -1747,6 +1771,7 @@ async fn accept_idle_route(
                 prompt,
                 execution_operation: Some(ExecutionOperation::Admitted(operation_id)),
                 accepted: None,
+                cancel_on_admission: false,
                 thinking: None,
                 fast_mode: None,
                 parent,

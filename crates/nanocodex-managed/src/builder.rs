@@ -52,6 +52,8 @@ pub enum ManagedRequest {
     Submit {
         /// Stable managed agent identifier.
         agent_id: String,
+        /// Optional caller-selected turn identifier.
+        turn_id: Option<String>,
         /// Stable idempotency key for this logical request.
         idempotency_key: String,
         /// Complete managed prompt input.
@@ -240,14 +242,23 @@ impl Service<ManagedRequest> for ManagedService {
                 },
                 ManagedRequest::Submit {
                     agent_id,
+                    turn_id,
                     idempotency_key,
                     input,
                 } => {
                     if matches!(transport, ManagedTransport::Http) {
                         return client
-                            .submit(&agent_id, None, &idempotency_key, &input)
+                            .submit(&agent_id, turn_id.as_deref(), &idempotency_key, &input)
                             .await
                             .map(ManagedResponse::Submitted);
+                    }
+                    if turn_id
+                        .as_deref()
+                        .is_some_and(|turn_id| turn_id != idempotency_key)
+                    {
+                        return Err(ManagedError::Configuration(
+                            "managed WebSocket turn ID must match its idempotency key".to_owned(),
+                        ));
                     }
                     let live = socket
                         .lock()

@@ -17,7 +17,8 @@ use axum::{
 };
 use futures_util::{FutureExt, stream};
 use nanocodex_agent::{
-    AgentEvents, Model, Nanocodex, PromptRequest, ReasoningMode, Thinking, TurnControl, TurnResult,
+    AgentEvents, Model, Nanocodex, NanocodexError, PromptRequest, ReasoningMode, Thinking,
+    TurnControl, TurnResult,
 };
 use nanocodex_managed::{
     AgentSettings, Managed, ManagedApiKey, ManagedClient, ManagedError, ManagedEventData,
@@ -39,6 +40,7 @@ const ACTIVE_TURN_ID: &str = "server-turn-active";
 const RETAINED_TURN_ID: &str = "server-turn-retained";
 const ACTIVE_REQUEST_ID: &str = "caller-request-active";
 const RETAINED_REQUEST_ID: &str = "caller-request-retained";
+const CANCELLED_REQUEST_ID: &str = "caller-request-cancelled";
 const TEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Clone)]
@@ -264,6 +266,20 @@ async fn public_managed_lifecycle_preserves_durable_identity_control_and_replay(
             .await
             .expect("fast mode should update through the driver");
 
+        let cancelled = agent
+            .prompt(
+                PromptRequest::new("cancel before managed work")
+                    .request_id(CANCELLED_REQUEST_ID)
+                    .cancel_on_admission(),
+            )
+            .await
+            .expect("cancelled managed prompt should be admitted");
+        assert_eq!(cancelled.request_id(), Some(CANCELLED_REQUEST_ID));
+        assert!(matches!(
+            cancelled.result().await,
+            Err(NanocodexError::TurnCancelled)
+        ));
+
         let mut turn = agent
             .prompt(PromptRequest::new("live prompt").request_id(ACTIVE_REQUEST_ID))
             .await
@@ -450,19 +466,27 @@ async fn public_managed_lifecycle_preserves_durable_identity_control_and_replay(
 
         {
             let submissions = lock(&fixture.inner.submissions);
-            assert_eq!(submissions.len(), 2);
-            assert_eq!(submissions[0].idempotency_key, ACTIVE_REQUEST_ID);
-            assert_eq!(submissions[0].body, json!({"input": "live prompt"}));
-            assert!(submissions[0].body.get("id").is_none());
-            assert_eq!(submissions[1].idempotency_key, RETAINED_REQUEST_ID);
-            assert_eq!(submissions[1].body, json!({"input": "retained prompt"}));
+            assert_eq!(submissions.len(), 3);
+            assert_eq!(submissions[0].idempotency_key, CANCELLED_REQUEST_ID);
+            assert_eq!(
+                submissions[0].body,
+                json!({
+                    "id": CANCELLED_REQUEST_ID,
+                    "input": "cancel before managed work"
+                })
+            );
+            assert_eq!(submissions[1].idempotency_key, ACTIVE_REQUEST_ID);
+            assert_eq!(submissions[1].body, json!({"input": "live prompt"}));
             assert!(submissions[1].body.get("id").is_none());
+            assert_eq!(submissions[2].idempotency_key, RETAINED_REQUEST_ID);
+            assert_eq!(submissions[2].body, json!({"input": "retained prompt"}));
+            assert!(submissions[2].body.get("id").is_none());
         }
 
         assert_eq!(
             lock(&fixture.inner.operations).as_slice(),
             [
-                "create", "settings", "settings", "settings", "submit", "submit"
+                "create", "settings", "settings", "settings", "submit", "submit", "submit"
             ]
         );
         assert_eq!(
@@ -488,22 +512,26 @@ async fn public_managed_lifecycle_preserves_durable_identity_control_and_replay(
 
         {
             let actions = lock(&fixture.inner.actions);
-            assert_eq!(actions.len(), 3);
-            assert_eq!(actions[0].kind, "steer");
+            assert_eq!(actions.len(), 4);
+            assert_eq!(actions[0].kind, "cancel");
             assert_eq!(actions[0].agent_id, AGENT_ID);
-            assert_eq!(actions[0].turn_id, ACTIVE_TURN_ID);
-            assert_eq!(
-                actions[0].body,
-                Some(json!({"input": "follow-up steering"}))
-            );
-            assert_eq!(actions[1].kind, "cancel");
+            assert_eq!(actions[0].turn_id, CANCELLED_REQUEST_ID);
+            assert_eq!(actions[0].body, None);
+            assert_eq!(actions[1].kind, "steer");
             assert_eq!(actions[1].agent_id, AGENT_ID);
             assert_eq!(actions[1].turn_id, ACTIVE_TURN_ID);
-            assert_eq!(actions[1].body, None);
+            assert_eq!(
+                actions[1].body,
+                Some(json!({"input": "follow-up steering"}))
+            );
             assert_eq!(actions[2].kind, "cancel");
             assert_eq!(actions[2].agent_id, AGENT_ID);
             assert_eq!(actions[2].turn_id, ACTIVE_TURN_ID);
             assert_eq!(actions[2].body, None);
+            assert_eq!(actions[3].kind, "cancel");
+            assert_eq!(actions[3].agent_id, AGENT_ID);
+            assert_eq!(actions[3].turn_id, ACTIVE_TURN_ID);
+            assert_eq!(actions[3].body, None);
         }
 
         let latest_error = client
@@ -703,6 +731,23 @@ async fn submit_turn(
             StatusCode::ACCEPTED,
             turn_view(ACTIVE_TURN_ID, "accepted", "live prompt", "41", None, None),
         ),
+        CANCELLED_REQUEST_ID => {
+            let terminal = json!({
+                "type": "turn_cancelled",
+                "id": CANCELLED_REQUEST_ID
+            });
+            json_response(
+                StatusCode::OK,
+                turn_view(
+                    CANCELLED_REQUEST_ID,
+                    "cancelled",
+                    "cancel before managed work",
+                    "40",
+                    Some("40"),
+                    Some(terminal),
+                ),
+            )
+        }
         RETAINED_REQUEST_ID => {
             let terminal = json!({
                 "type": "turn_completed",

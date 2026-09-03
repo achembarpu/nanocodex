@@ -334,7 +334,10 @@ export type AgentActions = {
     };
   };
   turn: {
-    prompt(options: { input: PromptInput; id?: string | undefined }): Turn;
+    prompt(options: {
+      input: PromptInput;
+      id?: string | undefined;
+    }): Turn;
   };
 };
 
@@ -371,7 +374,10 @@ export type AgentLifecycle = {
     shutdown(): Promise<void>;
   };
   turn: {
-    prompt(options: { input: PromptInput; id?: string | undefined }): LifecycleTurn;
+    prompt(options: {
+      input: PromptInput;
+      id?: string | undefined;
+    }): LifecycleTurn;
   };
 };
 

@@ -474,6 +474,33 @@ test("turn acceptance forwards durable IDs and remains optional for custom runti
   agent.dispose();
 });
 
+test("turn prompt forwards atomic cancellation through the WASM boundary", async () => {
+  const calls = [];
+  const raw = rawAgent("cancel-on-admission");
+  const prompt = raw.prompt;
+  raw.prompt = (input, id, cancelOnAdmission) => {
+    calls.push({ input, id, cancelOnAdmission });
+    return prompt(input, id);
+  };
+  const runtime = defineRuntime({
+    create: () => raw,
+    decorate: (agent) => agent.extend(Actions.agentActions()),
+  });
+  const agent = await createAgentClient(runtime);
+
+  await agent.turn.prompt({
+    input: "cancel before work",
+    id: "cancel-1",
+    cancelOnAdmission: true,
+  }).result();
+  assert.deepEqual(calls, [{
+    input: "cancel before work",
+    id: "cancel-1",
+    cancelOnAdmission: true,
+  }]);
+  agent.dispose();
+});
+
 test("the WASM config pairs a durability route with its state", () => {
   assert.deepEqual(toWasmConfig({
     apiKey: "test-key",

@@ -11,7 +11,7 @@ use std::{
 
 use async_trait::async_trait;
 use nanocodex_agent::{
-    Nanocodex, NanocodexError, OpenAi, ResponseError, Tools,
+    Nanocodex, NanocodexError, OpenAi, PromptRequest, ResponseError, Tools,
     rollout::RolloutConfig,
     session::SessionId,
     transport::{ResponsesAttempt, ResponsesServiceResponse},

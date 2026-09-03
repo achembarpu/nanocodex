@@ -55,6 +55,40 @@ async fn caller_service_factory_supports_cancellation() {
 }
 
 #[tokio::test]
+async fn cancel_on_admission_never_dispatches_model_work() {
+    let openai = OpenAi::builder("test")
+        .service(|| NeverCalled)
+        .build()
+        .unwrap();
+    let (agent, mut events) = Nanocodex::builder(openai).build().unwrap();
+    let turn = agent
+        .prompt(PromptRequest::new("cancel before work").cancel_on_admission())
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        turn.result().await,
+        Err(NanocodexError::TurnCancelled)
+    ));
+    let mut observed = Vec::new();
+    loop {
+        let event = tokio::time::timeout(Duration::from_secs(1), events.recv())
+            .await
+            .expect("cancelled admission should publish its terminal events")
+            .expect("event stream should remain open");
+        let terminal = event.kind.is_terminal();
+        observed.push(event.kind);
+        if terminal {
+            break;
+        }
+    }
+    assert!(observed.contains(&nanocodex_agent::events::AgentEventKind::RunStarted));
+    assert!(observed.contains(&nanocodex_agent::events::AgentEventKind::RunFailed));
+    assert!(!observed.contains(&nanocodex_agent::events::AgentEventKind::ModelAttemptStarted));
+    drop((agent, events));
+}
+
+#[tokio::test]
 async fn turn_result_does_not_wait_for_attempt_event_producers_to_close() {
     let (retained, mut retained_attempts) = mpsc::unbounded_channel();
     let openai = OpenAi::builder("test")

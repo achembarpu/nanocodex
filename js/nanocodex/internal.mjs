@@ -85,9 +85,10 @@ export function prompt(agent, options) {
   const state = agentState(agent);
   const input = actionInput(options);
   const operationId = options?.id;
+  const cancelOnAdmission = options?.cancelOnAdmission === true;
   const raw = typeof input === "string"
-    ? state.raw.prompt(input, operationId)
-    : state.raw.promptContent(JSON.stringify(input), operationId);
+    ? state.raw.prompt(input, operationId, cancelOnAdmission)
+    : state.raw.promptContent(JSON.stringify(input), operationId, cancelOnAdmission);
   return createTurn(raw, agent);
 }
 

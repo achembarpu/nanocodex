@@ -261,6 +261,7 @@ mod tests {
 pub struct PromptRequest {
     pub(super) prompt: Prompt,
     pub(super) request_id: Option<String>,
+    pub(super) cancel_on_admission: bool,
 }
 
 impl PromptRequest {
@@ -273,6 +274,7 @@ impl PromptRequest {
         Self {
             prompt: prompt.into(),
             request_id: None,
+            cancel_on_admission: false,
         }
     }
 
@@ -285,6 +287,15 @@ impl PromptRequest {
     #[must_use]
     pub fn request_id(mut self, request_id: impl Into<String>) -> Self {
         self.request_id = Some(request_id.into());
+        self
+    }
+
+    /// Cancels this prompt at its durable admission boundary before model or
+    /// tool work can start.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn cancel_on_admission(mut self) -> Self {
+        self.cancel_on_admission = true;
         self
     }
 }
@@ -362,6 +373,7 @@ pub(super) enum Command {
         prompt: Prompt,
         execution_operation: Option<ExecutionOperation>,
         accepted: Option<oneshot::Sender<Result<String>>>,
+        cancel_on_admission: bool,
         thinking: Option<Thinking>,
         fast_mode: Option<bool>,
         parent: Option<tracing::Span>,

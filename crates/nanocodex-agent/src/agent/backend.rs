@@ -36,6 +36,8 @@ pub struct BackendPrompt {
     pub prompt: Prompt,
     /// Optional caller-owned durable operation identity.
     pub request_id: Option<String>,
+    /// Whether the prompt must be durably cancelled as part of admission.
+    pub cancel_on_admission: bool,
     /// Canonical publisher routing events to both session and turn streams.
     pub events: nanocodex_oai_api::events::AgentEventPublisher,
 }
@@ -255,6 +257,7 @@ impl LifecycleBackend for LocalLifecycle {
                     prompt: request.prompt,
                     execution_operation,
                     accepted,
+                    cancel_on_admission: request.cancel_on_admission,
                     thinking: None,
                     fast_mode: None,
                     parent,
