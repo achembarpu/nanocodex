@@ -60,6 +60,8 @@ export type ToolActivity = Readonly<{
   status: ToolStatus;
   durationNs?: number | undefined;
   images?: readonly string[] | undefined;
+  /** Provider-neutral execution metadata retained with the terminal result. */
+  metadata?: unknown;
   children: readonly ToolActivity[];
 }>;
 

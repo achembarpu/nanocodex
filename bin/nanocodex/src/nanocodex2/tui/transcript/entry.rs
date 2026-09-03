@@ -124,7 +124,7 @@ pub(crate) enum ToolExecution {
 
 impl ToolExecution {
     pub(crate) fn infer(name: &str, arguments: &Value, metadata: Option<&Value>) -> Self {
-        let identity = ToolIdentity::decode(name);
+        let identity = ToolIdentity::decode(metadata.and_then(tool_name).unwrap_or(name));
         if let Some(machine) = metadata.and_then(machine_name).or(identity.machine) {
             return Self::Machine {
                 name: machine.to_owned(),
@@ -189,7 +189,13 @@ impl ToolEntry {
     }
 
     pub(crate) fn family(&self) -> &str {
-        ToolIdentity::decode(&self.name).family
+        ToolIdentity::decode(
+            self.metadata
+                .as_ref()
+                .and_then(tool_name)
+                .unwrap_or(&self.name),
+        )
+        .family
     }
 
     pub(crate) fn has_mcp_origin(&self) -> bool {
@@ -298,6 +304,10 @@ fn machine_name(value: &Value) -> Option<&str> {
     find_string(value, &["machine_name", "machineName"])
         .or_else(|| value.get("machine").and_then(machine_value_name))
         .or_else(|| value.get("executor").and_then(machine_value_name))
+}
+
+fn tool_name(value: &Value) -> Option<&str> {
+    find_string(value, &["tool_name", "toolName"])
 }
 
 fn machine_value_name(value: &Value) -> Option<&str> {

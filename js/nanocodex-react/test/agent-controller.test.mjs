@@ -142,7 +142,9 @@ test("tool activities retain bounded input, successful output, duration, images,
       }));
       source.emit(event(24, "tool.result", {
         call_id: "machine", status: "completed",
-        result: JSON.stringify([{ type: "input_image", image_url: "data:image/png;base64,AA==" }]),
+        result: "model-visible fallback",
+        structured_result: [{ type: "input_image", image_url: "data:image/png;base64,AA==" }],
+        metadata: { machine_name: "Machine A", tool_name: "exec_command" },
         turn_id: "turn-tools",
       }));
       source.emit(event(25, "tool.result", {
@@ -158,6 +160,13 @@ test("tool activities retain bounded input, successful output, duration, images,
     assert.match(completed[2].tool.output, /preview\.example\.test/);
     assert.equal(JSON.parse(completed[3].tool.output).status, "ready");
     assert.deepEqual(completed[4].tool.images, ["data:image/png;base64,AA=="]);
+    assert.deepEqual(JSON.parse(completed[4].tool.output), [
+      { type: "input_image", image_url: "data:image/png;base64,AA==" },
+    ]);
+    assert.deepEqual(completed[4].tool.metadata, {
+      machine_name: "Machine A",
+      tool_name: "exec_command",
+    });
     assert.equal(completed[5].tool.result, undefined);
     assert.match(completed[5].tool.output, /"issues"/);
     assert.ok(completed[5].tool.output.length <= 4_002);

@@ -7,7 +7,7 @@ use ratatui::style::Style;
 use serde_json::Value;
 
 pub(super) fn present(tool: &ToolEntry, width: u16, theme: &Theme, expanded: bool) -> Presentation {
-    if tool.name == "wait" {
+    if tool.family() == "wait" {
         return wait(tool, width, theme, expanded);
     }
     let source = tool.arguments.as_str().unwrap_or_else(|| {

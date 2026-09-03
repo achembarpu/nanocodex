@@ -109,7 +109,7 @@ describe("Cloudflare sandbox tools", () => {
     expect(result).toMatchObject({ success: true, stdout: "clone-visible" });
     expect(sandbox.startProcess).toHaveBeenCalledWith(clone, {
       cwd: "/workspace",
-      autoCleanup: true,
+      autoCleanup: false,
     });
     expect(sandbox.exec.mock.calls.filter(([command]) => isMountProbe(command))).toHaveLength(4);
     expect(sandbox.mountBucket).toHaveBeenCalledTimes(1);
@@ -251,6 +251,160 @@ describe("Cloudflare sandbox tools", () => {
     });
     const process = await sandbox.startProcess.mock.results[0]!.value;
     expect(process.waitForPort).toHaveBeenCalledWith(3_000, undefined);
+  });
+
+  it("retrieves authoritative background process state and bounded logs", async () => {
+    const sandbox = fakeSandbox();
+    const process = fakeProcess({
+      id: "proc_123",
+      pid: 42,
+      command: "cargo test",
+      status: "failed" as const,
+      exitCode: 101,
+    });
+    process.getLogs.mockResolvedValue({
+      stdout: "compiled\n",
+      stderr: "test failed\n",
+    });
+    sandbox.getProcess.mockResolvedValue(process);
+    const tools = createCloudflareSandboxTools(async () => sandbox);
+
+    await expect(tools.sandbox_get_process!.handler({ process_id: "proc_123" }, context))
+      .resolves.toEqual({
+        found: true,
+        process_id: "proc_123",
+        pid: 42,
+        command: "cargo test",
+        status: "failed",
+        terminal: true,
+        exit_code: 101,
+        stdout: "compiled\n",
+        stderr: "test failed\n",
+        stdout_truncated: false,
+        stderr_truncated: false,
+      });
+    expect(sandbox.getProcess).toHaveBeenCalledWith("proc_123");
+    expect(process.getLogs).toHaveBeenCalledOnce();
+  });
+
+  it("polls running and missing processes without repeatedly transferring logs", async () => {
+    const sandbox = fakeSandbox();
+    const running = fakeProcess({
+      id: "proc_running",
+      command: "cargo test",
+      status: "running" as const,
+    });
+    running.getLogs.mockResolvedValue({ stdout: "compiling", stderr: "" });
+    sandbox.getProcess
+      .mockResolvedValueOnce(running)
+      .mockResolvedValueOnce(null);
+    const tools = createCloudflareSandboxTools(async () => sandbox);
+
+    await expect(tools.sandbox_get_process!.handler({ process_id: "proc_running" }, context))
+      .resolves.toEqual({
+        found: true,
+        process_id: "proc_running",
+        pid: 1,
+        command: "cargo test",
+        status: "running",
+        terminal: false,
+        exit_code: null,
+      });
+    expect(running.getLogs).not.toHaveBeenCalled();
+    await expect(tools.sandbox_get_process!.handler({ process_id: "proc_missing" }, context))
+      .resolves.toEqual({ found: false, process_id: "proc_missing" });
+    await expect(tools.sandbox_get_process!.handler({ process_id: "../other" }, context))
+      .rejects.toThrow("process_id must be a safe Sandbox process ID");
+  });
+
+  it("returns partial running output only when explicitly requested", async () => {
+    const sandbox = fakeSandbox();
+    const running = fakeProcess({ id: "proc_running", status: "running" });
+    running.getLogs.mockResolvedValue({ stdout: "compiling", stderr: "warning" });
+    sandbox.getProcess.mockResolvedValue(running);
+    const tools = createCloudflareSandboxTools(async () => sandbox);
+
+    await expect(tools.sandbox_get_process!.handler({
+      process_id: "proc_running",
+      include_output: true,
+    }, context)).resolves.toMatchObject({
+      terminal: false,
+      stdout: "compiling",
+      stderr: "warning",
+    });
+    expect(running.getLogs).toHaveBeenCalledOnce();
+  });
+
+  it("terminates a running background process and reports its refreshed status", async () => {
+    const sandbox = fakeSandbox();
+    const process = fakeProcess({ id: "proc_running", status: "running" });
+    process.getStatus.mockResolvedValue("killed");
+    sandbox.getProcess.mockResolvedValue(process);
+    const tools = createCloudflareSandboxTools(async () => sandbox);
+
+    await expect(tools.sandbox_kill_process!.handler(
+      { process_id: "proc_running" },
+      context,
+    )).resolves.toEqual({
+      found: true,
+      process_id: "proc_running",
+      status: "killed",
+      terminal: true,
+      kill_requested: true,
+    });
+    expect(process.kill).toHaveBeenCalledOnce();
+    expect(process.getStatus).toHaveBeenCalledOnce();
+  });
+
+  it("does not kill missing or already-terminal background processes", async () => {
+    const sandbox = fakeSandbox();
+    const completed = fakeProcess({ id: "proc_completed", status: "completed" });
+    sandbox.getProcess
+      .mockResolvedValueOnce(completed)
+      .mockResolvedValueOnce(null);
+    const tools = createCloudflareSandboxTools(async () => sandbox);
+
+    await expect(tools.sandbox_kill_process!.handler(
+      { process_id: "proc_completed" },
+      context,
+    )).resolves.toEqual({
+      found: true,
+      process_id: "proc_completed",
+      status: "completed",
+      terminal: true,
+      kill_requested: false,
+    });
+    await expect(tools.sandbox_kill_process!.handler(
+      { process_id: "proc_missing" },
+      context,
+    )).resolves.toEqual({ found: false, process_id: "proc_missing" });
+    expect(completed.kill).not.toHaveBeenCalled();
+    expect(completed.getStatus).not.toHaveBeenCalled();
+  });
+
+  it("truncates background process stdout and stderr on UTF-8 boundaries", async () => {
+    const sandbox = fakeSandbox();
+    const process = fakeProcess({
+      id: "proc_flood",
+      command: "flood",
+      status: "completed" as const,
+      exitCode: 0,
+    });
+    process.getLogs.mockResolvedValue({
+      stdout: "🦀".repeat(40_000),
+      stderr: "λ".repeat(80_000),
+    });
+    sandbox.getProcess.mockResolvedValue(process);
+    const tools = createCloudflareSandboxTools(async () => sandbox);
+
+    const result = (await tools.sandbox_get_process!.handler(
+      { process_id: "proc_flood" },
+      context,
+    )) as Record<string, unknown>;
+    expect(result.stdout_truncated).toBe(true);
+    expect(result.stderr_truncated).toBe(true);
+    expect(new TextEncoder().encode(String(result.stdout)).byteLength).toBe(128 * 1024);
+    expect(new TextEncoder().encode(String(result.stderr)).byteLength).toBe(128 * 1024);
   });
 
   it("keeps account credentials and origin authority out of sandbox previews", async () => {
@@ -477,7 +631,20 @@ describe("Cloudflare sandbox tools", () => {
   });
 });
 
+type FakeLookupProcess = {
+  id: string;
+  pid?: number;
+  command: string;
+  status: "starting" | "running" | "completed" | "failed" | "killed" | "error";
+  exitCode?: number;
+  kill(): Promise<void>;
+  getStatus(): Promise<"starting" | "running" | "completed" | "failed" | "killed" | "error">;
+  getLogs(): Promise<{ stdout: string; stderr: string }>;
+  waitForPort(port: number, options?: { timeout?: number }): Promise<void>;
+};
+
 function fakeSandbox() {
+  const process = fakeProcess();
   return {
     exec: vi.fn(async (_command: string, _options?: { cwd: string; timeout?: number }) => ({
       success: true,
@@ -486,14 +653,10 @@ function fakeSandbox() {
       stderr: "",
       duration: 1,
     })),
-    startProcess: vi.fn(async (command: string) => ({
-      id: "process",
-      pid: 1,
-      command,
-      status: "running",
-      getStatus: vi.fn(async () => "running"),
-      waitForPort: vi.fn(async () => {}),
-    })),
+    startProcess: vi.fn(async (command: string) => ({ ...process, command })),
+    getProcess: vi.fn(async (id: string): Promise<FakeLookupProcess | null> => (
+      id === process.id ? process : null
+    )),
     readFile: vi.fn(async () => ({
       size: 0,
       content: new ReadableStream<Uint8Array>({ start(controller) { controller.close(); } }),
@@ -501,6 +664,23 @@ function fakeSandbox() {
     writeFile: vi.fn(async () => {}),
     listFiles: vi.fn(async () => ({ files: [] })),
     tunnels: { get: vi.fn(async () => ({ url: "https://preview.example" })) },
+  };
+}
+
+function fakeProcess(overrides: Partial<Pick<
+  FakeLookupProcess,
+  "id" | "pid" | "command" | "status" | "exitCode"
+>> = {}) {
+  return {
+    id: "process",
+    pid: 1,
+    command: "",
+    status: "running" as const,
+    kill: vi.fn(async () => {}),
+    getStatus: vi.fn(async (): Promise<FakeLookupProcess["status"]> => "running"),
+    getLogs: vi.fn(async () => ({ stdout: "", stderr: "" })),
+    waitForPort: vi.fn(async () => {}),
+    ...overrides,
   };
 }
 

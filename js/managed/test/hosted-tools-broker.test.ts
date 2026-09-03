@@ -144,8 +144,22 @@ describe("HostedToolsBroker socket-owned protocol", () => {
     expect(callB.name).toBe("exec_command");
     await fixture.broker.message(routeA.webSocket, result(callA.call_id as string, "from A"));
     await fixture.broker.message(routeB.webSocket, result(callB.call_id as string, "from B"));
-    await expect(pendingA).resolves.toMatchObject({ output: "from A" });
-    await expect(pendingB).resolves.toMatchObject({ output: "from B" });
+    await expect(pendingA).resolves.toMatchObject({
+      output: "from A",
+      metadata: {
+        machine_id: "machine-a",
+        machine_name: "Machine A",
+        tool_name: "exec_command",
+      },
+    });
+    await expect(pendingB).resolves.toMatchObject({
+      output: "from B",
+      metadata: {
+        machine_id: "machine-b",
+        machine_name: "Machine B",
+        tool_name: "exec_command",
+      },
+    });
 
     const replacementA = fixture.socket();
     await fixture.broker.message(replacementA.webSocket, JSON.stringify({
@@ -273,7 +287,14 @@ describe("HostedToolsBroker socket-owned protocol", () => {
     const call = host.sent.find((candidate) => candidate.type === "call")!;
     expect(call.name).toBe(originalName);
     await fixture.broker.message(host.webSocket, result(call.call_id as string, "long route"));
-    await expect(pending).resolves.toMatchObject({ output: "long route" });
+    await expect(pending).resolves.toMatchObject({
+      output: "long route",
+      metadata: {
+        machine_id: machineId,
+        machine_name: "Long machine",
+        tool_name: originalName,
+      },
+    });
   });
 
   it("removes machines when an open host lease expires", async () => {

@@ -92,12 +92,33 @@ export async function cloudflareSandboxSmokeSetup(
     }));
     assert(/exceeds 1 MiB/.test(oversizedError), "oversized UTF-8 write was not rejected");
 
+    const background = record(await invoke(tools, "sandbox_start_process", {
+      command: "sh -c 'printf background-output; printf background-error >&2; exit 7'",
+    }));
+    const processId = String(background.process_id);
+    let backgroundResult: Record<string, unknown> | undefined;
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      backgroundResult = record(await invoke(tools, "sandbox_get_process", {
+        process_id: processId,
+      }));
+      if (backgroundResult.terminal === true) break;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    assert(backgroundResult?.status === "failed", "background process did not reach failed state");
+    assert(backgroundResult.exit_code === 7, "background process exit code was not retained");
+    assert(backgroundResult.stdout === "background-output", "background stdout was not retained");
+    assert(backgroundResult.stderr === "background-error", "background stderr was not retained");
+
     const process = record(await invoke(tools, "sandbox_start_process", {
       command: "node -e 'require(\"http\").createServer((q,s)=>require(\"fs\").createReadStream(\"/workspace/probe.txt\").pipe(s)).listen(8000)'",
       ready_port: 8000,
       ready_timeout_ms: 10_000,
     }));
     assert(process.ready_port === 8000, "managed process did not report port readiness");
+    const server = record(await invoke(tools, "sandbox_get_process", {
+      process_id: process.process_id,
+    }));
+    assert(server.found === true && server.terminal === false, "preview process was not observable");
     const preview = record(await invoke(tools, "sandbox_preview", { port: 8000 }));
     const previewUrl = new URL("probe.txt", String(preview.url));
     assert(previewUrl.protocol === "https:", `preview returned an invalid URL: ${previewUrl.href}`);
@@ -115,6 +136,7 @@ export async function cloudflareSandboxSmokeSetup(
         "command_timeout",
         "path_confinement",
         "write_size_limit",
+        "background_process_result",
         "managed_process_preview",
       ],
       duration_ms: Date.now() - started,

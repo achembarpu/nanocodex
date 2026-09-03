@@ -530,13 +530,31 @@ function applyToolResult(entries, event, turnId) {
 }
 
 function completedTool(tool, payload, status) {
-  const images = extractImageUrls(payload.result);
+  const result = preferredToolResult(payload.structured_result, payload.result);
+  const images = extractImageUrls(result);
   return {
     ...tool, status, durationNs: payloadNumber(payload, "duration_ns"),
     ...(images ? { images } : {}),
-    result: summarizeToolResult(tool.name, payload.result, status),
-    output: serializeToolDetail(payload.result),
+    ...(payload.metadata === undefined || payload.metadata === null
+      ? {}
+      : { metadata: payload.metadata }),
+    result: summarizeToolResult(tool.name, result, status),
+    output: serializeToolDetail(result),
   };
+}
+
+function preferredToolResult(structured, modelVisible) {
+  const decoded = decodeJsonString(structured);
+  if (hasUsefulToolResult(decoded)) return decoded;
+  return decodeJsonString(modelVisible);
+}
+
+function hasUsefulToolResult(value) {
+  if (value === undefined || value === null) return false;
+  if (typeof value === "string") return value.trim().length > 0;
+  if (Array.isArray(value)) return value.length > 0;
+  if (isObject(value)) return Object.keys(value).length > 0;
+  return true;
 }
 
 function decodePlanUpdate(value) {

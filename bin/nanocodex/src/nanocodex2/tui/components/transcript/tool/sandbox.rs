@@ -9,10 +9,79 @@ use serde_json::Value;
 pub(super) fn present(tool: &ToolEntry, width: u16, theme: &Theme, expanded: bool) -> Presentation {
     match tool.family() {
         "sandbox_exec" => exec(tool, width, theme, expanded),
+        "sandbox_get_process" => get_process(tool, width, theme, expanded),
+        "sandbox_kill_process" => process_control(tool, "Stop process", width, theme, expanded),
+        "sandbox_list_files" => file_operation(tool, "List files", width, theme, expanded),
         "sandbox_start_process" => process(tool, width, theme, expanded),
         "sandbox_preview" => preview(tool, width, theme, expanded),
+        "sandbox_read_file" => file_operation(tool, "Read file", width, theme, expanded),
+        "sandbox_write_file" => file_operation(tool, "Write file", width, theme, expanded),
         _ => super::generic(tool, width, theme, expanded),
     }
+}
+
+fn process_control(
+    tool: &ToolEntry,
+    title: &str,
+    width: u16,
+    theme: &Theme,
+    expanded: bool,
+) -> Presentation {
+    let process_id = tool
+        .arguments
+        .get("process_id")
+        .and_then(Value::as_str)
+        .unwrap_or("<process unavailable>");
+    let mut presentation = Presentation::new(title, process_id).truncate_summary();
+    if let Some(outcome) = process_status(tool.result.as_ref()) {
+        presentation = presentation.outcome(outcome);
+    }
+    if expanded {
+        super::with_generic_details(presentation, tool, width, theme)
+    } else {
+        presentation
+    }
+}
+
+fn file_operation(
+    tool: &ToolEntry,
+    title: &str,
+    width: u16,
+    theme: &Theme,
+    expanded: bool,
+) -> Presentation {
+    let path = tool
+        .arguments
+        .get("path")
+        .and_then(Value::as_str)
+        .unwrap_or("/workspace");
+    let presentation = Presentation::new(title, path).truncate_summary();
+    if expanded {
+        super::with_generic_details(presentation, tool, width, theme)
+    } else {
+        presentation
+    }
+}
+
+fn get_process(tool: &ToolEntry, width: u16, theme: &Theme, expanded: bool) -> Presentation {
+    let process_id = tool
+        .arguments
+        .get("process_id")
+        .and_then(Value::as_str)
+        .unwrap_or("<process unavailable>");
+    let mut presentation = Presentation::new("Check process", process_id).truncate_summary();
+    if let Some(outcome) = process_status(tool.result.as_ref()) {
+        presentation = presentation.outcome(outcome);
+    }
+    if !expanded {
+        return presentation;
+    }
+    let command = tool
+        .result
+        .as_ref()
+        .and_then(|result| result.get("command"))
+        .and_then(Value::as_str);
+    execution_details(presentation, tool, command, width, theme)
 }
 
 fn exec(tool: &ToolEntry, width: u16, theme: &Theme, expanded: bool) -> Presentation {
@@ -37,7 +106,19 @@ fn exec(tool: &ToolEntry, width: u16, theme: &Theme, expanded: bool) -> Presenta
             Style::default().fg(theme.muted()),
         ));
     }
-    presentation = labeled_text(presentation, "command", command, width, theme);
+    execution_details(presentation, tool, Some(command), width, theme)
+}
+
+fn execution_details(
+    mut presentation: Presentation,
+    tool: &ToolEntry,
+    command: Option<&str>,
+    width: u16,
+    theme: &Theme,
+) -> Presentation {
+    if let Some(command) = command {
+        presentation = labeled_text(presentation, "command", command, width, theme);
+    }
     let stdout = result_string(tool, "stdout");
     let stderr = result_string(tool, "stderr");
     if let Some(stdout) = stdout {
@@ -121,18 +202,31 @@ fn exec_outcome(result: Option<&Value>) -> Option<String> {
 fn process_outcome(result: Option<&Value>) -> Option<String> {
     let result = result?;
     let mut parts = Vec::new();
-    if let Some(pid) = result
-        .get("pid")
-        .or_else(|| result.get("process_id"))
-        .and_then(value_label)
-    {
+    if let Some(pid) = result.get("pid").and_then(value_label) {
         parts.push(format!("PID {pid}"));
+    } else if let Some(process_id) = result.get("process_id").and_then(value_label) {
+        parts.push(format!("process {process_id}"));
     }
     if let Some(status) = result.get("status").and_then(Value::as_str) {
         parts.push(status.replace('_', " "));
     }
     if let Some(port) = result.get("ready_port").and_then(Value::as_u64) {
         parts.push(format!("port {port} ready"));
+    }
+    (!parts.is_empty()).then(|| parts.join(" · "))
+}
+
+fn process_status(result: Option<&Value>) -> Option<String> {
+    let result = result?;
+    if result.get("found").and_then(Value::as_bool) == Some(false) {
+        return Some("not found".to_owned());
+    }
+    let mut parts = Vec::new();
+    if let Some(status) = result.get("status").and_then(Value::as_str) {
+        parts.push(status.replace('_', " "));
+    }
+    if let Some(code) = result.get("exit_code").and_then(Value::as_i64) {
+        parts.push(format!("exit {code}"));
     }
     (!parts.is_empty()).then(|| parts.join(" · "))
 }

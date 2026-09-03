@@ -12,7 +12,7 @@ use std::path::Path;
 use syntect::easy::HighlightLines;
 
 pub(super) fn present(tool: &ToolEntry, width: u16, theme: &Theme, expanded: bool) -> Presentation {
-    if tool.name == "write_stdin" {
+    if tool.family() == "write_stdin" {
         return stdin(tool, width, theme, expanded);
     }
     let command = tool

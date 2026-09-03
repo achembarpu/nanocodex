@@ -155,14 +155,12 @@ fn present(tool: &ToolEntry, width: u16, theme: &Theme, expanded: bool) -> Prese
         return subagent::present(tool, width, theme, expanded);
     }
     match tool.family() {
-        "sandbox_exec" | "sandbox_start_process" | "sandbox_preview" => {
-            sandbox::present(tool, width, theme, expanded)
-        }
+        family if family.starts_with("sandbox_") => sandbox::present(tool, width, theme, expanded),
         "exec_command" | "write_stdin" => shell::present(tool, width, theme, expanded),
         "update_plan" => plan::present(tool, width, theme, expanded),
         "apply_patch" => patch::present(tool, width, theme, expanded),
         "web__run" => web::present(tool, width, theme, expanded),
-        "browser" => browser::present(tool, width, theme, expanded),
+        "browser" | "browser_execute" => browser::present(tool, width, theme, expanded),
         "view_image" | "image_gen__imagegen" => media::present(tool, width, theme, expanded),
         "memory" => memory::present(tool, width, theme, expanded),
         "exec" | "wait" => code::present(tool, width, theme, expanded),
@@ -1331,6 +1329,25 @@ mod tests {
             "status": "running",
             "ready_port": 8000
         }));
+        let mut process_status = tool("sandbox_get_process", json!({"process_id": "proc-1"}));
+        process_status.result = Some(json!({
+            "found": true,
+            "process_id": "proc-1",
+            "command": "cargo test",
+            "status": "failed",
+            "terminal": true,
+            "exit_code": 101,
+            "stdout": "compiled\n",
+            "stderr": "test failed\n"
+        }));
+        let mut stopped = tool("sandbox_kill_process", json!({"process_id": "proc-2"}));
+        stopped.result = Some(json!({
+            "found": true,
+            "process_id": "proc-2",
+            "status": "killed",
+            "terminal": true,
+            "kill_requested": true
+        }));
         let mut preview = tool("sandbox_preview", json!({"port": 8000}));
         preview.result = Some(json!({
             "port": 8000,
@@ -1344,6 +1361,12 @@ mod tests {
             .map(ToString::to_string)
             .collect::<String>();
         let process_summary = render(&process, 120, &Theme::default())[0].to_string();
+        let process_status_summary = render(&process_status, 120, &Theme::default())[0].to_string();
+        let process_status_details = render_expanded(&process_status, 120, &Theme::default())
+            .iter()
+            .map(ToString::to_string)
+            .collect::<String>();
+        let stopped_summary = render(&stopped, 120, &Theme::default())[0].to_string();
         let preview_summary = render(&preview, 120, &Theme::default())[0].to_string();
 
         assert!(
@@ -1378,6 +1401,26 @@ mod tests {
             "{process_summary}"
         );
         assert!(
+            process_status_summary.contains("Check process  proc-1"),
+            "{process_status_summary}"
+        );
+        assert!(
+            process_status_summary.contains("failed · exit 101"),
+            "{process_status_summary}"
+        );
+        assert!(
+            stopped_summary.contains("Stop process  proc-2")
+                && stopped_summary.contains("killed")
+                && stopped_summary.contains("Sandbox"),
+            "{stopped_summary}"
+        );
+        for expected in ["cargo test", "compiled", "test failed"] {
+            assert!(
+                process_status_details.contains(expected),
+                "missing {expected:?}: {process_status_details}"
+            );
+        }
+        assert!(
             preview_summary.contains("Open preview  port 8000"),
             "{preview_summary}"
         );
@@ -1407,6 +1450,56 @@ mod tests {
         assert!(sandbox.contains("Run command  $ pwd"), "{sandbox}");
         assert!(sandbox.contains("Machine machine-a · /repo"), "{sandbox}");
         assert!(!sandbox.contains("Sandbox"), "{sandbox}");
+    }
+
+    #[test]
+    fn machine_metadata_disambiguates_qualified_names() {
+        let mut shell = tool(
+            "user_build_agent_exec_command",
+            json!({"cmd": "pwd", "workdir": "/repo"}),
+        );
+        shell.metadata = Some(json!({
+            "machine_id": "build_agent",
+            "machine_name": "Build Agent",
+            "tool_name": "exec_command"
+        }));
+        shell.infer_execution();
+
+        let rendered = render(&shell, 120, &Theme::default())[0].to_string();
+
+        assert!(rendered.contains("Shell  $ pwd"), "{rendered}");
+        assert!(
+            rendered.contains("Machine Build Agent · /repo"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("agent exec command"), "{rendered}");
+    }
+
+    #[test]
+    fn qualified_specialized_tools_dispatch_by_normalized_family() {
+        let stdin = tool(
+            "user_machine-a_write_stdin",
+            json!({"session_id": 7, "chars": "y\n"}),
+        );
+        let image = tool(
+            "user_machine-a_view_image",
+            json!({"path": "/repo/result.png", "detail": "original"}),
+        );
+        let wait = tool("user_machine-a_wait", json!({"cell_id": "cell-7"}));
+
+        let stdin = render(&stdin, 120, &Theme::default())[0].to_string();
+        let image = render(&image, 120, &Theme::default())[0].to_string();
+        let wait = render(&wait, 120, &Theme::default())[0].to_string();
+
+        assert!(stdin.contains("Shell input  send \"y\\n\""), "{stdin}");
+        assert!(stdin.contains("Machine machine-a"), "{stdin}");
+        assert!(
+            image.contains("Image  /repo/result.png · original"),
+            "{image}"
+        );
+        assert!(image.contains("Machine machine-a"), "{image}");
+        assert!(wait.contains("Wait  background work"), "{wait}");
+        assert!(wait.contains("Machine machine-a"), "{wait}");
     }
 
     #[test]

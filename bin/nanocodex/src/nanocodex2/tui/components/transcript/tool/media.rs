@@ -8,7 +8,7 @@ use serde_json::Value;
 use std::path::Path;
 
 pub(super) fn present(tool: &ToolEntry, width: u16, theme: &Theme, expanded: bool) -> Presentation {
-    if tool.name == "view_image" {
+    if tool.family() == "view_image" {
         return view_image(tool, width, theme, expanded);
     }
     image_generation(tool, width, theme, expanded)

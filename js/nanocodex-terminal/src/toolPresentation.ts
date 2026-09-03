@@ -18,12 +18,14 @@ const TITLE_OVERRIDES: Readonly<Record<string, string>> = {
   exec: "Run code",
   exec_command: "Run command",
   sandbox_exec: "Run command",
+  sandbox_get_process: "Check process",
+  sandbox_kill_process: "Stop process",
   sandbox_preview: "Open preview",
   sandbox_start_process: "Start process",
 };
 
 export function presentTool(tool: ToolActivity): ToolPresentation {
-  const decodedName = decodeToolName(tool.name);
+  const decodedName = decodeToolName(tool.name, tool.metadata);
   const input = parseDetail(tool.input ?? tool.arguments);
   const output = parseDetail(tool.output ?? tool.result);
   const family = decodedName.family;
@@ -49,9 +51,11 @@ function semanticExecutionDetails(
   input: unknown,
   output: unknown,
 ): Pick<ToolPresentation, "inputDetail" | "outputDetails"> | undefined {
-  if (family !== "sandbox_exec" && family !== "exec_command") return undefined;
+  if (family !== "sandbox_exec" && family !== "sandbox_get_process" && family !== "exec_command") return undefined;
   const commandKey = family === "exec_command" ? "cmd" : "command";
-  const command = isRecord(input) ? stringField(input, commandKey) : undefined;
+  const command = family === "sandbox_get_process"
+    ? isRecord(output) ? stringField(output, "command") : undefined
+    : isRecord(input) ? stringField(input, commandKey) : undefined;
   const outputRecord = isRecord(output) ? output : undefined;
   const stdout = outputRecord
     ? stringField(outputRecord, family === "exec_command" ? "output" : "stdout")
@@ -92,10 +96,13 @@ export function boundedToolDetail(value: string): string {
   return lines.length > 24 ? `${output}\n…` : output;
 }
 
-function decodeToolName(name: string): { family: string; sources: string[] } {
+function decodeToolName(name: string, metadata: unknown): { family: string; sources: string[] } {
   const sources: string[] = [];
-  let family = name;
-  if (family.startsWith("user_")) {
+  const metadataName = findMetadataString(metadata, ["tool_name", "toolName"]);
+  const metadataMachine = findMetadataString(metadata, ["machine_name", "machineName"]);
+  let family = metadataName ?? name;
+  if (metadataMachine) sources.push(`Machine ${metadataMachine}`);
+  if (!metadataName && family.startsWith("user_")) {
     const separator = family.indexOf("_", 5);
     if (separator > 5 && separator < family.length - 1) {
       sources.push(`Machine ${family.slice(5, separator)}`);
@@ -109,12 +116,24 @@ function decodeToolName(name: string): { family: string; sources: string[] } {
   }
   if (sources.length === 0 && family.startsWith("sandbox_")) sources.push("Sandbox");
   if (family.startsWith("browser_")) {
-    if (sources.length === 0) sources.push("Web client");
+    if (sources.length === 0) sources.push(family === "browser_execute" ? "Managed browser" : "Web client");
     family = family.slice("browser_".length);
   } else if (sources.length === 0 && family === "exec_command") sources.push("Local");
   else if (sources.length === 0 && SUBAGENT_TOOLS.has(family)) sources.push("Subagent");
   else if (sources.length === 0 && family === "accountInfo") sources.push("Account");
   return { family, sources };
+}
+
+function findMetadataString(value: unknown, keys: readonly string[]): string | undefined {
+  if (!isRecord(value)) return undefined;
+  for (const key of keys) {
+    if (typeof value[key] === "string") return value[key];
+  }
+  for (const nested of Object.values(value)) {
+    const found = findMetadataString(nested, keys);
+    if (found) return found;
+  }
+  return undefined;
 }
 
 const SUBAGENT_TOOLS = new Set([
@@ -152,7 +171,7 @@ function summarizeInput(family: string, input: unknown): string | undefined {
     if (family === "sandbox_preview" && typeof input.port === "number") return `Port ${input.port}`;
     const command = stringField(input, family === "exec_command" ? "cmd" : "command");
     if (command) return compact(command);
-    for (const key of ["path", "file_path", "query", "url", "port", "session_id"]) {
+    for (const key of ["path", "file_path", "query", "url", "port", "process_id", "session_id"]) {
       const value = input[key];
       if (typeof value === "string" || typeof value === "number") return compact(String(value));
     }
@@ -169,21 +188,31 @@ function summarizeOutput(family: string, output: unknown): string | undefined {
       const summary = summarizeSubagentOutput(family, output);
       if (summary) return summary;
     }
+    if (family === "sandbox_get_process") {
+      if (output.found === false) return "Not found";
+      const parts = executionSummaryParts(output);
+      const status = stringField(output, "status");
+      if (status) parts.unshift(humanize(status));
+      if (parts.length) return parts.join(" · ");
+    }
+    if (family === "sandbox_kill_process") {
+      if (output.found === false) return "Not found";
+      const status = stringField(output, "status");
+      if (status) return humanize(status);
+    }
     if (family === "sandbox_exec" || family === "exec_command") {
-      const parts: string[] = [];
-      const exitCode = numberField(output, "exit_code");
-      if (exitCode !== undefined) parts.push(`Exit ${exitCode}`);
-      addLineCount(parts, output, "stdout");
-      addLineCount(parts, output, "stderr");
+      const parts = executionSummaryParts(output);
       if (family === "exec_command") addLineCount(parts, output, "output");
       if (parts.length) return parts.join(" · ");
     }
     if (family === "sandbox_start_process") {
       const parts: string[] = [];
+      const processId = stringField(output, "process_id");
       const pid = numberField(output, "pid");
       const status = stringField(output, "status");
       const port = numberField(output, "ready_port");
       if (pid !== undefined) parts.push(`PID ${pid}`);
+      else if (processId) parts.push(`Process ${compact(processId)}`);
       if (status) parts.push(humanize(status));
       if (port !== undefined) parts.push(`Port ${port} ready`);
       if (parts.length) return parts.join(" · ");
@@ -212,6 +241,15 @@ function summarizeOutput(family: string, output: unknown): string | undefined {
   if (typeof output === "string") return compact(output);
   if (output === undefined || output === null) return undefined;
   return compact(String(output));
+}
+
+function executionSummaryParts(output: JsonRecord): string[] {
+  const parts: string[] = [];
+  const exitCode = numberField(output, "exit_code");
+  if (exitCode !== undefined) parts.push(`Exit ${exitCode}`);
+  addLineCount(parts, output, "stdout");
+  addLineCount(parts, output, "stderr");
+  return parts;
 }
 
 function summarizeSubagentOutput(family: string, output: JsonRecord): string | undefined {

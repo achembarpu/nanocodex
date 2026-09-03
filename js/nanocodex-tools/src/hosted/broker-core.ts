@@ -123,6 +123,8 @@ export type HostedToolsInvokeRequest = Readonly<{
 export type HostedToolsPreparedTool = Readonly<{
   connectGrantId?: string;
   appToolCatalogDigest?: string;
+  canonicalName: string;
+  machine?: HostedMachine;
   entry: HostedToolCatalogEntry;
   invoke(request: HostedToolsInvokeRequest): Promise<HostedToolsInvocationOutcome>;
 }>;
@@ -135,6 +137,7 @@ type HostedToolsCatalogBinding = Readonly<{
   leaseId: string;
   generation: number;
   wireName: string;
+  machine?: HostedMachine;
   entry: HostedToolCatalogEntry;
 }>;
 
@@ -311,7 +314,13 @@ export class HostedToolsBrokerCore {
               outputTokenBudget: 10_000,
               ...(context.signal === undefined ? {} : { signal: context.signal }),
             });
-            if (outcome.status === "completed") return wireToolResult(outcome.output);
+            if (outcome.status === "completed") {
+              return wireToolResult(
+                outcome.output,
+                prepared.canonicalName,
+                prepared.machine,
+              );
+            }
             const result = toolResult(outcome.message, outcome, false, null);
             return outcome[HOSTED_TOOLS_PRE_ADMISSION_UNAVAILABLE] === true
               ? Object.freeze({
@@ -755,6 +764,8 @@ export class HostedToolsBrokerCore {
       ...(binding.appToolCatalogDigest === undefined
         ? {}
         : { appToolCatalogDigest: binding.appToolCatalogDigest }),
+      canonicalName: binding.wireName,
+      ...(binding.machine === undefined ? {} : { machine: binding.machine }),
       entry: binding.entry,
       invoke: (request: HostedToolsInvokeRequest) => this.#invoke(binding, request),
     });
@@ -1113,13 +1124,15 @@ export class HostedToolsBrokerCore {
         continue;
       }
       for (const entry of entries) {
+        const machine = attachment?.machines?.[0];
         bindings.push(Object.freeze({
           routeId: state.route_id,
           hostId: state.host_id,
           leaseId: state.lease_id,
           generation: state.generation,
           wireName: entry.definition.name,
-          entry: exposedEntry(entry, attachment?.machines?.[0]),
+          ...(machine === undefined ? {} : { machine }),
+          entry: exposedEntry(entry, machine),
           ...(connectGrantId === undefined ? {} : { connectGrantId }),
           ...(appToolCatalogDigest === undefined ? {} : { appToolCatalogDigest }),
         }));
@@ -1210,15 +1223,35 @@ function isConnectGrantId(value: unknown): value is string {
   return typeof value === "string" && /^0x[0-9a-f]{64}$/.test(value);
 }
 
-function wireToolResult(output: Extract<HostedToolCallOutcome, { status: "completed" }>["output"]): unknown {
-  return Object.freeze({
-    [TOOL_RESULT]: true,
-    metadata: output.metadata,
-    output: output.output,
-    structuredResult: output.structured_result,
-    success: output.success,
-    value: output.structured_result ?? output.output,
-  });
+function wireToolResult(
+  output: Extract<HostedToolCallOutcome, { status: "completed" }>["output"],
+  canonicalName: string,
+  machine: HostedMachine | undefined,
+): unknown {
+  return toolResult(
+    output.output,
+    output.structured_result,
+    output.success,
+    toolExecutionMetadata(output.metadata, canonicalName, machine),
+  );
+}
+
+function toolExecutionMetadata(
+  metadata: unknown,
+  canonicalName: string,
+  machine: HostedMachine | undefined,
+): unknown {
+  if (machine === undefined) return metadata;
+  const execution = {
+    machine_id: machine.id,
+    machine_name: machine.name,
+    tool_name: canonicalName,
+  };
+  if (metadata === null || metadata === undefined) return Object.freeze(execution);
+  if (typeof metadata === "object" && !Array.isArray(metadata)) {
+    return Object.freeze({ ...(metadata as Record<string, unknown>), ...execution });
+  }
+  return Object.freeze({ ...execution, provider_metadata: metadata });
 }
 
 function toolResult(

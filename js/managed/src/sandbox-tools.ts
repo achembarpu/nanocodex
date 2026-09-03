@@ -47,6 +47,26 @@ type SandboxPreparation = {
   promise: Promise<Sandbox>;
 };
 
+type SandboxProcessStatus =
+  | "starting"
+  | "running"
+  | "completed"
+  | "failed"
+  | "killed"
+  | "error";
+
+type SandboxProcess = {
+  id: string;
+  pid?: number;
+  command: string;
+  status: SandboxProcessStatus;
+  exitCode?: number;
+  kill(): Promise<void>;
+  getStatus(): Promise<SandboxProcessStatus>;
+  getLogs(): Promise<{ stdout: string; stderr: string }>;
+  waitForPort(port: number, options?: { timeout?: number }): Promise<void>;
+};
+
 const sandboxPreparations = new WeakMap<
   DurableObjectNamespace<Sandbox>,
   Map<string, SandboxPreparation>
@@ -65,15 +85,9 @@ type SandboxToolClient = {
   }>;
   startProcess(
     command: string,
-    options: { cwd: string; autoCleanup: true },
-  ): Promise<{
-    id: string;
-    pid?: number;
-    command: string;
-    status: string;
-    getStatus(): Promise<string>;
-    waitForPort(port: number, options?: { timeout?: number }): Promise<void>;
-  }>;
+    options: { cwd: string; autoCleanup: false },
+  ): Promise<SandboxProcess>;
+  getProcess(id: string): Promise<SandboxProcess | null>;
   readFile(
     path: string,
     options: { encoding: "none" },
@@ -189,15 +203,10 @@ export function createCloudflareSandboxTools(
             ...(timeout === undefined ? {} : { timeout }),
           }),
           (result) => {
-            const stdout = truncate(result.stdout);
-            const stderr = truncate(result.stderr);
             return {
               success: result.success,
               exit_code: result.exitCode,
-              stdout: stdout.text,
-              stderr: stderr.text,
-              stdout_truncated: stdout.truncated,
-              stderr_truncated: stderr.truncated,
+              ...boundedOutput(result),
               duration_ms: result.duration,
             };
           },
@@ -248,7 +257,7 @@ export function createCloudflareSandboxTools(
           "ready_timeout_ms",
         );
         return withSandboxRpcResult(
-          (await createSandbox()).startProcess(command, { cwd, autoCleanup: true }),
+          (await createSandbox()).startProcess(command, { cwd, autoCleanup: false }),
           async (process) => {
             if (readyPort !== undefined) {
               await process.waitForPort(
@@ -262,6 +271,65 @@ export function createCloudflareSandboxTools(
               command: process.command,
               status: await process.getStatus(),
               ...(readyPort === undefined ? {} : { ready_port: readyPort }),
+            };
+          },
+        );
+      },
+    },
+    sandbox_get_process: {
+      description: "Get authoritative status for a background process in this session's Cloudflare Sandbox. Terminal results include accumulated output; set include_output only when partial running output is needed.",
+      parameters: processIdParameters(true),
+      handler: async (input) => {
+        const value = objectInput(input);
+        const processId = requiredProcessId(value.process_id);
+        return withSandboxRpcResult(
+          (await createSandbox()).getProcess(processId),
+          async (process) => {
+            if (process === null) return { found: false, process_id: processId };
+            const terminal = isTerminalProcessStatus(process.status);
+            const output = terminal || value.include_output === true
+              ? boundedOutput(await process.getLogs())
+              : undefined;
+            return {
+              found: true,
+              process_id: process.id,
+              pid: process.pid,
+              command: process.command,
+              status: process.status,
+              terminal,
+              exit_code: process.exitCode ?? null,
+              ...output,
+            };
+          },
+        );
+      },
+    },
+    sandbox_kill_process: {
+      description: "Terminate a running background process in this session's Cloudflare Sandbox.",
+      parameters: processIdParameters(),
+      handler: async (input) => {
+        const processId = requiredProcessId(objectInput(input).process_id);
+        return withSandboxRpcResult(
+          (await createSandbox()).getProcess(processId),
+          async (process) => {
+            if (process === null) return { found: false, process_id: processId };
+            if (isTerminalProcessStatus(process.status)) {
+              return {
+                found: true,
+                process_id: process.id,
+                status: process.status,
+                terminal: true,
+                kill_requested: false,
+              };
+            }
+            await process.kill();
+            const status = await process.getStatus();
+            return {
+              found: true,
+              process_id: process.id,
+              status,
+              terminal: isTerminalProcessStatus(status),
+              kill_requested: true,
             };
           },
         );
@@ -742,6 +810,26 @@ function portParameters(): Record<string, unknown> {
   };
 }
 
+function processIdParameters(includeOutput = false): Record<string, unknown> {
+  return {
+    type: "object",
+    properties: {
+      process_id: {
+        type: "string",
+        description: "Process ID returned by sandbox_start_process.",
+      },
+      ...(includeOutput ? {
+        include_output: {
+          type: "boolean",
+          description: "Include accumulated output before the process reaches a terminal state.",
+        },
+      } : {}),
+    },
+    required: ["process_id"],
+    additionalProperties: false,
+  };
+}
+
 async function readBounded(stream: ReadableStream<Uint8Array>): Promise<string> {
   const reader = stream.getReader();
   const chunks: Uint8Array[] = [];
@@ -782,7 +870,7 @@ async function readBounded(stream: ReadableStream<Uint8Array>): Promise<string> 
   }
 }
 
-async function withSandboxRpcResult<T extends object, R>(
+async function withSandboxRpcResult<T, R>(
   result: Promise<T>,
   consume: (value: T) => R | Promise<R>,
 ): Promise<R> {
@@ -794,7 +882,8 @@ async function withSandboxRpcResult<T extends object, R>(
   }
 }
 
-function disposeSandboxRpcValue(value: object): void {
+function disposeSandboxRpcValue(value: unknown): void {
+  if (typeof value !== "object" || value === null) return;
   const dispose = (value as Partial<Disposable>)[Symbol.dispose];
   if (typeof dispose === "function") dispose.call(value);
 }
@@ -832,9 +921,36 @@ function truncate(value: string): { text: string; truncated: boolean } {
   return { text: "", truncated: true };
 }
 
+function boundedOutput(output: { stdout: string; stderr: string }): {
+  stdout: string;
+  stderr: string;
+  stdout_truncated: boolean;
+  stderr_truncated: boolean;
+} {
+  const stdout = truncate(output.stdout);
+  const stderr = truncate(output.stderr);
+  return {
+    stdout: stdout.text,
+    stderr: stderr.text,
+    stdout_truncated: stdout.truncated,
+    stderr_truncated: stderr.truncated,
+  };
+}
+
+function isTerminalProcessStatus(status: SandboxProcessStatus): boolean {
+  return status !== "starting" && status !== "running";
+}
+
 function requiredContent(value: unknown): string {
   if (typeof value !== "string") throw new Error("content must be a string");
   if (value.length > MAX_FILE_BYTES) throw new Error("content exceeds 1 MiB");
+  return value;
+}
+
+function requiredProcessId(value: unknown): string {
+  if (typeof value !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(value)) {
+    throw new Error("process_id must be a safe Sandbox process ID");
+  }
   return value;
 }
 

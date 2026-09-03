@@ -403,6 +403,17 @@ test("all-tool renderer adapts known families and keeps unknown tools excellent"
       "process", "sandbox_start_process", { command: "npm start", ready_port: 8_000 },
       { process_id: "proc", pid: 42, status: "running", ready_port: 8_000 },
     ) },
+    { id: "process-status", kind: "tool", tool: tool(
+      "process-status", "sandbox_get_process", { process_id: "proc" },
+      {
+        found: true, process_id: "proc", command: "npm start", status: "failed",
+        terminal: true, exit_code: 1, stdout: "started\n", stderr: "crashed\n",
+      },
+    ) },
+    { id: "process-stop", kind: "tool", tool: tool(
+      "process-stop", "sandbox_kill_process", { process_id: "proc" },
+      { found: true, process_id: "proc", status: "killed", terminal: true, kill_requested: true },
+    ) },
     { id: "preview", kind: "tool", tool: tool(
       "preview", "sandbox_preview", { port: 8_000 },
       { port: 8_000, url: "https://preview.example.test/app", persistent: false },
@@ -421,10 +432,14 @@ test("all-tool renderer adapts known families and keeps unknown tools excellent"
       },
     ) },
     { id: "machine", kind: "tool", tool: tool(
-      "machine", "user_machine-a_exec_command", { cmd: "pwd" }, { exit_code: 7, output: "denied" }, "failed",
+      "machine", "user_build_agent_exec_command", { cmd: "pwd" }, { exit_code: 7, output: "denied" }, "failed",
+      { metadata: { machine_name: "Build Agent", tool_name: "exec_command" } },
     ) },
     { id: "mcp", kind: "tool", tool: tool(
       "mcp", "mcp__linear__search_issues", { query: "renderer" }, { matches: ["NCX-1"] }, "cancelled",
+    ) },
+    { id: "browser", kind: "tool", tool: tool(
+      "browser", "browser_execute", { action: "navigate" }, { url: "https://example.test" },
     ) },
     { id: "unknown", kind: "tool", tool: tool(
       "unknown", "renderHyperGraph", { depth: 3 }, { nodes: 12 }, "completed",
@@ -452,31 +467,33 @@ test("all-tool renderer adapts known families and keeps unknown tools excellent"
   });
 
   assert.deepEqual(renderer.root.findAllByType("strong").map((node) => node.children.join("")), [
-    "Run command", "Start process", "Open preview", "Open preview",
-    "Account info", "Run command", "Search issues", "Render hyper graph",
+    "Run command", "Start process", "Check process", "Stop process", "Open preview", "Open preview",
+    "Account info", "Run command", "Search issues", "Execute", "Render hyper graph",
   ]);
   assert.deepEqual(renderer.root.findAllByProps({ className: "agent-terminal-tool-source" })
     .map((node) => node.children.join("")), [
-    "Sandbox · /workspace/nanocodex-spin", "Sandbox", "Sandbox", "Sandbox", "Account",
-    "Machine machine-a", "MCP Linear",
+    "Sandbox · /workspace/nanocodex-spin", "Sandbox", "Sandbox", "Sandbox", "Sandbox", "Sandbox", "Account",
+    "Machine Build Agent", "MCP Linear", "Managed browser",
   ]);
   const headings = renderer.root.findAllByProps({ className: "agent-terminal-tool-heading" })
     .map((node) => node.children.flatMap((child) => child.children ?? []).join(" "));
   assert.match(headings[0], /printf hello.*Exit 0.*1 stdout line/);
   assert.match(headings[1], /npm start.*PID 42.*Running.*Port 8000 ready/);
-  assert.match(headings[2], /Port 8000.*Preview ready/);
-  assert.match(headings[4], /Ready.*2 connectors.*1 machine.*1 Vault item/);
-  assert.match(headings[7], /1 input field.*nodes.*12/);
+  assert.match(headings[2], /proc.*Failed.*Exit 1.*2 stdout lines.*2 stderr lines/);
+  assert.match(headings[3], /proc.*Killed/);
+  assert.match(headings[4], /Port 8000.*Preview ready/);
+  assert.match(headings[6], /Ready.*2 connectors.*1 machine.*1 Vault item/);
+  assert.match(headings[10], /1 input field.*nodes.*12/);
   assert.deepEqual(renderer.root.findAllByProps({ className: "agent-terminal-tool-status" })
     .map((node) => node.children.join("")), [
-    "Succeeded", "Succeeded", "Succeeded", "Succeeded", "Succeeded", "Failed", "Cancelled", "Succeeded",
+    "Succeeded", "Succeeded", "Succeeded", "Succeeded", "Succeeded", "Succeeded", "Succeeded", "Failed", "Cancelled", "Succeeded", "Succeeded",
   ]);
   assert.ok(renderer.root.findAllByProps({ className: "agent-terminal-tool-meta" })[0]
     .children.some((node) => node.children?.join("") === "1.25 s"));
   const detailHeadings = renderer.root.findAllByType("h4").map((node) => node.children.join(""));
   assert.deepEqual(detailHeadings.slice(0, 3), ["Command", "Stdout", "Stderr"]);
-  assert.equal(detailHeadings.filter((label) => label === "Stdout").length, 1);
-  assert.equal(detailHeadings.filter((label) => label === "Stderr").length, 1);
+  assert.equal(detailHeadings.filter((label) => label === "Stdout").length, 2);
+  assert.equal(detailHeadings.filter((label) => label === "Stderr").length, 2);
   const links = renderer.root.findAllByType("a");
   assert.equal(links.length, 1);
   assert.equal(links[0].props.href, "https://preview.example.test/app");
@@ -486,7 +503,7 @@ test("all-tool renderer adapts known families and keeps unknown tools excellent"
     .map((node) => node.props.className), [
     "agent-terminal-tool is-failed", "agent-terminal-tool is-cancelled",
   ]);
-  assert.ok(renderer.root.findAllByType("code").some((node) => node.children.join("") === "user_machine-a_exec_command"));
+  assert.ok(renderer.root.findAllByType("code").some((node) => node.children.join("") === "user_build_agent_exec_command"));
   const images = renderer.root.findAllByType("img");
   assert.equal(images[0].props.src, "data:image/png;base64,AA==");
   assert.equal(images[0].props.alt, "Render hyper graph result 1");
