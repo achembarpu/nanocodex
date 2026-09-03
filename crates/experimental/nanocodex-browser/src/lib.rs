@@ -3437,7 +3437,8 @@ impl BrowserBuilder {
     /// Unlike the default temporary profile, this directory is never deleted
     /// by [`Browser`]. Cookies, granted extension permissions, and extension
     /// storage therefore survive closing one browser and building another with
-    /// the same directory. The caller must prevent concurrent use and protect
+    /// the same directory. The browser holds an exclusive profile lock while
+    /// Chromium is running and rejects concurrent use. The caller must protect
     /// the directory as sensitive browser state.
     #[must_use]
     pub fn persistent_profile(mut self, directory: impl Into<std::path::PathBuf>) -> Self {

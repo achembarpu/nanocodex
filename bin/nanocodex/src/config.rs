@@ -281,6 +281,11 @@ impl AgentArgs {
         self.browser.uses_host_passkeys()
     }
 
+    #[cfg(test)]
+    pub(crate) const fn uses_persistent_browser_profile(&self) -> bool {
+        self.browser.uses_persistent_profile()
+    }
+
     pub(crate) fn thinking(&self) -> Thinking {
         self.model_policy.thinking.unwrap_or_default()
     }

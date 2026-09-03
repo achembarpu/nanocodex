@@ -519,6 +519,101 @@ async fn evaluate_string(browser: &Browser, expression: &str) -> Result<String> 
 
 #[tokio::test]
 #[ignore = "requires a local Chrome or Chromium installation"]
+async fn persistent_profile_keeps_auth_and_origin_storage_across_browser_tools() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let profile = directory.path().join("browser-profile");
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+    let address = listener.local_addr()?;
+    let server = tokio::spawn(serve_persistent_profile_fixture(listener));
+    let origin = format!("http://127.0.0.1:{}", address.port());
+
+    let first = Browser::builder().persistent_profile(&profile).build()?;
+    first
+        .execute(BrowserAction::Open {
+            url: format!("{origin}/login"),
+        })
+        .await?;
+    first
+        .execute(BrowserAction::Evaluate {
+            expression: "localStorage.setItem('durable-login', 'present'); true".to_owned(),
+        })
+        .await?;
+
+    let competing = Browser::builder().persistent_profile(&profile).build()?;
+    assert!(matches!(
+        competing
+            .execute(BrowserAction::Open {
+                url: format!("{origin}/check"),
+            })
+            .await,
+        Err(BrowserError::PersistentProfileInUse)
+    ));
+    competing.close().await?;
+    first.close().await?;
+
+    let second = Browser::builder().persistent_profile(&profile).build()?;
+    second
+        .execute(BrowserAction::Open {
+            url: format!("{origin}/check"),
+        })
+        .await?;
+    let authenticated = second
+        .execute(BrowserAction::Evaluate {
+            expression: r#"({
+  response: document.body.textContent,
+  storage: localStorage.getItem('durable-login'),
+  visibleCookies: document.cookie
+})"#
+            .to_owned(),
+        })
+        .await?;
+    assert!(matches!(
+        authenticated,
+        BrowserActionResult::Evaluation { value, .. }
+            if value["response"] == "authenticated"
+                && value["storage"] == "present"
+                && value["visibleCookies"] == ""
+    ));
+
+    second
+        .execute(BrowserAction::Open {
+            url: format!("{origin}/logout"),
+        })
+        .await?;
+    second
+        .execute(BrowserAction::Evaluate {
+            expression: "localStorage.removeItem('durable-login'); true".to_owned(),
+        })
+        .await?;
+    second.close().await?;
+
+    let third = Browser::builder().persistent_profile(&profile).build()?;
+    third
+        .execute(BrowserAction::Open {
+            url: format!("{origin}/check"),
+        })
+        .await?;
+    let signed_out = third
+        .execute(BrowserAction::Evaluate {
+            expression: r#"({
+  response: document.body.textContent,
+  storage: localStorage.getItem('durable-login')
+})"#
+            .to_owned(),
+        })
+        .await?;
+    assert!(matches!(
+        signed_out,
+        BrowserActionResult::Evaluation { value, .. }
+            if value["response"] == "signed-out" && value["storage"].is_null()
+    ));
+    third.close().await?;
+    server.abort();
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires a local Chrome or Chromium installation"]
 async fn virtual_passkeys_persist_across_browser_sessions() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let credential_store = directory.path().join("browser/passkeys.json");
@@ -3194,6 +3289,47 @@ async fn serve_action_fixture(listener: TcpListener) -> std::io::Result<()> {
             };
             let response = format!(
                 "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).await?;
+            stream.shutdown().await
+        });
+    }
+}
+
+async fn serve_persistent_profile_fixture(listener: TcpListener) -> std::io::Result<()> {
+    loop {
+        let (mut stream, _) = listener.accept().await?;
+        tokio::spawn(async move {
+            let mut request = [0_u8; 4_096];
+            let bytes = stream.read(&mut request).await?;
+            if bytes == 0 {
+                return Ok(());
+            }
+            let request = String::from_utf8_lossy(&request[..bytes]);
+            let path = request
+                .lines()
+                .next()
+                .and_then(|line| line.split_whitespace().nth(1))
+                .unwrap_or("/");
+            let authenticated = request.lines().any(|line| {
+                line.to_ascii_lowercase().starts_with("cookie:")
+                    && line.contains("durable_auth=opaque")
+            });
+            let (cookie, body) = match path {
+                "/login" => (
+                    "Set-Cookie: durable_auth=opaque; Path=/; Max-Age=3600; HttpOnly; SameSite=Lax\r\n",
+                    "signed-in",
+                ),
+                "/logout" => (
+                    "Set-Cookie: durable_auth=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax\r\n",
+                    "signed-out",
+                ),
+                _ if authenticated => ("", "authenticated"),
+                _ => ("", "signed-out"),
+            };
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n{cookie}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 body.len()
             );
             stream.write_all(response.as_bytes()).await?;

@@ -1,4 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 use clap::{Args, ValueEnum};
 use eyre::{Result, WrapErr, eyre};
@@ -33,6 +36,13 @@ enum PasskeyKind {
     None,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
+enum BrowserProfilePersistence {
+    Temporary,
+    #[default]
+    Persistent,
+}
+
 enum CookieSource {
     Chromium(BraveSession),
     State(BrowserStorageState),
@@ -62,7 +72,8 @@ pub(crate) struct BrowserArgs {
     /// Permit a visible temporary browser when macOS must authorize cookie decryption.
     ///
     /// `interactive` retries a failed background import with a copied temporary
-    /// profile. It never opens the ordinary source profile or its tabs.
+    /// profile. It applies only to `--browser-profile=temporary` and never opens
+    /// the ordinary source profile or its tabs.
     #[arg(
         long = "cookie-auth",
         env = "NANOCODEX_BROWSER_COOKIE_AUTH",
@@ -88,6 +99,21 @@ pub(crate) struct BrowserArgs {
     /// Chrome or Chromium executable used by the browser tool.
     #[arg(long, env = "NANOCODEX_BROWSER_EXECUTABLE", value_name = "PATH")]
     browser_executable: Option<PathBuf>,
+
+    /// Keep the dedicated automation profile across Nanocodex runs.
+    ///
+    /// `persistent` stores cookies and site data under the Nanocodex state
+    /// directory. It never opens or mutates an ordinary desktop-browser
+    /// profile. Only one browser tool may actively use the persistent profile
+    /// at a time. Use `temporary` for a fresh profile that imports host-browser
+    /// cookies and forgets changes at shutdown.
+    #[arg(
+        long = "browser-profile",
+        env = "NANOCODEX_BROWSER_PROFILE",
+        value_enum,
+        default_value = "persistent"
+    )]
+    browser_profile: BrowserProfilePersistence,
 }
 
 impl Default for BrowserArgs {
@@ -97,6 +123,7 @@ impl Default for BrowserArgs {
             cookie_authorization: default_cookie_authorization(),
             passkeys: PasskeyKind::Virtual,
             browser_executable: None,
+            browser_profile: BrowserProfilePersistence::Persistent,
         }
     }
 }
@@ -111,6 +138,7 @@ impl BrowserArgs {
         self.cookie_authorization = CookieAuthorizationKind::Background;
         self.passkeys = PasskeyKind::None;
         self.browser_executable = None;
+        self.browser_profile = BrowserProfilePersistence::Temporary;
     }
 
     #[cfg(test)]
@@ -121,6 +149,7 @@ impl BrowserArgs {
     #[cfg(test)]
     pub(crate) const fn copies_all_cookies(&self) -> bool {
         !matches!(self.browser, Some(BrowserKind::None))
+            && matches!(self.browser_profile, BrowserProfilePersistence::Temporary)
     }
 
     #[cfg(test)]
@@ -141,6 +170,11 @@ impl BrowserArgs {
         matches!(self.passkeys, PasskeyKind::Host)
     }
 
+    #[cfg(test)]
+    pub(crate) const fn uses_persistent_profile(&self) -> bool {
+        matches!(self.browser_profile, BrowserProfilePersistence::Persistent)
+    }
+
     pub(crate) fn configure(&self, workspace: &Path) -> Result<Option<ConfiguredBrowser>> {
         if self.browser == Some(BrowserKind::None) {
             if self.browser_executable.is_some() {
@@ -159,7 +193,22 @@ impl BrowserArgs {
         else {
             return Ok(None);
         };
+        let persistent_profile =
+            match self.browser_profile {
+                BrowserProfilePersistence::Temporary => None,
+                BrowserProfilePersistence::Persistent => {
+                    let profile = default_persistent_browser_profile()?;
+                    create_private_directory(profile.parent().ok_or_else(|| {
+                        eyre!("persistent browser profile has no parent directory")
+                    })?)?;
+                    create_private_directory(&profile)?;
+                    Some(profile)
+                }
+            };
         let mut builder = Browser::builder().file_root(workspace);
+        if let Some(profile) = persistent_profile {
+            builder = builder.persistent_profile(profile);
+        }
         builder = match self.passkeys {
             PasskeyKind::Virtual => builder.virtual_authenticator(
                 VirtualAuthenticator::platform_passkey()
@@ -173,7 +222,13 @@ impl BrowserArgs {
         if let Some(executable) = launch.executable {
             builder = builder.executable(executable);
         }
-        if let Some(source) = cookie_source() {
+        // A persistent automation profile is its own browser identity. Host
+        // cookie import remains the bootstrap policy for temporary profiles;
+        // mixing it into a durable profile could overwrite a login created by
+        // an earlier Nanocodex run.
+        if self.browser_profile == BrowserProfilePersistence::Temporary
+            && let Some(source) = cookie_source()
+        {
             builder = match source {
                 CookieSource::Chromium(source) => {
                     builder.cookie_source(source.copy_all_cookies().cookie_authorization(
@@ -198,6 +253,14 @@ impl BrowserArgs {
 }
 
 fn default_virtual_credential_store() -> Result<PathBuf> {
+    Ok(default_browser_state_root()?.join("passkeys.json"))
+}
+
+fn default_persistent_browser_profile() -> Result<PathBuf> {
+    Ok(default_browser_state_root()?.join("profile"))
+}
+
+fn default_browser_state_root() -> Result<PathBuf> {
     let root = if let Some(root) = std::env::var_os("NANOCODEX_DIR") {
         PathBuf::from(root)
     } else {
@@ -209,7 +272,26 @@ fn default_virtual_credential_store() -> Result<PathBuf> {
     if root.as_os_str().is_empty() {
         return Err(eyre!("NANOCODEX_DIR cannot be empty"));
     }
-    Ok(root.join("browser/passkeys.json"))
+    Ok(root.join("browser"))
+}
+
+fn create_private_directory(path: &Path) -> Result<()> {
+    if let Ok(metadata) = fs::symlink_metadata(path)
+        && metadata.file_type().is_symlink()
+    {
+        return Err(eyre!(
+            "persistent browser profile directory must not be a symbolic link: {}",
+            path.display()
+        ));
+    }
+    fs::create_dir_all(path).wrap_err_with(|| format!("failed to create {}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+            .wrap_err_with(|| format!("failed to protect {}", path.display()))?;
+    }
+    Ok(())
 }
 
 fn standard_host_passkey_authenticator() -> Result<HostPasskeyAuthenticator> {
@@ -488,6 +570,7 @@ mod tests {
             cookie_authorization: super::CookieAuthorizationKind::Background,
             passkeys: super::PasskeyKind::Virtual,
             browser_executable: None,
+            browser_profile: super::BrowserProfilePersistence::Temporary,
         }
         .configure(workspace.path())
         .unwrap()
@@ -516,6 +599,7 @@ mod tests {
             cookie_authorization: super::CookieAuthorizationKind::Interactive,
             passkeys: super::PasskeyKind::None,
             browser_executable: None,
+            browser_profile: super::BrowserProfilePersistence::Temporary,
         }
         .configure(workspace.path())
         .unwrap();
@@ -526,6 +610,7 @@ mod tests {
             cookie_authorization: super::CookieAuthorizationKind::Background,
             passkeys: super::PasskeyKind::None,
             browser_executable: Some("/tmp/chromium".into()),
+            browser_profile: super::BrowserProfilePersistence::Temporary,
         }
         .configure(workspace.path())
         .err()
@@ -534,5 +619,32 @@ mod tests {
             executable.to_string(),
             "--browser-executable requires an enabled browser"
         );
+    }
+
+    #[test]
+    fn persistent_browser_profile_directory_is_private() {
+        let directory = tempfile::tempdir().unwrap();
+        let profile = directory.path().join("browser/profile");
+        super::create_private_directory(profile.parent().unwrap()).unwrap();
+        super::create_private_directory(&profile).unwrap();
+
+        assert!(profile.is_dir());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(profile.parent().unwrap())
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700
+            );
+            assert_eq!(
+                std::fs::metadata(profile).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+        }
     }
 }

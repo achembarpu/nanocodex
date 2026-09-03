@@ -219,19 +219,23 @@ actions return a typed unsupported error; there is no Chromium fallback.
   real-Safari Appium/XCUITest backend with Xcode device discovery.
 
 The Nanocodex CLI default and bare `--browser` use private automation-browser
-discovery with a fresh temporary profile. On macOS this selects a dedicated
-chrome-headless-shell or Chrome for Testing installation, not the user's Brave
-or Chrome application. `--browser=brave` remains an explicit request to launch
-the standard Brave application with a private profile. Cookie import defaults
-to `all` on every platform. `all` auto-detects the source; `brave`, `chrome`,
-`chromium`, `edge`, `firefox`, and `safari` select it explicitly. When
-requested on macOS, Chromium-family cookie decryption may briefly use the
-source browser's Keychain identity, but that bounded broker exits before the
-long-lived automation session starts. macOS first attempts background
-decryption and automatically opens the isolated interactive broker only when
-the populated cookie store exports no usable cookies.
-Chromium-family discovery follows the profile recorded as last used, then
-falls back only to standard profiles that actually contain a cookie database.
+discovery with a dedicated profile under the Nanocodex state directory. Its
+cookies, origin databases, extension state, and permissions survive across
+Nanocodex sessions. The profile is owner-only, remains separate from ordinary
+desktop-browser profiles, and is exclusively locked while Chromium is running;
+a concurrent browser action returns an in-use error instead of risking profile
+corruption. `--browser-profile=temporary` restores the fresh-profile behavior:
+that mode imports cookies from the first usable Brave, Chrome, Chromium, Edge,
+Firefox, or Safari profile and deletes browser changes at shutdown.
+
+On macOS the automation profile uses a dedicated chrome-headless-shell or
+Chrome for Testing installation, not the user's Brave or Chrome application.
+`--browser=brave` remains an explicit executable choice while still using the
+dedicated Nanocodex profile. Temporary-mode Chromium-family cookie decryption
+may briefly use the source browser's Keychain identity, but that bounded broker
+exits before the long-lived automation session starts. macOS first attempts
+background decryption and automatically opens the isolated interactive broker
+only when the populated cookie store exports no usable cookies.
 
 The CLI's virtual platform authenticator persists testing passkeys across
 browser and Nanocodex restarts in `$NANOCODEX_DIR/browser/passkeys.json`, or

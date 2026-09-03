@@ -481,7 +481,8 @@ mod tests {
     fn browser_and_cookie_selection_follow_platform_defaults() {
         let tui = Cli::try_parse_from(["nanocodex"]).unwrap();
         assert!(tui.agent.browser_enabled());
-        assert!(tui.agent.copies_all_browser_cookies());
+        assert!(tui.agent.uses_persistent_browser_profile());
+        assert!(!tui.agent.copies_all_browser_cookies());
         #[cfg(target_os = "macos")]
         assert!(!tui.agent.uses_brave_browser());
         #[cfg(target_os = "macos")]
@@ -508,6 +509,10 @@ mod tests {
 
         let host_passkeys = Cli::try_parse_from(["nanocodex", "--passkeys=host"]).unwrap();
         assert!(host_passkeys.agent.uses_host_browser_passkeys());
+
+        let temporary = Cli::try_parse_from(["nanocodex", "--browser-profile=temporary"]).unwrap();
+        assert!(!temporary.agent.uses_persistent_browser_profile());
+        assert!(temporary.agent.copies_all_browser_cookies());
 
         assert!(Cli::try_parse_from(["nanocodex", "--cookies=none"]).is_err());
         assert!(Cli::try_parse_from(["nanocodex", "--cookies=brave"]).is_err());

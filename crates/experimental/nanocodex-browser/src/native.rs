@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
+    fs::{File, OpenOptions},
     io::{self, Write},
     path::{Path, PathBuf},
     sync::{
@@ -80,6 +81,7 @@ use chromiumoxide::{
     error::{CdpError, ChannelError},
     layout::Point,
 };
+use fs2::FileExt;
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use tempfile::TempDir;
@@ -415,6 +417,7 @@ async fn mobile_audit_sample(
     reason = "the booleans are independent lifecycle flags for optional browser subsystems"
 )]
 struct Session {
+    _persistent_profile_lock: Option<File>,
     browser: Chromium,
     page: Page,
     handler: JoinHandle<()>,
@@ -1027,6 +1030,11 @@ impl Session {
             .persistent_profile
             .clone()
             .unwrap_or_else(|| runtime_dir.join("profile"));
+        let persistent_profile_lock = owner
+            .persistent_profile
+            .as_deref()
+            .map(lock_persistent_profile)
+            .transpose()?;
         let output_dir = runtime_dir.join("screenshots");
         let download_dir = runtime_dir.join("downloads");
         tokio::fs::create_dir_all(&profile).await?;
@@ -1140,6 +1148,7 @@ impl Session {
         let egress_targets = HashSet::from([page.target_id().as_ref().to_owned()]);
 
         Ok(Self {
+            _persistent_profile_lock: persistent_profile_lock,
             browser,
             page,
             handler,
@@ -7622,6 +7631,65 @@ fn build_config(builder: BrowserConfigBuilder) -> Result<BrowserConfig, BrowserE
         .map_err(|message| BrowserError::Configuration { message })
 }
 
+fn lock_persistent_profile(profile: &Path) -> Result<File, BrowserError> {
+    let path = profile.join(".nanocodex-profile.lock");
+    if let Ok(metadata) = std::fs::symlink_metadata(&path)
+        && metadata.file_type().is_symlink()
+    {
+        return Err(BrowserError::Configuration {
+            message: "persistent browser profile lock must not be a symbolic link".to_owned(),
+        });
+    }
+    let file = match OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(&path)
+    {
+        Ok(file) => {
+            set_private_profile_lock(&file)?;
+            file
+        }
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            OpenOptions::new().read(true).write(true).open(&path)?
+        }
+        Err(error) => return Err(error.into()),
+    };
+    ensure_private_profile_lock(&file)?;
+    file.try_lock_exclusive()
+        .map_err(|_| BrowserError::PersistentProfileInUse)?;
+    Ok(file)
+}
+
+#[cfg(unix)]
+fn set_private_profile_lock(file: &File) -> Result<(), BrowserError> {
+    use std::os::unix::fs::PermissionsExt;
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn set_private_profile_lock(_file: &File) -> Result<(), BrowserError> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn ensure_private_profile_lock(file: &File) -> Result<(), BrowserError> {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = file.metadata()?.permissions().mode() & 0o777;
+    if mode != 0o600 {
+        return Err(BrowserError::Configuration {
+            message: "persistent browser profile lock must have Unix permissions 0600".to_owned(),
+        });
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn ensure_private_profile_lock(_file: &File) -> Result<(), BrowserError> {
+    Ok(())
+}
+
 #[cfg(target_os = "macos")]
 fn isolated_launch_config(builder: BrowserConfigBuilder) -> BrowserConfigBuilder {
     // Private automation must never wait for an interactive credential prompt
@@ -7823,6 +7891,8 @@ pub enum BrowserError {
     BraveSession(#[from] BraveSessionError),
     #[error("browser configuration is invalid: {message}")]
     Configuration { message: String },
+    #[error("persistent browser profile is already in use by another browser session")]
+    PersistentProfileInUse,
     #[error(
         "the source profile contains {source_cookie_count} selected cookies, but its browser exported none; unlock the source browser's credential storage and retry"
     )]
@@ -8502,8 +8572,8 @@ mod tests {
         MAX_CONSOLE_ENTRIES, MAX_DIAGNOSTIC_TEXT_BYTES, MAX_NETWORK_REQUESTS, ManagedNavigation,
         NetworkSource, allowed_cookie_params, build_config, captured_profile_cookies,
         classify_gate, classify_navigation_outcome, close_chromium, cookie_param, diagnostic_limit,
-        profile_cookie, profile_launch_config, resolve_extension_directory, session_stopped,
-        trace_browser_configuration, validate_url,
+        lock_persistent_profile, profile_cookie, profile_launch_config,
+        resolve_extension_directory, session_stopped, trace_browser_configuration, validate_url,
     };
     use crate::session::ProfileCookieSnapshot;
     use crate::{
@@ -8516,6 +8586,33 @@ mod tests {
     type ExtensionSmokeResult = Result<(), Box<dyn std::error::Error>>;
     type ExtensionSmokeFuture =
         std::pin::Pin<Box<dyn std::future::Future<Output = ExtensionSmokeResult>>>;
+
+    #[test]
+    fn persistent_profile_lock_is_exclusive_and_released() {
+        let directory = tempfile::tempdir().unwrap();
+        let first = lock_persistent_profile(directory.path()).unwrap();
+        assert!(matches!(
+            lock_persistent_profile(directory.path()),
+            Err(BrowserError::PersistentProfileInUse)
+        ));
+
+        drop(first);
+        let second = lock_persistent_profile(directory.path()).unwrap();
+        drop(second);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(directory.path().join(".nanocodex-profile.lock"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+    }
 
     #[derive(Clone, Default)]
     struct TraceLog(Arc<StdMutex<Vec<u8>>>);

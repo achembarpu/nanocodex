@@ -483,7 +483,10 @@ let (_agent, _events) = Nanocodex::builder(openai).tools(tools).build()?;
 # }
 ```
 
-Local mode uses a private browser profile but is not an OS sandbox. The optional
+Local CLI mode uses a dedicated persistent browser profile by default so login
+and site state survive Nanocodex restarts; `--browser-profile=temporary` opts
+back into one disposable profile with host-cookie import. The profile is still
+private browser state, not an OS sandbox. The optional
 `BrowserVm` composition starts an unprivileged headed Chromium under Xvfb in a
 disposable libkrun guest and closes CDP, Chromium, networking, VMM, and disk as
 one owned lifecycle. Run the source in

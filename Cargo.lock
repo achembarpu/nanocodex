@@ -5687,6 +5687,7 @@ dependencies = [
  "chrono",
  "criterion",
  "eyre",
+ "fs2",
  "futures-util",
  "image",
  "nanocodex-oai-api",
