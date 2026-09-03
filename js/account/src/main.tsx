@@ -39,7 +39,7 @@ createRoot(container).render(
 
 function BrowserApplication({ url }: { url: URL }) {
   const [preparedRoute, setPreparedRoute] = useState<PreparedDirectRoute | null>(
-    directRepositorySurface ? {} : null,
+    directRepositorySurface || directSurface === "home" || directSurface === "agent" ? {} : null,
   );
 
   useEffect(() => {

@@ -38,10 +38,12 @@ export { AgentTerminalView } from "nanocodex-terminal";
 /** Authenticated website policy around the headless Agent SDK and shared transcript view. */
 type AgentTerminalProps = Readonly<{
   authStatus: ModelSessionStatus | undefined;
+  capabilityError?: string;
+  enabled: boolean;
   mode: AgentTerminalMode;
   onConversationActivity(input: string): void;
   onStateChange(state: AgentTerminalState): void;
-  source: Exclude<CredentialSource, null>;
+  source: CredentialSource | undefined;
   threadId: string;
   voiceEnabled: boolean;
   welcome?: string;
@@ -64,7 +66,9 @@ export const AgentTerminal = memo(function AgentTerminal(props: AgentTerminalPro
     return () => window.removeEventListener(ACCOUNT_MCP_CATALOG_CHANGED, refreshUnusedAgent);
   }, []);
   useEffect(() => {
+    if (!props.enabled) return;
     const controller = new AbortController();
+    setAccountMcpConnections(undefined);
     void loadBrowserAccountMcpConnections(controller.signal).then(
       setAccountMcpConnections,
       (error) => {
@@ -76,19 +80,20 @@ export const AgentTerminal = memo(function AgentTerminal(props: AgentTerminalPro
       },
     );
     return () => controller.abort();
-  }, [catalogRevision]);
-  return accountMcpConnections === undefined
-    ? null
-    : <BrowserAgentTerminal
-      {...props}
-      accountMcpConnections={accountMcpConnections}
-      onConversationActivity={onConversationActivity}
-    />;
+  }, [catalogRevision, props.enabled]);
+  return <BrowserAgentTerminal
+    {...props}
+    accountMcpConnections={accountMcpConnections ?? []}
+    enabled={props.enabled && accountMcpConnections !== undefined}
+    onConversationActivity={onConversationActivity}
+  />;
 });
 
 const BrowserAgentTerminal = memo(function BrowserAgentTerminal({
   authStatus,
   accountMcpConnections,
+  capabilityError,
+  enabled,
   mode,
   onConversationActivity,
   onStateChange,
@@ -110,7 +115,7 @@ const BrowserAgentTerminal = memo(function BrowserAgentTerminal({
     error,
     isError,
     refetch,
-  } = useNanocodex({ config: agentConfig, threadId });
+  } = useNanocodex({ config: agentConfig, enabled, threadId });
   const retryAgent = useCallback(() => {
     refetch();
   }, [refetch]);
@@ -122,7 +127,7 @@ const BrowserAgentTerminal = memo(function BrowserAgentTerminal({
         agentError,
         agentStatus,
         authStatus,
-        capabilityError: undefined,
+        capabilityError,
         source,
       })}
       mode={mode}

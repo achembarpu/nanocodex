@@ -152,20 +152,16 @@ export const AgentExperience = memo(function AgentExperience({
       />}
       <div className="conversation-main">
         {landing
-          ? hasCredential && !activeCapabilityError
-            ? <AgentTerminal
-              key={`ephemeral:${account.account?.id ?? "anonymous"}:${ephemeralThreadId}`}
-              authStatus={authStatus}
-              mode={mode} onConversationActivity={NO_CONVERSATION_ACTIVITY}
-              onStateChange={setRuntimeState} source={credentialSource} threadId={ephemeralThreadId}
-              voiceEnabled={voiceEnabled}
-              welcome={HOME_TERMINAL_WELCOME}
-            />
-            : <ReservedTerminal
-              message={inactiveMessage}
-              mode={mode}
-              welcome={credentialSource === undefined ? undefined : HOME_TERMINAL_WELCOME}
-            />
+          ? <AgentTerminal
+            key={`ephemeral:${account.account?.id ?? "anonymous"}:${ephemeralThreadId}`}
+            authStatus={authStatus}
+            capabilityError={activeCapabilityError}
+            enabled={hasCredential && !activeCapabilityError}
+            mode={mode} onConversationActivity={NO_CONVERSATION_ACTIVITY}
+            onStateChange={setRuntimeState} source={credentialSource} threadId={ephemeralThreadId}
+            voiceEnabled={voiceEnabled}
+            welcome={HOME_TERMINAL_WELCOME}
+          />
           : hasCredential && managedConversationId
             ? <ManagedAgentTerminal
               key={managedConversationId} agentId={managedConversationId!} authStatus={authStatus}
