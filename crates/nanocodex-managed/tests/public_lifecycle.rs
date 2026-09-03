@@ -437,25 +437,27 @@ async fn public_managed_lifecycle_preserves_durable_identity_control_and_replay(
             lock(&fixture.inner.state_reads).as_slice(),
             [AGENT_ID, AGENT_ID, AGENT_ID]
         );
-        let event_cursors = lock(&fixture.inner.event_cursors);
-        assert_eq!(event_cursors.first().map(String::as_str), Some("40"));
-        assert!(event_cursors.iter().any(|cursor| cursor == "44"));
-        assert!(
-            event_cursors
-                .iter()
-                .all(|cursor| cursor == "40" || cursor == "44")
-        );
-        drop(event_cursors);
+        {
+            let event_cursors = lock(&fixture.inner.event_cursors);
+            assert_eq!(event_cursors.first().map(String::as_str), Some("40"));
+            assert!(event_cursors.iter().any(|cursor| cursor == "44"));
+            assert!(
+                event_cursors
+                    .iter()
+                    .all(|cursor| cursor == "40" || cursor == "44")
+            );
+        }
 
-        let submissions = lock(&fixture.inner.submissions);
-        assert_eq!(submissions.len(), 2);
-        assert_eq!(submissions[0].idempotency_key, ACTIVE_REQUEST_ID);
-        assert_eq!(submissions[0].body, json!({"input": "live prompt"}));
-        assert!(submissions[0].body.get("id").is_none());
-        assert_eq!(submissions[1].idempotency_key, RETAINED_REQUEST_ID);
-        assert_eq!(submissions[1].body, json!({"input": "retained prompt"}));
-        assert!(submissions[1].body.get("id").is_none());
-        drop(submissions);
+        {
+            let submissions = lock(&fixture.inner.submissions);
+            assert_eq!(submissions.len(), 2);
+            assert_eq!(submissions[0].idempotency_key, ACTIVE_REQUEST_ID);
+            assert_eq!(submissions[0].body, json!({"input": "live prompt"}));
+            assert!(submissions[0].body.get("id").is_none());
+            assert_eq!(submissions[1].idempotency_key, RETAINED_REQUEST_ID);
+            assert_eq!(submissions[1].body, json!({"input": "retained prompt"}));
+            assert!(submissions[1].body.get("id").is_none());
+        }
 
         assert_eq!(
             lock(&fixture.inner.operations).as_slice(),
@@ -484,23 +486,25 @@ async fn public_managed_lifecycle_preserves_durable_identity_control_and_replay(
             })
         );
 
-        let actions = lock(&fixture.inner.actions);
-        assert_eq!(actions.len(), 3);
-        assert_eq!(actions[0].kind, "steer");
-        assert_eq!(actions[0].agent_id, AGENT_ID);
-        assert_eq!(actions[0].turn_id, ACTIVE_TURN_ID);
-        assert_eq!(
-            actions[0].body,
-            Some(json!({"input": "follow-up steering"}))
-        );
-        assert_eq!(actions[1].kind, "cancel");
-        assert_eq!(actions[1].agent_id, AGENT_ID);
-        assert_eq!(actions[1].turn_id, ACTIVE_TURN_ID);
-        assert_eq!(actions[1].body, None);
-        assert_eq!(actions[2].kind, "cancel");
-        assert_eq!(actions[2].agent_id, AGENT_ID);
-        assert_eq!(actions[2].turn_id, ACTIVE_TURN_ID);
-        assert_eq!(actions[2].body, None);
+        {
+            let actions = lock(&fixture.inner.actions);
+            assert_eq!(actions.len(), 3);
+            assert_eq!(actions[0].kind, "steer");
+            assert_eq!(actions[0].agent_id, AGENT_ID);
+            assert_eq!(actions[0].turn_id, ACTIVE_TURN_ID);
+            assert_eq!(
+                actions[0].body,
+                Some(json!({"input": "follow-up steering"}))
+            );
+            assert_eq!(actions[1].kind, "cancel");
+            assert_eq!(actions[1].agent_id, AGENT_ID);
+            assert_eq!(actions[1].turn_id, ACTIVE_TURN_ID);
+            assert_eq!(actions[1].body, None);
+            assert_eq!(actions[2].kind, "cancel");
+            assert_eq!(actions[2].agent_id, AGENT_ID);
+            assert_eq!(actions[2].turn_id, ACTIVE_TURN_ID);
+            assert_eq!(actions[2].body, None);
+        }
 
         let latest_error = client
             .state("agent-latest-cursor")
