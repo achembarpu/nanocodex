@@ -280,9 +280,9 @@ to the per-agent SQLite size and requires its own retention policy.
  +--------------------------+                                    +--------------------------+
  | Identity actors          |                                    | User index shards        |
  | SessionDO(token hash)    |                                    | AgentIndexDO(user,bucket)|
- | PasskeyDO(credential ID) |                                    +--------------------------+
+ | SmsIdentityDO(phone HMAC)|                                    +--------------------------+
  | ApiKeyDO(key hash)       |
- | LoginDO(challenge hash)  |
+ | SmsOtpDO(challenge hash) |
  +--------------------------+
       |
       | authorized agent ID

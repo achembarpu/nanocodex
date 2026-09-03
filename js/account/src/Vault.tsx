@@ -139,18 +139,16 @@ export function Vault() {
         <header className="wizard-intro">
           <div className="wizard-app">
             <h1>Vault</h1>
-            <p>Add a passkey account before storing encrypted credentials and personal details.</p>
+            <p>Verify your phone before storing encrypted credentials and personal details.</p>
           </div>
         </header>
         <AccountChooser
           description={session.reauthenticationRequired
-            ? "Your session expired. Continue with the saved passkey to restore your vault."
-            : "Continue with a saved passkey, or create a Nanocodex account."}
+            ? "Your session expired. Enter your phone number to restore your vault."
+            : "Enter your phone number to create or restore your Nanocodex account."}
           disabled={session.operation !== null}
           failure={session.error}
-          newAccountDetail="Create one passkey to keep your vault available across devices."
           onChooseAccount={(selection) => void session.chooseAccount(selection)}
-          storedPasskeys={session.savedPasskeys}
         />
       </div>
     );

@@ -33,7 +33,19 @@
 }
 
 .connect-wizard .wizard-account-page {
-  width: min(620px, calc(100% - (2 * var(--page-margin))));
+  width: min(500px, calc(100% - (2 * var(--page-margin))));
+  margin-right: auto;
+  margin-left: auto;
+  padding: clamp(40px, 8vh, 88px) 0 64px;
+}
+
+.connect-wizard .sms-auth-panel {
+  overflow: hidden;
+  padding: 32px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-medium);
+  background: color-mix(in srgb, var(--surface-raised) 88%, var(--surface));
+  box-shadow: 0 22px 70px rgba(0, 0, 0, 0.22);
 }
 
 .connect-wizard .wizard-review-page {
@@ -48,9 +60,18 @@
   gap: 32px;
 }
 
+.connect-wizard .sms-auth-panel .wizard-intro {
+  display: block;
+  padding-bottom: 26px;
+}
+
 .connect-wizard .wizard-app {
   display: grid;
   gap: 8px;
+}
+
+.connect-wizard .sms-auth-panel .wizard-app {
+  gap: 10px;
 }
 
 .connect-wizard .wizard-app > span,
@@ -68,11 +89,139 @@
   letter-spacing: -0.045em;
 }
 
+.connect-wizard .sms-auth-panel .wizard-app h1 {
+  margin-top: 2px;
+  font-size: clamp(27px, 4vw, 34px);
+  line-height: 1.12;
+}
+
 .connect-wizard .wizard-app p {
   max-width: 620px;
   color: var(--muted);
   font-size: 12px;
   line-height: 1.5;
+}
+
+.connect-wizard .sms-auth-panel .wizard-app p {
+  font-size: 12px;
+  line-height: 1.65;
+}
+
+.connect-wizard .sms-auth-panel .sms-otp-form {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  gap: 9px;
+}
+
+.connect-wizard .sms-auth-panel .sms-otp-form > label {
+  margin-top: 2px;
+  font-size: 12px;
+}
+
+.connect-wizard .sms-auth-panel .sms-otp-form > p {
+  font-size: 10px;
+  line-height: 1.55;
+}
+
+.connect-wizard .sms-auth-panel .sms-otp-input-row {
+  display: grid;
+  grid-template-columns: 1fr;
+  margin: 5px 0 3px;
+  gap: 10px;
+}
+
+.connect-wizard .sms-auth-panel .sms-otp-input-row input,
+.connect-wizard .sms-auth-panel .sms-otp-input-row button {
+  width: 100%;
+  min-height: 50px;
+  border-radius: var(--radius-small);
+  font-size: 14px;
+}
+
+.connect-wizard .sms-auth-panel .sms-otp-input-row input {
+  padding: 0 14px;
+  border: 1px solid var(--border);
+  outline: none;
+  background: var(--surface);
+  color: var(--text);
+}
+
+.connect-wizard .sms-auth-panel .sms-otp-input-row button {
+  border: 1px solid var(--text);
+  background: var(--text);
+  color: var(--text-inverse);
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.connect-wizard .sms-auth-panel .sms-otp-input-row button:disabled {
+  cursor: wait;
+  opacity: 0.55;
+}
+
+.connect-wizard .sms-auth-panel .sms-otp-input-row button:hover:not(:disabled),
+.connect-wizard .sms-auth-panel .sms-otp-input-row button:focus-visible {
+  opacity: 0.88;
+}
+
+.connect-wizard .sms-auth-panel .sms-otp-input-row button:focus-visible,
+.connect-wizard .sms-auth-panel .sms-otp-input-row input:focus-visible {
+  outline: 2px solid var(--text);
+  outline-offset: 2px;
+}
+
+.connect-wizard .sms-auth-panel .account-failure {
+  margin: 0 0 18px;
+  padding: 12px 14px;
+  border: 1px solid color-mix(in srgb, var(--negative) 34%, var(--border-soft));
+  border-radius: var(--radius-small);
+}
+
+.connect-wizard .sms-auth-panel .account-failure p {
+  font-size: 11px;
+}
+
+.connect-wizard .sms-auth-panel .sms-otp-change {
+  justify-self: start;
+  min-height: 34px;
+  margin-top: 2px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 10px;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.connect-wizard .sms-auth-security {
+  display: flex;
+  align-items: center;
+  margin-top: 24px;
+  padding-top: 18px;
+  border-top: 1px solid var(--border-soft);
+  color: var(--text-muted);
+  gap: 9px;
+}
+
+.connect-wizard .sms-auth-security span {
+  display: grid;
+  width: 20px;
+  height: 20px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, var(--positive) 55%, var(--border-soft));
+  border-radius: 50%;
+  color: var(--positive);
+  font-size: 10px;
+}
+
+.connect-wizard .sms-auth-security p {
+  font-size: 9px;
+  line-height: 1.45;
 }
 
 .connect-wizard .wizard-account-chooser {
@@ -769,6 +918,89 @@
   opacity: 0.58;
 }
 
+.connect-wizard .wizard-connectors .tempo-wallet-card {
+  cursor: default;
+  grid-template-columns: 40px minmax(0, 1fr) auto;
+}
+
+.connect-wizard .tempo-wallet-card .connection-card-copy {
+  gap: 3px;
+}
+
+.connect-wizard .tempo-wallet-card .tempo-wallet-balance {
+  color: var(--positive);
+  font-size: 10px;
+}
+
+.connect-wizard .tempo-wallet-card code {
+  overflow: hidden;
+  color: var(--faint);
+  font-size: 8px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.connect-wizard .tempo-wallet-message {
+  color: var(--faint);
+  font-size: 9px;
+  line-height: 1.4;
+  white-space: normal;
+}
+
+.connect-wizard .tempo-wallet-message.is-error {
+  color: var(--negative);
+}
+
+.connect-wizard .tempo-wallet-message.is-success {
+  color: var(--positive);
+}
+
+.connect-wizard .tempo-wallet-card-actions {
+  display: flex;
+  align-self: stretch;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.connect-wizard .tempo-wallet-card-actions button {
+  min-height: 36px;
+  padding: 0 10px;
+  border: 1px solid var(--border-soft);
+  color: var(--text);
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  font-size: 9px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.connect-wizard .tempo-wallet-card-actions button:last-child {
+  color: var(--surface);
+  background: var(--text);
+}
+
+.connect-wizard .tempo-wallet-card-actions button:hover:not(:disabled),
+.connect-wizard .tempo-wallet-card-actions button:focus-visible {
+  border-color: var(--text);
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.connect-wizard .tempo-wallet-card-actions button:disabled {
+  cursor: default;
+  opacity: 0.48;
+}
+
+.connect-wizard .tempo-wallet-payment-status {
+  align-self: end;
+  color: var(--positive);
+  font-size: 8px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
 .connect-wizard .mcp-connections {
   display: grid;
   margin-top: 12px;
@@ -903,6 +1135,25 @@
   font-size: 8px;
 }
 
+.connect-wizard .account-wallet-session > span {
+  color: var(--muted);
+  font-size: 8px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.connect-wizard .account-wallet-session {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 0 48px;
+  gap: 12px;
+}
+
+.connect-wizard .account-wallet-session .wizard-sign-out {
+  margin-top: 0;
+}
+
 .connect-wizard .wizard-visibility {
   display: grid;
   padding: 6px 0;
@@ -1015,6 +1266,16 @@
     width: calc(100% - 32px);
   }
 
+  .connect-wizard .wizard-account-page {
+    margin-right: 16px;
+    margin-left: 16px;
+    padding-top: 28px;
+  }
+
+  .connect-wizard .sms-auth-panel {
+    padding: 24px 20px;
+  }
+
   .connect-wizard .wizard-intro {
     align-items: stretch;
     flex-direction: column;
@@ -1054,6 +1315,20 @@
     white-space: normal;
     -webkit-box-orient: vertical;
     -webkit-line-clamp: 2;
+  }
+
+  .connect-wizard .wizard-connectors .tempo-wallet-card {
+    grid-template-columns: 40px minmax(0, 1fr);
+  }
+
+  .connect-wizard .tempo-wallet-card-actions {
+    grid-column: 1 / -1;
+    flex-direction: row;
+  }
+
+  .connect-wizard .tempo-wallet-card-actions button {
+    min-height: 44px;
+    flex: 1;
   }
 
   .connect-wizard .wizard-visibility > div {

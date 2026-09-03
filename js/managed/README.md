@@ -24,7 +24,7 @@ storage ownership.
 
 ## Public journeys and protocol boundaries
 
-- Passkey/account and API-key routes establish the account identity that owns
+- SMS OTP/account and API-key routes establish the account identity that owns
   agents, organizations, connectors, memory, and history.
 - `/v1/agents` lists or creates agents. Agent routes create turns, read state,
   cancel or steer work, delete an agent, and support explicit durability import
@@ -48,16 +48,56 @@ protocol. `/health` is the service health endpoint.
 
 | Binding | Role |
 | --- | --- |
-| `NANOCODEX` | Private Service Binding to `nanocodex-egress`. |
+| `NANOCODEX` | Private Service Binding to `nanocodex-egress` for credentials and persistent-account wallets. |
 | `NANOCODEX_SESSIONS` | One `DurableAgentSession` per managed agent. |
 | `NANOCODEX_ROOMS`, `NANOCODEX_MULTIPLAYER_QUOTA` | Multiplayer state and global quota. |
 | `NANOCODEX_AUTH`, `NANOCODEX_USERS`, `NANOCODEX_API_KEYS`, `NANOCODEX_ORGANIZATIONS`, `NANOCODEX_MEMORY` | Account, key, organization, and durable-memory ownership. |
 | `NANOCODEX_HISTORY`, `HISTORY_AI_SEARCH` | R2 history archive and production history retrieval. |
 | `BROWSER`, `LOADER` | Browser Run and the sandboxed Worker loader used by the official Agents browser runtime. |
 
+### SMS OTP delivery
+
+Set `NANOCODEX_OTP_HMAC_KEY` to at least 32 random bytes and create a Twilio
+Verify Service configured for SMS with six-digit codes. Provide its
+`TWILIO_VERIFY_SERVICE_SID` with `TWILIO_API_KEY_SID` and
+`TWILIO_API_KEY_SECRET` Worker secrets. `TWILIO_ACCOUNT_SID` plus
+`TWILIO_AUTH_TOKEN` is accepted as a fallback credential pair when an API key
+is not configured.
+
+The checked-in `development` Wrangler environment uses `123456` as a local
+Verify fixture and does not contact Twilio. The fixture is active only when
+`ENVIRONMENT` is exactly `development`; production ignores the fixture value
+and still requires a valid Verify Service and credentials.
+
+Twilio Verify generates, delivers, and checks each code, automatically upgrading
+eligible SMS requests to RCS. Nanocodex retains a five-minute opaque local
+challenge so a successful verification can be bound to the initiating browser,
+and stores the phone only as a keyed HMAC digest for identity and abuse limits.
+It never logs phone numbers, codes, provider responses, or credentials. Keep the
+HMAC key stable; rotating it requires an identity migration or known phones will
+resolve to new accounts.
+
+### Persistent account wallet
+
+After Twilio Verify approves an OTP, the Worker provisions that persistent
+account's secp256k1 root wallet through the existing `NANOCODEX` Service
+Binding before issuing the account session. Provisioning is idempotent. A
+wallet failure returns `wallet_unavailable`, issues no session, and leaves the
+browser-bound challenge retryable. `GET /v1/wallet` returns public metadata;
+same-origin authenticated `POST /v1/wallet/connect` and
+`POST /v1/wallet/revoke-access-key` authorize and revoke exact access keys.
+
+The private key is encrypted and used only inside the per-user egress Durable
+Object. It never enters this Worker or the browser. This is custodial
+server-side encryption, not user-held end-to-end encryption. See
+[the wallet custody contract](../../docs/WALLET_CUSTODY.md). Existing
+configurable-account migration is future work.
+
 `wrangler.jsonc` is the binding and migration source of truth. Development
 uses the same Worker role with local Durable Objects, local egress binding, R2,
-and shorter idle timing; AI Search is a production binding.
+and shorter idle timing; AI Search is a production binding. The wallet reuses
+the existing `NANOCODEX` binding, so it adds no managed-Worker secret, binding,
+or Durable Object migration.
 
 ### Managed browser provider
 

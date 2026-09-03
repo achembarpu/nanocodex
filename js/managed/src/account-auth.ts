@@ -16,13 +16,26 @@ const LOCAL_PORTABLE_CREDENTIAL_COOKIE = "nanocodex_local_passkey";
 const LOCAL_WEBAUTHN_RP_ID = "nanocodex.localhost";
 const LOCAL_WEBAUTHN_HOST = /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)?nanocodex\.localhost$/;
 const SESSION_TTL_SECONDS = 30 * 24 * 60 * 60;
+const PERSISTENT_SESSION_TTL_SECONDS = 365 * 24 * 60 * 60;
 const WEBAUTHN_CHALLENGE_TTL_SECONDS = 5 * 60;
-const PASSKEY_REAUTH_WINDOW_SECONDS = 365 * 24 * 60 * 60;
+const OTP_CHALLENGE_TTL_SECONDS = 5 * 60;
+const OTP_RESEND_SECONDS = 60;
+const OTP_PHONE_REQUESTS_PER_HOUR = 5;
+const OTP_IP_REQUESTS_PER_HOUR = 20;
+const OTP_PROVIDER_TIMEOUT_MS = 10_000;
+const MAX_WALLET_MUTATION_BODY_BYTES = 16 * 1024;
 const USER_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const API_KEY = /^ncx_live_([A-Za-z0-9_-]{12})_([A-Za-z0-9_-]{43})$/;
 const ANONYMOUS_SESSION_TOKEN = /^a_[A-Za-z0-9_-]{43}$/;
-const PASSKEY_SESSION_TOKEN = /^[0-9a-f]{64}$/;
+const SMS_SESSION_TOKEN = /^s_[A-Za-z0-9_-]{43}$/;
+const LEGACY_PASSKEY_SESSION_TOKEN = /^[0-9a-f]{64}$/;
+const OTP_CHALLENGE_ID = /^[A-Za-z0-9_-]{43}$/;
+const OTP_CODE = /^\d{6}$/;
+const E164_PHONE = /^\+[1-9]\d{7,14}$/;
+const TWILIO_VERIFY_SERVICE_SID = /^VA[0-9a-f]{32}$/i;
+const TWILIO_VERIFICATION_SID = /^VE[0-9a-f]{32}$/i;
+const ACCOUNT_ADDRESS = /^0x[0-9a-f]{40}$/;
 const PORTABLE_CREDENTIAL_ID = /^[A-Za-z0-9_-]{1,512}$/;
 const PORTABLE_PUBLIC_KEY = /^0x(?:[0-9a-fA-F]{2}){1,1024}$/;
 const BASE64_URL = /^[A-Za-z0-9_-]+$/;
@@ -49,10 +62,19 @@ export function isUserId(value: unknown): value is string {
 export const NonceStorage = Kv.NonceStorage;
 
 export interface AccountAuthEnv {
+  ENVIRONMENT?: string;
+  NANOCODEX_MOCK_TWILIO_VERIFY_CODE?: string;
   NANOCODEX_AUTH: DurableObjectNamespace;
   NANOCODEX_USERS: DurableObjectNamespace<UserAccount>;
   NANOCODEX_API_KEYS: DurableObjectNamespace<ApiKeyRecord>;
   NANOCODEX_LOCAL_WEBAUTHN_HMAC_KEY?: string;
+  NANOCODEX_OTP_HMAC_KEY?: string;
+  NANOCODEX?: Fetcher;
+  TWILIO_ACCOUNT_SID?: string;
+  TWILIO_API_KEY_SECRET?: string;
+  TWILIO_API_KEY_SID?: string;
+  TWILIO_AUTH_TOKEN?: string;
+  TWILIO_VERIFY_SERVICE_SID?: string;
   NANOCODEX_ORGANIZATIONS: DurableObjectNamespace<Organization>;
 }
 
@@ -189,9 +211,26 @@ const teamStorageKey = (teamId: string) => `team:${teamId}`;
 const userMembershipStorageKey = (userId: string) => `membership:user:${userId}`;
 
 type AccountSessionPayload = Readonly<{
+  authentication?: "anonymous" | "sms_otp";
   userId: string;
   issuedAt: number;
   expiresAt: number;
+}>;
+
+type SmsIdentity = Readonly<{
+  userId: string;
+}>;
+
+export type AccountWalletMetadata = Readonly<{
+  address: `0x${string}`;
+  created_at: number;
+}>;
+
+type SmsOtpChallenge = Readonly<{
+  candidateUserId: string;
+  expiresAt: number;
+  phoneDigest: string;
+  verificationSid: string;
 }>;
 
 type PortableCredential = Readonly<{
@@ -244,6 +283,24 @@ export async function routeAccountRequest(
 ): Promise<Response | undefined> {
   if (url.pathname === "/auth" || url.pathname.startsWith("/auth/")) {
     return json({ error: "not_found" }, { status: 404 });
+  }
+  if (url.pathname === "/v1/auth/sms/start") {
+    if (request.method !== "POST") return methodNotAllowed();
+    const originFailure = requireBrowserOrigin(request, url);
+    if (originFailure) return originFailure;
+    return startSmsOtp(request, env, url);
+  }
+  if (url.pathname === "/v1/auth/sms/verify") {
+    if (request.method !== "POST") return methodNotAllowed();
+    const originFailure = requireBrowserOrigin(request, url);
+    if (originFailure) return originFailure;
+    return verifySmsOtp(request, env, url);
+  }
+  if (url.pathname === "/v1/auth/logout") {
+    if (request.method !== "POST") return methodNotAllowed();
+    const originFailure = requireBrowserOrigin(request, url);
+    if (originFailure) return originFailure;
+    return logoutAccountSession(request, env, url);
   }
   if (url.pathname === "/webauthn/portable-credential") {
     if (request.method !== "DELETE") return methodNotAllowed();
@@ -300,6 +357,9 @@ export async function routeAccountRequest(
     const resolved = await resolveOrCreateBrowserAccount(request, env, url);
     if (resolved instanceof Response) return resolved;
     const principal = resolved.principal;
+    const accountAddress = resolved.persistent
+      ? await readAccountWallet(env, principal.userId).then((wallet) => wallet?.address).catch(() => undefined)
+      : await accountAddressForRequest(request, env, url, principal.userId).catch(() => undefined);
     const portableCookie = resolved.persistent
       ? await portableLocalCredentialCookieForSession(request, env, url, principal)
       : undefined;
@@ -313,6 +373,7 @@ export async function routeAccountRequest(
     for (const cookie of cookies) headers.append("set-cookie", cookie);
     return json({
       user: {
+        ...(accountAddress ? { address: accountAddress } : {}),
         id: principal.userId,
         persistent: resolved.persistent,
       },
@@ -323,6 +384,37 @@ export async function routeAccountRequest(
     }, cookies.length
       ? { headers }
       : undefined);
+  }
+  if (url.pathname === "/v1/wallet") {
+    if (request.method !== "GET") return methodNotAllowed();
+    const principal = await authenticatePersistentAccount(request, env, url);
+    if (!principal) return unauthorized();
+    return proxyAccountWalletRequest(env, principal.userId, "");
+  }
+  if (url.pathname === "/v1/wallet/balance") {
+    if (request.method !== "GET") return methodNotAllowed();
+    const principal = await authenticatePersistentAccount(request, env, url);
+    if (!principal) return unauthorized();
+    return proxyAccountWalletRequest(env, principal.userId, "/balance");
+  }
+  if (url.pathname === "/v1/wallet/connect" || url.pathname === "/v1/wallet/revoke-access-key") {
+    if (request.method !== "POST") return methodNotAllowed();
+    const principal = await authenticatePersistentAccount(request, env, url);
+    if (!principal) return unauthorized();
+    const originFailure = requireSameOriginMutation(request, url, principal);
+    if (originFailure) return originFailure;
+    let body = await readJson(request, MAX_WALLET_MUTATION_BODY_BYTES);
+    if (body instanceof Response) return body;
+    if (containsBrowserPrivateKey(body)) {
+      return json({ error: "invalid_wallet_request" }, { status: 400 });
+    }
+    const suffix = url.pathname === "/v1/wallet/connect" ? "/connect" : "/revoke-access-key";
+    if (suffix === "/revoke-access-key") {
+      const wallet = await readAccountWallet(env, principal.userId).catch(() => undefined);
+      if (!wallet) return json({ error: "wallet_unavailable" }, { status: 503 });
+      body = withCanonicalWalletAddress(body, wallet.address);
+    }
+    return proxyAccountWalletRequest(env, principal.userId, suffix, body);
   }
   if (url.pathname === "/v1/organization") {
     const principal = await authenticate(request, env, url);
@@ -401,6 +493,188 @@ export async function routeAccountRequest(
   return undefined;
 }
 
+async function startSmsOtp(
+  request: Request,
+  env: AccountAuthEnv,
+  url: URL,
+): Promise<Response> {
+  const secret = otpSecret(env);
+  if (!secret) return json({ error: "sms_otp_unavailable" }, { status: 503 });
+  const body = await readJson(request, 1_024);
+  if (body instanceof Response) return body;
+  const phone = normalizedPhone(body.phone);
+  if (!phone) return json({ error: "invalid_phone" }, { status: 400 });
+
+  const store = authStore(env, "sms-otp");
+  if (!store.create) return json({ error: "sms_otp_unavailable" }, { status: 503 });
+  const [phoneDigest, ipDigest] = await Promise.all([
+    keyedDigest(secret, `phone:${phone}`),
+    keyedDigest(secret, `ip:${request.headers.get("cf-connecting-ip") ?? "local"}`),
+  ]);
+  const now = Math.floor(Date.now() / 1_000);
+  const limited = !await store.create(`cooldown:${phoneDigest}`, true, { ttl: OTP_RESEND_SECONDS })
+    || !await reserveWindowSlot(
+      store,
+      `phone:${phoneDigest}`,
+      OTP_PHONE_REQUESTS_PER_HOUR,
+      now,
+    )
+    || !await reserveWindowSlot(store, `ip:${ipDigest}`, OTP_IP_REQUESTS_PER_HOUR, now);
+  if (limited) {
+    return json({ error: "rate_limited", retry_after: OTP_RESEND_SECONDS }, {
+      status: 429,
+      headers: { "retry-after": String(OTP_RESEND_SECONDS) },
+    });
+  }
+
+  const session = await readBrowserSession(request, env);
+  const sessionToken = cookieValue(request, ACCOUNT_COOKIE);
+  const candidateUserId = session && sessionToken && ANONYMOUS_SESSION_TOKEN.test(sessionToken)
+    ? session.userId
+    : crypto.randomUUID();
+  const challengeId = randomBase64Url(32);
+  try {
+    const verificationSid = await startTwilioSmsVerification(env, phone);
+    const challenge: SmsOtpChallenge = {
+      candidateUserId,
+      expiresAt: now + OTP_CHALLENGE_TTL_SECONDS,
+      phoneDigest,
+      verificationSid,
+    };
+    await Promise.all([
+      store.set(`challenge:${challengeId}`, challenge, { ttl: OTP_CHALLENGE_TTL_SECONDS }),
+      store.set(`active:${phoneDigest}`, challengeId, { ttl: OTP_CHALLENGE_TTL_SECONDS }),
+    ]);
+  } catch {
+    await Promise.all([
+      store.delete(`challenge:${challengeId}`),
+      store.delete(`active:${phoneDigest}`),
+      store.delete(`cooldown:${phoneDigest}`),
+    ]);
+    return json({ error: "sms_delivery_failed" }, { status: 503 });
+  }
+  return json({
+    challenge_id: challengeId,
+    expires_in: OTP_CHALLENGE_TTL_SECONDS,
+    resend_after: OTP_RESEND_SECONDS,
+  }, { status: 202 });
+}
+
+async function verifySmsOtp(
+  request: Request,
+  env: AccountAuthEnv,
+  url: URL,
+): Promise<Response> {
+  const secret = otpSecret(env);
+  if (!secret) return json({ error: "sms_otp_unavailable" }, { status: 503 });
+  const body = await readJson(request, 1_024);
+  if (body instanceof Response) return body;
+  const phone = normalizedPhone(body.phone);
+  const challengeId = typeof body.challenge_id === "string" && OTP_CHALLENGE_ID.test(body.challenge_id)
+    ? body.challenge_id
+    : undefined;
+  const code = typeof body.code === "string" && OTP_CODE.test(body.code) ? body.code : undefined;
+  if (!phone || !challengeId || !code) {
+    return json({ error: "invalid_otp" }, { status: 400 });
+  }
+
+  const store = authStore(env, "sms-otp");
+  if (!store.take) return json({ error: "sms_otp_unavailable" }, { status: 503 });
+  const phoneDigest = await keyedDigest(secret, `phone:${phone}`);
+  const active = await store.get<unknown>(`active:${phoneDigest}`);
+  const challenge = await store.take<unknown>(`challenge:${challengeId}`);
+  const now = Math.floor(Date.now() / 1_000);
+  if (active !== challengeId || !isSmsOtpChallenge(challenge)
+    || challenge.phoneDigest !== phoneDigest || challenge.expiresAt <= now) {
+    return json({ error: "invalid_or_expired_otp" }, { status: 400 });
+  }
+  let approved: boolean;
+  try {
+    approved = await checkTwilioSmsVerification(env, challenge.verificationSid, code);
+  } catch {
+    await store.set(`challenge:${challengeId}`, challenge, {
+      ttl: Math.max(1, challenge.expiresAt - now),
+    });
+    return json({ error: "sms_verification_failed" }, { status: 503 });
+  }
+  if (!approved) {
+    await store.set(`challenge:${challengeId}`, challenge, {
+      ttl: Math.max(1, challenge.expiresAt - now),
+    });
+    return json({ error: "invalid_or_expired_otp" }, { status: 400 });
+  }
+
+  const proposedIdentity: SmsIdentity = {
+    userId: challenge.candidateUserId,
+  };
+  const identityKey = `identity:${phoneDigest}`;
+  if (!store.create || !await store.create(identityKey, proposedIdentity)) {
+    const existing = await store.get<unknown>(identityKey);
+    if (!isSmsIdentity(existing)) {
+      return json({ error: "sms_identity_unavailable" }, { status: 503 });
+    }
+  }
+  const identity = await store.get<unknown>(identityKey);
+  if (!isSmsIdentity(identity)) {
+    return json({ error: "sms_identity_unavailable" }, { status: 503 });
+  }
+  await ensureAccount(env, identity.userId, true);
+  let wallet: AccountWalletMetadata;
+  try {
+    wallet = await ensureAccountWallet(env, identity.userId);
+  } catch {
+    await store.set(`challenge:${challengeId}`, challenge, {
+      ttl: Math.max(1, challenge.expiresAt - now),
+    });
+    return json({ error: "wallet_unavailable" }, { status: 503 });
+  }
+  const previousToken = cookieValue(request, ACCOUNT_COOKIE);
+  if (previousToken && (ANONYMOUS_SESSION_TOKEN.test(previousToken) || SMS_SESSION_TOKEN.test(previousToken))) {
+    await authStore(env, "account").delete(accountSessionKey(previousToken));
+  }
+  const token = `s_${randomBase64Url(32)}`;
+  await authStore(env, "account").set(accountSessionKey(token), {
+    authentication: "sms_otp",
+    userId: identity.userId,
+    issuedAt: now,
+    expiresAt: now + SESSION_TTL_SECONDS,
+  } satisfies AccountSessionPayload, { ttl: SESSION_TTL_SECONDS });
+  await store.delete(`active:${phoneDigest}`);
+  return json({
+    user: {
+      address: wallet.address,
+      id: identity.userId,
+      persistent: true,
+    },
+  }, {
+    headers: {
+      "set-cookie": accountCookie(token, PERSISTENT_SESSION_TTL_SECONDS, url.protocol),
+    },
+  });
+}
+
+async function logoutAccountSession(
+  request: Request,
+  env: AccountAuthEnv,
+  url: URL,
+): Promise<Response> {
+  const token = cookieValue(request, ACCOUNT_COOKIE);
+  if (token && (ANONYMOUS_SESSION_TOKEN.test(token) || SMS_SESSION_TOKEN.test(token))) {
+    await authStore(env, "account").delete(accountSessionKey(token));
+  }
+  if (token && LEGACY_PASSKEY_SESSION_TOKEN.test(token)) {
+    const response = await webAuthnHandler(env, url).fetch(new Request(
+      new URL("/webauthn/logout", url),
+      { method: "POST", headers: request.headers },
+    ));
+    await response.body?.cancel();
+  }
+  return new Response(null, {
+    status: 204,
+    headers: { "set-cookie": clearAccountCookie(url.protocol) },
+  });
+}
+
 export async function authenticate(
   request: Request,
   env: AccountAuthEnv,
@@ -427,7 +701,7 @@ export async function authenticate(
     };
   }
   const cookie = cookieValue(request, ACCOUNT_COOKIE);
-  if (cookie && ANONYMOUS_SESSION_TOKEN.test(cookie)) {
+  if (cookie && (ANONYMOUS_SESSION_TOKEN.test(cookie) || SMS_SESSION_TOKEN.test(cookie))) {
     const session = await readBrowserSession(request, env);
     if (session) {
       return resolveUserPrincipal(
@@ -436,7 +710,7 @@ export async function authenticate(
         `account_session:${await sha256(cookie)}`,
       );
     }
-  } else if (cookie && PASSKEY_SESSION_TOKEN.test(cookie)) {
+  } else if (cookie && LEGACY_PASSKEY_SESSION_TOKEN.test(cookie)) {
     const passkey = await webAuthnHandler(env, url).getSession(request);
     const passkeyUserId = passkey?.userId ? decodeUserId(passkey.userId) : undefined;
     if (isUserId(passkeyUserId)) {
@@ -527,28 +801,35 @@ export async function authenticatePersistentAccount(
   return account?.persistent === true ? principal : undefined;
 }
 
-export type PersistentPasskeyAccount = Readonly<{
+export type PersistentHostedAccount = Readonly<{
   accountAddress: string;
-  credentialId: string;
   principal: Principal;
-  publicKey: string;
 }>;
 
+export async function authenticatePersistentHostedAccount(
+  request: Request,
+  env: AccountAuthEnv,
+  url = new URL(request.url),
+): Promise<PersistentHostedAccount | undefined> {
+  const principal = await authenticatePersistentAccount(request, env, url);
+  if (!principal) return undefined;
+  const wallet = await readAccountWallet(env, principal.userId);
+  return wallet ? { accountAddress: wallet.address, principal } : undefined;
+}
+
+/** @deprecated Use authenticatePersistentHostedAccount. */
 export async function authenticatePersistentPasskeyAccount(
   request: Request,
   env: AccountAuthEnv,
   url = new URL(request.url),
-): Promise<PersistentPasskeyAccount | undefined> {
+): Promise<(PersistentHostedAccount & Readonly<{ credentialId: string; publicKey: string }>) | undefined> {
   const principal = await authenticatePersistentAccount(request, env, url);
   if (!principal) return undefined;
   const session = await webAuthnHandler(env, url).getSession(request);
   const userId = session?.userId ? decodeUserId(session.userId) : undefined;
-  if (!session
-    || userId !== principal.userId
-    || typeof session.credentialId !== "string"
-    || !PORTABLE_CREDENTIAL_ID.test(session.credentialId)
-    || typeof session.publicKey !== "string"
-    || !PORTABLE_PUBLIC_KEY.test(session.publicKey)) return undefined;
+  if (!session || userId !== principal.userId
+    || typeof session.credentialId !== "string" || !PORTABLE_CREDENTIAL_ID.test(session.credentialId)
+    || typeof session.publicKey !== "string" || !PORTABLE_PUBLIC_KEY.test(session.publicKey)) return undefined;
   try {
     const publicKey = PublicKey.fromHex(session.publicKey as `0x${string}`);
     if (publicKey.y === undefined) return undefined;
@@ -998,6 +1279,74 @@ export async function ensureAccount(
   throw new Error("account provisioning failed");
 }
 
+/** Ensures the egress-owned managed wallet exists and returns only public metadata. */
+export async function ensureAccountWallet(
+  env: AccountAuthEnv,
+  userId: string,
+): Promise<AccountWalletMetadata> {
+  if (!isUserId(userId) || !env.NANOCODEX) throw new Error("wallet unavailable");
+  let response: Response;
+  try {
+    response = await env.NANOCODEX.fetch(
+      `https://broker.internal/users/${encodeURIComponent(userId)}/wallet`,
+      { method: "PUT" },
+    );
+  } catch {
+    throw new Error("wallet unavailable");
+  }
+  if (!response.ok) {
+    await response.body?.cancel().catch(() => {});
+    throw new Error("wallet unavailable");
+  }
+  const metadata = await response.json<unknown>().catch(() => undefined);
+  if (!isAccountWalletMetadata(metadata)) throw new Error("wallet unavailable");
+  return metadata;
+}
+
+async function readAccountWallet(
+  env: AccountAuthEnv,
+  userId: string,
+): Promise<AccountWalletMetadata | undefined> {
+  if (!isUserId(userId) || !env.NANOCODEX) throw new Error("wallet unavailable");
+  let response: Response;
+  try {
+    response = await env.NANOCODEX.fetch(
+      `https://broker.internal/users/${encodeURIComponent(userId)}/wallet`,
+    );
+  } catch {
+    throw new Error("wallet unavailable");
+  }
+  if (!response.ok) {
+    await response.body?.cancel().catch(() => {});
+    return undefined;
+  }
+  const metadata = await response.json<unknown>().catch(() => undefined);
+  return isAccountWalletMetadata(metadata) ? metadata : undefined;
+}
+
+async function proxyAccountWalletRequest(
+  env: AccountAuthEnv,
+  userId: string,
+  suffix: "" | "/balance" | "/connect" | "/revoke-access-key",
+  body?: Record<string, unknown>,
+): Promise<Response> {
+  if (!env.NANOCODEX) return json({ error: "wallet_unavailable" }, { status: 503 });
+  try {
+    return await env.NANOCODEX.fetch(
+      `https://broker.internal/users/${encodeURIComponent(userId)}/wallet${suffix}`,
+      body === undefined
+        ? undefined
+        : {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        },
+    );
+  } catch {
+    return json({ error: "wallet_unavailable" }, { status: 503 });
+  }
+}
+
 async function readAccount(env: AccountAuthEnv, userId: string): Promise<UserRecord | undefined> {
   const response = await env.NANOCODEX_USERS.getByName(userId).fetch("https://user.internal/account");
   if (!response.ok) {
@@ -1054,7 +1403,8 @@ async function resolveOrCreateBrowserAccount(
   if (request.headers.has("authorization")) return unauthorized();
   if (hasCookie(request, ACCOUNT_COOKIE)) {
     const token = cookieValue(request, ACCOUNT_COOKIE);
-    const reauthenticationRequired = Boolean(token && PASSKEY_SESSION_TOKEN.test(token));
+    const reauthenticationRequired = Boolean(token
+      && (SMS_SESSION_TOKEN.test(token) || LEGACY_PASSKEY_SESSION_TOKEN.test(token)));
     return json({
       error: reauthenticationRequired
         ? "reauthentication_required"
@@ -1063,7 +1413,7 @@ async function resolveOrCreateBrowserAccount(
       status: 401,
       headers: {
         "set-cookie": reauthenticationRequired
-          ? accountCookie(token!, PASSKEY_REAUTH_WINDOW_SECONDS, new URL(request.url).protocol)
+          ? accountCookie(token!, PERSISTENT_SESSION_TTL_SECONDS, new URL(request.url).protocol)
           : clearAccountCookie(new URL(request.url).protocol),
       },
     });
@@ -1075,6 +1425,7 @@ async function resolveOrCreateBrowserAccount(
   await Promise.all([
     ensureAccount(env, userId, false),
     authStore(env, "account").set(accountSessionKey(token), {
+      authentication: "anonymous",
       userId,
       issuedAt,
       expiresAt: issuedAt + SESSION_TTL_SECONDS,
@@ -1119,7 +1470,9 @@ function decodeUserId(value: string): string | undefined {
 function cookieValue(request: Request, name: string): string | undefined {
   const cookie = rawCookie(request, name);
   return cookie.present
-    && (ANONYMOUS_SESSION_TOKEN.test(cookie.value) || PASSKEY_SESSION_TOKEN.test(cookie.value))
+    && (ANONYMOUS_SESSION_TOKEN.test(cookie.value)
+      || SMS_SESSION_TOKEN.test(cookie.value)
+      || LEGACY_PASSKEY_SESSION_TOKEN.test(cookie.value))
     ? cookie.value
     : undefined;
 }
@@ -1144,8 +1497,8 @@ function serializeAccountCookie(token: string, protocol: string): string {
 
 function serializePersistentSessionCookie(request: Request, protocol: string): string | undefined {
   const token = cookieValue(request, ACCOUNT_COOKIE);
-  return token && PASSKEY_SESSION_TOKEN.test(token)
-    ? accountCookie(token, PASSKEY_REAUTH_WINDOW_SECONDS, protocol)
+  return token && (SMS_SESSION_TOKEN.test(token) || LEGACY_PASSKEY_SESSION_TOKEN.test(token))
+    ? accountCookie(token, PERSISTENT_SESSION_TTL_SECONDS, protocol)
     : undefined;
 }
 
@@ -1657,6 +2010,43 @@ function isUserRecord(value: unknown): value is UserRecord {
     && Number.isFinite(record.lastAuthenticatedAt);
 }
 
+function isAccountWalletMetadata(value: unknown): value is AccountWalletMetadata {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const metadata = value as Partial<AccountWalletMetadata>;
+  return Object.keys(metadata).length === 2
+    && ACCOUNT_ADDRESS.test(metadata.address ?? "")
+    && Number.isSafeInteger(metadata.created_at)
+    && (metadata.created_at ?? -1) >= 0;
+}
+
+function containsBrowserPrivateKey(value: unknown): boolean {
+  if (Array.isArray(value)) return value.some(containsBrowserPrivateKey);
+  if (typeof value !== "object" || value === null) return false;
+  return Object.entries(value).some(([key, nested]) => {
+    const normalized = key.toLowerCase().replaceAll(/[-_]/g, "");
+    return normalized.includes("privatekey")
+      || containsBrowserPrivateKey(nested);
+  });
+}
+
+function withCanonicalWalletAddress(
+  body: Record<string, unknown>,
+  address: `0x${string}`,
+): Record<string, unknown> {
+  const request = body.request;
+  if (typeof request !== "object" || request === null || Array.isArray(request)) return body;
+  const params = (request as Record<string, unknown>).params;
+  if (!Array.isArray(params) || params.length !== 1
+    || typeof params[0] !== "object" || params[0] === null || Array.isArray(params[0])) return body;
+  return {
+    ...body,
+    request: {
+      ...(request as Record<string, unknown>),
+      params: [{ ...(params[0] as Record<string, unknown>), address }],
+    },
+  };
+}
+
 function isOrganizationMetadata(value: unknown): value is OrganizationMetadata {
   if (typeof value !== "object" || value === null) return false;
   const metadata = value as Partial<OrganizationMetadata>;
@@ -1860,6 +2250,213 @@ function organizationName(value: unknown): string | null | undefined {
   return name.length <= 120 ? name : undefined;
 }
 
+function normalizedPhone(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const phone = value.replace(/[\s()-]/g, "");
+  return E164_PHONE.test(phone) ? phone : undefined;
+}
+
+function otpSecret(env: AccountAuthEnv): string | undefined {
+  return typeof env.NANOCODEX_OTP_HMAC_KEY === "string"
+    && env.NANOCODEX_OTP_HMAC_KEY.length >= 32
+    ? env.NANOCODEX_OTP_HMAC_KEY
+    : undefined;
+}
+
+async function reserveWindowSlot(
+  store: Kv.Kv,
+  subject: string,
+  limit: number,
+  now: number,
+): Promise<boolean> {
+  if (!store.create) return false;
+  const window = Math.floor(now / 3_600);
+  const ttl = 7_200;
+  for (let slot = 0; slot < limit; slot += 1) {
+    if (await store.create(`rate:${subject}:${window}:${slot}`, true, { ttl })) return true;
+  }
+  return false;
+}
+
+async function keyedDigest(secret: string, value: string): Promise<string> {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(secret),
+    { hash: "SHA-256", name: "HMAC" },
+    false,
+    ["sign"],
+  );
+  return encodeBase64Url(new Uint8Array(await crypto.subtle.sign(
+    "HMAC",
+    key,
+    new TextEncoder().encode(value),
+  )));
+}
+
+function isSmsOtpChallenge(value: unknown): value is SmsOtpChallenge {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const challenge = value as Partial<SmsOtpChallenge>;
+  return isUserId(challenge.candidateUserId)
+    && Number.isSafeInteger(challenge.expiresAt)
+    && typeof challenge.phoneDigest === "string" && BASE64_URL.test(challenge.phoneDigest)
+    && typeof challenge.verificationSid === "string"
+    && TWILIO_VERIFICATION_SID.test(challenge.verificationSid);
+}
+
+function isSmsIdentity(value: unknown): value is SmsIdentity {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const identity = value as Partial<SmsIdentity>;
+  return isUserId(identity.userId);
+}
+
+function twilioVerifyRequest(
+  env: AccountAuthEnv,
+  resource: "Verifications" | "VerificationCheck",
+  body: Record<string, string>,
+): Readonly<{ body: URLSearchParams; headers: Record<string, string>; method: "POST"; url: string }> {
+  const accountSid = env.TWILIO_ACCOUNT_SID;
+  const apiKeySid = env.TWILIO_API_KEY_SID;
+  const apiKeySecret = env.TWILIO_API_KEY_SECRET;
+  const authToken = env.TWILIO_AUTH_TOKEN;
+  const serviceSid = env.TWILIO_VERIFY_SERVICE_SID;
+  const apiKey = apiKeySid && /^SK[0-9a-f]{32}$/i.test(apiKeySid) && apiKeySecret
+    ? { secret: apiKeySecret, sid: apiKeySid }
+    : undefined;
+  const credential = apiKey ?? (authToken && accountSid && /^AC[0-9a-f]{32}$/i.test(accountSid)
+    ? { secret: authToken, sid: accountSid }
+    : undefined);
+  if (!serviceSid || !TWILIO_VERIFY_SERVICE_SID.test(serviceSid) || !credential) {
+    throw new Error("Twilio Verify is not configured");
+  }
+  return {
+    body: new URLSearchParams(body),
+    headers: {
+      authorization: `Basic ${btoa(`${credential.sid}:${credential.secret}`)}`,
+      "content-type": "application/x-www-form-urlencoded;charset=UTF-8",
+    },
+    method: "POST",
+    url: `https://verify.twilio.com/v2/Services/${serviceSid}/${resource}`,
+  };
+}
+
+async function startTwilioSmsVerification(env: AccountAuthEnv, to: string): Promise<string> {
+  if (developmentTwilioVerifyCode(env)) {
+    return "VE00000000000000000000000000000000";
+  }
+  const request = twilioVerifyRequest(env, "Verifications", { Channel: "sms", To: to });
+  return fetchResponseWithDeadline(
+    { fetch: (input: RequestInfo | URL, init?: RequestInit) => fetch(input, init) },
+    request.url,
+    { body: request.body, headers: request.headers, method: request.method },
+    OTP_PROVIDER_TIMEOUT_MS,
+    "SMS OTP delivery",
+    async (response) => {
+      if (!response.ok) throw new Error(`SMS delivery failed with HTTP ${response.status}`);
+      const value: unknown = await response.json();
+      if (typeof value !== "object" || value === null || Array.isArray(value)) {
+        throw new Error("Twilio Verify returned an invalid response");
+      }
+      const verification = value as { sid?: unknown; status?: unknown };
+      if (typeof verification.sid !== "string" || !TWILIO_VERIFICATION_SID.test(verification.sid)
+        || verification.status !== "pending") {
+        throw new Error("Twilio Verify did not create a pending verification");
+      }
+      return verification.sid;
+    },
+    { retryable: true },
+  );
+}
+
+async function checkTwilioSmsVerification(
+  env: AccountAuthEnv,
+  verificationSid: string,
+  code: string,
+): Promise<boolean> {
+  const mockCode = developmentTwilioVerifyCode(env);
+  if (mockCode) return code === mockCode;
+  const request = twilioVerifyRequest(env, "VerificationCheck", {
+    Code: code,
+    VerificationSid: verificationSid,
+  });
+  return fetchResponseWithDeadline(
+    { fetch: (input: RequestInfo | URL, init?: RequestInit) => fetch(input, init) },
+    request.url,
+    { body: request.body, headers: request.headers, method: request.method },
+    OTP_PROVIDER_TIMEOUT_MS,
+    "SMS OTP verification",
+    async (response) => {
+      if (response.status === 404) return false;
+      if (!response.ok) throw new Error(`SMS verification failed with HTTP ${response.status}`);
+      const value: unknown = await response.json();
+      if (typeof value !== "object" || value === null || Array.isArray(value)) {
+        throw new Error("Twilio Verify returned an invalid response");
+      }
+      return (value as { status?: unknown }).status === "approved";
+    },
+    { retryable: true },
+  );
+}
+
+function developmentTwilioVerifyCode(env: AccountAuthEnv): string | undefined {
+  const code = env.NANOCODEX_MOCK_TWILIO_VERIFY_CODE;
+  return env.ENVIRONMENT?.trim().toLowerCase() === "development"
+    && typeof code === "string"
+    && /^[0-9]{6}$/.test(code)
+    ? code
+    : undefined;
+}
+
+async function accountAddressForRequest(
+  request: Request,
+  env: AccountAuthEnv,
+  url: URL,
+  userId: string,
+): Promise<`0x${string}` | undefined> {
+  const remembered = await readAccountAddress(env, userId);
+  if (remembered) return remembered;
+  const session = await webAuthnHandler(env, url).getSession(request);
+  const sessionUserId = session?.userId ? decodeUserId(session.userId) : undefined;
+  if (session && sessionUserId === userId && typeof session.publicKey === "string"
+    && PORTABLE_PUBLIC_KEY.test(session.publicKey)) {
+    try {
+      const publicKey = PublicKey.fromHex(session.publicKey as `0x${string}`);
+      if (publicKey.y !== undefined) {
+        const address = Address.fromPublicKey(publicKey).toLowerCase() as `0x${string}`;
+        await rememberAccountAddress(env, userId, address);
+        return address;
+      }
+    } catch {
+      // Legacy credentials that cannot be decoded do not imply wallet ownership.
+    }
+  }
+  return undefined;
+}
+
+async function rememberAccountAddress(
+  env: AccountAuthEnv,
+  userId: string,
+  address: string,
+): Promise<void> {
+  if (!ACCOUNT_ADDRESS.test(address)) throw new Error("invalid hosted account address");
+  const store = authStore(env, "account");
+  if (!store.create) throw new Error("hosted account identity is unavailable");
+  const key = `address:${userId}`;
+  if (!await store.create(key, address)) {
+    const existing = await store.get<unknown>(key);
+    if (existing !== address) throw new Error("hosted account identity conflict");
+  }
+}
+
+async function readAccountAddress(
+  env: AccountAuthEnv,
+  userId: string,
+): Promise<`0x${string}` | undefined> {
+  const value = await authStore(env, "account").get<unknown>(`address:${userId}`);
+  return typeof value === "string" && ACCOUNT_ADDRESS.test(value)
+    ? value as `0x${string}`
+    : undefined;
+}
+
 function proxyOrganizationResponse(response: Response): Response {
   return response;
 }
@@ -1878,16 +2475,61 @@ async function sha256(value: string): Promise<string> {
   return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
 }
 
-async function readJson(request: Request): Promise<Record<string, unknown> | Response> {
+async function readJson(
+  request: Request,
+  maxBytes?: number,
+): Promise<Record<string, unknown> | Response> {
   if (!request.headers.get("content-type")?.toLowerCase().startsWith("application/json")) {
     return json({ error: "expected_json" }, { status: 415 });
   }
+  const contentLength = request.headers.get("content-length");
+  if (maxBytes !== undefined && contentLength
+    && (!/^\d+$/.test(contentLength) || Number(contentLength) > maxBytes)) {
+    return json({ error: "payload_too_large" }, { status: 413 });
+  }
   try {
-    const value = await request.json<unknown>();
+    const value = maxBytes === undefined
+      ? await request.json<unknown>()
+      : await readBoundedJsonValue(request, maxBytes);
     if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error();
     return value as Record<string, unknown>;
-  } catch {
+  } catch (cause) {
+    if (cause instanceof PayloadTooLargeError) {
+      return json({ error: "payload_too_large" }, { status: 413 });
+    }
     return json({ error: "invalid_json" }, { status: 400 });
+  }
+}
+
+class PayloadTooLargeError extends Error {}
+
+async function readBoundedJsonValue(request: Request, maxBytes: number): Promise<unknown> {
+  if (!request.body) throw new Error("missing body");
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let length = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      length += value.byteLength;
+      if (length > maxBytes) {
+        await reader.cancel();
+        throw new PayloadTooLargeError();
+      }
+      chunks.push(value);
+    }
+    const encoded = new Uint8Array(length);
+    let offset = 0;
+    for (const chunk of chunks) {
+      encoded.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    return JSON.parse(
+      new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(encoded),
+    ) as unknown;
+  } finally {
+    reader.releaseLock();
   }
 }
 

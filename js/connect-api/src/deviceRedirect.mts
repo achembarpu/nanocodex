@@ -22,6 +22,16 @@ export function connectAuthOrigin(apiOrigin: string): string {
   throw new Error("The Connect API origin is not allowed.");
 }
 
+/**
+ * Server-held wallets have no browser Origin header. This is only an
+ * admission rule for the signed SIWE challenge/verify protocol, not an
+ * authentication signal: account ownership is still proved by the signature.
+ */
+export function allowsHeadlessConnectAuth(requestOrigin: string, origin: string | null): boolean {
+  return origin === null
+    && (requestOrigin === productionApiOrigin || isLocalDevelopmentOrigin(requestOrigin));
+}
+
 export function isLocalDevelopmentOrigin(value: string): boolean {
   try {
     const url = new URL(value);

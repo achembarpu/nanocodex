@@ -1,4 +1,5 @@
 export type AuthenticatedAccount = Readonly<{
+  address?: `0x${string}` | undefined;
   id: string;
   persistent: boolean;
 }>;
@@ -7,7 +8,7 @@ const USER_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f
 
 export class ReauthenticationRequiredError extends Error {
   constructor() {
-    super("Your passkey session expired. Sign in to restore your account.");
+    super("Your session expired. Sign in by SMS to restore your account.");
     this.name = "ReauthenticationRequiredError";
   }
 }
@@ -39,13 +40,14 @@ async function readCurrentUser(
   if (!response.ok) throw await responseFailure(response, "Account service unavailable.");
   const body: unknown = await response.json();
   if (!isRecord(body) || !isRecord(body.user)) throw new Error("Invalid account response.");
-  const { id, persistent } = body.user;
+  const { address, id, persistent } = body.user;
   if (
     typeof id !== "string"
     || !USER_ID.test(id)
+    || (address !== undefined && (typeof address !== "string" || !/^0x[0-9a-f]{40}$/.test(address)))
     || typeof persistent !== "boolean"
   ) throw new Error("Invalid account response.");
-  return { id, persistent };
+  return { ...(address ? { address: address as `0x${string}` } : {}), id, persistent };
 }
 
 export async function responseFailure(response: Response, fallback: string): Promise<Error> {

@@ -18,6 +18,7 @@ import {
   managedMemoryCapability,
 } from "./devicePolicy.mts";
 import {
+  allowsHeadlessConnectAuth,
   connectAuthOrigin,
   deviceVerificationUrl,
   isLocalDevelopmentOrigin as isLocalDeviceOrigin,
@@ -493,7 +494,7 @@ export default {
       }
 
       if (url.pathname.startsWith("/v1/connect/auth")) {
-        requireDialogOrigin(request);
+        requireConnectAuthOrigin(request);
         const auth = createAuth(
           env,
           store,
@@ -1438,9 +1439,8 @@ async function createHostedAuthorization(
   const appOrigin = requiredString(body.app_origin, "app_origin");
   const resources = encodedResources;
   const app = approvedAppContext(resources);
-  if (app.appId !== CLI_APP_ID || app.origin !== CLI_APP_ORIGIN
-    || appId !== app.appId || appOrigin !== app.origin) {
-    throw new ApiFailure(403, "app_identity_mismatch", "Hosted authorization is reserved for the Nanocodex CLI.");
+  if (appId !== app.appId || appOrigin !== app.origin) {
+    throw new ApiFailure(403, "app_identity_mismatch", "Hosted authorization does not match the approved app.");
   }
   if (!resources.includes(HOSTED_AUTHORIZATION_RESOURCE)
     || resources.includes("urn:nanocodex:mpp:machusd:spend")) {
@@ -6188,6 +6188,14 @@ async function scopedAppId(app: CallerApp): Promise<string> {
 
 function requireDialogOrigin(request: Request): void {
   requiredDialogOrigin(request);
+}
+
+function requireConnectAuthOrigin(request: Request): void {
+  if (allowsHeadlessConnectAuth(
+    new URL(request.url).origin,
+    request.headers.get("origin"),
+  )) return;
+  requireDialogOrigin(request);
 }
 
 function requiredDialogOrigin(request: Request): string {

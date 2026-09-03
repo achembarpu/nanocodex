@@ -157,8 +157,11 @@
       },
       "vars": {
         "AGENT_IDLE_TIMEOUT_MS": "1000",
+        "ENVIRONMENT": "development",
         "MANAGED_BROWSER_PROVIDER": "cloudflare",
         "NANOCODEX_ADMIN_TOKEN": "nanocodex-local-room-signing-key",
+        "NANOCODEX_MOCK_TWILIO_VERIFY_CODE": "123456",
+        "NANOCODEX_OTP_HMAC_KEY": "nanocodex-local-sms-otp-hmac-key-v1-only",
         "NANOCODEX_LOCAL_WEBAUTHN_HMAC_KEY": "nanocodex-local-passkey-portability-v1",
         "NANOCODEX_LOCAL_OAUTH_RELAY_HMAC_KEY": "nanocodex-local-oauth-relay-hmac-v1-only"
       },

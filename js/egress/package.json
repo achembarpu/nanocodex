@@ -15,7 +15,9 @@
     "deploy:broker": "wrangler deploy --env=\"\" --config wrangler.broker.jsonc"
   },
   "dependencies": {
-    "nanocodex": "workspace:*"
+    "accounts": "0.17.0",
+    "nanocodex": "workspace:*",
+    "viem": "^2.54.0"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.22.0",

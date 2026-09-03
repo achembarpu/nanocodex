@@ -478,7 +478,12 @@ export async function disconnect(client, options = {}) {
 export async function reconnect(client, options = {}) {
   const session = client._getSession();
   if (!session) return undefined;
-  const authorization = options.authorization ?? (client.principal ? "hosted" : "access_key");
+  const retainedAuthorization = session.connection?.authorization_mode
+    ?? (session.connection?.access_key ? "access_key" : undefined);
+  const authorization = options.authorization
+    ?? (retainedAuthorization === "access_key" || retainedAuthorization === "hosted"
+      ? retainedAuthorization
+      : (client.principal ? "hosted" : "access_key"));
   if (client.principal && authorization !== "hosted") {
     client._clearSession();
     throw new TypeError("host principal connections require hosted authorization");

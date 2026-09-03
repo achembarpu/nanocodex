@@ -1114,6 +1114,72 @@ dd {
   border: 1px solid var(--border-strong);
 }
 
+.sms-otp-form {
+  display: grid;
+  margin-top: 14px;
+  padding: 14px;
+  border: 1px solid var(--border-strong);
+  gap: 7px;
+}
+
+.sms-otp-form > label {
+  font-size: 10px;
+  font-weight: 500;
+}
+
+.sms-otp-form > p {
+  color: var(--muted);
+  font-size: 8px;
+  line-height: 1.5;
+}
+
+.sms-otp-input-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
+.sms-otp-input-row input {
+  min-width: 0;
+  min-height: 38px;
+  padding: 0 10px;
+  border: 1px solid var(--border-strong);
+  outline: none;
+  background: var(--surface-raised);
+  color: var(--text);
+  font: inherit;
+}
+
+.sms-otp-input-row input:focus {
+  border-color: var(--text);
+}
+
+.sms-otp-input-row button {
+  min-height: 38px;
+  padding: 0 14px;
+  border: 1px solid var(--text);
+  background: var(--text);
+  color: var(--surface);
+  cursor: pointer;
+  font: inherit;
+}
+
+.sms-otp-input-row button:disabled,
+.sms-otp-change:disabled {
+  cursor: default;
+  opacity: 0.48;
+}
+
+.sms-otp-change {
+  justify-self: start;
+  padding: 2px 0;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 8px;
+}
+
 .wizard-account-choice {
   display: grid;
   width: 100%;

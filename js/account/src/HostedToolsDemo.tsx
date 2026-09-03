@@ -79,7 +79,7 @@ export function HostedToolsDemo() {
   const ensureRuntime = useCallback(async (): Promise<DemoRuntime> => {
     if (runtimeRef.current) return runtimeRef.current;
     const accountId = accountIdRef.current;
-    if (!accountId) throw new Error("sign in with a passkey before attaching browser tools");
+    if (!accountId) throw new Error("sign in by SMS before attaching browser tools");
     const storageKey = `nanocodex.hosted-tools-demo.agent.v1.${accountId}`;
     const retainedId = safeGet(storageKey);
     const listed = await Agent.list();
@@ -244,14 +244,14 @@ export function HostedToolsDemo() {
       </header>
 
       <dl className="hosted-tools-facts" aria-label="Hosted tool connection">
-        <div><dt>Account</dt><dd>{account.account ? "Passkey session" : "Required"}</dd></div>
+        <div><dt>Account</dt><dd>{account.account ? "SMS session" : "Required"}</dd></div>
         <div><dt>Agent</dt><dd>{agentId ? shortId(agentId) : "Chosen on attach"}</dd></div>
         <div><dt>Execution</dt><dd>{executions.length ? `${executions.length} browser call${executions.length === 1 ? "" : "s"}` : "No browser calls"}</dd></div>
       </dl>
 
       {!account.account ? (
         <div className="hosted-tools-gate" role="status">
-          Sign in with a passkey from the account menu to use the managed broker.
+          Sign in by SMS from the account menu to use the managed broker.
         </div>
       ) : !modelReady ? (
         <div className="hosted-tools-gate" role={modelStatus.state === "error" ? "alert" : "status"}>

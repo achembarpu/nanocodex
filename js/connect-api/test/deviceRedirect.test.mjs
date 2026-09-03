@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { connectAuthOrigin, deviceVerificationUrl } from "../src/deviceRedirect.mts";
+import {
+  allowsHeadlessConnectAuth,
+  connectAuthOrigin,
+  deviceVerificationUrl,
+} from "../src/deviceRedirect.mts";
 
 test("production device verification opens the first-class main-site route", () => {
   assert.equal(
@@ -37,4 +41,18 @@ test("Connect authentication binds production and local ceremonies to exact trus
   assert.equal(connectAuthOrigin("http://localhost:5190"), "http://localhost:5190");
   assert.throws(() => connectAuthOrigin("https://connect.attacker.example"), /not allowed/);
   assert.throws(() => connectAuthOrigin("http://127.0.0.1:8787/path"), /not allowed/);
+});
+
+test("headless wallet auth admits only exact Connect API or local request origins without a browser Origin", () => {
+  assert.equal(allowsHeadlessConnectAuth(
+    "https://nanocodex-connect-api.gakonst.workers.dev",
+    null,
+  ), true);
+  assert.equal(allowsHeadlessConnectAuth("http://nanocodex.localhost:18943", null), true);
+  assert.equal(allowsHeadlessConnectAuth("https://nanocodex.gakonst.workers.dev", null), false);
+  assert.equal(allowsHeadlessConnectAuth("https://connect.attacker.example", null), false);
+  assert.equal(allowsHeadlessConnectAuth(
+    "https://nanocodex-connect-api.gakonst.workers.dev",
+    "https://connect.attacker.example",
+  ), false);
 });

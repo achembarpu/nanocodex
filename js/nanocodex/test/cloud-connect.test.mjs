@@ -1741,6 +1741,7 @@ test("Nanocodex Connect signs one witness-bound access key and enforces its MPP 
   });
 
   let connection = await Actions.connection.connect(client, {
+    authorization: "access_key",
     capabilities: {
       auth: { resources: [
         "repositories",

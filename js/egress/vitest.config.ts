@@ -514,6 +514,29 @@ export default defineConfig({
               ? new Response(null, { status: 200 })
               : Response.json({ error: "invalid_request" }, { status: 400 });
           }
+          if (url.hostname === "nanocodex.localhost" && request.method === "POST"
+            && url.pathname === "/v1/connect/auth/challenge") {
+            const body = await request.json() as { chainId?: unknown; resources?: unknown };
+            if (body.chainId !== 4217 || JSON.stringify(body.resources) !== JSON.stringify(["urn:nanocodex:agent:run"])) {
+              return Response.json({ error: "invalid_request" }, { status: 400 });
+            }
+            return Response.json({
+              message: "nanocodex.localhost wants you to sign in with your Ethereum account:\n0x0000000000000000000000000000000000000001\n\nAuthorize Nanocodex.\n\nURI: https://nanocodex.localhost\nVersion: 1\nChain ID: 4217\nNonce: wallettestnonce\nIssued At: 2026-01-01T00:00:00.000Z\nResources:\n- urn:nanocodex:agent:run",
+            });
+          }
+          if (url.hostname === "nanocodex.localhost" && request.method === "POST"
+            && url.pathname === "/v1/connect/auth") {
+            const body = await request.json() as {
+              address?: unknown;
+              message?: unknown;
+              signature?: unknown;
+              returnToken?: unknown;
+            };
+            return typeof body.address === "string" && typeof body.message === "string"
+              && typeof body.signature === "string" && body.returnToken === true
+              ? Response.json({ approval_id: "wallet-test-approval", token: "wallet-test-token" })
+              : Response.json({ error: "invalid_request" }, { status: 400 });
+          }
           if (request.method === "POST" && url.pathname.endsWith("/deviceauth/usercode")) {
             return Response.json({
               device_auth_id: "device-secret",
@@ -545,6 +568,30 @@ export default defineConfig({
             return Response.json({
               access_token: jwt({ exp: 4_102_444_800, marker: "chatgpt-refreshed" }),
               refresh_token: "chatgpt-refresh-rotated",
+            });
+          }
+          if (url.hostname === "rpc.tempo.xyz" && request.method === "POST") {
+            const body = await request.json() as { id?: unknown; method?: unknown; params?: unknown };
+            const call = Array.isArray(body.params) && body.params[0] && typeof body.params[0] === "object"
+              ? body.params[0] as { data?: unknown; to?: unknown }
+              : undefined;
+            const validCall = body.method === "eth_call"
+              && Array.isArray(body.params)
+              && body.params[1] === "latest"
+              && typeof call?.to === "string"
+              && call.to.toLowerCase() === "0x20c000000000000000000000f37de3740adec032"
+              && typeof call.data === "string"
+              && /^0x70a082310{24}[0-9a-f]{40}$/i.test(call.data)
+              && request.headers.get("content-type")?.startsWith("application/json") === true
+              && !request.headers.has("authorization")
+              && !request.headers.has("cookie");
+            if (!validCall) {
+              return Response.json({ jsonrpc: "2.0", id: body.id, error: { message: "unexpected method" } });
+            }
+            return Response.json({
+              jsonrpc: "2.0",
+              id: body.id,
+              result: "0x0000000000000000000000000000000000000000000000000000000000bc614e",
             });
           }
           if (url.hostname === "api.openai.com" || url.hostname === "chatgpt.com") {

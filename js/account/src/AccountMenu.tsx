@@ -18,6 +18,18 @@ import { ConnectionLogo } from "nanocodex-connect-ui/ConnectionLogo";
 import { deploymentHealth } from "./deploymentHealth";
 import { localDevelopmentCredential } from "./localDevelopmentCredential";
 import { ProfileConnectors } from "./ProfileConnectors";
+import {
+  classifyFundingOrder,
+  decodeFundingAttempt,
+  decodeMachineUsdConfig,
+  decodeWalletBalance,
+  defaultFundingAmountCents,
+  formatDollars,
+  formatWalletBalance,
+  type FundingAttempt,
+  type MachineUsdConfig,
+  type WalletBalance,
+} from "./walletFunding";
 
 type ApiKeyMetadata = Readonly<{
   id: string;
@@ -52,6 +64,18 @@ type AccountDataRequest = Readonly<{
   promise: Promise<void>;
 }>;
 
+type WalletBalanceRequest = Readonly<{
+  accountId: string;
+  controller: AbortController;
+  promise: Promise<boolean>;
+}>;
+
+type WalletFundingRun = Readonly<{
+  accountId: string;
+  checkout: Window;
+  controller: AbortController;
+}>;
+
 const API_KEY_ID = /^[A-Za-z0-9_-]{12}$/;
 
 export function AccountMenu({ inline = false }: Readonly<{ inline?: boolean }>) {
@@ -66,6 +90,13 @@ export function AccountMenu({ inline = false }: Readonly<{ inline?: boolean }>) 
   const [newKey, setNewKey] = useState<NewApiKey | null>(null);
   const [label, setLabel] = useState("");
   const [copied, setCopied] = useState(false);
+  const [walletCopied, setWalletCopied] = useState(false);
+  const [walletBalance, setWalletBalance] = useState<WalletBalance | null>(null);
+  const [walletBalanceError, setWalletBalanceError] = useState<string | null>(null);
+  const [walletFundingConfig, setWalletFundingConfig] = useState<MachineUsdConfig | null>(null);
+  const [walletFundingError, setWalletFundingError] = useState<string | null>(null);
+  const [walletFundingSuccess, setWalletFundingSuccess] = useState<string | null>(null);
+  const [walletFundingOperation, setWalletFundingOperation] = useState<"prepare" | "payment" | null>(null);
   const [credentials, setCredentials] = useState<CredentialStatus | null>(null);
   const [credentialError, setCredentialError] = useState<string | null>(null);
   const [providerOperation, setProviderOperation] = useState<string | null>(null);
@@ -75,12 +106,24 @@ export function AccountMenu({ inline = false }: Readonly<{ inline?: boolean }>) 
   const cachedAccountId = useRef<string | undefined>(undefined);
   const keyRequest = useRef<AccountDataRequest | undefined>(undefined);
   const credentialRequest = useRef<AccountDataRequest | undefined>(undefined);
+  const walletBalanceRequest = useRef<WalletBalanceRequest | undefined>(undefined);
+  const walletFundingConfigRequest = useRef<AccountDataRequest | undefined>(undefined);
+  const walletFundingRun = useRef<WalletFundingRun | undefined>(undefined);
+
+  const cancelWalletFunding = useCallback(() => {
+    const run = walletFundingRun.current;
+    walletFundingRun.current = undefined;
+    run?.controller.abort();
+    run?.checkout.close();
+  }, []);
 
   const close = useCallback(() => {
+    cancelWalletFunding();
     setOpen(false);
     setNewKey(null);
     setCopied(false);
-  }, []);
+    setWalletFundingOperation(null);
+  }, [cancelWalletFunding]);
 
   const loadKeys = useCallback((): Promise<void> => {
     if (!accountId) return Promise.resolve();
@@ -161,31 +204,130 @@ export function AccountMenu({ inline = false }: Readonly<{ inline?: boolean }>) 
     }
   }, [loadCredentials]);
 
+  const loadWalletBalance = useCallback((force = false): Promise<boolean> => {
+    const address = session.account?.address;
+    if (!accountId || !address) return Promise.resolve(false);
+    if (!force && walletBalanceRequest.current?.accountId === accountId) {
+      return walletBalanceRequest.current.promise;
+    }
+    if (force) walletBalanceRequest.current?.controller.abort();
+    const controller = new AbortController();
+    setWalletBalanceError(null);
+    let current!: Promise<boolean>;
+    current = (async () => {
+      try {
+        const response = await apiRequest("/v1/wallet/balance", { signal: controller.signal });
+        if (response.status === 401) {
+          await response.body?.cancel();
+          await refreshSession();
+          return false;
+        }
+        if (!response.ok) throw await responseFailure(response, "Couldn’t load the MACH balance.");
+        const balance = decodeWalletBalance(await response.json(), address);
+        if (cachedAccountId.current === accountId) setWalletBalance(balance);
+        return true;
+      } catch (cause) {
+        if (!controller.signal.aborted && cachedAccountId.current === accountId) {
+          setWalletBalanceError(failureMessage(cause, "Couldn’t load the MACH balance."));
+        }
+        return false;
+      }
+    })().finally(() => {
+      if (walletBalanceRequest.current?.promise === current) {
+        walletBalanceRequest.current = undefined;
+      }
+    });
+    walletBalanceRequest.current = { accountId, controller, promise: current };
+    return current;
+  }, [accountId, refreshSession, session.account?.address]);
+
+  const loadWalletFundingConfig = useCallback((): Promise<void> => {
+    if (!accountId || walletFundingConfig) return Promise.resolve();
+    if (walletFundingConfigRequest.current?.accountId === accountId) {
+      return walletFundingConfigRequest.current.promise;
+    }
+    setWalletFundingError(null);
+    let current!: Promise<void>;
+    current = (async () => {
+      try {
+        const response = await apiRequest("/v1/machine-usd/config");
+        if (!response.ok) throw await responseFailure(response, "Couldn’t load the MACH onramp.");
+        const config = decodeMachineUsdConfig(await response.json());
+        if (cachedAccountId.current === accountId) setWalletFundingConfig(config);
+      } catch (cause) {
+        if (cachedAccountId.current === accountId) {
+          setWalletFundingError(failureMessage(cause, "Couldn’t load the MACH onramp."));
+        }
+      }
+    })().finally(() => {
+      if (walletFundingConfigRequest.current?.promise === current) {
+        walletFundingConfigRequest.current = undefined;
+      }
+    });
+    walletFundingConfigRequest.current = { accountId, promise: current };
+    return current;
+  }, [accountId, walletFundingConfig]);
+
   useEffect(() => {
     if (!accountId) {
+      cancelWalletFunding();
+      walletBalanceRequest.current?.controller.abort();
+      walletBalanceRequest.current = undefined;
+      walletFundingConfigRequest.current = undefined;
       cachedAccountId.current = undefined;
       setKeys(null);
       setKeyError(null);
       setNewKey(null);
+      setWalletCopied(false);
+      setWalletBalance(null);
+      setWalletBalanceError(null);
+      setWalletFundingConfig(null);
+      setWalletFundingError(null);
+      setWalletFundingSuccess(null);
+      setWalletFundingOperation(null);
       setCredentials(null);
       setCredentialError(null);
       return;
     }
     const accountChanged = cachedAccountId.current !== accountId;
     if (accountChanged) {
+      cancelWalletFunding();
+      walletBalanceRequest.current?.controller.abort();
+      walletBalanceRequest.current = undefined;
+      walletFundingConfigRequest.current = undefined;
       cachedAccountId.current = accountId;
       setKeys(null);
       setKeyError(null);
       setNewKey(null);
+      setWalletCopied(false);
+      setWalletBalance(null);
+      setWalletBalanceError(null);
+      setWalletFundingConfig(null);
+      setWalletFundingError(null);
+      setWalletFundingSuccess(null);
+      setWalletFundingOperation(null);
       setCredentials(null);
       setCredentialError(null);
     }
     if (!inline && !open) return;
-    const missing: Promise<void>[] = [];
+    const missing: Promise<unknown>[] = [];
     if (accountChanged || keys === null) missing.push(loadKeys());
     if (accountChanged || credentials === null) missing.push(loadCredentials());
+    if (accountChanged || walletBalance === null) missing.push(loadWalletBalance());
+    if (accountChanged || walletFundingConfig === null) missing.push(loadWalletFundingConfig());
     void Promise.all(missing);
-  }, [accountId, credentials, inline, keys, loadCredentials, loadKeys, open]);
+  }, [accountId, cancelWalletFunding, credentials, inline, keys, loadCredentials, loadKeys, loadWalletBalance, loadWalletFundingConfig, open, walletBalance, walletFundingConfig]);
+
+  useEffect(() => () => {
+    cancelWalletFunding();
+    walletBalanceRequest.current?.controller.abort();
+  }, [cancelWalletFunding]);
+
+  useEffect(() => {
+    if (!accountId || !session.account?.address || (!inline && !open)) return;
+    const timer = window.setInterval(() => void loadWalletBalance(), 5 * 60_000);
+    return () => window.clearInterval(timer);
+  }, [accountId, inline, loadWalletBalance, open, session.account?.address]);
 
   useEffect(() => {
     const login = credentials?.chatgpt.login;
@@ -280,6 +422,82 @@ export function AccountMenu({ inline = false }: Readonly<{ inline?: boolean }>) 
     }
   };
 
+  const copyWalletAddress = async () => {
+    const address = session.account?.address;
+    if (!address) return;
+    try {
+      await navigator.clipboard.writeText(address);
+      setWalletCopied(true);
+    } catch {
+      setCredentialError("Couldn’t copy the wallet address. Select and copy it manually.");
+    }
+  };
+
+  const fundWallet = () => {
+    const address = session.account?.address;
+    const config = walletFundingConfig;
+    if (!accountId || !address || !config || !config.onrampEnabled || walletFundingOperation) return;
+    const checkout = window.open("about:blank", "nanocodex-mach-checkout");
+    if (!checkout) {
+      setWalletFundingError("Allow pop-ups for Nanocodex, then try again.");
+      return;
+    }
+    checkout.opener = null;
+    const controller = new AbortController();
+    const run: WalletFundingRun = { accountId, checkout, controller };
+    cancelWalletFunding();
+    walletFundingRun.current = run;
+    setWalletFundingOperation("prepare");
+    setWalletFundingError(null);
+    setWalletFundingSuccess(null);
+    void (async () => {
+      let navigated = false;
+      try {
+        const amount = defaultFundingAmountCents(config);
+        const orderToken = randomOrderToken();
+        const response = await apiRequest("/v1/machine-usd/orders", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "idempotency-key": crypto.randomUUID(),
+          },
+          body: JSON.stringify({
+            order_token: orderToken,
+            payment_mode: "hosted_checkout",
+            usd_amount_cents: amount,
+            wallet_address: address,
+          }),
+          signal: controller.signal,
+        });
+        if (!response.ok) throw await responseFailure(response, "Couldn’t create the MACH order.");
+        const attempt = decodeFundingAttempt(await response.json(), orderToken);
+        if (walletFundingRun.current !== run) return;
+        checkout.location.href = attempt.checkoutUrl;
+        navigated = true;
+        setWalletFundingOperation("payment");
+        await waitForFundingOrder(attempt, controller.signal, checkout);
+        if (walletFundingRun.current !== run) return;
+        setWalletFundingSuccess("MACH issued. Refreshing balance…");
+        const refreshed = await loadWalletBalance(true);
+        if (walletFundingRun.current === run) {
+          setWalletFundingSuccess(refreshed
+            ? "MACH added. Balance refreshed."
+            : "MACH issued. Refresh the balance to confirm it.");
+        }
+      } catch (cause) {
+        if (!navigated) checkout.close();
+        if (!controller.signal.aborted && walletFundingRun.current === run) {
+          setWalletFundingError(failureMessage(cause, "The MACH purchase did not complete."));
+        }
+      } finally {
+        if (walletFundingRun.current === run) {
+          walletFundingRun.current = undefined;
+          setWalletFundingOperation(null);
+        }
+      }
+    })();
+  };
+
   const connectOpenAi = async (event: FormEvent) => {
     event.preventDefault();
     if (!openAiKey.trim() || providerOperation) return;
@@ -365,13 +583,11 @@ export function AccountMenu({ inline = false }: Readonly<{ inline?: boolean }>) 
     return (
       <AccountChooser
         description={session.reauthenticationRequired
-          ? "Your session expired. Continue with the saved passkey to restore this account’s memory and connections."
-          : "Continue with a saved passkey, or create a new Nanocodex account."}
+          ? "Your session expired. Enter your phone number to restore this account’s memory and connections."
+          : "Enter your phone number to create or restore your Nanocodex account."}
         disabled={session.operation !== null}
         failure={session.error}
-        newAccountDetail="Create one passkey to keep your agents, memory, and connections."
         onChooseAccount={(selection) => void session.chooseAccount(selection)}
-        storedPasskeys={session.savedPasskeys}
       />
     );
   }
@@ -380,15 +596,9 @@ export function AccountMenu({ inline = false }: Readonly<{ inline?: boolean }>) 
     return (
       <div className="account-inline">
         <AccountConnectionSurface
-          description={<>Signed in as {shortIdentity(session.account.id)}. Manage the same hosted connections your Nanocodex agents can use.</>}
-          title="Connect"
-        >
-          <AccountConnectionSection
-            eyebrow="Account"
-            meta={shortIdentity(session.account.id)}
-            title="Passkey identity"
-            titleId="account-identity-heading"
-          >
+          description={<>Manage the hosted connections your Nanocodex agents can use.</>}
+          footer={<div className="account-wallet-session">
+            <span>Account {shortIdentity(session.account.id)}</span>
             <button
               className="wizard-sign-out"
               disabled={session.operation !== null}
@@ -397,8 +607,9 @@ export function AccountMenu({ inline = false }: Readonly<{ inline?: boolean }>) 
             >
               Sign out
             </button>
-          </AccountConnectionSection>
-
+          </div>}
+          title="Connect"
+        >
           <AccountConnectionSection
             eyebrow="Service"
             meta="Available to your agents"
@@ -449,6 +660,20 @@ export function AccountMenu({ inline = false }: Readonly<{ inline?: boolean }>) 
               presentation="wizard"
               refreshSession={refreshSession}
             >
+              <TempoWalletConnectionCard
+                address={session.account.address}
+                balance={walletBalanceError
+                  ? walletBalance ? `${formatWalletBalance(walletBalance)} · refresh failed` : "Balance unavailable"
+                  : walletBalance ? formatWalletBalance(walletBalance) : "Loading balance…"}
+                copied={walletCopied}
+                fundingAmountCents={walletFundingConfig ? defaultFundingAmountCents(walletFundingConfig) : 500}
+                fundingAvailable={walletFundingConfig?.onrampEnabled === true}
+                fundingError={walletFundingError}
+                fundingOperation={walletFundingOperation}
+                fundingSuccess={walletFundingSuccess}
+                onCopy={() => void copyWalletAddress()}
+                onFund={fundWallet}
+              />
               {credentials ? (
                 <>
                   <AccountConnectionCard
@@ -600,13 +825,13 @@ export function AccountMenu({ inline = false }: Readonly<{ inline?: boolean }>) 
               <section className={inline ? "wizard-section account-identity" : "account-summary"}>
                 {inline ? (
                   <header className="wizard-section-title">
-                    <div><span>Account</span><h2>Passkey identity</h2></div>
+                    <div><span>Account</span><h2>SMS identity</h2></div>
                     <small>{shortIdentity(session.account.id)}</small>
                   </header>
                 ) : (
                   <>
-                    <span>{session.account.persistent ? "Passkey identity" : "Browser session"}</span>
-                    <span>{session.account.persistent ? "Available across devices" : "Add a passkey to keep it"}</span>
+                    <span>{session.account.persistent ? "SMS identity" : "Browser session"}</span>
+                    <span>{session.account.persistent ? "Available across devices" : "Verify your phone to keep it"}</span>
                   </>
                 )}
                 {session.account.persistent ? (
@@ -622,26 +847,12 @@ export function AccountMenu({ inline = false }: Readonly<{ inline?: boolean }>) 
               </section>
 
               {!accountPersistent ? (
-                <div className="account-auth-actions">
-                  <p>Add a passkey or use an existing one to connect services and create API keys.</p>
-                  <div className="account-auth-buttons">
-                    <button
-                      className="account-primary-action"
-                      type="button"
-                      disabled={session.operation !== null}
-                      onClick={() => void session.register()}
-                    >
-                      Add a passkey
-                    </button>
-                    <button
-                      type="button"
-                      disabled={session.operation !== null}
-                      onClick={() => void session.signIn()}
-                    >
-                      Use existing passkey
-                    </button>
-                  </div>
-                </div>
+                <AccountChooser
+                  description="Verify your phone to keep this account and unlock connections and API keys."
+                  disabled={session.operation !== null}
+                  failure={session.error}
+                  onChooseAccount={(selection) => void session.chooseAccount(selection)}
+                />
               ) : null}
 
               <div className={inline ? "account-profile-content wizard-sections" : "api-key-panel account-profile-content"}>
@@ -652,7 +863,7 @@ export function AccountMenu({ inline = false }: Readonly<{ inline?: boolean }>) 
                     <h2 id="connections-heading">Connections</h2>
                     {!inline ? <p>{accountPersistent
                       ? "Choose a service to connect it through your private broker. Connected services can be removed from the same tile."
-                      : "Add or use a passkey above to enable connections and API keys."}</p> : null}
+                      : "Verify your phone above to enable connections and API keys."}</p> : null}
                   </div>
                   {inline ? <small>Available to your agents</small> : null}
                 </div>
@@ -841,33 +1052,137 @@ export function AccountMenu({ inline = false }: Readonly<{ inline?: boolean }>) 
               </div>
             </>
           ) : (
-            <div className="account-auth-actions">
-              <p>{session.reauthenticationRequired
-                ? "Your passkey session expired. Sign in to restore this account’s memory and connections."
-                : "Sign in with your passkey, or explicitly start a separate account."}</p>
-              <div className="account-auth-buttons">
-                <button
-                  className="account-primary-action"
-                  type="button"
-                  disabled={session.operation !== null}
-                  onClick={() => void session.signIn()}
-                >
-                  Sign in with passkey
-                </button>
-                <button
-                  type="button"
-                  disabled={session.operation !== null}
-                  onClick={() => void session.register()}
-                >
-                  Create new account
-                </button>
-              </div>
-            </div>
+            <AccountChooser
+              description={session.reauthenticationRequired
+                ? "Your session expired. Enter your phone number to restore this account’s memory and connections."
+                : "Enter your phone number to create or restore your Nanocodex account."}
+              disabled={session.operation !== null}
+              failure={session.error}
+              onChooseAccount={(selection) => void session.chooseAccount(selection)}
+            />
           )}
         </section>
       ) : null}
     </div>
   );
+}
+
+function TempoWalletConnectionCard({
+  address,
+  balance,
+  copied,
+  fundingAmountCents,
+  fundingAvailable,
+  fundingError,
+  fundingOperation,
+  fundingSuccess,
+  onCopy,
+  onFund,
+}: Readonly<{
+  address?: string | undefined;
+  balance: string;
+  copied: boolean;
+  fundingAmountCents: number;
+  fundingAvailable: boolean;
+  fundingError: string | null;
+  fundingOperation: "prepare" | "payment" | null;
+  fundingSuccess: string | null;
+  onCopy(): void;
+  onFund(): void;
+}>) {
+  const busy = fundingOperation !== null;
+  return (
+    <div className="wizard-connector-card tempo-wallet-connection" role="listitem">
+      <div className={`connection-card tempo-wallet-card${address ? " is-connected" : " is-unavailable"}`}>
+        <ConnectionLogo id="tempo" />
+        <span className="connection-card-copy">
+          <strong>{busy ? "Add MACH" : "Tempo Wallet"}</strong>
+          <span className="tempo-wallet-balance" role={busy ? "status" : undefined}>{fundingOperation === "prepare"
+            ? "Preparing secure checkout…"
+            : fundingOperation === "payment"
+              ? "Complete payment in Stripe"
+              : balance}</span>
+          <code title={address}>{address ?? "Wallet unavailable"}</code>
+          {fundingError ? <span className="tempo-wallet-message is-error" role="alert">{fundingError}</span> : null}
+          {fundingSuccess ? <span className="tempo-wallet-message is-success" role="status">{fundingSuccess}</span> : null}
+        </span>
+        {busy ? <span className="tempo-wallet-payment-status" role="status">Waiting</span> : (
+          <span className="tempo-wallet-card-actions">
+            <button disabled={!address} onClick={onCopy} type="button">{copied ? "Copied" : "Copy"}</button>
+            <button disabled={!address || !fundingAvailable} onClick={onFund} type="button">
+              {fundingAvailable ? `Add ${formatDollars(fundingAmountCents)}` : "Onramp unavailable"}
+            </button>
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+async function waitForFundingOrder(
+  attempt: FundingAttempt,
+  signal: AbortSignal,
+  checkout: Window,
+): Promise<void> {
+  const deadline = Date.now() + 15 * 60_000;
+  let checkoutClosedAt: number | undefined;
+  let retryDelayMs = 1_500;
+  while (Date.now() < deadline) {
+    signal.throwIfAborted();
+    if (checkout.closed) checkoutClosedAt ??= Date.now();
+    if (checkoutClosedAt && Date.now() - checkoutClosedAt >= 2 * 60_000) {
+      throw new Error("Payment status wasn’t confirmed after checkout closed. Check the balance before trying again.");
+    }
+    let response: Response;
+    try {
+      response = await apiRequest(`/v1/machine-usd/orders/${encodeURIComponent(attempt.id)}`, {
+        headers: { authorization: `Bearer ${attempt.orderToken}` },
+        signal,
+      });
+    } catch (cause) {
+      if (signal.aborted) throw cause;
+      retryDelayMs = Math.min(retryDelayMs * 2, 10_000);
+      await abortableDelay(retryDelayMs, signal);
+      continue;
+    }
+    if (!response.ok) {
+      if (response.status < 500) {
+        throw await responseFailure(response, "Couldn’t check the MACH order.");
+      }
+      await response.body?.cancel();
+      retryDelayMs = Math.min(retryDelayMs * 2, 10_000);
+    } else {
+      const body: unknown = await response.json();
+      if (!isRecord(body)) throw new Error("The MACH order response is invalid.");
+      const status = classifyFundingOrder(body.order);
+      if (status === "complete") return;
+      if (status === "failed") throw new Error("The MACH purchase did not complete.");
+      retryDelayMs = 1_500;
+    }
+    await abortableDelay(retryDelayMs, signal);
+  }
+  throw new Error("Payment status wasn’t confirmed. Check the balance before trying again.");
+}
+
+function abortableDelay(durationMs: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      window.clearTimeout(timer);
+      reject(signal.reason);
+    };
+    const timer = window.setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, durationMs);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+function randomOrderToken(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(32));
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
 }
 
 async function apiRequest(path: string, init: RequestInit = {}): Promise<Response> {
