@@ -98,6 +98,8 @@ impl Fixture {
     async fn wait_for_event_cursor(&self, expected: &str) {
         loop {
             let changed = self.inner.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
             if lock(&self.inner.event_cursors)
                 .iter()
                 .any(|cursor| cursor == expected)
@@ -112,6 +114,8 @@ impl Fixture {
         lock(&self.inner.retained_events).push(event.clone());
         loop {
             let changed = self.inner.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
             let senders = lock(&self.inner.event_streams)
                 .iter()
                 .filter(|sender| !sender.is_closed())
@@ -131,6 +135,8 @@ impl Fixture {
     async fn wait_for_catalog(&self) {
         loop {
             let changed = self.inner.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
             if !lock(&self.inner.catalogs).is_empty() {
                 return;
             }
@@ -644,7 +650,16 @@ async fn tool_host(
             .send(Message::Text(json!({"type": "ready"}).to_string().into()))
             .await
             .unwrap();
-        while socket.recv().await.is_some() {}
+        while let Some(Ok(Message::Text(frame))) = socket.recv().await {
+            if serde_json::from_str::<Value>(&frame).unwrap()["type"] == "drain" {
+                socket
+                    .send(Message::Text(
+                        json!({"type": "draining"}).to_string().into(),
+                    ))
+                    .await
+                    .unwrap();
+            }
+        }
     })
 }
 
