@@ -161,9 +161,7 @@ describe("Cloudflare sandbox tools", () => {
 
     expect(started).toMatchObject({ command: clone });
     expect(result).toMatchObject({ success: true, stdout: "clone-visible" });
-    expect(sandbox.startProcess).toHaveBeenCalledWith(expect.stringContaining(
-      `${clone}\n)\nstatus=$?\nsync -f /workspace`,
-    ), {
+    expect(sandbox.startProcess).toHaveBeenCalledWith(clone, {
       cwd: "/workspace",
       autoCleanup: false,
     });
@@ -315,23 +313,62 @@ describe("Cloudflare sandbox tools", () => {
     expect(process.waitForPort).toHaveBeenCalledWith(3_000, undefined);
   });
 
-  it("flushes a background process before exit without exposing its wrapper", async () => {
+  it("returns the process identity when port readiness fails", async () => {
+    const sandbox = fakeSandbox();
+    const process = fakeProcess();
+    process.waitForPort.mockRejectedValue(new Error("port never became ready"));
+    process.getStatus.mockResolvedValue("running");
+    sandbox.startProcess.mockResolvedValue(process);
+    const tools = createCloudflareSandboxTools(async () => sandbox);
+
+    await expect(tools.sandbox_start_process!.handler({
+      command: "start server",
+      ready_port: 3_000,
+    }, context)).resolves.toMatchObject({
+      process_id: "process",
+      status: "running",
+      terminal: false,
+      ready: false,
+      ready_error: "port never became ready",
+    });
+    expect(process.kill).toHaveBeenCalledOnce();
+    expect(process.getStatus).toHaveBeenCalledTimes(2);
+    expect(sandbox.exec).toHaveBeenLastCalledWith("sync -f /workspace", { cwd: "/" });
+  });
+
+  it("runs the requested background command unchanged and flushes terminal observations", async () => {
     const sandbox = fakeSandbox();
     const tools = createCloudflareSandboxTools(async () => sandbox);
     const command = "cargo test --workspace";
 
     await expect(tools.sandbox_start_process!.handler({ command }, context))
       .resolves.toMatchObject({ command });
-    const wrapped = sandbox.startProcess.mock.calls[0]![0];
-    expect(wrapped).toContain(`${command}\n)\nstatus=$?\nsync -f /workspace`);
+    expect(sandbox.startProcess.mock.calls[0]![0]).toBe(command);
 
     sandbox.getProcess.mockResolvedValue(fakeProcess({
-      command: wrapped,
+      command,
       status: "completed",
       exitCode: 0,
     }));
     await expect(tools.sandbox_get_process!.handler({ process_id: "process" }, context))
       .resolves.toMatchObject({ command, status: "completed", terminal: true });
+    expect(sandbox.exec).toHaveBeenLastCalledWith("sync -f /workspace", {
+      cwd: "/",
+    });
+  });
+
+  it("flushes a background process that finishes while it is starting", async () => {
+    const sandbox = fakeSandbox();
+    const process = fakeProcess({ status: "running" });
+    process.getStatus.mockResolvedValue("completed");
+    sandbox.startProcess.mockResolvedValue(process);
+    const tools = createCloudflareSandboxTools(async () => sandbox);
+
+    await expect(tools.sandbox_start_process!.handler({ command: "quick task" }, context))
+      .resolves.toMatchObject({ command: "quick task", status: "completed" });
+    expect(sandbox.exec).toHaveBeenLastCalledWith("sync -f /workspace", {
+      cwd: "/",
+    });
   });
 
   it("retrieves authoritative background process state and bounded logs", async () => {
@@ -434,8 +471,26 @@ describe("Cloudflare sandbox tools", () => {
       kill_requested: true,
     });
     expect(process.kill).toHaveBeenCalledOnce();
-    expect(process.waitForExit).toHaveBeenCalledOnce();
+    expect(process.waitForExit).not.toHaveBeenCalled();
     expect(process.getStatus).toHaveBeenCalledOnce();
+  });
+
+  it("reports an asynchronously stopping process without waiting indefinitely", async () => {
+    const sandbox = fakeSandbox();
+    const process = fakeProcess({ id: "proc_running", status: "running" });
+    process.getStatus.mockResolvedValue("running");
+    sandbox.getProcess.mockResolvedValue(process);
+    const tools = createCloudflareSandboxTools(async () => sandbox);
+
+    await expect(tools.sandbox_kill_process!.handler(
+      { process_id: "proc_running" },
+      context,
+    )).resolves.toMatchObject({
+      status: "running",
+      terminal: false,
+      kill_requested: true,
+    });
+    expect(process.waitForExit).not.toHaveBeenCalled();
   });
 
   it("does not kill missing or already-terminal background processes", async () => {

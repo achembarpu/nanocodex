@@ -6,12 +6,6 @@ import type { Sandbox } from "./sandbox-runtime";
 
 const WORKSPACE = "/workspace";
 const WORKSPACE_FLUSH_COMMAND = "sync -f /workspace";
-const BACKGROUND_COMMAND_PREFIX = "# nanocodex retained process\n(\n";
-const BACKGROUND_COMMAND_SUFFIX = "\n)\nstatus=$?\n"
-  + `${WORKSPACE_FLUSH_COMMAND}\n`
-  + "flush_status=$?\n"
-  + "if [ \"$status\" -ne 0 ]; then exit \"$status\"; fi\n"
-  + "exit \"$flush_status\"";
 const MAX_COMMAND_CHARS = 32 * 1024;
 const MAX_FILE_BYTES = 1024 * 1024;
 const MAX_OUTPUT_BYTES = 128 * 1024;
@@ -269,24 +263,58 @@ export function createCloudflareSandboxTools(
           value.ready_timeout_ms,
           "ready_timeout_ms",
         );
+        const sandbox = await createSandbox();
         return withSandboxRpcResult(
-          (await createSandbox()).startProcess(durableBackgroundCommand(command), {
+          sandbox.startProcess(command, {
             cwd,
             autoCleanup: false,
           }),
           async (process) => {
             if (readyPort !== undefined) {
-              await process.waitForPort(
-                readyPort,
-                readyTimeout === undefined ? undefined : { timeout: readyTimeout },
-              );
+              try {
+                await process.waitForPort(
+                  readyPort,
+                  readyTimeout === undefined ? undefined : { timeout: readyTimeout },
+                );
+              } catch (error) {
+                let status = await process.getStatus().catch(() => process.status);
+                let killError: string | undefined;
+                if (!isTerminalProcessStatus(status)) {
+                  try {
+                    await process.kill();
+                    status = await process.getStatus().catch(() => status);
+                  } catch (killFailure) {
+                    killError = errorMessage(killFailure);
+                  }
+                }
+                let flushError: string | undefined;
+                try {
+                  await flushWorkspace(sandbox);
+                } catch (flushFailure) {
+                  flushError = errorMessage(flushFailure);
+                }
+                return {
+                  process_id: process.id,
+                  pid: process.pid,
+                  command,
+                  status,
+                  terminal: isTerminalProcessStatus(status),
+                  ready_port: readyPort,
+                  ready: false,
+                  ready_error: errorMessage(error),
+                  ...(killError === undefined ? {} : { kill_error: killError }),
+                  ...(flushError === undefined ? {} : { flush_error: flushError }),
+                };
+              }
             }
+            const status = await process.getStatus();
+            if (isTerminalProcessStatus(status)) await flushWorkspace(sandbox);
             return {
               process_id: process.id,
               pid: process.pid,
               command,
-              status: await process.getStatus(),
-              ...(readyPort === undefined ? {} : { ready_port: readyPort }),
+              status,
+              ...(readyPort === undefined ? {} : { ready_port: readyPort, ready: true }),
             };
           },
         );
@@ -307,9 +335,7 @@ export function createCloudflareSandboxTools(
             let output;
             if (terminal || value.include_output === true) {
               const logs = process.getLogs();
-              const durableCompletion = process.status === "completed"
-                && isDurableBackgroundCommand(process.command);
-              output = boundedOutput(await (terminal && !durableCompletion
+              output = boundedOutput(await (terminal
                 ? Promise.all([logs, flushWorkspace(sandbox)]).then(([result]) => result)
                 : logs));
             }
@@ -317,7 +343,7 @@ export function createCloudflareSandboxTools(
               found: true,
               process_id: process.id,
               pid: process.pid,
-              command: presentedBackgroundCommand(process.command),
+              command: process.command,
               status: process.status,
               terminal,
               exit_code: process.exitCode ?? null,
@@ -341,20 +367,14 @@ export function createCloudflareSandboxTools(
             const killRequested = !isTerminalProcessStatus(status);
             if (killRequested) {
               await process.kill();
-              await process.waitForExit();
               status = await process.getStatus();
-              if (!isTerminalProcessStatus(status)) {
-                throw new Error("sandbox process remained active after exit was observed");
-              }
             }
-            const durableCompletion = status === "completed"
-              && isDurableBackgroundCommand(process.command);
-            if (!durableCompletion) await flushWorkspace(sandbox);
+            await flushWorkspace(sandbox);
             return {
               found: true,
               process_id: process.id,
               status,
-              terminal: true,
+              terminal: isTerminalProcessStatus(status),
               kill_requested: killRequested,
             };
           },
@@ -916,20 +936,6 @@ async function flushWorkspace(sandbox: SandboxToolClient): Promise<void> {
     const detail = result.stderr.trim() || result.stdout.trim();
     throw new Error(`failed to flush the retained workspace${detail ? `: ${detail}` : ""}`);
   }
-}
-
-function durableBackgroundCommand(command: string): string {
-  return BACKGROUND_COMMAND_PREFIX + command + BACKGROUND_COMMAND_SUFFIX;
-}
-
-function presentedBackgroundCommand(command: string): string {
-  if (!isDurableBackgroundCommand(command)) return command;
-  return command.slice(BACKGROUND_COMMAND_PREFIX.length, -BACKGROUND_COMMAND_SUFFIX.length);
-}
-
-function isDurableBackgroundCommand(command: string): boolean {
-  return command.startsWith(BACKGROUND_COMMAND_PREFIX)
-    && command.endsWith(BACKGROUND_COMMAND_SUFFIX);
 }
 
 function disposeSandboxRpcValue(value: unknown): void {
