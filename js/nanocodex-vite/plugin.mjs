@@ -34,7 +34,7 @@ const generatedPackage = [
   new URL("../pkg-web/nanocodex.js", browserPackage),
   new URL(import.meta.resolve("nanocodex/wasm")),
 ];
-let packageBuild;
+const packageBuilds = new Map();
 
 export function createNanocodexVitePlugin(options, integration) {
   const tools = nanocodexTools();
@@ -86,7 +86,7 @@ export function createNanocodexVitePlugin(options, integration) {
     enforce: "pre",
     resolveId: tools.resolveId,
     async config(config, environment) {
-      await (buildPromise ??= buildJsPackage());
+      await (buildPromise ??= buildJsPackage(environment.command === "build"));
       if (options.oauthRelay === true && environment.command === "serve") {
         oauthRelay ??= await startOAuthRelay();
       } else {
@@ -399,21 +399,26 @@ function firstEnvironmentValue(environment, names) {
   return undefined;
 }
 
-async function ensureJsPackage() {
-  return packageBuild ??= (async () => {
+async function ensureJsPackage(release = false) {
+  const mode = release ? "release" : "development";
+  if (!packageBuilds.has(mode)) packageBuilds.set(mode, (async () => {
     if (process.env.CI && await generatedPackageIsPresent()) return;
     if (!await isSourceCheckout()) {
       await Promise.all(generatedPackage.map((artifact) => access(artifact, constants.R_OK)));
       return;
     }
-    await runJsPackageBuild();
-  })();
+    await runJsPackageBuild(release);
+  })());
+  return packageBuilds.get(mode);
 }
 
-async function runJsPackageBuild() {
+async function runJsPackageBuild(release = false) {
   await access(buildScript, constants.X_OK);
   await new Promise((resolve, reject) => {
-    const child = spawn(buildScript, [], { cwd: repositoryRoot, stdio: "inherit" });
+    const child = spawn(buildScript, release ? ["--release"] : [], {
+      cwd: repositoryRoot,
+      stdio: "inherit",
+    });
     child.once("error", reject);
     child.once("exit", (code, signal) => {
       if (code === 0) resolve();

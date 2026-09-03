@@ -206,13 +206,15 @@ test("Slack OAuth credentials are paired and normalized only into broker binding
 
 test("production builds neither read local auth nor start development egress", async () => {
   let cloudflareOptions;
+  const packageBuildModes = [];
   const [plugin] = createNanocodexCloudflarePlugins({
     chatGpt: { authFile: "/definitely/missing/nanocodex-auth.json" },
   }, (options) => {
     cloudflareOptions = options;
     return [];
-  }, { buildJsPackage: async () => {} });
+  }, { buildJsPackage: async (release) => packageBuildModes.push(release) });
   const config = await plugin.config({ plugins: [] }, { command: "build" });
+  assert.deepEqual(packageBuildModes, [true]);
   assert.equal(cloudflareOptions.config({ vars: { PRODUCTION: "yes" } }), undefined);
   assert.equal(typeof config.worker.plugins, "function");
   await plugin.closeBundle();
