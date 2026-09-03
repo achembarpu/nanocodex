@@ -1565,7 +1565,7 @@ impl Component for Composer {
     type Effect = ComposerEffect;
 
     fn update(&mut self, event: Self::Event) -> ComponentUpdate<Self::Effect> {
-        let update = Composer::update(self, event);
+        let update = Self::update(self, event);
         ComponentUpdate {
             effects: update.effect.into_iter().collect(),
             render: if update.changed {
@@ -1577,7 +1577,7 @@ impl Component for Composer {
     }
 
     fn render(&mut self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
-        Composer::render(self, frame, area, theme);
+        Self::render(self, frame, area, theme);
     }
 }
 

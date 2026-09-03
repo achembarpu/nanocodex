@@ -1024,9 +1024,7 @@ impl RootNode {
             return ComponentUpdate::render(RenderRequest::Immediate);
         }
         if let Some(command) = self.transcript.component().scroll_command(&event) {
-            let load_older = matches!(command, ScrollCommand::Home)
-                || matches!(command, ScrollCommand::Rows(rows) if rows < 0)
-                    && self.transcript.component().near_top();
+            let load_older = self.transcript.component().should_load_older_after(command);
             let transcript = self.transcript.update(TranscriptEvent::Scroll(command));
             return ComponentUpdate {
                 effects: load_older
@@ -3207,7 +3205,7 @@ mod history_tests {
     }
 
     #[test]
-    fn upward_scroll_requests_history_before_reaching_the_loaded_top() {
+    fn upward_scroll_prefetches_before_entering_the_cached_near_top_window() {
         let mut root = RootNode::new(std::path::Path::new("/workspace"), ReasoningEffort::Medium);
         for sequence in 1..=40 {
             let record = TranscriptRecord::from_local(
@@ -3233,19 +3231,17 @@ mod history_tests {
             terminal
                 .draw(|frame| root.render_focused(frame, frame.area(), &Theme::default(), true))
                 .unwrap();
-            if root.transcript.component().near_top() {
+            let was_near_top = root.transcript.component().near_top();
+            let update = root.update(page_up());
+            if matches!(update.effects.as_slice(), [RootEffect::LoadOlderHistory]) {
+                assert!(!was_near_top);
                 assert!(!root.transcript.component().at_top());
-                let update = root.update(page_up());
-                assert!(matches!(
-                    update.effects.as_slice(),
-                    [RootEffect::LoadOlderHistory]
-                ));
                 return;
             }
-            assert!(root.update(page_up()).effects.is_empty());
+            assert!(!was_near_top);
         }
 
-        panic!("expected to enter the near-top prefetch window");
+        panic!("expected to prefetch before entering the cached near-top window");
     }
 }
 

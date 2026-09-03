@@ -50,6 +50,7 @@ use std::{
 
 const EXPANDABLE_FOCUS_HINTS: [&str; 2] =
     ["↑↓ item · Enter toggle · Esc back", "↑↓ item · Enter · Esc"];
+const HISTORY_PREFETCH_VIEWPORTS: u16 = 3;
 const NESTED_TOOL_INDENT: u16 = 4;
 const RETRY_COUNTDOWN_INTERVAL: Duration = Duration::from_millis(100);
 
@@ -97,7 +98,7 @@ pub(crate) struct Transcript {
     effort: ReasoningEffort,
     updates_banner_area: Option<Rect>,
     at_top: bool,
-    near_top: bool,
+    rows_before_top: Option<u16>,
 }
 
 struct CachedEntry {
@@ -270,7 +271,7 @@ impl Transcript {
             effort,
             updates_banner_area: None,
             at_top: true,
-            near_top: true,
+            rows_before_top: Some(0),
         }
     }
 
@@ -285,8 +286,22 @@ impl Transcript {
         self.at_top
     }
 
-    pub(crate) const fn near_top(&self) -> bool {
-        self.near_top
+    pub(crate) fn near_top(&self) -> bool {
+        self.rows_before_top
+            .is_some_and(|rows| rows <= self.history_prefetch_rows())
+    }
+
+    pub(super) fn should_load_older_after(&self, command: ScrollCommand) -> bool {
+        match command {
+            ScrollCommand::Home => true,
+            ScrollCommand::Rows(rows) if rows < 0 => {
+                let scroll_rows = u16::try_from(rows.unsigned_abs()).unwrap_or(u16::MAX);
+                self.rows_before_top.is_some_and(|distance| {
+                    distance.saturating_sub(scroll_rows) <= self.history_prefetch_rows()
+                })
+            }
+            ScrollCommand::None | ScrollCommand::Rows(_) | ScrollCommand::End => false,
+        }
     }
 
     pub(crate) fn preserve_viewport_from(&mut self, previous: &Self) {
@@ -315,7 +330,7 @@ impl Transcript {
         self.last_top = Some(anchor);
         self.new_updates = previous.new_updates;
         self.at_top = false;
-        self.near_top = previous.near_top;
+        self.rows_before_top = previous.rows_before_top;
     }
 
     pub(crate) fn set_workspace(&mut self, workspace: &Path) {
@@ -854,6 +869,7 @@ impl Transcript {
         if width == 0 || height == 0 {
             return RenderPlan::default();
         }
+        self.viewport_height = height;
         self.apply_pending_expandable_anchor(width, theme);
         self.apply_pending_scroll(width, height, theme);
         let top = match self.scroll {
@@ -873,8 +889,12 @@ impl Transcript {
             Some(top) => self.first_anchor(width, theme) == Some(top),
             None => true,
         };
-        self.near_top = self.top_is_within_viewport_of_start(top, height, width, theme);
-
+        self.rows_before_top = self.rows_before_loaded_top(
+            top,
+            self.history_prefetch_rows().saturating_add(height.max(1)),
+            width,
+            theme,
+        );
         let anchors = top.map_or_else(Vec::new, |anchor| {
             self.collect_forward_anchors(anchor, usize::from(height), width, theme)
         });
@@ -893,23 +913,33 @@ impl Transcript {
         }
     }
 
-    fn top_is_within_viewport_of_start(
+    fn history_prefetch_rows(&self) -> u16 {
+        self.viewport_height
+            .max(1)
+            .saturating_mul(HISTORY_PREFETCH_VIEWPORTS)
+    }
+
+    fn rows_before_loaded_top(
         &mut self,
         top: Option<Anchor>,
-        height: u16,
+        limit: u16,
         width: u16,
         theme: &Theme,
-    ) -> bool {
+    ) -> Option<u16> {
         let Some(mut anchor) = top else {
-            return true;
+            return Some(0);
         };
-        for _ in 0..height.max(1) {
+        let mut rows = 0_u16;
+        loop {
             let Some(previous) = self.previous(anchor, width, theme) else {
-                return true;
+                return Some(rows);
             };
+            rows = rows.saturating_add(1);
+            if rows > limit {
+                return None;
+            }
             anchor = previous;
         }
-        false
     }
 
     fn apply_pending_expandable_anchor(&mut self, width: u16, theme: &Theme) {
@@ -1956,7 +1986,7 @@ mod history_tests {
     }
 
     #[test]
-    fn near_top_covers_one_viewport_before_the_visible_top() {
+    fn near_top_covers_three_viewports_before_the_visible_top() {
         let mut transcript = Transcript::new();
         for sequence in 1..=20 {
             let _ = transcript.update(TranscriptEvent::Record(user(sequence, "message")));
@@ -1964,6 +1994,13 @@ mod history_tests {
 
         transcript.scroll = ScrollState::Detached(Anchor {
             entry: transcript.model.entries()[2].id,
+            line: 0,
+        });
+        let _ = transcript.render_plan(80, 5, &Theme::default());
+        assert!(transcript.near_top());
+
+        transcript.scroll = ScrollState::Detached(Anchor {
+            entry: transcript.model.entries()[6].id,
             line: 0,
         });
         let _ = transcript.render_plan(80, 5, &Theme::default());

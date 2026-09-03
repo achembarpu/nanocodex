@@ -251,6 +251,19 @@ fn synthetic_history(event_count: usize, tool_output_bytes: usize) -> Vec<Manage
     synthetic_history_range(1, event_count, tool_output_bytes)
 }
 
+fn synthetic_user_prompt_history(prompt_bytes: usize) -> Vec<ManagedEvent> {
+    let mut history = synthetic_history(4_096, 128);
+    let Some(ManagedEvent {
+        data: ManagedEventData::TurnAccepted { input, .. },
+        ..
+    }) = history.first_mut()
+    else {
+        panic!("synthetic turn should start with an accepted user prompt");
+    };
+    *input = PromptInput::Text(deterministic_user_prompt(prompt_bytes));
+    history
+}
+
 fn synthetic_history_range(
     first_cursor: usize,
     event_count: usize,
@@ -367,13 +380,22 @@ fn agent_data(
 }
 
 fn deterministic_output(turn: usize, bytes: usize) -> String {
-    let mut output = String::with_capacity(bytes);
     let line = format!("payload-line-{turn:05}: synthetic benchmark output\n");
-    while output.len() < bytes {
-        output.push_str(&line);
+    deterministic_payload(bytes, &line)
+}
+
+fn deterministic_user_prompt(bytes: usize) -> String {
+    const LINE: &str = "user-prompt-payload: inspect deterministic benchmark behavior\n";
+    deterministic_payload(bytes, LINE)
+}
+
+fn deterministic_payload(bytes: usize, line: &str) -> String {
+    let mut payload = String::with_capacity(bytes);
+    while payload.len() < bytes {
+        payload.push_str(line);
     }
-    output.truncate(bytes);
-    output
+    payload.truncate(bytes);
+    payload
 }
 
 fn validated_projection(history: &[ManagedEvent]) -> Vec<Arc<TranscriptRecord>> {
@@ -545,6 +567,12 @@ fn near_top_harness(records: &[Arc<TranscriptRecord>]) -> Harness {
     panic!("synthetic transcript should reach the near-top lazy-load window");
 }
 
+fn prewarmed_harness(records: &[Arc<TranscriptRecord>]) -> Harness {
+    let mut harness = Harness::from_records(records.to_vec(), WIDTH, HEIGHT);
+    harness.render();
+    harness
+}
+
 fn scroll_benchmarks(criterion: &mut Criterion) {
     let history = synthetic_history(4_096, 128);
     let records = validated_projection(&history);
@@ -560,16 +588,17 @@ fn scroll_benchmarks(criterion: &mut Criterion) {
     let mut down = Harness::from_records(records.clone(), WIDTH, HEIGHT);
     down.render();
     assert_eq!(down.key_update(KeyCode::PageDown, KeyModifiers::NONE).0, 0);
+    let mut page_and_frame = prewarmed_harness(&records);
+    let before_page = page_and_frame.fingerprint();
+    page_and_frame.page_up();
+    let after_page = page_and_frame.render_fingerprint();
+    assert_ne!(after_page, before_page);
 
     let mut group = criterion.benchmark_group("nanocodex2_history/scroll_lazy_load_decision");
     group.sample_size(10);
     group.bench_function("far_from_top_page_up", |bencher| {
         bencher.iter_batched(
-            || {
-                let mut harness = Harness::from_records(records.clone(), WIDTH, HEIGHT);
-                harness.render();
-                harness
-            },
+            || prewarmed_harness(&records),
             |mut harness| black_box(harness.page_up()),
             BatchSize::LargeInput,
         );
@@ -583,26 +612,73 @@ fn scroll_benchmarks(criterion: &mut Criterion) {
     });
     group.bench_function("home", |bencher| {
         bencher.iter_batched(
-            || {
-                let mut harness = Harness::from_records(records.clone(), WIDTH, HEIGHT);
-                harness.render();
-                harness
-            },
+            || prewarmed_harness(&records),
             |mut harness| black_box(harness.key_update(KeyCode::Home, KeyModifiers::CONTROL).0),
             BatchSize::LargeInput,
         );
     });
     group.bench_function("page_down", |bencher| {
         bencher.iter_batched(
-            || {
-                let mut harness = Harness::from_records(records.clone(), WIDTH, HEIGHT);
-                harness.render();
-                harness
-            },
+            || prewarmed_harness(&records),
             |mut harness| black_box(harness.key_update(KeyCode::PageDown, KeyModifiers::NONE).0),
             BatchSize::LargeInput,
         );
     });
+    group.bench_function("prewarmed_page_up_and_frame", |bencher| {
+        bencher.iter_batched(
+            || prewarmed_harness(&records),
+            |mut harness| {
+                black_box(harness.page_up());
+                harness.render();
+                black_box(harness)
+            },
+            BatchSize::LargeInput,
+        );
+    });
+    group.finish();
+}
+
+fn user_prompt_payload_benchmarks(criterion: &mut Criterion) {
+    let mut group =
+        criterion.benchmark_group("nanocodex2_history/user_prompt_cold_scroll_frame_120x40");
+    group.sample_size(10);
+    for (size_name, prompt_bytes) in [("4KiB", 4 * 1_024), ("256KiB", 256 * 1_024)] {
+        let history = synthetic_user_prompt_history(prompt_bytes);
+        let Some(ManagedEventData::TurnAccepted {
+            input: PromptInput::Text(prompt),
+            ..
+        }) = history.first().map(|event| &event.data)
+        else {
+            panic!("prompt benchmark should contain a text user prompt");
+        };
+        assert_eq!(prompt.len(), prompt_bytes);
+        let records = validated_projection(&history);
+
+        let mut probe = prewarmed_harness(&records);
+        assert!(!probe.screen_text().contains("user-prompt-payload"));
+        let before_page = probe.fingerprint();
+        probe.key_update(KeyCode::Home, KeyModifiers::CONTROL);
+        let after_page = probe.render_fingerprint();
+        assert_ne!(after_page, before_page);
+        assert!(probe.screen_text().contains("user-prompt-payload"));
+
+        group.throughput(Throughput::Bytes(prompt_bytes as u64));
+        group.bench_with_input(
+            BenchmarkId::new("ctrl_home_first_frame", size_name),
+            &records,
+            |bencher, records| {
+                bencher.iter_batched(
+                    || prewarmed_harness(records),
+                    |mut harness| {
+                        black_box(harness.key_update(KeyCode::Home, KeyModifiers::CONTROL));
+                        harness.render();
+                        black_box(harness)
+                    },
+                    BatchSize::LargeInput,
+                );
+            },
+        );
+    }
     group.finish();
 }
 
@@ -692,6 +768,7 @@ criterion_group!(
     replay_and_frame_benchmarks,
     prepend_replay_benchmarks,
     scroll_benchmarks,
+    user_prompt_payload_benchmarks,
     tool_payload_benchmarks,
 );
 criterion_main!(tui_benches);
