@@ -214,7 +214,7 @@ fn history_projection_range_with_sequences(
         let projected = (|| -> Result<_, ManagedError> {
             match &event.data {
                 ManagedEventData::TurnAccepted { input, .. } => {
-                    let text = prompt_input_text(&input);
+                    let text = prompt_input_text(input);
                     let record = TranscriptRecord::from_local(
                         sequence,
                         timestamp,
