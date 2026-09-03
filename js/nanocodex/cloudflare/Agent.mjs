@@ -1,8 +1,12 @@
 import * as HostAgent from "../host/Agent.mjs";
 import {
+  CLOUDFLARE_SESSION_RESERVATION,
+  commitCloudflareAgentSession,
   installHostBridge,
   loadDurabilityRuntime,
   observeAgentRelease,
+  prepareCloudflareAgentSession,
+  releaseAgentSession,
   routePrompt,
 } from "../internal.mjs";
 import { pruneDurableReceipts as pruneWasmDurableReceipts } from "../pkg-web/nanocodex.js";
@@ -335,6 +339,7 @@ async function createOwned(module, resolved, options, hostAgent, lifecycle) {
     },
   });
 
+  const sessionReservation = prepareCloudflareAgentSession(sessionId, subject);
   let agent;
   let watcher;
   let unwatch;
@@ -352,6 +357,7 @@ async function createOwned(module, resolved, options, hostAgent, lifecycle) {
       codeEvaluator: internalRuntime?.codeEvaluator,
       [Symbol.for("nanocodex.browser.internalRuntime")]: {
         toolProviders: internalRuntime?.toolProviders,
+        [CLOUDFLARE_SESSION_RESERVATION]: sessionReservation,
       },
       transport,
       sessionId,
@@ -393,6 +399,7 @@ async function createOwned(module, resolved, options, hostAgent, lifecycle) {
     observeAgentRelease(exposed, () => {
       if (lifecycle.active === active) lifecycle.active = undefined;
     });
+    commitCloudflareAgentSession(sessionReservation);
     return exposed;
   } catch (error) {
     const cleanupErrors = [];
@@ -401,6 +408,7 @@ async function createOwned(module, resolved, options, hostAgent, lifecycle) {
     if (agent) {
       try { await agent.session.shutdown(); } catch (cleanupError) { cleanupErrors.push(cleanupError); }
     }
+    releaseAgentSession(sessionReservation);
     if (cleanupErrors.length > 0) {
       const cause = new AggregateError(
         [error, ...cleanupErrors],

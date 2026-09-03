@@ -3,7 +3,9 @@ import { applyBrowserPatch, Nanocodex } from "../pkg-web/nanocodex.js";
 import { agentActions } from "../actions/index.mjs";
 import {
   activateHost,
+  activateCloudflareAgentSession,
   bindHostSession,
+  CLOUDFLARE_SESSION_RESERVATION,
   createAgentClient,
   createEventChannel,
   createSessionId,
@@ -59,6 +61,7 @@ export async function create(options = {}) {
     codeEvaluator,
   } = options;
   const toolProviders = internalRuntime?.toolProviders;
+  const cloudflareReservation = internalRuntime?.[CLOUDFLARE_SESSION_RESERVATION];
   const stableSessionId = sessionId ?? createSessionId();
   const {
     apiKey,
@@ -138,12 +141,16 @@ export async function create(options = {}) {
           ...config,
           durabilityHostId: durabilityOwner?.id,
         }));
-        return subscription === undefined
-          ? Nanocodex.create(configJson)
-          : Nanocodex.createWithChatGpt(
+        const raw = subscription === undefined
+          ? await Nanocodex.create(configJson)
+          : await Nanocodex.createWithChatGpt(
               configJson,
               (await loadSubscriptionRuntime()).rawSubscription(subscription),
             );
+        if (cloudflareReservation !== undefined) {
+          activateCloudflareAgentSession(cloudflareReservation);
+        }
+        return raw;
       } catch (error) {
         durabilityOwner?.abandon();
         await host.dispose();
@@ -155,7 +162,7 @@ export async function create(options = {}) {
       host.retain();
       try {
         durabilityOwner?.retain();
-        bindHostSession(host, raw.sessionId);
+        bindHostSession(host, raw.sessionId, cloudflareReservation);
         events.addSource(raw);
       } catch (error) {
         events.removeSource(raw);
@@ -187,7 +194,7 @@ export async function create(options = {}) {
       resume,
       durabilityId,
       terminalReceiptRetention,
-    });
+    }, cloudflareReservation);
   } catch (error) {
     if (!creationStarted) await host.dispose();
     throw error;

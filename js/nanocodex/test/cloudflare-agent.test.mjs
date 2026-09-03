@@ -361,6 +361,110 @@ test("Cloudflare Agent isolates states per Durable Object and can recreate after
   );
 });
 
+test("Cloudflare Agent reconstruction takes over the same durable owner after fencing", async () => {
+  const module = await readFile(new URL("../pkg-web/nanocodex_bg.wasm", import.meta.url));
+  const storage = new MemoryStorage();
+  const binding = egressBinding();
+  const first = await create(module, durableOwner(storage, binding, FIRST_OBJECT_ID));
+  const firstDurableOwner = { ...storage.owners.get(storage.stateId) };
+
+  const reconstructed = await create(
+    module,
+    durableOwner(storage, binding, FIRST_OBJECT_ID),
+  );
+  assert.equal(reconstructed.sessionId, first.sessionId);
+  assert.notEqual(storage.owners.get(storage.stateId).ownerId, firstDurableOwner.ownerId);
+  assert.ok(
+    BigInt(storage.owners.get(storage.stateId).fence) > BigInt(firstDurableOwner.fence),
+  );
+
+  first.dispose();
+  await reconstructed.session.shutdown();
+  const reopened = await create(module, durableOwner(storage, binding, FIRST_OBJECT_ID));
+  await reopened.session.shutdown();
+});
+
+test("Cloudflare Agent reconstruction rejects a different durable owner before fencing", async () => {
+  const module = await readFile(new URL("../pkg-web/nanocodex_bg.wasm", import.meta.url));
+  const storage = new MemoryStorage();
+  const binding = egressBinding();
+  const first = await create(module, durableOwner(storage, binding, FIRST_OBJECT_ID));
+  const retainedOwner = { ...storage.owners.get(storage.stateId) };
+
+  await assert.rejects(
+    create(module, durableOwner(storage, binding, SECOND_OBJECT_ID)),
+    /session ID is already active/,
+  );
+  assert.deepEqual(storage.owners.get(storage.stateId), retainedOwner);
+
+  await first.session.shutdown();
+});
+
+test("failed reconstruction keeps the prior same-owner reservation fail closed", async () => {
+  const module = await readFile(new URL("../pkg-web/nanocodex_bg.wasm", import.meta.url));
+  const storage = new MemoryStorage();
+  const binding = egressBinding();
+  const first = await create(module, durableOwner(storage, binding, FIRST_OBJECT_ID));
+  const failing = bindAgent(module, {
+    async create(options) {
+      const agent = await HostAgent.create(options);
+      return new Proxy(agent, {
+        get(target, property, receiver) {
+          if (property === "events") {
+            return { watch: () => { throw new Error("reconstruction setup failed"); } };
+          }
+          return Reflect.get(target, property, receiver);
+        },
+      });
+    },
+  });
+
+  await assert.rejects(
+    failing.create(durableOwner(storage, binding, FIRST_OBJECT_ID)),
+    /reconstruction setup failed/,
+  );
+  await assert.rejects(
+    create(module, durableOwner(storage, binding, SECOND_OBJECT_ID)),
+    /session ID is already active/,
+  );
+
+  const reconstructed = await create(
+    module,
+    durableOwner(storage, binding, FIRST_OBJECT_ID),
+  );
+  first.dispose();
+  await reconstructed.session.shutdown();
+});
+
+test("Cloudflare Agent rejects a takeover while its predecessor is not committed", async () => {
+  const module = await readFile(new URL("../pkg-web/nanocodex_bg.wasm", import.meta.url));
+  const storage = new MemoryStorage();
+  const binding = egressBinding();
+  const first = await create(module, durableOwner(storage, binding, FIRST_OBJECT_ID));
+  const entered = deferred();
+  const release = deferred();
+  const held = bindAgent(module, {
+    async create(options) {
+      const agent = await HostAgent.create(options);
+      entered.resolve();
+      await release.promise;
+      return agent;
+    },
+  });
+  const pending = held.create(durableOwner(storage, binding, FIRST_OBJECT_ID));
+  await entered.promise;
+
+  await assert.rejects(
+    create(module, durableOwner(storage, binding, FIRST_OBJECT_ID)),
+    /session ID is already active/,
+  );
+
+  release.resolve();
+  const reconstructed = await pending;
+  first.dispose();
+  await reconstructed.session.shutdown();
+});
+
 test("Cloudflare Agent exports and imports one stable state across a fresh runtime identity", async () => {
   const module = await readFile(new URL("../pkg-web/nanocodex_bg.wasm", import.meta.url));
   const sourceStorage = new MemoryStorage();

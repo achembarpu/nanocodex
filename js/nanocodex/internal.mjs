@@ -7,12 +7,17 @@ const resultFinalizer = typeof FinalizationRegistry === "function"
     })
   : undefined;
 const hostSessions = new Map();
+const cloudflareHostOwners = new WeakMap();
 const activeAgentSessions = new Map();
+const pendingCloudflareAgentSessions = new Map();
+const cloudflareAgentSessions = new WeakSet();
 const hostConnections = new Map();
 const definitionHosts = new Map();
 let nextHostConnection = 1;
 let nextDefinitionHost = 1;
 let nextAgentUid = 1;
+
+export const CLOUDFLARE_SESSION_RESERVATION = Symbol("nanocodex.cloudflare.sessionReservation");
 
 export function defineRuntime(definition) {
   if (!definition || typeof definition.create !== "function") {
@@ -391,16 +396,25 @@ export function reportError(error) {
   } catch {}
 }
 
-export function bindHostSession(host, sessionId) {
+export function bindHostSession(host, sessionId, reservation) {
   const existing = hostSessions.get(sessionId);
+  const replacementOwner = cloudflareSessionOwner(reservation, sessionId);
   if (existing && existing !== host) {
-    throw new Error(`Nanocodex session ID is already active: ${sessionId}`);
+    if (replacementOwner === undefined
+      || cloudflareHostOwners.get(existing) !== replacementOwner) {
+      throw new Error(`Nanocodex session ID is already active: ${sessionId}`);
+    }
   }
   hostSessions.set(sessionId, host);
+  if (replacementOwner !== undefined) {
+    cloudflareHostOwners.set(host, replacementOwner);
+    reservation.host = host;
+  }
 }
 
 export function releaseHostSession(host, sessionId) {
-  if (hostSessions.get(sessionId) === host) hostSessions.delete(sessionId);
+  if (hostSessions.get(sessionId) !== host) return;
+  hostSessions.delete(sessionId);
 }
 
 export function registerDefinitionHost(host) {
@@ -683,12 +697,78 @@ export function reserveAgentSession(sessionId) {
   if (typeof sessionId !== "string" || !sessionId) {
     throw new TypeError("sessionId must be a non-empty string");
   }
-  if (activeAgentSessions.has(sessionId)) {
+  if (activeAgentSessions.has(sessionId) || pendingCloudflareAgentSessions.has(sessionId)) {
     throw new Error(`Nanocodex session ID is already active: ${sessionId}`);
   }
   const reservation = { sessionId, adopted: false, released: false };
   activeAgentSessions.set(sessionId, reservation);
   return reservation;
+}
+
+/** Internal Cloudflare seam: prepares, but does not activate, a reconstructed DO owner. */
+export function prepareCloudflareAgentSession(sessionId, ownerId) {
+  if (typeof sessionId !== "string" || !sessionId) {
+    throw new TypeError("sessionId must be a non-empty string");
+  }
+  if (typeof ownerId !== "string" || !ownerId) {
+    throw new TypeError("Cloudflare Durable Object owner ID must be a non-empty string");
+  }
+  const existing = activeAgentSessions.get(sessionId);
+  if (pendingCloudflareAgentSessions.has(sessionId)
+    || (existing !== undefined
+      && (!cloudflareAgentSessions.has(existing)
+        || existing.ownerId !== ownerId
+        || !existing.committed))) {
+    throw new Error(`Nanocodex session ID is already active: ${sessionId}`);
+  }
+  const reservation = {
+    sessionId,
+    ownerId,
+    adopted: false,
+    committed: false,
+    predecessor: undefined,
+    predecessorHost: undefined,
+    host: undefined,
+    released: false,
+  };
+  cloudflareAgentSessions.add(reservation);
+  pendingCloudflareAgentSessions.set(sessionId, reservation);
+  return reservation;
+}
+
+/** Internal Cloudflare seam: activates a prepared owner after raw construction acquires its durable fence. */
+export function activateCloudflareAgentSession(reservation) {
+  if (!cloudflareAgentSessions.has(reservation) || reservation.released) {
+    throw new Error("Cloudflare Agent session reservation is no longer active");
+  }
+  if (activeAgentSessions.get(reservation.sessionId) === reservation) return;
+  if (pendingCloudflareAgentSessions.get(reservation.sessionId) !== reservation) {
+    throw new Error("Cloudflare Agent session reservation is no longer pending");
+  }
+  const existing = activeAgentSessions.get(reservation.sessionId);
+  if (existing !== undefined
+      && (!cloudflareAgentSessions.has(existing)
+        || existing.ownerId !== reservation.ownerId
+        || !existing.committed)) {
+    throw new Error(`Nanocodex session ID is already active: ${reservation.sessionId}`);
+  }
+  reservation.predecessor = existing;
+  reservation.predecessorHost = hostSessions.get(reservation.sessionId);
+  activeAgentSessions.set(reservation.sessionId, reservation);
+  pendingCloudflareAgentSessions.delete(reservation.sessionId);
+}
+
+/** Internal Cloudflare seam: publishes a reconstructed owner after adapter setup succeeds. */
+export function commitCloudflareAgentSession(reservation) {
+  if (!cloudflareAgentSessions.has(reservation)
+    || reservation.released
+    || !reservation.adopted
+    || activeAgentSessions.get(reservation.sessionId) !== reservation) {
+    throw new Error("Cloudflare Agent session reservation is not ready to commit");
+  }
+  reservation.committed = true;
+  reservation.predecessor = undefined;
+  reservation.predecessorHost = undefined;
 }
 
 function adoptAgentSession(reservation, sessionId) {
@@ -710,9 +790,35 @@ function adoptAgentSession(reservation, sessionId) {
 export function releaseAgentSession(reservation) {
   if (!reservation || reservation.released) return;
   reservation.released = true;
-  if (activeAgentSessions.get(reservation.sessionId) === reservation) {
-    activeAgentSessions.delete(reservation.sessionId);
+  if (pendingCloudflareAgentSessions.get(reservation.sessionId) === reservation) {
+    pendingCloudflareAgentSessions.delete(reservation.sessionId);
   }
+  if (activeAgentSessions.get(reservation.sessionId) === reservation) {
+    if (cloudflareAgentSessions.has(reservation)
+      && !reservation.committed
+      && reservation.predecessor !== undefined
+      && !reservation.predecessor.released) {
+      activeAgentSessions.set(reservation.sessionId, reservation.predecessor);
+      if (reservation.predecessorHost !== undefined) {
+        hostSessions.set(reservation.sessionId, reservation.predecessorHost);
+      }
+    } else {
+      activeAgentSessions.delete(reservation.sessionId);
+      if (hostSessions.get(reservation.sessionId) === reservation.host) {
+        hostSessions.delete(reservation.sessionId);
+      }
+    }
+  }
+}
+
+function cloudflareSessionOwner(reservation, sessionId) {
+  if (!cloudflareAgentSessions.has(reservation)
+    || reservation.released
+    || reservation.sessionId !== sessionId
+    || activeAgentSessions.get(sessionId) !== reservation) {
+    return undefined;
+  }
+  return reservation.ownerId;
 }
 
 async function joinAgentShutdown(state) {
