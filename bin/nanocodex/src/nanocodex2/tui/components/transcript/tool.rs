@@ -1,13 +1,16 @@
 // Derived from clabby/tact; modified for Nanocodex2.
 // SPDX-License-Identifier: Apache-2.0
 
+mod browser;
 mod code;
+mod mcp;
 mod media;
 mod memory;
 mod patch;
 mod plan;
-mod send_message;
+mod sandbox;
 mod shell;
+mod subagent;
 mod web;
 
 use super::markdown::{
@@ -16,7 +19,7 @@ use super::markdown::{
 use crate::tui::{
     format::{format_duration, humanize_tool},
     theme::Theme,
-    transcript::{ToolEntry, ToolState},
+    transcript::{ToolEntry, ToolState, is_subagent_tool},
 };
 use ratatui::{
     style::{Color, Modifier, Style},
@@ -26,6 +29,10 @@ use serde_json::Value;
 use std::ops::Range;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
+
+const MAX_EXPANDED_DETAIL_LINES: usize = 128;
+const MAX_DETAIL_SECTION_LINES: usize = MAX_EXPANDED_DETAIL_LINES / 2;
+const MAX_EXPANDED_TEXT_BYTES: usize = 24 * 1024;
 
 #[cfg(test)]
 pub(super) fn render(tool: &ToolEntry, width: u16, theme: &Theme) -> Vec<Line<'static>> {
@@ -141,12 +148,21 @@ pub(super) fn render_live_summary(
 }
 
 fn present(tool: &ToolEntry, width: u16, theme: &Theme, expanded: bool) -> Presentation {
-    match tool.name.as_str() {
+    if tool.has_mcp_origin() {
+        return mcp::present(tool, width, theme, expanded);
+    }
+    if is_subagent_tool(tool.family()) {
+        return subagent::present(tool, width, theme, expanded);
+    }
+    match tool.family() {
+        "sandbox_exec" | "sandbox_start_process" | "sandbox_preview" => {
+            sandbox::present(tool, width, theme, expanded)
+        }
         "exec_command" | "write_stdin" => shell::present(tool, width, theme, expanded),
         "update_plan" => plan::present(tool, width, theme, expanded),
-        "send_agent_message" => send_message::present(tool, width, theme, expanded),
         "apply_patch" => patch::present(tool, width, theme, expanded),
         "web__run" => web::present(tool, width, theme, expanded),
+        "browser" => browser::present(tool, width, theme, expanded),
         "view_image" | "image_gen__imagegen" => media::present(tool, width, theme, expanded),
         "memory" => memory::present(tool, width, theme, expanded),
         "exec" | "wait" => code::present(tool, width, theme, expanded),
@@ -211,6 +227,7 @@ impl Presentation {
     }
 
     pub(super) fn unselectable_details(mut self, details: Vec<Line<'static>>) -> Self {
+        let details = self.bounded_details(details);
         self.detail_selections
             .resize_with(self.detail_selections.len() + details.len(), Vec::new);
         self.details.extend(details);
@@ -231,7 +248,8 @@ impl Presentation {
         details: Vec<Line<'static>>,
         exclusions: &[Vec<Range<u16>>],
     ) -> Self {
-        let source = source.into();
+        let source = bounded_text(&source.into());
+        let details = self.bounded_details(details);
         let offset = if self.selection_source.is_empty() {
             0
         } else {
@@ -251,13 +269,26 @@ impl Presentation {
         self
     }
 
+    fn bounded_details(&self, mut details: Vec<Line<'static>>) -> Vec<Line<'static>> {
+        let remaining = MAX_EXPANDED_DETAIL_LINES.saturating_sub(self.details.len());
+        if details.len() <= remaining {
+            return details;
+        }
+        if remaining == 0 {
+            return Vec::new();
+        }
+        details.truncate(remaining.saturating_sub(1));
+        details.push(Line::from("… expanded output truncated …"));
+        details
+    }
+
     pub(super) fn selectable_plain(
         self,
         source: impl Into<String>,
         width: u16,
         style: Style,
     ) -> Self {
-        let source = source.into();
+        let source = bounded_text(&source.into());
         let lines = wrap_plain(&source, width, style);
         self.selectable_details(source, lines)
     }
@@ -319,6 +350,12 @@ fn summary_lines(
             Style::default().fg(theme.muted()),
         );
     }
+    let mut origin_spans = Vec::new();
+    append_span(
+        &mut origin_spans,
+        &format!(" · {}", tool.execution_qualifier()),
+        Style::default().fg(theme.muted()),
+    );
     let mut error_spans = Vec::new();
     if tool.state == ToolState::Failed
         && let Some(error) = first_error_line(tool.result.as_ref())
@@ -340,7 +377,11 @@ fn summary_lines(
 
     if matches!(presentation.summary_overflow, SummaryOverflow::Truncate) {
         let title_span_count = prefix.len() + usize::from(!content.is_empty());
-        let leading = prefix.into_iter().chain(content).collect::<Vec<_>>();
+        let leading = prefix
+            .into_iter()
+            .chain(content)
+            .chain(origin_spans)
+            .collect::<Vec<_>>();
         let full_summary = leading
             .iter()
             .chain(&outcome_spans)
@@ -377,6 +418,7 @@ fn summary_lines(
         return vec![line];
     }
 
+    content.extend(origin_spans);
     content.extend(outcome_spans);
     content.extend(error_spans);
     content.extend(duration_spans);
@@ -518,20 +560,30 @@ fn truncate_line(line: Line<'static>, width: u16) -> Line<'static> {
 }
 
 fn generic(tool: &ToolEntry, width: u16, theme: &Theme, expanded: bool) -> Presentation {
-    let title = humanize_tool(&tool.name);
+    let family = tool.family();
+    let title = humanize_tool(family.strip_prefix("sandbox_").unwrap_or(family));
     let subject = meaningful_subject(&tool.arguments).unwrap_or_else(|| {
         let count = tool.arguments.as_object().map_or(0, serde_json::Map::len);
         format!("{count} arguments")
     });
-    let mut presentation = Presentation::new(title, subject);
+    let presentation = Presentation::new(title, subject);
     if !expanded {
         return presentation;
     }
-    let details = pretty_value(&tool.arguments, width, theme);
+    with_generic_details(presentation, tool, width, theme)
+}
+
+fn with_generic_details(
+    mut presentation: Presentation,
+    tool: &ToolEntry,
+    width: u16,
+    theme: &Theme,
+) -> Presentation {
+    let details = bounded_section(pretty_value(&tool.arguments, width, theme));
     presentation = presentation.unselectable_details(details);
     if let Some(result) = &tool.result {
         let (source, details) = selectable_result(result, width, theme);
-        presentation = presentation.selectable_details(source, details);
+        presentation = presentation.selectable_details(source, bounded_section(details));
     }
     presentation.footer = Some("arguments and result".to_owned());
     presentation
@@ -543,17 +595,18 @@ pub(super) fn selectable_result(
     theme: &Theme,
 ) -> (String, Vec<Line<'static>>) {
     if contains_image_data(value) {
-        let source = format!("image data · {}", format_bytes(value.to_string().len()));
+        let source = "image data hidden".to_owned();
         let details = wrap_plain(&source, width, Style::default().fg(theme.muted()));
         return (source, details);
     }
     if let Some(text) = value.as_str() {
+        let text = bounded_text(text);
         return (
-            text.to_owned(),
-            wrap_plain(text, width, Style::default().fg(theme.text())),
+            text.clone(),
+            wrap_plain(&text, width, Style::default().fg(theme.text())),
         );
     }
-    let source = serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string());
+    let source = bounded_json(value);
     let details = wrap_plain(
         &source,
         width,
@@ -565,7 +618,7 @@ pub(super) fn selectable_result(
 }
 
 pub(super) fn pretty_value(value: &Value, width: u16, theme: &Theme) -> Vec<Line<'static>> {
-    let rendered = serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string());
+    let rendered = bounded_json(value);
     wrap_plain(
         &rendered,
         width,
@@ -594,15 +647,103 @@ fn meaningful_subject(arguments: &Value) -> Option<String> {
 
 fn first_error_line(result: Option<&Value>) -> Option<String> {
     let result = result?;
-    let text = result
-        .get("error")
-        .and_then(Value::as_str)
-        .or_else(|| result.get("output").and_then(Value::as_str))
-        .or_else(|| result.as_str())?;
+    let text = error_text(result)?;
     text.lines()
         .map(str::trim)
         .find(|line| !line.is_empty())
         .map(sanitize)
+}
+
+fn error_text(value: &Value) -> Option<&str> {
+    if let Some(text) = value.as_str() {
+        return Some(text);
+    }
+    if let Some(items) = value.as_array() {
+        return items.iter().find_map(error_text);
+    }
+    let fields = value.as_object()?;
+    for key in ["error", "message", "stderr", "output", "text"] {
+        if let Some(text) = fields
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|text| !text.trim().is_empty())
+        {
+            return Some(text);
+        }
+    }
+    for key in ["errors", "content", "details", "cause"] {
+        if let Some(text) = fields.get(key).and_then(error_text) {
+            return Some(text);
+        }
+    }
+    None
+}
+
+pub(super) fn bounded_text(text: &str) -> String {
+    if text.len() <= MAX_EXPANDED_TEXT_BYTES {
+        return text.to_owned();
+    }
+    let mut end = MAX_EXPANDED_TEXT_BYTES;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}\n… output truncated …", &text[..end])
+}
+
+fn bounded_json(value: &Value) -> String {
+    let mut writer = CappedWriter::default();
+    let _ = serde_json::to_writer_pretty(&mut writer, value);
+    writer.finish()
+}
+
+#[derive(Default)]
+struct CappedWriter {
+    bytes: Vec<u8>,
+    truncated: bool,
+}
+
+impl CappedWriter {
+    fn finish(self) -> String {
+        let mut rendered = String::from_utf8_lossy(&self.bytes).into_owned();
+        if self.truncated {
+            rendered.push_str("\n… output truncated …");
+        }
+        rendered
+    }
+}
+
+impl std::io::Write for CappedWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let remaining = MAX_EXPANDED_TEXT_BYTES.saturating_sub(self.bytes.len());
+        if remaining == 0 {
+            self.truncated = true;
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WriteZero,
+                "tool detail limit reached",
+            ));
+        }
+        let accepted = remaining.min(bytes.len());
+        self.bytes.extend_from_slice(&bytes[..accepted]);
+        if accepted < bytes.len() {
+            self.truncated = true;
+        }
+        Ok(accepted)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn bounded_section(mut details: Vec<Line<'static>>) -> Vec<Line<'static>> {
+    if details.len() <= MAX_DETAIL_SECTION_LINES {
+        return details;
+    }
+    details.truncate(MAX_DETAIL_SECTION_LINES.saturating_sub(1));
+    details.push(Line::from(
+        "… section truncated · expanded output truncated …",
+    ));
+    details
 }
 
 fn contains_image_data(value: &Value) -> bool {
@@ -660,7 +801,10 @@ fn status_style(state: ToolState, theme: &Theme) -> Style {
 
 #[cfg(test)]
 mod tests {
-    use super::{render, render_expanded, render_layout, render_live};
+    use super::{
+        MAX_EXPANDED_DETAIL_LINES, MAX_EXPANDED_TEXT_BYTES, bounded_json, render, render_expanded,
+        render_layout, render_live,
+    };
     use crate::tui::{
         theme::Theme,
         transcript::{ToolEntry, ToolState},
@@ -669,6 +813,7 @@ mod tests {
     use serde_json::json;
 
     fn tool(name: &str, arguments: serde_json::Value) -> ToolEntry {
+        let execution = ToolEntry::inferred_execution(name, &arguments, None);
         ToolEntry {
             name: name.to_owned(),
             arguments,
@@ -677,6 +822,7 @@ mod tests {
             duration_ns: Some(1_200_000_000),
             result: None,
             metadata: None,
+            execution,
             substeps: Vec::new(),
             child_count: 0,
         }
@@ -699,7 +845,7 @@ mod tests {
         assert_eq!(lines.len(), 1);
         assert_eq!(
             lines[0].to_string(),
-            "  ▶ ✓ Shell  $ cargo test · exit 0 · 1.2s"
+            "  ▶ ✓ Shell  $ cargo test · Local · exit 0 · 1.2s"
         );
         let checkmark = lines[0]
             .spans
@@ -758,7 +904,7 @@ mod tests {
 
         let lines = render(&workflow, 80, &Theme::default());
 
-        assert_eq!(lines[0].to_string(), "  ▶ ✓ Batch  2 tools · 1.2s");
+        assert_eq!(lines[0].to_string(), "  ▶ ✓ Batch  2 tools · Local · 1.2s");
         assert!(lines.iter().all(|line| line.width() <= 80));
     }
 
@@ -809,8 +955,10 @@ mod tests {
         let stdin_line = render(&stdin, 32, &Theme::default()).remove(0);
 
         assert_eq!(shell_line.width(), 36);
-        assert!(shell_line.to_string().ends_with(" … · exit 0 · 1.2s"));
-        assert!(live_shell_line.to_string().ends_with(" … · exit 0 · 2.5s"));
+        assert!(shell_line.to_string().contains("exit 0"));
+        assert!(shell_line.to_string().ends_with("1.2s"));
+        assert!(live_shell_line.to_string().contains("exit 0"));
+        assert!(live_shell_line.to_string().ends_with("2.5s"));
         assert_eq!(stdin_line.width(), 32);
         assert!(stdin_line.to_string().ends_with(" … · 1.2s"));
     }
@@ -928,7 +1076,7 @@ mod tests {
             (
                 "spawn_agent",
                 json!({"role": "reviewer"}),
-                "Spawn agent  1 arguments",
+                "Spawned  reviewer",
             ),
         ];
 
@@ -1070,5 +1218,298 @@ mod tests {
                     .all(|line| line.width() <= usize::from(width))
             );
         }
+    }
+
+    #[test]
+    fn summaries_name_the_execution_origin() {
+        let cases = [
+            (
+                tool("exec_command", json!({"cmd": "pwd", "workdir": "/work"})),
+                "Local",
+            ),
+            (
+                tool("sandbox_exec", json!({"command": "pwd", "cwd": "/work"})),
+                "Sandbox · /work",
+            ),
+            (tool("custom_operation", json!({})), "Local"),
+            (
+                tool("web__run", json!({"time": [{"utc_offset": "+00:00"}]})),
+                "Web client",
+            ),
+            (
+                tool(
+                    "browser",
+                    json!({"action": "open", "url": "https://example.com"}),
+                ),
+                "Browser",
+            ),
+            (
+                tool("mcp__files__read", json!({"path": "/tmp/a"})),
+                "MCP · files",
+            ),
+        ];
+
+        for (tool, expected) in cases {
+            let rendered = render(&tool, 120, &Theme::default())[0].to_string();
+            assert!(rendered.contains(expected), "{rendered}");
+        }
+    }
+
+    #[test]
+    fn result_metadata_can_promote_a_call_to_a_named_machine() {
+        let mut remote = tool("exec_command", json!({"cmd": "pwd"}));
+        remote.metadata = Some(json!({"executor": {"machine_name": "Alice's Mac"}}));
+        remote.infer_execution();
+
+        let rendered = render(&remote, 100, &Theme::default())[0].to_string();
+
+        assert!(rendered.contains("Alice's Mac"), "{rendered}");
+        assert!(rendered.contains("Machine Alice's Mac"), "{rendered}");
+        assert!(!rendered.contains("Sandbox"), "{rendered}");
+    }
+
+    #[test]
+    fn expanded_generic_output_is_bounded() {
+        let mut generic = tool("custom_operation", json!({"query": "bounded"}));
+        generic.result = Some(json!({"rows": vec!["x".repeat(1_000); 1_000]}));
+
+        let lines = render_expanded(&generic, 40, &Theme::default());
+        let rendered = lines.iter().map(ToString::to_string).collect::<String>();
+
+        assert!(lines.len() <= MAX_EXPANDED_DETAIL_LINES + 4);
+        assert!(rendered.contains("expanded output truncated"));
+    }
+
+    #[test]
+    fn subagent_summaries_keep_schema_and_full_task_out_of_collapsed_view() {
+        let mut spawn = tool(
+            "spawn_agent",
+            json!({
+                "role": "reviewer",
+                "task": "Inspect the entire repository carefully and return a detailed report with evidence.",
+                "output_schema": {"type": "object", "properties": {"report": {"type": "string"}}}
+            }),
+        );
+        spawn.result = Some(json!({
+            "agent_id": 72,
+            "role": "reviewer",
+            "status": {"state": "running"}
+        }));
+
+        let collapsed = render(&spawn, 140, &Theme::default())[0].to_string();
+        let expanded = render_expanded(&spawn, 140, &Theme::default())
+            .iter()
+            .map(ToString::to_string)
+            .collect::<String>();
+
+        assert!(collapsed.contains("Spawned  reviewer"));
+        assert!(collapsed.contains("agent 72 · running"));
+        assert!(!collapsed.contains("output_schema"));
+        assert!(expanded.contains("output_schema"));
+        assert!(expanded.contains("Inspect the entire repository carefully"));
+    }
+
+    #[test]
+    fn sandbox_families_render_commands_processes_previews_and_streams() {
+        let mut exec = tool(
+            "sandbox_exec",
+            json!({"command": "printf hello", "cwd": "/workspace"}),
+        );
+        exec.result = Some(json!({
+            "success": true,
+            "exit_code": 0,
+            "stdout": "hello\n",
+            "stderr": ""
+        }));
+        let mut process = tool(
+            "sandbox_start_process",
+            json!({"command": "node", "args": ["server.mjs"], "ready_port": 8000}),
+        );
+        process.result = Some(json!({
+            "process_id": "proc-1",
+            "pid": 42,
+            "status": "running",
+            "ready_port": 8000
+        }));
+        let mut preview = tool("sandbox_preview", json!({"port": 8000}));
+        preview.result = Some(json!({
+            "port": 8000,
+            "url": "https://preview.example.test",
+            "persistent": false
+        }));
+
+        let exec_summary = render(&exec, 120, &Theme::default())[0].to_string();
+        let exec_details = render_expanded(&exec, 120, &Theme::default())
+            .iter()
+            .map(ToString::to_string)
+            .collect::<String>();
+        let process_summary = render(&process, 120, &Theme::default())[0].to_string();
+        let preview_summary = render(&preview, 120, &Theme::default())[0].to_string();
+
+        assert!(
+            exec_summary.contains("Run command  $ printf hello"),
+            "{exec_summary}"
+        );
+        assert!(
+            exec_summary.contains("Sandbox · /workspace"),
+            "{exec_summary}"
+        );
+        assert!(exec_summary.contains("exit 0"), "{exec_summary}");
+        for expected in [
+            "cwd /workspace",
+            "command",
+            "printf hello",
+            "stdout",
+            "hello",
+            "stderr",
+            "(empty)",
+        ] {
+            assert!(
+                exec_details.contains(expected),
+                "missing {expected:?}: {exec_details}"
+            );
+        }
+        assert!(
+            process_summary.contains("Start process  node server.mjs"),
+            "{process_summary}"
+        );
+        assert!(
+            process_summary.contains("PID 42 · running · port 8000 ready"),
+            "{process_summary}"
+        );
+        assert!(
+            preview_summary.contains("Open preview  port 8000"),
+            "{preview_summary}"
+        );
+        assert!(
+            preview_summary.contains("preview ready"),
+            "{preview_summary}"
+        );
+    }
+
+    #[test]
+    fn qualified_machine_tools_use_clean_family_routing_and_machine_origin() {
+        let direct = tool(
+            "user_machine-a_exec_command",
+            json!({"cmd": "pwd", "workdir": "/repo"}),
+        );
+        let sandbox = tool(
+            "user_machine-a_sandbox_exec",
+            json!({"command": "pwd", "cwd": "/repo"}),
+        );
+
+        let direct = render(&direct, 120, &Theme::default())[0].to_string();
+        let sandbox = render(&sandbox, 120, &Theme::default())[0].to_string();
+
+        assert!(direct.contains("Shell  $ pwd"), "{direct}");
+        assert!(direct.contains("Machine machine-a · /repo"), "{direct}");
+        assert!(!direct.contains("user machine"), "{direct}");
+        assert!(sandbox.contains("Run command  $ pwd"), "{sandbox}");
+        assert!(sandbox.contains("Machine machine-a · /repo"), "{sandbox}");
+        assert!(!sandbox.contains("Sandbox"), "{sandbox}");
+    }
+
+    #[test]
+    fn direct_shell_only_becomes_sandbox_when_metadata_says_so() {
+        let direct = tool("exec_command", json!({"cmd": "pwd", "workdir": "/repo"}));
+        let mut sandbox = direct.clone();
+        sandbox.metadata = Some(json!({"execution": "sandbox"}));
+        sandbox.infer_execution();
+
+        let direct = render(&direct, 120, &Theme::default())[0].to_string();
+        let sandbox = render(&sandbox, 120, &Theme::default())[0].to_string();
+
+        assert!(direct.contains(" · Local · "), "{direct}");
+        assert!(sandbox.contains("Sandbox · /repo"), "{sandbox}");
+    }
+
+    #[test]
+    fn mcp_namespace_precedes_shell_family_and_wrappers_keep_wire_operation() {
+        let shell = tool(
+            "mcp__remote_host__exec_command",
+            json!({"cmd": "pwd", "workdir": "/repo"}),
+        );
+        let wrapper = tool(
+            "mcp__centaur__call_read_tool",
+            json!({"name": "search_issues", "arguments": {"query": "renderer"}}),
+        );
+
+        let shell = render(&shell, 120, &Theme::default())[0].to_string();
+        let wrapper = render(&wrapper, 120, &Theme::default())[0].to_string();
+
+        assert!(shell.contains("Remote host · exec command"), "{shell}");
+        assert!(shell.contains("MCP · remote_host"), "{shell}");
+        assert!(!shell.contains("Shell  $"), "{shell}");
+        assert!(wrapper.contains("Centaur · call read tool"), "{wrapper}");
+        assert!(wrapper.contains("search_issues · renderer"), "{wrapper}");
+    }
+
+    #[test]
+    fn generic_sections_bound_serialization_and_reserve_result_space() {
+        let huge = json!({"rows": vec!["x".repeat(1_000); 1_000]});
+        let serialized = bounded_json(&huge);
+        assert!(serialized.len() <= MAX_EXPANDED_TEXT_BYTES + 64);
+        assert!(serialized.contains("output truncated"));
+
+        let mut generic = tool("custom_operation", huge);
+        generic.result = Some(json!({"proof": "RESULT_SENTINEL"}));
+        let rendered = render_expanded(&generic, 40, &Theme::default())
+            .iter()
+            .map(ToString::to_string)
+            .collect::<String>();
+
+        assert!(rendered.contains("section truncated"), "{rendered}");
+        assert!(rendered.contains("RESULT_SENTINEL"), "{rendered}");
+    }
+
+    #[test]
+    fn browser_target_objects_have_concise_semantic_subjects() {
+        let browser = tool(
+            "browser",
+            json!({
+                "action": "click",
+                "target": {
+                    "by": "role",
+                    "role": "button",
+                    "name": "Submit",
+                    "exact": true,
+                    "index": {"kind": "nth", "index": 2}
+                }
+            }),
+        );
+
+        let rendered = render(&browser, 120, &Theme::default())[0].to_string();
+
+        assert!(
+            rendered.contains("role button \"Submit\" · nth 2"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("exact"), "{rendered}");
+    }
+
+    #[test]
+    fn qualified_subagents_and_machine_mcp_tools_use_normalized_families() {
+        let mut spawn = tool(
+            "user_machine-a_spawn_agent",
+            json!({"role": "reviewer", "task": "Check routing"}),
+        );
+        spawn.result = Some(json!({"agent_id": 9, "status": {"state": "running"}}));
+        let combined = tool(
+            "user_machine-a_mcp__linear__exec_command",
+            json!({"cmd": "pwd", "workdir": "/repo"}),
+        );
+
+        let spawn = render(&spawn, 120, &Theme::default())[0].to_string();
+        let combined = render(&combined, 120, &Theme::default())[0].to_string();
+
+        assert!(
+            spawn.contains("Spawned  reviewer · Check routing"),
+            "{spawn}"
+        );
+        assert!(spawn.contains("Machine machine-a"), "{spawn}");
+        assert!(spawn.contains("agent 9 · running"), "{spawn}");
+        assert!(combined.contains("Linear · exec command"), "{combined}");
+        assert!(combined.contains("Machine machine-a · /repo"), "{combined}");
+        assert!(!combined.contains("Shell  $"), "{combined}");
     }
 }

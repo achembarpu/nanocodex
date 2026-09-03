@@ -890,10 +890,19 @@ impl RootNode {
                 self.key_confirmation = None;
                 return self.update_transcript(TranscriptEvent::BlurExpandables);
             }
-            return self.update_key_confirmation(ConfirmationAction::Interrupt, Instant::now());
-        }
-        if self.transcript.component().pinned_prompt_clicked(&event) {
-            return self.update_transcript(TranscriptEvent::JumpToPinnedPrompt);
+            if self.in_flight_turns > 0 {
+                return self.update_key_confirmation(ConfirmationAction::Interrupt, Instant::now());
+            }
+            let cleared = self
+                .key_confirmation
+                .as_ref()
+                .is_some_and(|confirmation| confirmation.action == ConfirmationAction::Interrupt);
+            self.key_confirmation = None;
+            return ComponentUpdate::render(if cleared {
+                RenderRequest::Immediate
+            } else {
+                RenderRequest::None
+            });
         }
         if self.transcript.component().updates_banner_clicked(&event) {
             return self.update_transcript(TranscriptEvent::FollowTail);
@@ -922,6 +931,14 @@ impl RootNode {
                 }
                 None => {}
             }
+        }
+        if is_queue_shortcut(&event)
+            && self.in_flight_turns > 0
+            && !self.queue.component().focused()
+            && !self.transcript.component().expandables_focused()
+            && !self.composer.component().draft().trim().is_empty()
+        {
+            return self.update_composer(ComposerEvent::Terminal(event), RenderRequest::Immediate);
         }
         if is_focus_toggle(&event) {
             return self.update_focus();
@@ -1009,7 +1026,7 @@ impl RootNode {
         if let Some(command) = self.transcript.component().scroll_command(&event) {
             let load_older = matches!(command, ScrollCommand::Home)
                 || matches!(command, ScrollCommand::Rows(rows) if rows < 0)
-                    && self.transcript.component().at_top();
+                    && self.transcript.component().near_top();
             let transcript = self.transcript.update(TranscriptEvent::Scroll(command));
             return ComponentUpdate {
                 effects: load_older
@@ -2098,8 +2115,11 @@ impl RootNode {
         priority: RenderRequest,
     ) -> ComponentUpdate<RootEffect> {
         let update = self.composer.component_mut().update(event);
-        let submitted = matches!(&update.effect, Some(ComposerEffect::Submit(_)));
-        if submitted {
+        let delivered = matches!(
+            &update.effect,
+            Some(ComposerEffect::Submit(_) | ComposerEffect::Queue(_))
+        );
+        if delivered {
             self.thread = ThreadState::Started;
         }
         let mut render = if update.changed {
@@ -2107,8 +2127,37 @@ impl RootNode {
         } else {
             RenderRequest::None
         };
-        if submitted {
+        if delivered {
             render = render.max(self.update_transcript(TranscriptEvent::FollowTail).render);
+        }
+        let effects = match update.effect {
+            Some(ComposerEffect::Submit(prompt)) if self.in_flight_turns > 0 => {
+                let (id, prompt) = self.queue.component_mut().begin_steer(prompt);
+                vec![RootEffect::Steer { id, prompt }]
+            }
+            Some(ComposerEffect::Submit(prompt)) if self.queue.component().has_pending_steer() => {
+                self.queue.component_mut().push(prompt);
+                Vec::new()
+            }
+            Some(ComposerEffect::Submit(prompt)) => {
+                self.in_flight_turns = self.in_flight_turns.saturating_add(1);
+                vec![RootEffect::Submit(prompt)]
+            }
+            Some(ComposerEffect::Queue(prompt)) => {
+                self.queue.component_mut().push(prompt);
+                let queued = self.submit_next_queued();
+                render = render.max(queued.render);
+                queued.effects
+            }
+            Some(ComposerEffect::RunShell(command)) => {
+                self.in_flight_shells = self.in_flight_shells.saturating_add(1);
+                vec![RootEffect::RunShell(command)]
+            }
+            Some(ComposerEffect::OpenDraftEditor) => vec![RootEffect::OpenDraftEditor],
+            None => Vec::new(),
+        };
+
+        if delivered && self.in_flight_turns > 0 {
             let activity = self
                 .composer
                 .component_mut()
@@ -2121,24 +2170,8 @@ impl RootNode {
                 render = render.max(RenderRequest::Immediate);
             }
         }
-        let effects = match update.effect {
-            Some(ComposerEffect::Submit(prompt))
-                if self.in_flight_turns > 0 || self.queue.component().has_pending_steer() =>
-            {
-                self.queue.component_mut().push(prompt);
-                Vec::new()
-            }
-            Some(ComposerEffect::Submit(prompt)) => {
-                self.in_flight_turns = self.in_flight_turns.saturating_add(1);
-                vec![RootEffect::Submit(prompt)]
-            }
-            Some(ComposerEffect::RunShell(command)) => {
-                self.in_flight_shells = self.in_flight_shells.saturating_add(1);
-                vec![RootEffect::RunShell(command)]
-            }
-            Some(ComposerEffect::OpenDraftEditor) => vec![RootEffect::OpenDraftEditor],
-            None => Vec::new(),
-        };
+        let controls = self.sync_live_controls();
+        render = render.max(controls);
 
         ComponentUpdate { effects, render }
     }
@@ -2213,6 +2246,7 @@ impl RootNode {
                 update.render = update.render.max(RenderRequest::Immediate);
             }
         }
+        update.render = update.render.max(self.sync_live_controls());
         update
     }
 
@@ -2250,7 +2284,8 @@ impl RootNode {
     fn steer_promoted(&mut self, id: QueueId) -> ComponentUpdate<RootEffect> {
         let _ = self.queue.component_mut().steer_promoted(id);
         self.in_flight_turns = self.in_flight_turns.saturating_add(1);
-        ComponentUpdate::render(RenderRequest::Immediate)
+        let controls = self.sync_live_controls();
+        ComponentUpdate::render(RenderRequest::Immediate.max(controls))
     }
 
     fn steer_failed(&mut self, id: QueueId) -> ComponentUpdate<RootEffect> {
@@ -2294,6 +2329,18 @@ impl RootNode {
         ComponentUpdate {
             effects: vec![RootEffect::Submit(Submission::join(prompts))],
             render: RenderRequest::Immediate,
+        }
+    }
+
+    fn sync_live_controls(&mut self) -> RenderRequest {
+        let update = self
+            .composer
+            .component_mut()
+            .update(ComposerEvent::LiveControls(self.in_flight_turns > 0));
+        if update.changed {
+            RenderRequest::Immediate
+        } else {
+            RenderRequest::None
         }
     }
 
@@ -3005,6 +3052,15 @@ fn is_focus_toggle(event: &Event) -> bool {
         && matches!(key.code, KeyCode::Tab | KeyCode::BackTab)
 }
 
+fn is_queue_shortcut(event: &Event) -> bool {
+    let Event::Key(key) = event else {
+        return false;
+    };
+    matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
+        && key.code == KeyCode::Tab
+        && key.modifiers.is_empty()
+}
+
 fn is_left_click_in(event: &Event, area: Rect) -> bool {
     if !is_left_click(event) {
         return false;
@@ -3148,5 +3204,159 @@ mod history_tests {
         ))));
 
         assert!(update.effects.is_empty());
+    }
+
+    #[test]
+    fn upward_scroll_requests_history_before_reaching_the_loaded_top() {
+        let mut root = RootNode::new(std::path::Path::new("/workspace"), ReasoningEffort::Medium);
+        for sequence in 1..=40 {
+            let record = TranscriptRecord::from_local(
+                sequence,
+                sequence,
+                LocalEvent::UserSubmitted {
+                    id: TurnId::new(sequence),
+                    text: format!("prompt {sequence}"),
+                },
+            )
+            .unwrap();
+            let _ = root.update(RootEvent::Transcript(Arc::new(record)));
+        }
+        let mut terminal = Terminal::new(TestBackend::new(60, 12)).unwrap();
+        let page_up = || {
+            RootEvent::Terminal(Event::Key(KeyEvent::new(
+                KeyCode::PageUp,
+                KeyModifiers::NONE,
+            )))
+        };
+
+        for _ in 0..20 {
+            terminal
+                .draw(|frame| root.render_focused(frame, frame.area(), &Theme::default(), true))
+                .unwrap();
+            if root.transcript.component().near_top() {
+                assert!(!root.transcript.component().at_top());
+                let update = root.update(page_up());
+                assert!(matches!(
+                    update.effects.as_slice(),
+                    [RootEffect::LoadOlderHistory]
+                ));
+                return;
+            }
+            assert!(root.update(page_up()).effects.is_empty());
+        }
+
+        panic!("expected to enter the near-top prefetch window");
+    }
+}
+
+#[cfg(test)]
+mod live_control_tests {
+    use super::{Component, RootEffect, RootEvent, RootNode};
+    use crate::config::ReasoningEffort;
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    use std::path::Path;
+
+    fn key(code: KeyCode) -> RootEvent {
+        RootEvent::Terminal(Event::Key(KeyEvent::new(code, KeyModifiers::NONE)))
+    }
+
+    fn root_with_draft(draft: &str) -> RootNode {
+        let mut root = RootNode::new(Path::new("/workspace"), ReasoningEffort::Medium);
+        root.composer
+            .component_mut()
+            .replace_draft(draft.to_owned());
+        root
+    }
+
+    #[test]
+    fn idle_enter_submits_once() {
+        let mut root = root_with_draft("start work");
+
+        let update = root.update(key(KeyCode::Enter));
+
+        assert!(
+            matches!(update.effects.as_slice(), [RootEffect::Submit(prompt)] if prompt.display_text() == "start work")
+        );
+        assert_eq!(root.in_flight_turns, 1);
+        assert!(root.queue.component().is_empty());
+    }
+
+    #[test]
+    fn active_enter_steers_once_without_first_queuing() {
+        let mut root = root_with_draft("change direction");
+        root.in_flight_turns = 1;
+        let _ = root.sync_live_controls();
+
+        let update = root.update(key(KeyCode::Enter));
+
+        assert!(
+            matches!(update.effects.as_slice(), [RootEffect::Steer { prompt, .. }] if prompt.display_text() == "change direction")
+        );
+        assert_eq!(root.in_flight_turns, 1);
+        assert_eq!(root.queue.component().len(), 1);
+        assert!(root.queue.component().has_pending_steer());
+    }
+
+    #[test]
+    fn nonempty_tab_queues_during_an_active_turn() {
+        let mut root = root_with_draft("follow up");
+        root.in_flight_turns = 1;
+        let _ = root.sync_live_controls();
+
+        let update = root.update(key(KeyCode::Tab));
+
+        assert!(update.effects.is_empty());
+        assert_eq!(root.queue.component().len(), 1);
+        assert!(!root.queue.component().has_pending_steer());
+        assert!(root.composer.component().draft().is_empty());
+    }
+
+    #[test]
+    fn idle_nonempty_tab_keeps_the_draft_and_focus_traversal() {
+        let mut root = root_with_draft("not yet");
+        root.queue.component_mut().push("already queued".to_owned());
+
+        let update = root.update(key(KeyCode::Tab));
+
+        assert!(update.effects.is_empty());
+        assert_eq!(root.composer.component().draft(), "not yet");
+        assert_eq!(root.queue.component().len(), 1);
+        assert!(root.queue.component().focused());
+    }
+
+    #[test]
+    fn queue_focused_tab_returns_to_the_composer_without_consuming_its_draft() {
+        let mut root = root_with_draft("first follow up");
+        root.in_flight_turns = 1;
+        let _ = root.sync_live_controls();
+        let _ = root.update(key(KeyCode::Tab));
+        root.composer
+            .component_mut()
+            .replace_draft("keep this draft".to_owned());
+        root.queue.component_mut().set_focused(true);
+
+        let update = root.update(key(KeyCode::Tab));
+
+        assert!(update.effects.is_empty());
+        assert_eq!(root.composer.component().draft(), "keep this draft");
+        assert_eq!(root.queue.component().len(), 1);
+        assert!(!root.queue.component().focused());
+    }
+
+    #[test]
+    fn escape_only_offers_stop_for_a_locally_active_turn() {
+        let mut idle = root_with_draft("");
+        assert!(idle.update(key(KeyCode::Esc)).effects.is_empty());
+        assert!(idle.key_confirmation.is_none());
+
+        let mut active = root_with_draft("");
+        active.in_flight_turns = 1;
+        let _ = active.sync_live_controls();
+        assert!(active.update(key(KeyCode::Esc)).effects.is_empty());
+        assert!(active.key_confirmation.is_some());
+        assert!(matches!(
+            active.update(key(KeyCode::Esc)).effects.as_slice(),
+            [RootEffect::CancelTurns]
+        ));
     }
 }

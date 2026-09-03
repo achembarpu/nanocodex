@@ -922,7 +922,7 @@ test("shared event replay reconnect resolves one turn and delivers each cursor e
   const observed = [];
   const watching = (async () => {
     for await (const event of agent.events.watch({ cursor: "5" })) {
-      observed.push(event.cursor);
+      observed.push(event);
       if (event.type === "turn_completed") break;
     }
   })();
@@ -939,7 +939,8 @@ test("shared event replay reconnect resolves one turn and delivers each cursor e
     created_at: 10,
     turn_id: "turn-1",
     type: "event",
-    event: { type: "reasoning" },
+    agent_id: 1,
+    event: childToolEvent(),
   })}`);
   connections[0].close();
   await waitFor(() => connections.length === 2);
@@ -948,7 +949,8 @@ test("shared event replay reconnect resolves one turn and delivers each cursor e
     created_at: 10,
     turn_id: "turn-1",
     type: "event",
-    event: { type: "reasoning" },
+    agent_id: 1,
+    event: childToolEvent(),
   })}${sse("7", "turn_completed", {
     cursor: "7",
     created_at: 11,
@@ -970,7 +972,16 @@ test("shared event replay reconnect resolves one turn and delivers each cursor e
   assert.strictEqual(await turn.result(), await turn.result());
   await watching;
   assert.deepEqual(requestedCursors, ["5", "6"]);
-  assert.deepEqual(observed, ["6", "7"]);
+  assert.deepEqual(observed.map((event) => event.cursor), ["6", "7"]);
+  assert.equal(observed[0].turnId, "turn-1");
+  assert.equal(observed[0].data.agent_id, 1);
+  assert.equal(observed[0].data.event.request_id, "child-session");
+  assert.deepEqual(observed[0].data.event.payload, {
+    call_id: "call-child-exec/code-1",
+    tool: "rootOnly",
+    arguments: {},
+    model_call_index: 1,
+  });
   assert.equal(maximumActiveConnections, 1);
   await waitFor(() => activeConnections === 0);
 });
@@ -1799,6 +1810,21 @@ function eventData(cursor) {
     turn_id: null,
     type: "event",
     event: { type: "assistant.message", payload: { text: cursor } },
+  };
+}
+
+function childToolEvent() {
+  return {
+    protocol_version: 1,
+    request_id: "child-session",
+    seq: 15,
+    type: "tool.call",
+    payload: {
+      call_id: "call-child-exec/code-1",
+      tool: "rootOnly",
+      arguments: {},
+      model_call_index: 1,
+    },
   };
 }
 

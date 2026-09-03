@@ -351,6 +351,7 @@ impl TranscriptModel {
             duration_ns: None,
             result: None,
             metadata: None,
+            execution: ToolEntry::local_execution(),
             substeps: Vec::new(),
             child_count: 0,
         }));
@@ -601,13 +602,13 @@ impl TranscriptModel {
                 return Ok(true);
             }
         }
-        let displayed_parent = parent.and_then(|parent| self.next_code_child_parent(parent));
         let hidden = tool == "wait" && parent.is_none();
         let transient = if hidden {
             TransientStatus::WaitingForBackgroundWork
         } else {
             TransientStatus::Tool(humanize_tool(&tool))
         };
+        let execution = ToolEntry::inferred_execution(&tool, &arguments, None);
         let id = self.push_with_parent(
             EntryKind::Tool(ToolEntry {
                 name: tool,
@@ -617,11 +618,12 @@ impl TranscriptModel {
                 duration_ns: None,
                 result: None,
                 metadata: None,
+                execution,
                 substeps: Vec::new(),
                 child_count: 0,
             }),
             hidden,
-            displayed_parent,
+            None,
         );
         if let Some(parent) = parent {
             self.register_code_child(parent, id);
@@ -636,12 +638,9 @@ impl TranscriptModel {
         let payload = record.decode_payload::<ToolResultPayload>()?;
         let resumed_shell = self.shell_followups.remove(&payload.call_id);
         let shell_followup = payload.tool == "write_stdin";
-        let result = if matches!(payload.tool.as_str(), "exec_command" | "write_stdin") {
-            normalize_result(payload.structured_result)
-        } else {
-            normalize_result(payload.result)
-        };
+        let result = preferred_result(payload.structured_result, payload.result);
         let resumed_result = resumed_shell.map(|_| result.clone());
+        let nested_shell_followup = resumed_shell.is_some();
         let state = tool_result_state(&payload.tool, &payload.status, &result);
         let entry_state = if resumed_shell.is_some() && state == ToolState::Running {
             ToolState::Succeeded
@@ -657,8 +656,6 @@ impl TranscriptModel {
             .copied()
             .unwrap_or_else(|| {
                 let parent = self.code_parent(&payload.call_id);
-                let displayed_parent =
-                    parent.and_then(|parent| self.next_code_child_parent(parent));
                 let id = self.push_with_parent(
                     EntryKind::Tool(ToolEntry {
                         name: payload.tool.clone(),
@@ -668,11 +665,16 @@ impl TranscriptModel {
                         duration_ns: None,
                         result: None,
                         metadata: None,
+                        execution: ToolEntry::inferred_execution(
+                            &payload.tool,
+                            &Value::Null,
+                            payload.metadata.as_ref(),
+                        ),
                         substeps: Vec::new(),
                         child_count: 0,
                     }),
                     false,
-                    displayed_parent,
+                    None,
                 );
                 if let Some(parent) = parent {
                     self.register_code_child(parent, id);
@@ -699,13 +701,26 @@ impl TranscriptModel {
                     payload.duration_ns
                 });
                 tool.result = Some(if shell_followup {
-                    merge_shell_result(tool.result.take(), result)
+                    if nested_shell_followup {
+                        without_shell_output(result)
+                    } else {
+                        merge_shell_result(tool.result.take(), result)
+                    }
                 } else {
                     result
                 });
                 tool.metadata = payload.metadata;
+                tool.infer_execution();
             }
         });
+        if payload.tool == "exec"
+            && self.code_children.contains_key(&id)
+            && (entry_state == ToolState::Failed || code_mode_has_own_output(self.entry(id)))
+            && let Some(index) = self.index_of(id)
+        {
+            self.entries[index].hidden = false;
+            self.entries[index].revision = self.entries[index].revision.saturating_add(1);
+        }
         if let Some(shell) = resumed_shell {
             let resumed_result = resumed_result.expect("resumed shell result was retained");
             self.update(shell, |kind| {
@@ -1003,13 +1018,6 @@ impl TranscriptModel {
         tool.arguments.get("cell_id")?.as_str()
     }
 
-    fn next_code_child_parent(&self, parent: EntryId) -> Option<EntryId> {
-        self.code_children
-            .get(&parent)
-            .is_some_and(|children| !children.is_empty())
-            .then_some(parent)
-    }
-
     fn register_code_child(&mut self, parent: EntryId, child: EntryId) {
         self.update(parent, |kind| {
             if let EntryKind::Tool(tool) = kind {
@@ -1018,55 +1026,12 @@ impl TranscriptModel {
         });
         let children = self.code_children.entry(parent).or_default();
         children.push(child);
-        let child_count = children.len();
-
-        if child_count == 1 {
-            let index = self.index_of(parent).expect("code parent is retained");
-            self.entries[index].hidden = true;
-            self.entries[index].revision = self.entries[index].revision.saturating_add(1);
-            return;
-        }
-        let previous_child = self.code_children[&parent][child_count - 2];
-        if child_count == 2 {
-            let parent_index = self.index_of(parent).expect("code parent is retained");
-            self.entries[parent_index].hidden = false;
-            self.entries[parent_index].trailing_spacer = false;
-            self.entries[parent_index].revision =
-                self.entries[parent_index].revision.saturating_add(1);
-
-            self.move_entry_after(previous_child, parent);
-        }
-
-        let previous_index = self
-            .index_of(previous_child)
-            .expect("code child is retained");
-        self.entries[previous_index].parent = Some(parent);
-        self.entries[previous_index].trailing_spacer = false;
-        self.entries[previous_index].revision =
-            self.entries[previous_index].revision.saturating_add(1);
+        let index = self.index_of(parent).expect("code parent is retained");
+        self.entries[index].hidden = true;
+        self.entries[index].revision = self.entries[index].revision.saturating_add(1);
 
         let child_index = self.index_of(child).expect("code child is retained");
-        self.entries[child_index].parent = Some(parent);
-        self.entries[child_index].trailing_spacer = true;
-        self.entries[child_index].revision = self.entries[child_index].revision.saturating_add(1);
-        self.move_entry_after(child, previous_child);
-    }
-
-    fn move_entry_after(&mut self, id: EntryId, previous: EntryId) {
-        let index = self.index_of(id).expect("moved entry is retained");
-        let entry = self.entries.remove(index);
-        let previous_index = self
-            .entries
-            .iter()
-            .position(|entry| entry.id == previous)
-            .expect("preceding entry is retained");
-        self.entries.insert(previous_index + 1, entry);
-        self.entry_indices = self
-            .entries
-            .iter()
-            .enumerate()
-            .map(|(index, entry)| (entry.id, index))
-            .collect();
+        self.entries[child_index].parent = None;
     }
 
     fn trim_message_history(&mut self) -> Option<EntryId> {
@@ -1200,15 +1165,57 @@ fn code_mode_status(result: &Value) -> Option<&str> {
     }
 }
 
+fn code_mode_has_own_output(entry: Option<&TranscriptEntry>) -> bool {
+    let Some(TranscriptEntry {
+        kind: EntryKind::Tool(tool),
+        ..
+    }) = entry
+    else {
+        return false;
+    };
+    let Some(result) = &tool.result else {
+        return false;
+    };
+    code_mode_value_has_output(result)
+}
+
+fn code_mode_value_has_output(result: &Value) -> bool {
+    match result {
+        Value::String(text) => status_text_has_output(text),
+        Value::Array(items) => items.iter().any(code_mode_value_has_output),
+        Value::Object(fields) => {
+            if let Some(text) = fields.get("text").and_then(Value::as_str) {
+                return status_text_has_output(text);
+            }
+            ["content", "output", "image_url", "audio_url"]
+                .into_iter()
+                .any(|key| fields.get(key).is_some_and(code_mode_value_has_output))
+        }
+        Value::Bool(_) | Value::Number(_) => true,
+        Value::Null => false,
+    }
+}
+
+fn status_text_has_output(text: &str) -> bool {
+    if let Some((status, output)) = text.split_once("\nOutput:\n")
+        && (status.starts_with("Script completed")
+            || status.starts_with("Script running")
+            || status.starts_with("Script terminated"))
+    {
+        return !output.trim().is_empty();
+    }
+    !text.trim().is_empty()
+}
+
 fn tool_result_state(tool: &str, status: &str, result: &Value) -> ToolState {
     if !matches!(status, "success" | "completed") {
         return ToolState::Failed;
     }
+    if result_reports_failure(result) {
+        return ToolState::Failed;
+    }
     if !matches!(tool, "exec_command" | "write_stdin") {
         return ToolState::Succeeded;
-    }
-    if result.get("error").is_some_and(|error| !error.is_null()) {
-        return ToolState::Failed;
     }
     if let Some(exit_code) = result.get("exit_code").and_then(Value::as_i64) {
         return if exit_code == 0 {
@@ -1223,6 +1230,32 @@ fn tool_result_state(tool: &str, status: &str, result: &Value) -> ToolState {
     ToolState::Failed
 }
 
+fn result_reports_failure(result: &Value) -> bool {
+    let Some(fields) = result.as_object() else {
+        return false;
+    };
+    if fields
+        .get("isError")
+        .or_else(|| fields.get("is_error"))
+        .and_then(Value::as_bool)
+        == Some(true)
+        || fields.get("success").and_then(Value::as_bool) == Some(false)
+    {
+        return true;
+    }
+    if fields.get("error").is_some_and(|error| match error {
+        Value::Null | Value::Bool(false) => false,
+        Value::String(message) => !message.trim().is_empty(),
+        _ => true,
+    }) {
+        return true;
+    }
+    fields
+        .get("status")
+        .and_then(Value::as_str)
+        .is_some_and(|status| matches!(status, "failed" | "error" | "cancelled" | "canceled"))
+}
+
 fn elapsed_nanoseconds(started_at_unix_ms: u64, finished_at_unix_ms: u64) -> u64 {
     finished_at_unix_ms
         .saturating_sub(started_at_unix_ms)
@@ -1234,6 +1267,26 @@ fn normalize_result(result: Value) -> Value {
         return result;
     };
     serde_json::from_str(&encoded).unwrap_or(Value::String(encoded))
+}
+
+fn preferred_result(structured: Value, model_visible: Value) -> Value {
+    let structured = normalize_result(structured);
+    let model_visible = normalize_result(model_visible);
+    if has_useful_result(&structured) {
+        structured
+    } else {
+        model_visible
+    }
+}
+
+fn has_useful_result(result: &Value) -> bool {
+    match result {
+        Value::Null => false,
+        Value::String(text) => !text.trim().is_empty(),
+        Value::Array(items) => !items.is_empty(),
+        Value::Object(fields) => !fields.is_empty(),
+        Value::Bool(_) | Value::Number(_) => true,
+    }
 }
 
 fn merge_shell_result(current: Option<Value>, next: Value) -> Value {
@@ -1252,6 +1305,14 @@ fn merge_shell_result(current: Option<Value>, next: Value) -> Value {
         output.insert_str(0, &previous_output);
     }
     Value::Object(next)
+}
+
+fn without_shell_output(result: Value) -> Value {
+    let Value::Object(mut fields) = result else {
+        return result;
+    };
+    fields.remove("output");
+    Value::Object(fields)
 }
 
 #[derive(Deserialize)]
@@ -1362,4 +1423,250 @@ struct RetryPayload {
 #[derive(Deserialize)]
 struct ConnectionPayload {
     purpose: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{EntryKind, ToolState, TranscriptModel, TranscriptRecord};
+    use nanocodex::agent::events::{AgentEvent, AgentEventKind};
+    use serde_json::{Value, json, value::to_raw_value};
+    use std::sync::Arc;
+
+    fn agent_record(sequence: u64, kind: AgentEventKind, payload: Value) -> TranscriptRecord {
+        TranscriptRecord::from_agent(
+            sequence,
+            sequence * 10,
+            AgentEvent {
+                protocol_version: 1,
+                request_id: Arc::from("request"),
+                seq: sequence,
+                kind,
+                payload: to_raw_value(&payload).unwrap().into(),
+            },
+        )
+    }
+
+    fn call(sequence: u64, call_id: &str, tool: &str, arguments: Value) -> TranscriptRecord {
+        agent_record(
+            sequence,
+            AgentEventKind::ToolCall,
+            json!({"call_id": call_id, "tool": tool, "arguments": arguments}),
+        )
+    }
+
+    fn result(
+        sequence: u64,
+        call_id: &str,
+        tool: &str,
+        result: Value,
+        structured_result: Value,
+        metadata: Value,
+    ) -> TranscriptRecord {
+        agent_record(
+            sequence,
+            AgentEventKind::ToolResult,
+            json!({
+                "call_id": call_id,
+                "tool": tool,
+                "status": "completed",
+                "duration_ns": 10,
+                "result": result,
+                "structured_result": structured_result,
+                "metadata": metadata,
+            }),
+        )
+    }
+
+    #[test]
+    fn semantic_children_hide_code_mode_wrapper_without_grouping_children_under_it() {
+        let mut model = TranscriptModel::default();
+        model.apply(&call(1, "outer", "exec", json!("await tools.one({})")));
+        model.apply(&call(
+            2,
+            "outer/code-0",
+            "exec_command",
+            json!({"cmd": "pwd"}),
+        ));
+        model.apply(&call(
+            3,
+            "outer/code-1",
+            "mcp__docs__search",
+            json!({"query": "x"}),
+        ));
+
+        assert_eq!(model.entries().len(), 3);
+        assert!(model.entries()[0].hidden);
+        assert!(!model.entries()[1].hidden);
+        assert!(!model.entries()[2].hidden);
+        assert!(model.entries()[1].parent.is_none());
+        assert!(model.entries()[2].parent.is_none());
+        let EntryKind::Tool(wrapper) = &model.entries()[0].kind else {
+            panic!("wrapper should remain a tool entry");
+        };
+        assert_eq!(wrapper.child_count, 2);
+    }
+
+    #[test]
+    fn structured_results_drive_failure_state_and_machine_origin() {
+        let mut model = TranscriptModel::default();
+        model.apply(&call(1, "remote", "custom_operation", json!({})));
+        model.apply(&result(
+            2,
+            "remote",
+            "custom_operation",
+            json!("less useful model text"),
+            json!({"isError": true, "content": [{"type": "text", "text": "permission denied"}]}),
+            json!({"executor": {"machine_name": "Alice's Mac"}}),
+        ));
+
+        let EntryKind::Tool(tool) = &model.entries()[0].kind else {
+            panic!("result should update the tool entry");
+        };
+        assert_eq!(tool.state, ToolState::Failed);
+        assert_eq!(tool.result.as_ref().unwrap()["isError"], true);
+        assert_eq!(tool.execution_qualifier(), "Machine Alice's Mac");
+    }
+
+    #[test]
+    fn null_structured_result_falls_back_to_model_visible_output() {
+        let mut model = TranscriptModel::default();
+        model.apply(&call(1, "direct", "custom_operation", json!({})));
+        model.apply(&result(
+            2,
+            "direct",
+            "custom_operation",
+            json!("visible output"),
+            Value::Null,
+            Value::Null,
+        ));
+
+        let EntryKind::Tool(tool) = &model.entries()[0].kind else {
+            panic!("result should update the tool entry");
+        };
+        assert_eq!(tool.state, ToolState::Succeeded);
+        assert_eq!(tool.result, Some(json!("visible output")));
+    }
+
+    #[test]
+    fn nested_shell_interaction_keeps_output_only_on_the_owning_shell() {
+        let mut model = TranscriptModel::default();
+        model.apply(&call(
+            1,
+            "outer",
+            "exec",
+            json!("await tools.exec_command({})"),
+        ));
+        model.apply(&call(
+            2,
+            "outer/code-0",
+            "exec_command",
+            json!({"cmd": "interactive", "tty": true}),
+        ));
+        model.apply(&result(
+            3,
+            "outer/code-0",
+            "exec_command",
+            Value::Null,
+            json!({"session_id": 7, "output": "ready\n"}),
+            Value::Null,
+        ));
+        model.apply(&call(
+            4,
+            "outer/code-1",
+            "write_stdin",
+            json!({"session_id": 7, "chars": "go\n"}),
+        ));
+        model.apply(&result(
+            5,
+            "outer/code-1",
+            "write_stdin",
+            Value::Null,
+            json!({"exit_code": 0, "output": "done\n"}),
+            Value::Null,
+        ));
+
+        let EntryKind::Tool(shell) = &model.entries()[1].kind else {
+            panic!("first semantic child should be the owning shell");
+        };
+        let EntryKind::Tool(interaction) = &model.entries()[2].kind else {
+            panic!("second semantic child should be the shell interaction");
+        };
+        assert_eq!(shell.result.as_ref().unwrap()["output"], "ready\ndone\n");
+        assert!(interaction.result.as_ref().unwrap().get("output").is_none());
+        assert_eq!(interaction.result.as_ref().unwrap()["exit_code"], 0);
+    }
+
+    #[test]
+    fn hidden_code_wrapper_returns_for_failure_or_authoritative_output() {
+        let mut failed = TranscriptModel::default();
+        failed.apply(&call(1, "failed", "exec", json!("await tools.one({})")));
+        failed.apply(&call(2, "failed/code-0", "custom_operation", json!({})));
+        failed.apply(&agent_record(
+            3,
+            AgentEventKind::ToolResult,
+            json!({
+                "call_id": "failed",
+                "tool": "exec",
+                "status": "failed",
+                "duration_ns": 10,
+                "result": "Script failed\nWall time 0.1 seconds\nOutput:\nboom",
+                "structured_result": null,
+                "metadata": null
+            }),
+        ));
+        assert!(!failed.entries()[0].hidden);
+
+        let mut output = TranscriptModel::default();
+        output.apply(&call(1, "output", "exec", json!("text('summary')")));
+        output.apply(&call(2, "output/code-0", "custom_operation", json!({})));
+        output.apply(&result(
+            3,
+            "output",
+            "exec",
+            json!([
+                {"type": "text", "text": "Script completed\nWall time 0.1 seconds\nOutput:\n"},
+                {"type": "text", "text": "authoritative summary"}
+            ]),
+            Value::Null,
+            Value::Null,
+        ));
+        assert!(!output.entries()[0].hidden);
+
+        let mut status_only = TranscriptModel::default();
+        status_only.apply(&call(1, "status", "exec", json!("await tools.one({})")));
+        status_only.apply(&call(2, "status/code-0", "custom_operation", json!({})));
+        status_only.apply(&result(
+            3,
+            "status",
+            "exec",
+            json!("Script completed\nWall time 0.1 seconds\nOutput:\n"),
+            Value::Null,
+            Value::Null,
+        ));
+        assert!(status_only.entries()[0].hidden);
+    }
+
+    #[test]
+    fn empty_structured_results_do_not_replace_useful_visible_output() {
+        for (tool_name, arguments) in [
+            ("apply_patch", json!("*** Begin Patch\n*** End Patch")),
+            ("update_plan", json!({"plan": []})),
+        ] {
+            let mut model = TranscriptModel::default();
+            model.apply(&call(1, "call", tool_name, arguments));
+            model.apply(&result(
+                2,
+                "call",
+                tool_name,
+                json!("visible confirmation"),
+                json!({}),
+                Value::Null,
+            ));
+
+            let EntryKind::Tool(tool) = &model.entries()[0].kind else {
+                panic!("result should update the tool entry");
+            };
+            assert_eq!(tool.result, Some(json!("visible confirmation")));
+        }
+    }
 }

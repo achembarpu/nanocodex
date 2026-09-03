@@ -51,7 +51,6 @@ use std::{
 const EXPANDABLE_FOCUS_HINTS: [&str; 2] =
     ["↑↓ item · Enter toggle · Esc back", "↑↓ item · Enter · Esc"];
 const NESTED_TOOL_INDENT: u16 = 4;
-const PINNED_PROMPT_MAX_HEIGHT: u16 = 3;
 const RETRY_COUNTDOWN_INTERVAL: Duration = Duration::from_millis(100);
 
 pub(crate) enum TranscriptEvent {
@@ -62,7 +61,6 @@ pub(crate) enum TranscriptEvent {
     },
     AgentStreamClosed,
     Scroll(ScrollCommand),
-    JumpToPinnedPrompt,
     FollowTail,
     BlurExpandables,
     Expandable(ExpandableCommand),
@@ -97,9 +95,9 @@ pub(crate) struct Transcript {
     pending_expandable_anchor: Option<PendingExpandableAnchor>,
     empty_logo: EmptyLogo,
     effort: ReasoningEffort,
-    pinned_prompt: Option<PinnedPrompt>,
     updates_banner_area: Option<Rect>,
     at_top: bool,
+    near_top: bool,
 }
 
 struct CachedEntry {
@@ -189,14 +187,6 @@ struct RetryTimer {
     next_frame: Option<Instant>,
 }
 
-#[derive(Clone, Copy)]
-struct PinnedPrompt {
-    entry: EntryId,
-    area: Rect,
-    offset: usize,
-    max_offset: usize,
-}
-
 impl RunningToolTimer {
     fn new(started_at_unix_ms: u64, observed_at: Instant, observed_at_unix_ms: u64) -> Self {
         Self {
@@ -241,12 +231,11 @@ pub(super) enum ExpandableCommand {
     Click { row: u16 },
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(super) enum ScrollCommand {
     #[default]
     None,
     Rows(i32),
-    PinnedPromptRows(i32),
     Home,
     End,
 }
@@ -279,9 +268,9 @@ impl Transcript {
             pending_expandable_anchor: None,
             empty_logo: EmptyLogo::new(Instant::now()),
             effort,
-            pinned_prompt: None,
             updates_banner_area: None,
             at_top: true,
+            near_top: true,
         }
     }
 
@@ -294,6 +283,10 @@ impl Transcript {
 
     pub(crate) const fn at_top(&self) -> bool {
         self.at_top
+    }
+
+    pub(crate) const fn near_top(&self) -> bool {
+        self.near_top
     }
 
     pub(crate) fn preserve_viewport_from(&mut self, previous: &Self) {
@@ -322,6 +315,7 @@ impl Transcript {
         self.last_top = Some(anchor);
         self.new_updates = previous.new_updates;
         self.at_top = false;
+        self.near_top = previous.near_top;
     }
 
     pub(crate) fn set_workspace(&mut self, workspace: &Path) {
@@ -340,11 +334,6 @@ impl Transcript {
 
     pub(super) fn render_chrome(&mut self, frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
         self.updates_banner_area = None;
-        let area = self.pinned_prompt.map_or(area, |prompt| Rect {
-            y: prompt.area.bottom(),
-            height: area.bottom().saturating_sub(prompt.area.bottom()),
-            ..area
-        });
         if self.expandables_focused {
             let _ = render_top_right_hint(frame, area, &EXPANDABLE_FOCUS_HINTS, theme.accent());
             return;
@@ -574,39 +563,15 @@ impl Transcript {
                 }
             }
             Event::Mouse(mouse) if !mouse.modifiers.contains(KeyModifiers::SHIFT) => {
-                if let Some(prompt) = self.pinned_prompt
-                    && prompt.area.contains(Position::new(mouse.column, mouse.row))
-                {
-                    match mouse.kind {
-                        MouseEventKind::ScrollUp if prompt.offset > 0 => {
-                            return Some(ScrollCommand::PinnedPromptRows(-1));
-                        }
-                        MouseEventKind::ScrollDown if prompt.offset < prompt.max_offset => {
-                            return Some(ScrollCommand::PinnedPromptRows(1));
-                        }
-                        _ => {}
-                    }
-                }
                 match mouse.kind {
-                    MouseEventKind::ScrollUp => ScrollCommand::Rows(-3),
-                    MouseEventKind::ScrollDown => ScrollCommand::Rows(3),
+                    MouseEventKind::ScrollUp => ScrollCommand::Rows(-self.wheel_size()),
+                    MouseEventKind::ScrollDown => ScrollCommand::Rows(self.wheel_size()),
                     _ => return None,
                 }
             }
             _ => return None,
         };
         Some(command)
-    }
-
-    pub(super) fn pinned_prompt_clicked(&self, event: &Event) -> bool {
-        let Event::Mouse(mouse) = event else {
-            return false;
-        };
-        if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
-            return false;
-        }
-        self.pinned_prompt
-            .is_some_and(|prompt| prompt.area.contains(Position::new(mouse.column, mouse.row)))
     }
 
     pub(super) fn updates_banner_clicked(&self, event: &Event) -> bool {
@@ -768,29 +733,7 @@ impl Transcript {
     }
 
     fn update_scroll(&mut self, command: ScrollCommand) -> ComponentUpdate<TranscriptEffect> {
-        if let ScrollCommand::PinnedPromptRows(rows) = command {
-            let Some(prompt) = &mut self.pinned_prompt else {
-                return ComponentUpdate::none();
-            };
-            let offset = i64::try_from(prompt.offset).unwrap_or(i64::MAX);
-            let max_offset = i64::try_from(prompt.max_offset).unwrap_or(i64::MAX);
-            prompt.offset = usize::try_from((offset + i64::from(rows)).clamp(0, max_offset))
-                .unwrap_or(prompt.max_offset);
-            return ComponentUpdate::render(RenderRequest::Immediate);
-        }
         self.pending_scroll = command;
-        ComponentUpdate::render(RenderRequest::Immediate)
-    }
-
-    fn jump_to_pinned_prompt(&mut self) -> ComponentUpdate<TranscriptEffect> {
-        let Some(prompt) = self.pinned_prompt.take() else {
-            return ComponentUpdate::none();
-        };
-        self.scroll = ScrollState::Detached(Anchor {
-            entry: prompt.entry,
-            line: 0,
-        });
-        self.pending_scroll = ScrollCommand::None;
         ComponentUpdate::render(RenderRequest::Immediate)
     }
 
@@ -903,6 +846,10 @@ impl Transcript {
         i32::from(self.viewport_height.saturating_sub(2).max(1))
     }
 
+    fn wheel_size(&self) -> i32 {
+        (self.page_size() + 2) / 3
+    }
+
     fn render_plan(&mut self, width: u16, height: u16, theme: &Theme) -> RenderPlan {
         if width == 0 || height == 0 {
             return RenderPlan::default();
@@ -926,6 +873,7 @@ impl Transcript {
             Some(top) => self.first_anchor(width, theme) == Some(top),
             None => true,
         };
+        self.near_top = self.top_is_within_viewport_of_start(top, height, width, theme);
 
         let anchors = top.map_or_else(Vec::new, |anchor| {
             self.collect_forward_anchors(anchor, usize::from(height), width, theme)
@@ -945,105 +893,23 @@ impl Transcript {
         }
     }
 
-    fn pinned_prompt_entry(&self, top: Option<Anchor>) -> Option<EntryId> {
-        if !matches!(self.scroll, ScrollState::Detached(_)) {
-            return None;
-        }
-        let top = top?;
-        let top_index = self.model.index_of(top.entry)?;
-        if matches!(self.model.entries()[top_index].kind, EntryKind::User { .. }) {
-            return None;
-        }
-        self.model.entries()[..top_index]
-            .iter()
-            .rev()
-            .find(|entry| !entry.hidden && matches!(entry.kind, EntryKind::User { .. }))
-            .map(|entry| entry.id)
-    }
-
-    fn prepare_pinned_prompt(
+    fn top_is_within_viewport_of_start(
         &mut self,
-        entry_id: Option<EntryId>,
-        area: Rect,
+        top: Option<Anchor>,
+        height: u16,
+        width: u16,
         theme: &Theme,
-    ) -> u16 {
-        let Some(entry_id) = entry_id else {
-            self.pinned_prompt = None;
-            return 0;
+    ) -> bool {
+        let Some(mut anchor) = top else {
+            return true;
         };
-        let Some(entry) = self.model.entry(entry_id).cloned() else {
-            self.pinned_prompt = None;
-            return 0;
-        };
-        let available_height = area.height.saturating_sub(1).min(PINNED_PROMPT_MAX_HEIGHT);
-        let mut line_count = self.cache.layout(&entry, area.width, theme).len();
-        if entry.trailing_spacer {
-            line_count = line_count.saturating_sub(1);
-        }
-        let height = available_height.min(u16::try_from(line_count).unwrap_or(u16::MAX));
-        if height == 0 {
-            self.pinned_prompt = None;
-            return 0;
-        }
-
-        let max_offset = line_count.saturating_sub(usize::from(height));
-        let offset = self
-            .pinned_prompt
-            .filter(|prompt| prompt.entry == entry_id)
-            .map_or(0, |prompt| prompt.offset.min(max_offset));
-        self.pinned_prompt = Some(PinnedPrompt {
-            entry: entry_id,
-            area: Rect { height, ..area },
-            offset,
-            max_offset,
-        });
-        height
-    }
-
-    fn render_pinned_prompt(&mut self, frame: &mut Frame<'_>, theme: &Theme) {
-        let Some(prompt) = self.pinned_prompt else {
-            return;
-        };
-        for row in 0..prompt.area.height {
-            let line = prompt.offset.saturating_add(usize::from(row));
-            let anchor = Anchor {
-                entry: prompt.entry,
-                line,
+        for _ in 0..height.max(1) {
+            let Some(previous) = self.previous(anchor, width, theme) else {
+                return true;
             };
-            if let Some(content) = self.cache.line(anchor) {
-                frame.buffer_mut().set_line(
-                    prompt.area.x,
-                    prompt.area.y.saturating_add(row),
-                    content,
-                    prompt.area.width,
-                );
-            }
-            self.selection_rows
-                .push((prompt.area.y.saturating_add(row), anchor));
+            anchor = previous;
         }
-        frame
-            .buffer_mut()
-            .set_style(prompt.area, Style::default().bg(theme.code_background()));
-
-        let marker_style = Style::default()
-            .fg(theme.muted())
-            .add_modifier(Modifier::BOLD);
-        let marker_x = prompt.area.right().saturating_sub(1);
-        if prompt.offset > 0
-            && let Some(cell) = frame
-                .buffer_mut()
-                .cell_mut(Position::new(marker_x, prompt.area.y))
-        {
-            cell.set_symbol("…").set_style(marker_style);
-        }
-        if prompt.offset < prompt.max_offset
-            && let Some(cell) = frame.buffer_mut().cell_mut(Position::new(
-                marker_x,
-                prompt.area.bottom().saturating_sub(1),
-            ))
-        {
-            cell.set_symbol("…").set_style(marker_style);
-        }
+        false
     }
 
     fn apply_pending_expandable_anchor(&mut self, width: u16, theme: &Theme) {
@@ -1063,7 +929,6 @@ impl Transcript {
         let command = std::mem::take(&mut self.pending_scroll);
         match command {
             ScrollCommand::None => {}
-            ScrollCommand::PinnedPromptRows(_) => {}
             ScrollCommand::End => {
                 self.scroll = ScrollState::Follow;
                 self.new_updates = 0;
@@ -1611,7 +1476,6 @@ impl Component for Transcript {
             } => self.update_message(perspective, update),
             TranscriptEvent::AgentStreamClosed => self.agent_stream_closed(),
             TranscriptEvent::Scroll(command) => self.update_scroll(command),
-            TranscriptEvent::JumpToPinnedPrompt => self.jump_to_pinned_prompt(),
             TranscriptEvent::FollowTail => self.follow_tail(),
             TranscriptEvent::BlurExpandables => self.blur_expandables(),
             TranscriptEvent::Expandable(command) => self.update_expandable(command),
@@ -1635,19 +1499,8 @@ impl Component for Transcript {
             self.empty_logo.render(frame, area, theme, self.effort);
             return;
         }
-        let mut plan = self.render_plan(area.width, area.height, theme);
-        let prompt_entry = self.pinned_prompt_entry(plan.anchors.first().copied());
-        let prompt_height = self.prepare_pinned_prompt(prompt_entry, area, theme);
-        let transcript_area = Rect {
-            y: area.y.saturating_add(prompt_height),
-            height: area.height.saturating_sub(prompt_height),
-            ..area
-        };
-        self.viewport_height = transcript_area.height;
-        if prompt_height > 0 {
-            plan = self.render_plan(transcript_area.width, transcript_area.height, theme);
-            self.render_pinned_prompt(frame, theme);
-        }
+        let plan = self.render_plan(area.width, area.height, theme);
+        let transcript_area = area;
         let RenderPlan {
             top_padding,
             anchors,
@@ -2051,8 +1904,12 @@ fn line_width(text: &str) -> usize {
 
 #[cfg(test)]
 mod history_tests {
-    use super::{Anchor, Component, ScrollState, Transcript, TranscriptEvent};
-    use crate::tui::transcript::{LocalEvent, TranscriptRecord, TurnId};
+    use super::{Anchor, Component, ScrollCommand, ScrollState, Transcript, TranscriptEvent};
+    use crate::tui::{
+        theme::Theme,
+        transcript::{LocalEvent, TranscriptRecord, TurnId},
+    };
+    use crossterm::event::{Event, KeyModifiers, MouseEvent, MouseEventKind};
     use std::sync::Arc;
 
     #[test]
@@ -2081,6 +1938,52 @@ mod history_tests {
         assert_eq!(replayed.model.index_of(anchor.entry), Some(1));
         assert_eq!(anchor.line, 0);
         assert_eq!(replayed.new_updates, 3);
+    }
+
+    #[test]
+    fn wheel_scroll_uses_one_third_of_the_viewport() {
+        let mut transcript = Transcript::new();
+        transcript.viewport_height = 32;
+
+        assert_eq!(
+            transcript.scroll_command(&wheel(MouseEventKind::ScrollUp)),
+            Some(ScrollCommand::Rows(-10))
+        );
+        assert_eq!(
+            transcript.scroll_command(&wheel(MouseEventKind::ScrollDown)),
+            Some(ScrollCommand::Rows(10))
+        );
+    }
+
+    #[test]
+    fn near_top_covers_one_viewport_before_the_visible_top() {
+        let mut transcript = Transcript::new();
+        for sequence in 1..=20 {
+            let _ = transcript.update(TranscriptEvent::Record(user(sequence, "message")));
+        }
+
+        transcript.scroll = ScrollState::Detached(Anchor {
+            entry: transcript.model.entries()[2].id,
+            line: 0,
+        });
+        let _ = transcript.render_plan(80, 5, &Theme::default());
+        assert!(transcript.near_top());
+
+        transcript.scroll = ScrollState::Detached(Anchor {
+            entry: transcript.model.entries()[10].id,
+            line: 0,
+        });
+        let _ = transcript.render_plan(80, 5, &Theme::default());
+        assert!(!transcript.near_top());
+    }
+
+    fn wheel(kind: MouseEventKind) -> Event {
+        Event::Mouse(MouseEvent {
+            kind,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        })
     }
 
     fn user(sequence: u64, text: &str) -> Arc<TranscriptRecord> {

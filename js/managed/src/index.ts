@@ -67,6 +67,7 @@ import {
   type DurableEvent,
   type DurableEventTail,
 } from "./durable-events";
+import { watchManagedAgentFamilyEvents } from "./agent-event-watcher";
 import {
   ManagedEventArchive,
   type ManagedEventArchiveState,
@@ -4925,8 +4926,14 @@ export class DurableAgentSession extends DurableComputerSession {
         }
         throw retryableError("agent construction was superseded");
       }
-      const events = resolvedAgent.events.watch();
-      events.onEvent((event) => this.#recordAgentEvent(event, resolvedAgent.sessionId));
+      const events = watchManagedAgentFamilyEvents(
+        resolvedAgent,
+        (event, agentId) => this.#recordAgentEvent(
+          event,
+          resolvedAgent.sessionId,
+          agentId,
+        ),
+      );
       if (!this.#ownsAgentConstruction(construction)) {
         events.off();
         try { await this.#retireAgentConstruction(construction, resolvedAgent); }
@@ -5898,10 +5905,18 @@ export class DurableAgentSession extends DurableComputerSession {
     }
   }
 
-  #recordAgentEvent(event: AgentEvent, rootSessionId: string): void {
+  #recordAgentEvent(
+    event: AgentEvent,
+    rootSessionId: string,
+    agentId?: number,
+  ): void {
     if (this.#deleting) return;
     if (event.request_id !== rootSessionId) {
-      this.#recordAndBroadcast({ type: "event", event }, this.#eventTurnId ?? null);
+      this.#recordAndBroadcast({
+        type: "event",
+        event,
+        ...(agentId === undefined ? {} : { agent_id: agentId }),
+      }, this.#eventTurnId ?? null);
       return;
     }
     if (this.#realtimeEventBuffer) {

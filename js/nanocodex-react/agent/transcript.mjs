@@ -474,7 +474,9 @@ function applyToolCall(entries, event, turnId) {
   if (hasToolCall(entries, callId, turnId)) return;
   const name = payloadString(payload, "tool") ?? "tool";
   const tool = {
-    callId, name, arguments: summarizeToolArguments(name, payload.arguments),
+    callId, name,
+    arguments: summarizeToolArguments(name, payload.arguments),
+    input: serializeToolDetail(payload.arguments),
     status: "running", children: [],
   };
   const parentId = callId.split("/code-")[0];
@@ -533,6 +535,7 @@ function completedTool(tool, payload, status) {
     ...tool, status, durationNs: payloadNumber(payload, "duration_ns"),
     ...(images ? { images } : {}),
     result: summarizeToolResult(tool.name, payload.result, status),
+    output: serializeToolDetail(payload.result),
   };
 }
 
@@ -580,6 +583,10 @@ function payloadNumber(payload, key) {
 function isEmptyTerminalPoll(tool, value) {
   return tool === "write_stdin" && isObject(value)
     && (typeof value.chars !== "string" || value.chars.length === 0);
+}
+
+function serializeToolDetail(value) {
+  return boundedMultiline(formatValue(value));
 }
 
 function summarizeToolArguments(tool, value) {
@@ -640,22 +647,18 @@ function compact(value) {
 
 function boundedMultiline(value) {
   const lines = value.trim().split("\n");
-  let output = "";
-  let characters = 0;
-  for (let index = 0; index < lines.length; index += 1) {
-    if (index >= 24) return `${output}\n…`;
-    if (index) output += "\n";
-    for (const character of lines[index]) {
-      if (characters >= 4_000) return `${output}…`;
-      output += character;
-      characters += 1;
-    }
-  }
-  return output;
+  const output = lines.slice(0, 24).join("\n");
+  const characters = [...output];
+  if (characters.length > 4_000) return `${characters.slice(0, 4_000).join("")}…`;
+  return lines.length > 24 ? `${output}\n…` : output;
 }
 
 function formatValue(value) {
-  if (typeof value === "string") return value;
+  if (typeof value === "string") {
+    const decoded = decodeJsonString(value);
+    if (decoded === value) return value;
+    try { return JSON.stringify(decoded); } catch { return value; }
+  }
   if (value === undefined) return "";
   try { return JSON.stringify(value); } catch { return String(value); }
 }

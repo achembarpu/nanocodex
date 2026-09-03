@@ -92,7 +92,12 @@ pub async fn prune_durable_receipts(
 #[wasm_bindgen]
 extern "C" {
     #[wasm_bindgen(js_namespace = ["globalThis", "nanocodexHost"], js_name = emitEvent)]
-    fn host_emit_event(session_id: &str, event: &str, encoded_bytes: u32);
+    fn host_emit_event(
+        session_id: &str,
+        event: &str,
+        encoded_bytes: u32,
+        subagent_id: Option<&str>,
+    );
 
     #[wasm_bindgen(catch, js_namespace = ["globalThis", "nanocodexHost"], js_name = executeCode)]
     fn host_execute_code(
@@ -2646,6 +2651,7 @@ fn forward_events(mut events: AgentEvents, forwarding: Rc<Cell<bool>>) {
                     event.request_id.as_ref(),
                     &encoded,
                     u32::try_from(encoded.len()).unwrap_or(u32::MAX),
+                    None,
                 );
             }
         }
@@ -2679,14 +2685,16 @@ fn forward_subagent_updates(
                         .borrow_mut()
                         .insert((root_session_id, descriptor.id), descriptor.session_id);
                 }
-                SubagentUpdate::Event { event, .. } => {
+                SubagentUpdate::Event { id, event } => {
                     if event_forwarders.get() > 0
                         && let Ok(encoded) = serde_json::to_string(&event)
                     {
+                        let id = id.to_string();
                         host_emit_event(
                             event.request_id.as_ref(),
                             &encoded,
                             u32::try_from(encoded.len()).unwrap_or(u32::MAX),
+                            Some(&id),
                         );
                     }
                 }

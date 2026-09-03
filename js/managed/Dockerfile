@@ -37,7 +37,8 @@ RUN apt-get update \
         vim-tiny \
         wget \
         zip \
-    && rm -rf /var/lib/apt/lists/*
+    && apt-get clean \
+    && rm -rf /var/cache/apt/* /var/lib/apt/lists/*
 
 RUN ln -s /usr/bin/fdfind /usr/local/bin/fd \
     && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \

@@ -8,7 +8,19 @@ const MAX_COMMAND_CHARS = 32 * 1024;
 const MAX_FILE_BYTES = 1024 * 1024;
 const MAX_OUTPUT_BYTES = 128 * 1024;
 const MAX_LIST_ENTRIES = 512;
+const WORKSPACE_MOUNT_PROBE_TIMEOUT_MS = 10_000;
 const PREVIEW_AAD = new TextEncoder().encode("nanocodex-cloudflare-sandbox-preview-v1");
+
+type SandboxPreparation = {
+  sessionId: string;
+  sandbox: Sandbox;
+  promise: Promise<Sandbox>;
+};
+
+const sandboxPreparations = new WeakMap<
+  DurableObjectNamespace<Sandbox>,
+  Map<string, SandboxPreparation>
+>();
 
 type SandboxToolClient = {
   exec(
@@ -80,7 +92,14 @@ export async function destroyCloudflareSandbox(
   namespace: DurableObjectNamespace<Sandbox>,
   sessionId: string,
 ): Promise<void> {
-  await sandboxHandle(namespace, sessionId).destroy();
+  const cached = sandboxPreparation(namespace, sessionId);
+  const sandbox = cached?.sandbox ?? sandboxHandle(namespace, sessionId);
+  if (cached) await cached.promise.catch(() => {});
+  try {
+    await sandbox.destroy();
+  } finally {
+    clearSandboxPreparations(namespace, sessionId);
+  }
 }
 
 export async function deleteCloudflareSandbox(
@@ -113,7 +132,15 @@ export function createCloudflareSandboxTools(
   createPreview?: (port: number) => Promise<{ port: number; url: string; persistent: boolean }>,
 ): ToolMap {
   let sandboxPromise: Promise<SandboxToolClient> | undefined;
-  const sandbox = () => sandboxPromise ??= createSandbox();
+  const sandbox = () => {
+    if (sandboxPromise) return sandboxPromise;
+    const created = createSandbox();
+    sandboxPromise = created;
+    void created.catch(() => {
+      if (sandboxPromise === created) sandboxPromise = undefined;
+    });
+    return created;
+  };
 
   return {
     sandbox_exec: {
@@ -395,16 +422,131 @@ async function prepareSandbox(
   sessionId: string,
   localBucket: boolean,
 ): Promise<Sandbox> {
+  let sessions = sandboxPreparations.get(namespace);
+  if (!sessions) {
+    sessions = new Map();
+    sandboxPreparations.set(namespace, sessions);
+  }
+  const key = `${localBucket ? "local" : "remote"}:${sessionId}`;
+  const existing = sessions.get(key);
+  if (existing) return existing.promise;
+
   const sandbox = sandboxHandle(namespace, sessionId);
+  const entry: SandboxPreparation = {
+    sessionId,
+    sandbox,
+    promise: Promise.resolve(sandbox),
+  };
+  const prepared = prepareSandboxWorkspace(sandbox, sessionId, localBucket);
+  entry.promise = prepared.then(
+    (value) => {
+      releaseSandboxPreparation(namespace, key, entry);
+      return value;
+    },
+    (error: unknown) => {
+      releaseSandboxPreparation(namespace, key, entry);
+      throw error;
+    },
+  );
+  sessions.set(key, entry);
+  return entry.promise;
+}
+
+async function prepareSandboxWorkspace(
+  sandbox: Sandbox,
+  sessionId: string,
+  localBucket: boolean,
+): Promise<Sandbox> {
+  if (!localBucket) {
+    const state = await workspaceMountState(sandbox);
+    if (state === "mounted") return sandbox;
+    if (state === "mounted-unhealthy") {
+      throw new Error(
+        "the existing /workspace mount is unhealthy; refusing to unmount or remount a live workspace",
+      );
+    }
+    if (state === "occupied") {
+      throw new Error(
+        "the unmounted /workspace directory is not empty; refusing to hide retained workspace files",
+      );
+    }
+  }
+
   try {
     await sandbox.mountBucket("NANOCODEX_WORKSPACES", WORKSPACE, {
       prefix: `/sessions/${sessionId}/`,
       ...(localBucket ? { localBucket: true as const } : {}),
     });
   } catch (error) {
-    if (!errorMessage(error).toLowerCase().includes("mount path already in use")) throw error;
+    if (localBucket && errorMessage(error).toLowerCase().includes("mount path already in use")) {
+      return sandbox;
+    }
+    // Another preparation can win between the preflight probe and the SDK's
+    // serialized mount operation. Reuse only a mount that is demonstrably live;
+    // never suppress a mount error merely because /workspace contains files.
+    if (!localBucket && await workspaceMountState(sandbox) === "mounted") return sandbox;
+    throw error;
+  }
+  if (!localBucket && await workspaceMountState(sandbox) !== "mounted") {
+    throw new Error("the R2 workspace mount did not become healthy");
   }
   return sandbox;
+}
+
+type WorkspaceMountState = "absent" | "empty" | "occupied" | "mounted" | "mounted-unhealthy";
+
+async function workspaceMountState(sandbox: SandboxToolClient): Promise<WorkspaceMountState> {
+  const probe = await sandbox.exec(
+    "if mountpoint -q /workspace; then "
+      + "if ls -A /workspace >/dev/null 2>&1; then printf mounted; else printf mounted-unhealthy; fi; "
+      + "elif [ ! -e /workspace ]; then printf absent; "
+      + "elif [ -d /workspace ] && [ -z \"$(find /workspace -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)\" ]; then printf empty; "
+      + "else printf occupied; fi",
+    { cwd: "/", timeout: WORKSPACE_MOUNT_PROBE_TIMEOUT_MS },
+  );
+  if (!probe.success || probe.exitCode !== 0) {
+    throw new Error("could not inspect the existing /workspace mount");
+  }
+  const state = probe.stdout.trim();
+  if (
+    state === "absent"
+    || state === "empty"
+    || state === "occupied"
+    || state === "mounted"
+    || state === "mounted-unhealthy"
+  ) return state;
+  throw new Error(`unexpected /workspace mount probe result: ${state || "empty output"}`);
+}
+
+function sandboxPreparation(
+  namespace: DurableObjectNamespace<Sandbox>,
+  sessionId: string,
+): SandboxPreparation | undefined {
+  return [...(sandboxPreparations.get(namespace)?.values() ?? [])]
+    .find((entry) => entry.sessionId === sessionId);
+}
+
+function clearSandboxPreparations(
+  namespace: DurableObjectNamespace<Sandbox>,
+  sessionId: string,
+): void {
+  const sessions = sandboxPreparations.get(namespace);
+  if (!sessions) return;
+  for (const [key, entry] of sessions) {
+    if (entry.sessionId === sessionId) sessions.delete(key);
+  }
+  if (sessions.size === 0) sandboxPreparations.delete(namespace);
+}
+
+function releaseSandboxPreparation(
+  namespace: DurableObjectNamespace<Sandbox>,
+  key: string,
+  entry: SandboxPreparation,
+): void {
+  const sessions = sandboxPreparations.get(namespace);
+  if (sessions?.get(key) !== entry) return;
+  sessions.delete(key);
+  if (sessions.size === 0) sandboxPreparations.delete(namespace);
 }
 
 function sandboxHandle(

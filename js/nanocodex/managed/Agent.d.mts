@@ -1,4 +1,5 @@
 import type { PromptInput, TurnUsage } from "../types.mjs";
+import type { AgentId } from "../runtime/subagents.mjs";
 
 export type HistorySource = Readonly<{ turn_id: string; cursor: string }>;
 export type HistoryCitation = Readonly<{
@@ -191,7 +192,7 @@ export type EventData = Readonly<{
   | { type: "turn_cancelled"; id: string }
   | { type: "turn_retryable"; id: string; error: string }
   | { type: "turn_failed"; id: string; error: string }
-  | { type: "event"; event: unknown }
+  | { type: "event"; event: unknown; agent_id?: AgentId | undefined }
   | { type: "stream_failed"; error: string }
 );
 

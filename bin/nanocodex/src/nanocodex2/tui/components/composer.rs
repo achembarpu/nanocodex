@@ -51,6 +51,7 @@ const DEVELOPMENT_BADGE: &str = " ◉ dev ";
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) enum ComposerEffect {
     Submit(Submission),
+    Queue(Submission),
     RunShell(String),
     OpenDraftEditor,
 }
@@ -76,6 +77,7 @@ pub(crate) enum ComposerEvent {
     SetReasoningMode(ReasoningMode),
     SetFastMode(bool),
     InputMode(Option<String>),
+    LiveControls(bool),
     Activity {
         active: bool,
         status: Option<String>,
@@ -114,6 +116,8 @@ pub(crate) struct Composer {
     reasoning_mode: ReasoningMode,
     fast_mode: bool,
     input_mode: Option<String>,
+    live_controls: bool,
+    activity_active: bool,
     activity_wave: Option<WavedText>,
     activity_status: Option<String>,
     review_wave: Option<WavedText>,
@@ -213,6 +217,8 @@ impl Composer {
             reasoning_mode: ReasoningMode::Standard,
             fast_mode: false,
             input_mode: None,
+            live_controls: false,
+            activity_active: false,
             activity_wave: None,
             activity_status: None,
             review_wave: None,
@@ -299,15 +305,23 @@ impl Composer {
                 self.input_mode = mode;
                 ComposerUpdate::changed()
             }
+            ComposerEvent::LiveControls(active) => {
+                if self.live_controls == active {
+                    return ComposerUpdate::unchanged();
+                }
+                self.live_controls = active;
+                ComposerUpdate::changed()
+            }
             ComposerEvent::Activity {
                 active,
                 status,
                 now,
             } => {
                 let status = if active { status } else { None };
-                if self.activity_status == status {
+                if self.activity_active == active && self.activity_status == status {
                     return ComposerUpdate::unchanged();
                 }
+                self.activity_active = active;
                 self.activity_wave = status.as_ref().map(|status| {
                     let mut wave = WavedText::new(status, Color::Cyan);
                     wave.set_active(true, now);
@@ -750,6 +764,7 @@ impl Composer {
                 ComposerUpdate::changed()
             }
             KeyCode::Enter => self.submit(),
+            KeyCode::Tab if key.modifiers.is_empty() => self.queue(),
             KeyCode::Char('b') if key.modifiers == KeyModifiers::ALT => {
                 ComposerUpdate::from_change(self.move_by_word(false))
             }
@@ -802,6 +817,14 @@ impl Composer {
             .expect("non-empty composer draft must produce a submission");
         self.history.record(prompt.display_text().to_owned());
         ComposerUpdate::effect(ComposerEffect::Submit(prompt), true)
+    }
+
+    fn queue(&mut self) -> ComposerUpdate {
+        let Some(prompt) = self.take_submission() else {
+            return ComposerUpdate::unchanged();
+        };
+        self.history.record(prompt.display_text().to_owned());
+        ComposerUpdate::effect(ComposerEffect::Queue(prompt), true)
     }
 
     fn move_up(&mut self) -> bool {
@@ -1431,7 +1454,13 @@ impl Composer {
         let development_start =
             directory_start.saturating_sub(u16::try_from(development_width).unwrap_or(u16::MAX));
         let hint_space = usize::from(development_start.saturating_sub(content_start));
-        let entry_hint = entry_hint(theme, self.draft.is_empty());
+        let entry_hint = entry_hint(
+            theme,
+            self.draft.is_empty(),
+            self.activity_active,
+            self.live_controls,
+            hint_space,
+        );
         if entry_hint.width() <= hint_space {
             buffer.set_line(
                 content_start,
@@ -1480,8 +1509,37 @@ impl Composer {
     }
 }
 
-fn entry_hint(theme: &Theme, include_actions: bool) -> Line<'static> {
+fn entry_hint(
+    theme: &Theme,
+    include_actions: bool,
+    activity_active: bool,
+    live_controls: bool,
+    max_width: usize,
+) -> Line<'static> {
     let mut spans = vec![Span::raw(" ")];
+    if live_controls {
+        spans.extend([
+            Span::styled("Enter", Style::reset()),
+            Span::styled(" steer · ", Style::default().fg(theme.muted())),
+            Span::styled("Tab", Style::reset()),
+            Span::styled(" queue · ", Style::default().fg(theme.muted())),
+            Span::styled("Esc Esc", Style::reset()),
+            Span::styled(" stop ", Style::default().fg(theme.muted())),
+        ]);
+        return Line::from(spans);
+    }
+    if activity_active {
+        spans.push(Span::styled(
+            "remote · read only ",
+            Style::default().fg(theme.muted()),
+        ));
+        return Line::from(spans);
+    }
+    let send_start = spans.len();
+    spans.extend([
+        Span::styled("Enter", Style::reset()),
+        Span::styled(" send · ", Style::default().fg(theme.muted())),
+    ]);
     if include_actions {
         spans.extend([
             Span::styled("/", Style::reset()),
@@ -1494,6 +1552,11 @@ fn entry_hint(theme: &Theme, include_actions: bool) -> Line<'static> {
         Span::styled("@@", Style::reset()),
         Span::styled(" sessions ", Style::default().fg(theme.muted())),
     ]);
+    let full = Line::from(spans.clone());
+    if full.width() <= max_width {
+        return full;
+    }
+    spans.drain(send_start..send_start + 2);
     Line::from(spans)
 }
 
@@ -2404,6 +2467,45 @@ mod tests {
         let update = composer.update(key(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(update.effect, None);
         assert_eq!(composer.draft(), "   \n");
+    }
+
+    #[test]
+    fn tab_queues_nonempty_input_and_preserves_empty_input() {
+        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        composer.replace_draft("  follow up  ".to_owned());
+
+        let update = composer.update(key(KeyCode::Tab, KeyModifiers::NONE));
+
+        assert_eq!(
+            update.effect,
+            Some(ComposerEffect::Queue("follow up".to_owned().into()))
+        );
+        assert!(composer.draft().is_empty());
+
+        composer.replace_draft("   ".to_owned());
+        let update = composer.update(key(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(update.effect, None);
+        assert_eq!(composer.draft(), "   ");
+    }
+
+    #[test]
+    fn composer_discloses_idle_local_and_remote_control_modes() {
+        let mut composer = Composer::new(Path::new("/work"), ReasoningEffort::Medium);
+        assert!(rows(&render(&mut composer, 90, 5))[4].contains("Enter send"));
+
+        composer.update(ComposerEvent::Activity {
+            active: true,
+            status: Some("Thinking…".to_owned()),
+            now: Instant::now(),
+        });
+        let footer = &rows(&render(&mut composer, 90, 5))[4];
+        assert!(footer.contains("remote · read only"));
+        assert!(!footer.contains("Enter steer"));
+
+        composer.update(ComposerEvent::LiveControls(true));
+        let footer = &rows(&render(&mut composer, 90, 5))[4];
+        assert!(footer.contains("Enter steer · Tab queue · Esc Esc stop"));
+        assert!(!footer.contains("read only"));
     }
 
     #[test]

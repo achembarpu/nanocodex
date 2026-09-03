@@ -362,6 +362,7 @@ test("a durable Node-hosted root runs the canonical in-memory Rust subagent task
   const server = await startServer();
   const decoyServer = await startServer();
   const events = [];
+  const eventAgentIds = [];
   const rootToolContexts = [];
   const durabilityId = "node-durable-root-subagents";
   const durability = createMemoryDurabilityStore(durabilityId);
@@ -397,7 +398,10 @@ test("a durable Node-hosted root runs the canonical in-memory Rust subagent task
     },
   });
   const watch = agent.events.watch({ includeAllSessions: true });
-  watch.onEvent((event) => events.push(event));
+  watch.onEvent((event, _encodedLength, _encodedEvent, agentId) => {
+    events.push(event);
+    eventAgentIds.push(agentId);
+  });
 
   let childSessionId;
   const scenario = (async () => {
@@ -492,6 +496,7 @@ test("a durable Node-hosted root runs the canonical in-memory Rust subagent task
     const rootWaited = await rootReader.next();
     const waited = JSON.parse(rootWaited.input[0].output);
     assert.equal(waited.timed_out, false);
+    assert.equal(waited.agents[0].parent_agent_id, null);
     assert.deepEqual(waited.agents[0].status, {
       state: "completed",
       output: { report: "portable" },
@@ -512,7 +517,37 @@ test("a durable Node-hosted root runs the canonical in-memory Rust subagent task
       role: "reviewer",
       task: "Return the word portable.",
     });
-    assert.ok(events.some((event) => event.request_id === childSessionId));
+    const childEvents = events.filter((event) => event.request_id === childSessionId);
+    const childAgentIds = events.flatMap((event, index) =>
+      event.request_id === childSessionId ? [eventAgentIds[index]] : []);
+    assert.equal(childAgentIds.length, childEvents.length);
+    assert.ok(childAgentIds.every((agentId) => agentId === 1));
+    assert.ok(eventAgentIds.every((agentId, index) =>
+      events[index].request_id === childSessionId ? agentId === 1 : agentId === undefined));
+    assert.deepEqual(
+      childEvents
+        .filter((event) => event.type === "run.started" || event.type === "run.completed")
+        .map((event) => event.type),
+      ["run.started", "run.completed"],
+    );
+    assert.deepEqual(
+      childEvents
+        .filter((event) => event.type === "tool.call")
+        .map((event) => event.payload.tool),
+      ["exec", "rootOnly", "submit_result"],
+    );
+    assert.deepEqual(
+      childEvents.map((event) => event.seq),
+      Array.from({ length: childEvents.length }, (_value, index) => index + 1),
+    );
+    assert.ok(events.some((event) =>
+      event.request_id === agent.sessionId
+      && event.type === "tool.call"
+      && event.payload.tool === "spawn_agent"));
+    assert.ok(events.some((event) =>
+      event.request_id === agent.sessionId
+      && event.type === "tool.call"
+      && event.payload.tool === "wait_agent"));
     const childState = durability.load(childSessionId);
     assert.notEqual(childState.revision, "0");
     assert.match(childState.payload, /nanocodex_durable_state/);

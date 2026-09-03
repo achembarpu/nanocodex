@@ -268,9 +268,9 @@ export function subscribeAgentEvents(agent, listener, options = {}, onRelease) {
   if (typeof listener !== "function") {
     throw new TypeError("watchAgentEvents requires a listener");
   }
-  const unsubscribe = state.runtime.subscribe((event, encodedLength) => {
+  const unsubscribe = state.runtime.subscribe((event, encodedLength, encodedEvent, agentId) => {
     if (options.includeAllSessions || !event?.request_id || event.request_id === agent.sessionId) {
-      listener(event, encodedLength);
+      listener(event, encodedLength, encodedEvent, agentId);
     }
   });
   let active = true;
@@ -333,13 +333,13 @@ export function createEventChannel() {
   const listeners = new Set();
   const sources = new Set();
   return Object.freeze({
-    emit(eventJson, encodedBytes) {
+    emit(eventJson, encodedBytes, agentId) {
       if (!listeners.size) return;
       const event = freezeJson(typeof eventJson === "string" ? JSON.parse(eventJson) : eventJson);
       const encodedLength = Number.isSafeInteger(encodedBytes) && encodedBytes >= 0
         ? encodedBytes
         : undefined;
-      for (const listener of listeners) listener(event, encodedLength, eventJson);
+      for (const listener of listeners) listener(event, encodedLength, eventJson, agentId);
     },
     subscribe(listener) {
       const activate = listeners.size === 0;
@@ -537,10 +537,27 @@ const hostBridge = Object.freeze({
       payload,
     );
   },
-  emitEvent(sessionId, eventJson, encodedBytes) {
-    requiredSessionHost(sessionId).emitEvent(eventJson, encodedBytes);
+  emitEvent(sessionId, eventJson, encodedBytes, encodedAgentId) {
+    requiredSessionHost(sessionId).emitEvent(
+      eventJson,
+      encodedBytes,
+      parseSubagentAgentId(encodedAgentId),
+    );
   },
 });
+
+/** Decodes the string ABI without changing JavaScript's numeric AgentId contract. */
+export function parseSubagentAgentId(encoded) {
+  if (encoded === undefined) return undefined;
+  if (typeof encoded !== "string" || !/^[1-9][0-9]*$/.test(encoded)) {
+    throw new TypeError("subagent agent ID must be a canonical positive decimal string");
+  }
+  const agentId = Number(encoded);
+  if (!Number.isSafeInteger(agentId)) {
+    throw new RangeError("subagent agent ID exceeds JavaScript's safe integer range");
+  }
+  return agentId;
+}
 
 export function loadSubscriptionRuntime() {
   return import("./runtime/chatgpt-subscription.mjs");

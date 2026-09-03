@@ -42,7 +42,7 @@ export type ServerMessage = (
   | { type: "turn_cancelled"; id: string }
   | { type: "turn_retryable"; id: string; error: string }
   | { type: "turn_failed"; id: string; error: string }
-  | { type: "event"; event: AgentEvent }
+  | { type: "event"; event: AgentEvent; agent_id?: number }
   | { type: "stream_failed"; error: string }
   | { type: "status"; active_turns: string[]; active_turn_details: ActiveTurn[]; agent_loaded: boolean; connected_clients: number; settings: ManagedAgentSettings }
   | { type: "pong"; nonce?: string }

@@ -18,6 +18,7 @@ import {
   type Agent,
   type AgentControllerSnapshot,
   type AgentEntry,
+  type ToolActivity,
 } from "../agent/index.mjs";
 import {
   createConnectAgentSource,
@@ -135,6 +136,19 @@ void narrowResource;
 createConfig({ agent: { transport: Transport.hostManaged({ createWebSocket() { return {} as WebSocket; } }) } });
 
 declare const structuralAgent: Agent | undefined;
+const detailedTool: ToolActivity = {
+  callId: "call-1",
+  name: "custom_tool",
+  arguments: "input summary",
+  input: "{\"query\":\"full input\"}",
+  result: "output summary",
+  output: "{\"matches\":[1]}",
+  status: "completed",
+  durationNs: 1_000,
+  images: [],
+  children: [],
+};
+void detailedTool;
 declare const defaultAgent: DefaultAgent;
 const normalizedDefaultAgent: Agent = defaultAgent;
 void normalizedDefaultAgent;

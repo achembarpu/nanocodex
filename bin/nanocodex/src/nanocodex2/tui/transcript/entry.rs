@@ -106,8 +106,211 @@ pub(crate) struct ToolEntry {
     pub(crate) duration_ns: Option<u64>,
     pub(crate) result: Option<Value>,
     pub(crate) metadata: Option<Value>,
+    pub(crate) execution: ToolExecution,
     pub(crate) substeps: Vec<String>,
     pub(crate) child_count: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum ToolExecution {
+    Sandbox { cwd: Option<String> },
+    Direct,
+    WebClient,
+    Machine { name: String, cwd: Option<String> },
+    Mcp { server: String },
+    Browser,
+    Subagent { target: Option<String> },
+}
+
+impl ToolExecution {
+    pub(crate) fn infer(name: &str, arguments: &Value, metadata: Option<&Value>) -> Self {
+        let identity = ToolIdentity::decode(name);
+        if let Some(machine) = metadata.and_then(machine_name).or(identity.machine) {
+            return Self::Machine {
+                name: machine.to_owned(),
+                cwd: execution_cwd(arguments),
+            };
+        }
+        if let Some(server) = metadata
+            .and_then(|value| find_string(value, &["mcp_server"]))
+            .or(identity.mcp_server)
+        {
+            return Self::Mcp {
+                server: server.to_owned(),
+            };
+        }
+        if identity.family.starts_with("sandbox_") || metadata.is_some_and(reports_sandbox) {
+            return Self::Sandbox {
+                cwd: execution_cwd(arguments),
+            };
+        }
+        if identity.family == "web__run" {
+            return Self::WebClient;
+        }
+        if identity.family == "browser" || identity.family.starts_with("browser_") {
+            return Self::Browser;
+        }
+        if is_subagent_tool(identity.family) {
+            return Self::Subagent {
+                target: subagent_target(arguments),
+            };
+        }
+        Self::Direct
+    }
+
+    fn qualifier(&self) -> String {
+        match self {
+            Self::Sandbox { cwd: Some(cwd) } => format!("Sandbox · {cwd}"),
+            Self::Sandbox { cwd: None } => "Sandbox".to_owned(),
+            Self::Direct => "Local".to_owned(),
+            Self::WebClient => "Web client".to_owned(),
+            Self::Machine {
+                name,
+                cwd: Some(cwd),
+            } => format!("Machine {name} · {cwd}"),
+            Self::Machine { name, cwd: None } => format!("Machine {name}"),
+            Self::Mcp { server } => format!("MCP · {server}"),
+            Self::Browser => "Browser".to_owned(),
+            Self::Subagent {
+                target: Some(target),
+            } => format!("Subagent · {target}"),
+            Self::Subagent { target: None } => "Subagent".to_owned(),
+        }
+    }
+}
+
+impl ToolEntry {
+    pub(crate) fn infer_execution(&mut self) {
+        self.execution = ToolExecution::infer(&self.name, &self.arguments, self.metadata.as_ref());
+    }
+
+    pub(crate) fn execution_qualifier(&self) -> String {
+        self.execution.qualifier()
+    }
+
+    pub(crate) fn family(&self) -> &str {
+        ToolIdentity::decode(&self.name).family
+    }
+
+    pub(crate) fn has_mcp_origin(&self) -> bool {
+        ToolIdentity::decode(&self.name).mcp_server.is_some()
+    }
+
+    pub(crate) fn mcp_server(&self) -> Option<&str> {
+        ToolIdentity::decode(&self.name).mcp_server
+    }
+
+    pub(crate) fn inferred_execution(
+        name: &str,
+        arguments: &Value,
+        metadata: Option<&Value>,
+    ) -> ToolExecution {
+        ToolExecution::infer(name, arguments, metadata)
+    }
+
+    pub(crate) const fn local_execution() -> ToolExecution {
+        ToolExecution::Direct
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ToolIdentity<'a> {
+    family: &'a str,
+    machine: Option<&'a str>,
+    mcp_server: Option<&'a str>,
+}
+
+impl<'a> ToolIdentity<'a> {
+    fn decode(name: &'a str) -> Self {
+        let (machine, qualified) = name
+            .strip_prefix("user_")
+            .and_then(|name| name.split_once('_'))
+            .filter(|(machine, family)| !machine.is_empty() && !family.is_empty())
+            .map_or((None, name), |(machine, family)| (Some(machine), family));
+        let (mcp_server, family) = qualified
+            .strip_prefix("mcp__")
+            .and_then(|name| name.split_once("__"))
+            .filter(|(server, family)| !server.is_empty() && !family.is_empty())
+            .map_or((None, qualified), |(server, family)| (Some(server), family));
+        Self {
+            family,
+            machine,
+            mcp_server,
+        }
+    }
+}
+
+fn execution_cwd(arguments: &Value) -> Option<String> {
+    arguments
+        .get("cwd")
+        .or_else(|| arguments.get("workdir"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+}
+
+fn reports_sandbox(value: &Value) -> bool {
+    let Some(fields) = value.as_object() else {
+        return false;
+    };
+    fields.get("sandbox").and_then(Value::as_bool) == Some(true)
+        || ["execution", "origin", "environment", "kind"]
+            .into_iter()
+            .any(|key| fields.get(key).and_then(Value::as_str) == Some("sandbox"))
+        || fields.values().any(reports_sandbox)
+}
+
+pub(crate) fn is_subagent_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "spawn_agent"
+            | "submit_result"
+            | "send_agent_message"
+            | "list_agents"
+            | "wait_agent"
+            | "interrupt_agent"
+            | "close_agent"
+    )
+}
+
+fn subagent_target(arguments: &Value) -> Option<String> {
+    arguments
+        .get("role")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .or_else(|| {
+            arguments
+                .get("agent_id")
+                .and_then(Value::as_u64)
+                .map(|id| format!("agent {id}"))
+        })
+        .or_else(|| {
+            let ids = arguments.get("agent_ids")?.as_array()?;
+            let labels = ids
+                .iter()
+                .filter_map(Value::as_u64)
+                .map(|id| format!("{id}"))
+                .collect::<Vec<_>>();
+            (!labels.is_empty()).then(|| format!("agents {}", labels.join(", ")))
+        })
+}
+
+fn machine_name(value: &Value) -> Option<&str> {
+    find_string(value, &["machine_name", "machineName"])
+        .or_else(|| value.get("machine").and_then(machine_value_name))
+        .or_else(|| value.get("executor").and_then(machine_value_name))
+}
+
+fn machine_value_name(value: &Value) -> Option<&str> {
+    value
+        .as_str()
+        .or_else(|| value.get("name").and_then(Value::as_str))
+}
+
+fn find_string<'a>(value: &'a Value, keys: &[&str]) -> Option<&'a str> {
+    let fields = value.as_object()?;
+    keys.iter()
+        .find_map(|key| fields.get(*key).and_then(Value::as_str))
+        .or_else(|| fields.values().find_map(|value| find_string(value, keys)))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

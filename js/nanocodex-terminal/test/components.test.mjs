@@ -316,7 +316,7 @@ test("welcome is replaced by the first visible durable or voice entry", async ()
   await act(async () => renderer.unmount());
 });
 
-test("transcript renders semantic reasoning, plans, and nested tools", async () => {
+test("transcript renders semantic reasoning, plans, and accessible nested tools", async () => {
   const entries = [
     { id: "r", kind: "reasoning", text: "checking", streaming: true },
     { id: "a", kind: "assistant", text: "**done**", streaming: false },
@@ -325,9 +325,13 @@ test("transcript renders semantic reasoning, plans, and nested tools", async () 
       id: "t",
       kind: "tool",
       tool: {
-        callId: "root", name: "shell", arguments: "{}", result: "ok", status: "completed",
+        callId: "root", name: "exec", arguments: "text(await tools.sandbox_exec(...))",
+        result: "{\"content\":[{\"type\":\"text\"}]}", status: "completed",
         children: [{
-          callId: "child", name: "read", arguments: "{}", status: "running", children: [],
+          callId: "child", name: "sandbox_exec",
+          arguments: "{\"command\":\"pwd\",\"cwd\":\"/workspace\"}",
+          result: "{\"exit_code\":0,\"stdout\":\"/workspace\",\"stderr\":\"\"}",
+          status: "completed", children: [],
         }],
       },
     },
@@ -354,10 +358,14 @@ test("transcript renders semantic reasoning, plans, and nested tools", async () 
   const labels = renderer.root.findAllByProps({ className: "agent-terminal-entry-label" });
   assert.equal(labels[0].children.join(""), "thinking…");
   assert.equal(renderer.root.findAllByType("li")[0].children[1], "verify");
-  assert.deepEqual(
-    renderer.root.findAllByType("header").map((header) => header.children.at(-1)),
-    ["shell", "read"],
-  );
+  assert.deepEqual(renderer.root.findAllByType("strong").map((strong) => strong.children.join("")), ["Run code", "Run command"]);
+  assert.deepEqual(renderer.root.findAllByProps({ className: "agent-terminal-tool-status" })
+    .map((status) => status.children.join("")), ["Succeeded", "Succeeded"]);
+  assert.deepEqual(renderer.root.findAllByProps({ className: "agent-terminal-tool-source" })
+    .map((source) => source.children.join("")), ["Code mode", "Sandbox · /workspace"]);
+  assert.deepEqual(renderer.root.findAllByType("h4").map((heading) => heading.children.join("")), [
+    "Command", "Stdout", "Stderr",
+  ]);
   assert.equal(renderer.root.findAllByProps({ className: "agent-terminal-brand" }).length, 0);
   await act(async () => renderer.update(React.createElement(TerminalTranscriptSurface, {
     canLoadOlder: false,
@@ -371,7 +379,223 @@ test("transcript renders semantic reasoning, plans, and nested tools", async () 
     status: "ready",
     onLoadOlder: async () => false,
   })));
-  assert.equal(renderer.root.findAllByType("header").length, 0);
+  assert.equal(renderer.root.findAllByType("details").length, 0);
+  await act(async () => renderer.unmount());
+});
+
+test("all-tool renderer adapts known families and keeps unknown tools excellent", async () => {
+  const tool = (callId, name, arguments_, result, status = "completed", extra = {}) => ({
+    callId,
+    name,
+    arguments: JSON.stringify(arguments_, null, 2),
+    result: result === undefined ? undefined : JSON.stringify(result, null, 2),
+    status,
+    children: [],
+    ...extra,
+  });
+  const entries = [
+    { id: "exec", kind: "tool", tool: tool(
+      "exec", "sandbox_exec", { command: "printf hello", cwd: "/workspace/nanocodex-spin" },
+      { success: true, exit_code: 0, stdout: "hello", stderr: "" },
+      "completed", { durationNs: 1_250_000_000 },
+    ) },
+    { id: "process", kind: "tool", tool: tool(
+      "process", "sandbox_start_process", { command: "npm start", ready_port: 8_000 },
+      { process_id: "proc", pid: 42, status: "running", ready_port: 8_000 },
+    ) },
+    { id: "preview", kind: "tool", tool: tool(
+      "preview", "sandbox_preview", { port: 8_000 },
+      { port: 8_000, url: "https://preview.example.test/app", persistent: false },
+    ) },
+    { id: "unsafe-preview", kind: "tool", tool: tool(
+      "unsafe-preview", "sandbox_preview", { port: 8_001 },
+      { port: 8_001, url: "javascript:alert(1)", persistent: false },
+    ) },
+    { id: "account", kind: "tool", tool: tool(
+      "account", "accountInfo", {}, {
+        status: "ready",
+        authenticated: ["github"],
+        connectorAccounts: { github: [{ id: "one" }, { id: "two" }] },
+        machines: [{ id: "sandbox" }],
+        vault: [{ id: "login" }],
+      },
+    ) },
+    { id: "machine", kind: "tool", tool: tool(
+      "machine", "user_machine-a_exec_command", { cmd: "pwd" }, { exit_code: 7, output: "denied" }, "failed",
+    ) },
+    { id: "mcp", kind: "tool", tool: tool(
+      "mcp", "mcp__linear__search_issues", { query: "renderer" }, { matches: ["NCX-1"] }, "cancelled",
+    ) },
+    { id: "unknown", kind: "tool", tool: tool(
+      "unknown", "renderHyperGraph", { depth: 3 }, { nodes: 12 }, "completed",
+      { images: ["data:image/png;base64,AA=="] },
+    ) },
+  ];
+  let renderer;
+  await act(async () => {
+    renderer = TestRenderer.create(React.createElement(TerminalTranscriptSurface, {
+      canLoadOlder: false,
+      composer: null,
+      entries,
+      inactiveMessage: "",
+      isLoadingOlder: false,
+      mode: "full",
+      status: "ready",
+      onLoadOlder: async () => false,
+    }), {
+      createNodeMock(element) {
+        return element.type === "div"
+          ? { clientHeight: 300, firstElementChild: null, scrollHeight: 600, scrollTop: 0 }
+          : {};
+      },
+    });
+  });
+
+  assert.deepEqual(renderer.root.findAllByType("strong").map((node) => node.children.join("")), [
+    "Run command", "Start process", "Open preview", "Open preview",
+    "Account info", "Run command", "Search issues", "Render hyper graph",
+  ]);
+  assert.deepEqual(renderer.root.findAllByProps({ className: "agent-terminal-tool-source" })
+    .map((node) => node.children.join("")), [
+    "Sandbox · /workspace/nanocodex-spin", "Sandbox", "Sandbox", "Sandbox", "Account",
+    "Machine machine-a", "MCP Linear",
+  ]);
+  const headings = renderer.root.findAllByProps({ className: "agent-terminal-tool-heading" })
+    .map((node) => node.children.flatMap((child) => child.children ?? []).join(" "));
+  assert.match(headings[0], /printf hello.*Exit 0.*1 stdout line/);
+  assert.match(headings[1], /npm start.*PID 42.*Running.*Port 8000 ready/);
+  assert.match(headings[2], /Port 8000.*Preview ready/);
+  assert.match(headings[4], /Ready.*2 connectors.*1 machine.*1 Vault item/);
+  assert.match(headings[7], /1 input field.*nodes.*12/);
+  assert.deepEqual(renderer.root.findAllByProps({ className: "agent-terminal-tool-status" })
+    .map((node) => node.children.join("")), [
+    "Succeeded", "Succeeded", "Succeeded", "Succeeded", "Succeeded", "Failed", "Cancelled", "Succeeded",
+  ]);
+  assert.ok(renderer.root.findAllByProps({ className: "agent-terminal-tool-meta" })[0]
+    .children.some((node) => node.children?.join("") === "1.25 s"));
+  const detailHeadings = renderer.root.findAllByType("h4").map((node) => node.children.join(""));
+  assert.deepEqual(detailHeadings.slice(0, 3), ["Command", "Stdout", "Stderr"]);
+  assert.equal(detailHeadings.filter((label) => label === "Stdout").length, 1);
+  assert.equal(detailHeadings.filter((label) => label === "Stderr").length, 1);
+  const links = renderer.root.findAllByType("a");
+  assert.equal(links.length, 1);
+  assert.equal(links[0].props.href, "https://preview.example.test/app");
+  assert.equal(links[0].props.target, "_blank");
+  assert.equal(links[0].props.rel, "noopener noreferrer");
+  assert.deepEqual(renderer.root.findAllByType("details").filter((node) => node.props.open)
+    .map((node) => node.props.className), [
+    "agent-terminal-tool is-failed", "agent-terminal-tool is-cancelled",
+  ]);
+  assert.ok(renderer.root.findAllByType("code").some((node) => node.children.join("") === "user_machine-a_exec_command"));
+  const images = renderer.root.findAllByType("img");
+  assert.equal(images[0].props.src, "data:image/png;base64,AA==");
+  assert.equal(images[0].props.alt, "Render hyper graph result 1");
+  await act(async () => renderer.unmount());
+});
+
+test("subagent and host tools share concise what, where, state, duration, and outcome slots", async () => {
+  const entries = [
+    {
+      id: "spawn", kind: "tool", tool: {
+        callId: "spawn", name: "spawn_agent", status: "completed", durationNs: 12_000_000,
+        arguments: "spawn renderer", input: JSON.stringify({
+          role: "renderer specialist",
+          task: "Inspect every tool result and report the relevant evidence without leaking schema noise.",
+          output_schema: { type: "object", properties: { report: { type: "string" } } },
+        }),
+        output: JSON.stringify({ agent_id: 68, role: "renderer specialist", status: { state: "running" } }),
+        children: [],
+      },
+    },
+    {
+      id: "wait", kind: "tool", tool: {
+        callId: "wait", name: "wait_agent", status: "completed", durationNs: 2_000_000_000,
+        arguments: "agents 68", input: JSON.stringify({ agent_ids: [68] }),
+        output: JSON.stringify({
+          agents: [{ agent_id: 68, role: "renderer specialist", status: { state: "completed" } }],
+          timed_out: false,
+        }),
+        children: [],
+      },
+    },
+    {
+      id: "send", kind: "tool", tool: {
+        callId: "send", name: "send_agent_message", status: "completed",
+        arguments: "message agent", input: JSON.stringify({ agent_id: 68, message: "Please verify the preview link." }),
+        output: JSON.stringify({ accepted: true }), children: [],
+      },
+    },
+    {
+      id: "interrupt", kind: "tool", tool: {
+        callId: "interrupt", name: "interrupt_agent", status: "completed",
+        arguments: "agent 68", input: JSON.stringify({ agent_id: 68 }),
+        output: JSON.stringify({ status: { state: "interrupted" } }), children: [],
+      },
+    },
+    {
+      id: "close", kind: "tool", tool: {
+        callId: "close", name: "close_agent", status: "completed",
+        arguments: "agent 68", input: JSON.stringify({ agent_id: 68 }),
+        output: JSON.stringify({ status: { state: "closed" } }), children: [],
+      },
+    },
+    {
+      id: "local", kind: "tool", tool: {
+        callId: "local", name: "exec_command", status: "running",
+        arguments: "pwd", input: JSON.stringify({ cmd: "pwd", cwd: "/repo" }), children: [],
+      },
+    },
+    {
+      id: "browser", kind: "tool", tool: {
+        callId: "browser", name: "browser_capture_page", status: "completed",
+        arguments: "page", input: JSON.stringify({ page: "main" }), output: JSON.stringify({ captured: true }), children: [],
+      },
+    },
+  ];
+  let renderer;
+  await act(async () => {
+    renderer = TestRenderer.create(React.createElement(TerminalTranscriptSurface, {
+      canLoadOlder: false,
+      composer: null,
+      entries,
+      inactiveMessage: "",
+      isLoadingOlder: false,
+      mode: "full",
+      status: "ready",
+      onLoadOlder: async () => false,
+    }), {
+      createNodeMock(element) {
+        return element.type === "div"
+          ? { clientHeight: 300, firstElementChild: null, scrollHeight: 600, scrollTop: 0 }
+          : {};
+      },
+    });
+  });
+  assert.deepEqual(renderer.root.findAllByType("strong").map((node) => node.children.join("")), [
+    "Spawned renderer specialist",
+    "Waiting on renderer specialist (68)",
+    "Message agent 68",
+    "Interrupt agent 68",
+    "Close agent 68",
+    "Run command",
+    "Capture page",
+  ]);
+  assert.deepEqual(renderer.root.findAllByProps({ className: "agent-terminal-tool-source" })
+    .map((node) => node.children.join("")), [
+    "Subagent", "Subagent", "Subagent", "Subagent", "Subagent", "Local · /repo", "Web client",
+  ]);
+  const headings = renderer.root.findAllByProps({ className: "agent-terminal-tool-heading" })
+    .map((node) => node.children.flatMap((child) => child.children ?? []).join(" "));
+  assert.match(headings[0], /Inspect every tool result.*Agent 68.*Running/);
+  assert.doesNotMatch(headings[0], /output_schema|properties/);
+  assert.match(headings[1], /renderer specialist \(68\).*Completed/);
+  assert.match(headings[2], /Please verify the preview link.*Accepted/);
+  assert.match(headings[3], /Interrupted/);
+  assert.match(headings[4], /Closed/);
+  assert.ok(renderer.root.findAllByProps({ className: "agent-terminal-tool-meta" })[1]
+    .children.some((node) => node.children?.join("") === "2.00 s"));
+  assert.equal(renderer.root.findAllByProps({ role: "status" })[0].children.join(""), "Running");
+  assert.ok(renderer.root.findAllByType("pre").some((node) => node.children.join("").includes("output_schema")));
   await act(async () => renderer.unmount());
 });
 

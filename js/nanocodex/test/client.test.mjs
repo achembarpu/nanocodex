@@ -13,6 +13,7 @@ import {
   bindHostSession,
   createAgentClient,
   defineRuntime,
+  parseSubagentAgentId,
   releaseHostSession,
   toWasmConfig,
 } from "../internal.mjs";
@@ -21,6 +22,14 @@ import {
   release as releaseDurabilityHost,
   retain as retainDurabilityHost,
 } from "../runtime/durability.mjs";
+
+test("subagent event agent IDs cross the WASM ABI as safe JavaScript numbers", () => {
+  assert.equal(parseSubagentAgentId(undefined), undefined);
+  assert.equal(parseSubagentAgentId("1"), 1);
+  for (const invalid of [0, "0", "01", "-1", "1.0", "x", "9007199254740992"]) {
+    assert.throws(() => parseSubagentAgentId(invalid), /subagent agent ID/);
+  }
+});
 
 test("the memory durability store replaces one complete opaque state", () => {
   const store = createMemoryDurabilityStore("state-1");

@@ -782,7 +782,7 @@ mod tests {
     };
     use tokio::io::AsyncReadExt;
 
-    use super::{ManagedClient, decode_response};
+    use super::{ManagedClient, decode_response, install_default_rustls_crypto_provider};
     use crate::{ManagedApiKey, ManagedError, PromptInput};
 
     fn key() -> String {
@@ -847,6 +847,7 @@ mod tests {
 
     #[tokio::test]
     async fn ordinary_responses_have_no_client_byte_limit() {
+        install_default_rustls_crypto_provider();
         let payload = "x".repeat(1024 * 1024 + 1);
         let encoded = serde_json::to_string(&serde_json::json!({ "payload": payload })).unwrap();
         let app = Router::new().route(

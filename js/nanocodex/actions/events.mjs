@@ -10,10 +10,10 @@ export function watch(agent, options = {}) {
   let unsubscribe;
   let closed = false;
 
-  const emit = (event, encodedLength, encodedEvent) => {
+  const emit = (event, encodedLength, encodedEvent, agentId) => {
     for (const listener of listeners) {
       try {
-        listener(event, encodedLength, encodedEvent);
+        listener(event, encodedLength, encodedEvent, agentId);
       } catch (error) {
         reportError(error);
       }

@@ -13,6 +13,7 @@ import type { AgentEntry, ToolActivity } from "nanocodex-react/agent";
 import { Streamdown } from "streamdown";
 
 import type { AgentStatus, AgentTerminalMode } from "./types.js";
+import { boundedToolDetail, presentTool } from "./toolPresentation.js";
 
 export type VoiceTerminalEntry = Readonly<{
   afterEntryId?: string;
@@ -307,10 +308,66 @@ function MarkdownInput({
 const MARKDOWN_COMPONENTS = { input: MarkdownInput };
 const LINK_SAFETY = { enabled: true } as const;
 
-function TerminalToolView({ tool }: { tool: ToolActivity }) {
-  return <section className={`agent-terminal-tool is-${tool.status}`}>
-    <header><span aria-hidden="true">{tool.status === "completed" ? "✓" : tool.status === "running" ? "→" : "!"}</span>{tool.name}</header>
-    {tool.result ? <pre>{tool.result}</pre> : null}
-    {tool.children.map((child) => <TerminalToolView key={child.callId} tool={child} />)}
-  </section>;
+function TerminalToolView({ isChild = false, tool }: { isChild?: boolean; tool: ToolActivity }) {
+  const presentation = presentTool(tool);
+  const semanticWrapper = tool.name === "exec" && tool.children.length > 0;
+  const input = semanticWrapper ? undefined : tool.input ?? tool.arguments;
+  const output = semanticWrapper ? undefined : tool.output ?? tool.result;
+  const status = tool.status === "completed" ? "Succeeded"
+    : tool.status === "running" ? "Running"
+      : tool.status === "cancelled" ? "Cancelled" : "Failed";
+  return <details
+    className={`agent-terminal-tool is-${tool.status}${isChild ? " is-child" : ""}`}
+    {...(tool.status === "failed" || tool.status === "cancelled" || tool.children.length > 0
+      ? { open: true }
+      : {})}
+  >
+    <summary>
+      <span className="agent-terminal-tool-glyph" aria-hidden="true">
+        {tool.status === "completed" ? "✓" : tool.status === "running" ? "→" : "!"}
+      </span>
+      <span className="agent-terminal-tool-heading">
+        <strong>{presentation.title}</strong>
+        {presentation.subject ? <span>{presentation.subject}</span> : null}
+        {presentation.outputSummary ? <span>{presentation.outputSummary}</span> : null}
+      </span>
+      <span className="agent-terminal-tool-meta">
+        {presentation.source ? <span className="agent-terminal-tool-source">{presentation.source}</span> : null}
+        <span className="agent-terminal-tool-status" role={tool.status === "running" ? "status" : undefined}>
+          {status}
+        </span>
+        {presentation.duration ? <span>{presentation.duration}</span> : null}
+      </span>
+    </summary>
+    <div className="agent-terminal-tool-body">
+      <p className="agent-terminal-tool-wire"><span>Wire name</span> <code>{tool.name}</code></p>
+      {presentation.inputDetail || input ? <section className="agent-terminal-tool-detail">
+        <h4>{presentation.inputDetail?.label ?? "Input"}</h4>
+        <pre>{boundedToolDetail(presentation.inputDetail?.value ?? input ?? "")}</pre>
+      </section> : null}
+      {presentation.outputDetails?.map((detail) => <section
+        className="agent-terminal-tool-detail agent-terminal-tool-result"
+        key={detail.label}
+      >
+        <h4>{detail.label}</h4>
+        <pre>{boundedToolDetail(detail.value)}</pre>
+      </section>)}
+      {!presentation.outputDetails && output ? <section className="agent-terminal-tool-detail agent-terminal-tool-result">
+        <h4>Output</h4>
+        <pre>{boundedToolDetail(output)}</pre>
+      </section> : null}
+      {presentation.previewUrl ? <p className="agent-terminal-tool-preview">
+        <a href={presentation.previewUrl} rel="noopener noreferrer" target="_blank">Open preview</a>
+      </p> : null}
+      {!semanticWrapper && tool.images?.length ? <div className="agent-terminal-tool-images">
+        {tool.images.map((source, index) => <img
+          alt={`${presentation.title} result ${index + 1}`}
+          key={`${tool.callId}-image-${index}`}
+          loading="lazy"
+          src={source}
+        />)}
+      </div> : null}
+      {tool.children.map((child) => <TerminalToolView isChild key={child.callId} tool={child} />)}
+    </div>
+  </details>;
 }

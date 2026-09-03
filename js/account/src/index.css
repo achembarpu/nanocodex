@@ -1229,8 +1229,7 @@ html[data-theme="dark"] .button--medium:focus-visible {
 }
 
 .agent-terminal-entry pre,
-.agent-terminal-reasoning pre,
-.agent-terminal-tool pre {
+.agent-terminal-reasoning pre {
   min-width: 0;
   margin: 0;
   overflow-wrap: anywhere;
@@ -1238,60 +1237,22 @@ html[data-theme="dark"] .button--medium:focus-visible {
   font: inherit;
 }
 
-.agent-terminal-reasoning,
-.agent-terminal-tool {
+.agent-terminal-reasoning {
   padding: 8px 10px;
   color: var(--text-muted);
   background: color-mix(in srgb, var(--surface-subtle) 72%, transparent);
   border-left: 2px solid var(--border);
 }
 
-.agent-terminal-reasoning summary,
-.agent-terminal-tool summary {
+.agent-terminal-reasoning summary {
   cursor: pointer;
 }
 
-.agent-terminal-reasoning pre,
-.agent-terminal-tool pre {
+.agent-terminal-reasoning pre {
   margin-top: 8px;
   padding: 8px;
   background: var(--surface);
   border: 1px solid var(--border-soft);
-}
-
-.agent-terminal-tool summary {
-  display: grid;
-  grid-template-columns: 18px minmax(0, 1fr) auto;
-  gap: 8px;
-  align-items: center;
-  list-style: none;
-}
-
-.agent-terminal-tool summary::-webkit-details-marker {
-  display: none;
-}
-
-.agent-terminal-tool summary > span,
-.agent-terminal-tool.is-completed summary > strong {
-  color: var(--positive);
-}
-
-.agent-terminal-tool.is-failed summary > span,
-.agent-terminal-tool.is-cancelled summary > span {
-  color: var(--negative);
-}
-
-.agent-terminal-tool summary small {
-  font-size: 9px;
-}
-
-.agent-terminal-tool.is-child {
-  margin-left: 24px;
-  border-left-style: dotted;
-}
-
-.agent-terminal-tool-result {
-  color: var(--text-muted);
 }
 
 .agent-terminal-cursor {

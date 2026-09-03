@@ -9,7 +9,7 @@ mod record;
 
 pub(crate) use entry::{
     DirectedMessageEntry, EntryId, EntryKind, MessageDelivery, MessagePhase, ToolEntry, ToolState,
-    TranscriptEntry, TransientStatus,
+    TranscriptEntry, TransientStatus, is_subagent_tool,
 };
 pub(crate) use model::TranscriptModel;
 pub(crate) use record::{

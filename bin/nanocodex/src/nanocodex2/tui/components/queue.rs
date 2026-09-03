@@ -92,6 +92,22 @@ impl MessageQueue {
         self.selected = self.items.len() - 1;
     }
 
+    pub(super) fn begin_steer(&mut self, prompt: Submission) -> (QueueId, Submission) {
+        let id = QueueId(self.next_id);
+        self.next_id = self.next_id.saturating_add(1);
+        self.items.insert(
+            self.steer_lane_len(),
+            QueueItem {
+                id,
+                prompt: prompt.clone(),
+                state: QueueItemState::SubmittingSteer,
+            },
+        );
+        self.selected = self.steer_lane_len().saturating_sub(1);
+        self.sync_steering_wave();
+        (id, prompt)
+    }
+
     pub(super) fn finish_edit(&mut self, id: QueueId, text: String) -> bool {
         let Some(index) = self.items.iter().position(|item| item.id == id) else {
             return false;
@@ -602,6 +618,19 @@ mod tests {
             update.effects.as_slice(),
             [QueueEffect::Steer { prompt, .. }] if prompt.display_text() == "item 99"
         ));
+    }
+
+    #[test]
+    fn direct_steer_enters_the_steer_lane_exactly_once() {
+        let mut queue = MessageQueue::default();
+
+        let (id, prompt) = queue.begin_steer("change direction".to_owned().into());
+
+        assert_eq!(id, QueueId::new(0));
+        assert_eq!(prompt.display_text(), "change direction");
+        assert_eq!(queue.len(), 1);
+        assert!(queue.has_pending_steer());
+        assert!(queue.drain_ready().is_empty());
     }
 
     #[test]

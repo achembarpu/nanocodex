@@ -49,8 +49,14 @@ export type ToolStatus = "running" | "completed" | "cancelled" | "failed";
 export type ToolActivity = Readonly<{
   callId: string;
   name: string;
+  /** Concise backwards-compatible argument summary. */
   arguments: string;
+  /** Bounded serialized tool input for expandable presentation. */
+  input?: string | undefined;
+  /** Concise backwards-compatible terminal result summary. */
   result?: string | undefined;
+  /** Bounded serialized tool output, including successful generic results. */
+  output?: string | undefined;
   status: ToolStatus;
   durationNs?: number | undefined;
   images?: readonly string[] | undefined;

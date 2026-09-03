@@ -60,6 +60,7 @@ use tokio::{sync::mpsc, task::JoinSet};
 type Admission = (PaneId, TurnId, Result<Turn, NanocodexError>);
 type Completion = (PaneId, TurnId, Result<TurnResult, NanocodexError>);
 type SteerCompletion = (PaneId, components::QueueId, Result<(), NanocodexError>);
+type WaitingSteer = (PaneId, components::QueueId, Submission);
 type CancelCompletion = (PaneId, Vec<TurnId>, Option<String>);
 type SettingsCompletion = (
     PaneId,
@@ -193,6 +194,7 @@ struct DriverRuntime {
     admissions: JoinSet<Admission>,
     completions: JoinSet<Completion>,
     steers: JoinSet<SteerCompletion>,
+    waiting_steers: VecDeque<WaitingSteer>,
     cancellations: JoinSet<CancelCompletion>,
     settings_updates: JoinSet<SettingsCompletion>,
     settings_queue: VecDeque<(PaneId, String, SettingsMutation)>,
@@ -297,6 +299,7 @@ impl DriverRuntime {
             && self.admissions.is_empty()
             && self.completions.is_empty()
             && self.steers.is_empty()
+            && self.waiting_steers.is_empty()
             && self.cancellations.is_empty()
             && self.settings_updates.is_empty()
             && self.settings_queue.is_empty()
@@ -328,6 +331,18 @@ impl DriverRuntime {
             (pane, ids, error)
         });
     }
+}
+
+fn take_waiting_steer_failures(
+    waiting: &mut VecDeque<WaitingSteer>,
+) -> Vec<(PaneId, components::QueueId)> {
+    // Queue failure recovery reinserts each item at the front of the ready lane,
+    // so notify newest-first to preserve the user's original FIFO order.
+    waiting
+        .drain(..)
+        .rev()
+        .map(|(pane, id, _)| (pane, id))
+        .collect()
 }
 
 async fn connect_agent(
@@ -476,6 +491,7 @@ async fn run_inner(
         admissions: JoinSet::new(),
         completions: JoinSet::new(),
         steers: JoinSet::new(),
+        waiting_steers: VecDeque::new(),
         cancellations: JoinSet::new(),
         settings_updates: JoinSet::new(),
         settings_queue: VecDeque::new(),
@@ -597,10 +613,49 @@ async fn run_inner(
                     let result = match result {
                         Ok(result) => result,
                         Err(error) => {
+                            let message =
+                                format!("Managed connection task stopped unexpectedly: {error}");
                             request_render(app.update(AppEvent::NotifyError {
                                 pane: PaneId::Main,
-                                error: format!("Managed connection task stopped unexpectedly: {error}"),
+                                error: message.clone(),
                             }), &mut scheduler);
+                            for (pane, id) in
+                                take_waiting_steer_failures(&mut runtime.waiting_steers)
+                            {
+                                let _ = apply_update(
+                                    app.update(AppEvent::SteerFailed { pane, id }),
+                                    &mut app,
+                                    &mut runtime,
+                                    &mut terminal,
+                                    &mut scheduler,
+                                )
+                                .await?;
+                            }
+                            if let Some((pane, id, _)) = runtime.pending_submission.take() {
+                                let record = runtime.local_record(LocalEvent::WorkerTurnFinished {
+                                    id,
+                                    error: Some(message),
+                                })?;
+                                stopping |= apply_update(
+                                    app.update(AppEvent::Transcript { pane, record }),
+                                    &mut app,
+                                    &mut runtime,
+                                    &mut terminal,
+                                    &mut scheduler,
+                                )
+                                .await?;
+                                stopping |= apply_update(
+                                    app.update(AppEvent::WorkerTurnFinished {
+                                        pane,
+                                        terminal_expected: false,
+                                    }),
+                                    &mut app,
+                                    &mut runtime,
+                                    &mut terminal,
+                                    &mut scheduler,
+                                )
+                                .await?;
+                            }
                             continue;
                         }
                     };
@@ -771,6 +826,18 @@ async fn run_inner(
                                 }),
                             };
                             request_render(update, &mut scheduler);
+                            for (pane, id) in
+                                take_waiting_steer_failures(&mut runtime.waiting_steers)
+                            {
+                                stopping |= apply_update(
+                                    app.update(AppEvent::SteerFailed { pane, id }),
+                                    &mut app,
+                                    &mut runtime,
+                                    &mut terminal,
+                                    &mut scheduler,
+                                )
+                                .await?;
+                            }
                             if matches!(purpose, ConnectionPurpose::Startup)
                                 && let Some((pane, id, _)) = runtime.pending_submission.take()
                             {
@@ -778,11 +845,25 @@ async fn run_inner(
                                     id,
                                     error: Some(message),
                                 })?;
-                                request_render(app.update(AppEvent::Transcript { pane, record }), &mut scheduler);
-                                request_render(app.update(AppEvent::WorkerTurnFinished {
-                                    pane,
-                                    terminal_expected: false,
-                                }), &mut scheduler);
+                                stopping |= apply_update(
+                                    app.update(AppEvent::Transcript { pane, record }),
+                                    &mut app,
+                                    &mut runtime,
+                                    &mut terminal,
+                                    &mut scheduler,
+                                )
+                                .await?;
+                                stopping |= apply_update(
+                                    app.update(AppEvent::WorkerTurnFinished {
+                                        pane,
+                                        terminal_expected: false,
+                                    }),
+                                    &mut app,
+                                    &mut runtime,
+                                    &mut terminal,
+                                    &mut scheduler,
+                                )
+                                .await?;
                             }
                         }
                         ConnectionResult::Disconnected(Err(error)) => {
@@ -833,7 +914,26 @@ async fn run_inner(
             }
             result = runtime.admissions.join_next(), if !runtime.admissions.is_empty() => {
                 if let Some(result) = result {
-                    let (pane, id, admission) = result.map_err(|error| ManagedError::Configuration(format!("prompt task failed: {error}")))?;
+                    let (pane, id, admission) = match result {
+                        Ok(result) => result,
+                        Err(error) => {
+                            for (pane, id) in
+                                take_waiting_steer_failures(&mut runtime.waiting_steers)
+                            {
+                                let _ = apply_update(
+                                    app.update(AppEvent::SteerFailed { pane, id }),
+                                    &mut app,
+                                    &mut runtime,
+                                    &mut terminal,
+                                    &mut scheduler,
+                                )
+                                .await?;
+                            }
+                            return Err(ManagedError::Configuration(format!(
+                                "prompt task failed: {error}"
+                            )));
+                        }
+                    };
                     runtime.admitting.remove(&id);
                     let cancelled_after_admission = runtime.cancel_after_admission.remove(&id);
                     let mut updates = Vec::new();
@@ -845,7 +945,22 @@ async fn run_inner(
                             updates.push(app.update(AppEvent::Transcript { pane, record }));
                             runtime.completions.spawn(async move { (pane, id, turn.await) });
                             if cancelled_after_admission {
+                                for (pane, id) in
+                                    take_waiting_steer_failures(&mut runtime.waiting_steers)
+                                {
+                                    updates.push(app.update(AppEvent::SteerFailed { pane, id }));
+                                }
                                 runtime.cancel_controls(pane, vec![(id, control)]);
+                            } else {
+                                while let Some((pane, id, prompt)) =
+                                    runtime.waiting_steers.pop_front()
+                                {
+                                    let control = control.clone();
+                                    runtime.steers.spawn(async move {
+                                        let result = control.steer(prompt.agent_prompt()).await;
+                                        (pane, id, result)
+                                    });
+                                }
                             }
                         }
                         Err(error) => {
@@ -855,6 +970,11 @@ async fn run_inner(
                             })?;
                             updates.push(app.update(AppEvent::Transcript { pane, record }));
                             updates.push(app.update(AppEvent::WorkerTurnFinished { pane, terminal_expected: false }));
+                            for (pane, id) in
+                                take_waiting_steer_failures(&mut runtime.waiting_steers)
+                            {
+                                updates.push(app.update(AppEvent::SteerFailed { pane, id }));
+                            }
                         }
                     }
                     for update in updates {
@@ -1107,6 +1227,10 @@ async fn apply_update(
                                 let result = control.steer(prompt.agent_prompt()).await;
                                 (pane, id, result)
                             });
+                        } else if !runtime.admitting.is_empty()
+                            || runtime.pending_submission.is_some()
+                        {
+                            runtime.waiting_steers.push_back((pane, id, prompt));
                         } else {
                             let turn_id = TurnId::new(runtime.next_turn);
                             runtime.next_turn = runtime.next_turn.saturating_add(1);
@@ -1131,6 +1255,18 @@ async fn apply_update(
                             && runtime.cancelling_controls.is_empty()
                         {
                             runtime.cancellation_failed = false;
+                        }
+                        for (steer_pane, id) in
+                            take_waiting_steer_failures(&mut runtime.waiting_steers)
+                        {
+                            absorb(
+                                app.update(AppEvent::SteerFailed {
+                                    pane: steer_pane,
+                                    id,
+                                }),
+                                &mut effects,
+                                scheduler,
+                            );
                         }
                         if let Some((pending_pane, id, _)) = runtime.pending_submission.take() {
                             let record = runtime.local_record(LocalEvent::WorkerTurnFinished {
@@ -1791,15 +1927,41 @@ mod tests {
     use super::{
         HistoryWindow, cursor_at_or_before, decimal_successor, history_projection,
         history_projection_with_sequences, live_managed_projection, session_summaries,
+        take_waiting_steer_failures,
     };
+    use crate::tui::{components::QueueId, pane::PaneId, prompt::Submission};
     use nanocodex_managed::{
         AgentList, AgentSummary, EventHistoryPage, ManagedEvent, ManagedEventData, PromptInput,
     };
     use serde_json::{json, value::to_raw_value};
     use std::{
-        collections::{BTreeMap, HashMap},
+        collections::{BTreeMap, HashMap, VecDeque},
         path::Path,
     };
+
+    #[test]
+    fn terminal_failures_drain_waiting_steers_in_queue_safe_order() {
+        let mut waiting = VecDeque::from([
+            (
+                PaneId::Main,
+                QueueId::new(7),
+                Submission::text("first".to_owned()),
+            ),
+            (
+                PaneId::Main,
+                QueueId::new(8),
+                Submission::text("second".to_owned()),
+            ),
+        ]);
+
+        let failures = take_waiting_steer_failures(&mut waiting);
+
+        assert_eq!(
+            failures.iter().map(|(_, id)| *id).collect::<Vec<_>>(),
+            [QueueId::new(8), QueueId::new(7)]
+        );
+        assert!(waiting.is_empty());
+    }
 
     #[test]
     fn managed_history_projects_into_tact_user_and_assistant_records() {

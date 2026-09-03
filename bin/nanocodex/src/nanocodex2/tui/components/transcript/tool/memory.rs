@@ -521,6 +521,7 @@ mod tests {
     use serde_json::{Value, json};
 
     fn memory(arguments: Value, state: ToolState, result: Option<Value>) -> ToolEntry {
+        let execution = ToolEntry::inferred_execution("memory", &arguments, None);
         ToolEntry {
             name: "memory".to_owned(),
             arguments,
@@ -529,6 +530,7 @@ mod tests {
             duration_ns: None,
             result,
             metadata: None,
+            execution,
             substeps: Vec::new(),
             child_count: 0,
         }
@@ -573,7 +575,7 @@ mod tests {
                     ToolState::Succeeded,
                     Some(json!({"operation": "scan", "abstained": true, "candidates": []})),
                 ),
-                "Memory scan  Rust style · abstained",
+                "Memory scan  Rust style · Local · abstained",
             ),
             (
                 memory(
@@ -583,7 +585,7 @@ mod tests {
                         json!({"operation": "read", "memories": [record(7, 2, "Use early returns.")]}),
                     ),
                 ),
-                "Memory read  7@v2 · 1 memory",
+                "Memory read  7@v2 · Local · 1 memory",
             ),
             (
                 memory(
@@ -602,7 +604,7 @@ mod tests {
                         ]
                     })),
                 ),
-                "Memory read  7@v1, 8@v1, 9@v1 · 3 memories",
+                "Memory read  7@v1, 8@v1, 9@v1 · Local · 3 memories",
             ),
             (
                 memory(
@@ -641,7 +643,7 @@ mod tests {
                     ToolState::Failed,
                     Some(json!({"error": "version conflict"})),
                 ),
-                "Memory delete  7@v2 · version conflict",
+                "Memory delete  7@v2 · Local · version conflict",
             ),
         ];
 
@@ -696,7 +698,7 @@ mod tests {
                         "candidates": []
                     })),
                 ),
-                "Memory scan · local · style · abstained",
+                "Memory scan · local · style · Local · abstained",
             ),
             (
                 memory(
@@ -708,7 +710,7 @@ mod tests {
                         "memories": []
                     })),
                 ),
-                "Memory read · remote · alice:7@v2 · 0 memories",
+                "Memory read · remote · alice:7@v2 · Local · 0 memories",
             ),
         ];
 
