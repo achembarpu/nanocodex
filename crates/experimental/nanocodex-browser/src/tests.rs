@@ -206,7 +206,8 @@ async fn streaming_open_returns_before_eof_and_reuses_the_same_target() -> Resul
     let server = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await?;
         let mut request = [0_u8; 4096];
-        stream.read(&mut request).await?;
+        let bytes_read = stream.read(&mut request).await?;
+        assert!(bytes_read > 0);
         let body = b"<html><body><main>streaming document is usable</main>";
         let response = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nTransfer-Encoding: chunked\r\nConnection: keep-alive\r\n\r\n{:X}\r\n",
@@ -294,7 +295,8 @@ async fn streaming_reload_returns_before_eof() -> Result<()> {
         ] {
             let (mut stream, _) = listener.accept().await?;
             let mut request = [0_u8; 4096];
-            stream.read(&mut request).await?;
+            let bytes_read = stream.read(&mut request).await?;
+            assert!(bytes_read > 0);
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nTransfer-Encoding: chunked\r\nConnection: keep-alive\r\n\r\n{:X}\r\n",
                 body.len()
@@ -338,7 +340,8 @@ async fn ordinary_navigation_failure_keeps_the_target_reusable() -> Result<()> {
     let server = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await?;
         let mut request = [0_u8; 4096];
-        stream.read(&mut request).await?;
+        let bytes_read = stream.read(&mut request).await?;
+        assert!(bytes_read > 0);
         drop(stream);
         Ok::<(), std::io::Error>(())
     });
@@ -381,7 +384,8 @@ async fn navigation_timeout_stops_a_late_commit_and_keeps_the_target_reusable() 
     let server = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await?;
         let mut request = [0_u8; 4096];
-        stream.read(&mut request).await?;
+        let bytes_read = stream.read(&mut request).await?;
+        assert!(bytes_read > 0);
         tokio::time::sleep(Duration::from_secs(6)).await;
         let response = b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 44\r\nConnection: close\r\n\r\n<title>late</title>late navigation committed";
         let _ = stream.write_all(response).await;
