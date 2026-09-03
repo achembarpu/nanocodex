@@ -12,6 +12,10 @@ use chromiumoxide::{
                 EnableParams as NetworkEnableParams, GetRequestPostDataParams,
                 GetRequestPostDataReturns, GetResponseBodyParams, GetResponseBodyReturns,
             },
+            page::{
+                GetFrameTreeParams, GetFrameTreeReturns, NavigateParams, NavigateReturns,
+                ReloadParams, ReloadReturns, StopLoadingParams, StopLoadingReturns,
+            },
             target::{
                 FilterEntry, SessionId, SetAutoAttachParams, SetAutoAttachReturns, TargetFilter,
                 TargetId,
@@ -61,11 +65,74 @@ enum ObserverCommand {
         kind: BrowserNetworkBodyKind,
         response: oneshot::Sender<Result<NetworkBody, String>>,
     },
+    Page {
+        target_id: String,
+        command: ObserverPageCommand,
+        response: oneshot::Sender<Result<ObserverPageCommandOutcome, ObserverPageCommandError>>,
+    },
+}
+
+#[derive(Clone, Copy)]
+enum ObserverPageCommandKind {
+    Navigate,
+    Reload,
+    MainDocument,
+    StopLoading,
+}
+
+enum ObserverPageCommand {
+    Navigate(String),
+    Reload(String),
+    MainDocument,
+    StopLoading,
+}
+
+impl ObserverPageCommand {
+    const fn kind(&self) -> ObserverPageCommandKind {
+        match self {
+            Self::Navigate(_) => ObserverPageCommandKind::Navigate,
+            Self::Reload(_) => ObserverPageCommandKind::Reload,
+            Self::MainDocument => ObserverPageCommandKind::MainDocument,
+            Self::StopLoading => ObserverPageCommandKind::StopLoading,
+        }
+    }
+}
+
+pub(super) struct NavigateOutcome {
+    pub(super) frame_id: String,
+    pub(super) loader_id: Option<String>,
+    pub(super) error_text: Option<String>,
+    pub(super) is_download: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct MainDocument {
+    pub(super) frame_id: String,
+    pub(super) loader_id: String,
+    pub(super) url: String,
+    pub(super) unreachable_url: Option<String>,
+}
+
+enum ObserverPageCommandOutcome {
+    Navigate(NavigateOutcome),
+    Reload,
+    MainDocument(MainDocument),
+    StopLoading,
+}
+
+pub(super) enum ObserverPageCommandError {
+    Rejected(String),
+    Observer(String),
 }
 
 struct PendingBody {
     kind: BrowserNetworkBodyKind,
     response: oneshot::Sender<Result<NetworkBody, String>>,
+}
+
+struct PendingPageCommand {
+    kind: ObserverPageCommandKind,
+    response: oneshot::Sender<Result<ObserverPageCommandOutcome, ObserverPageCommandError>>,
 }
 
 #[derive(Default)]
@@ -124,6 +191,91 @@ impl NetworkObserver {
                 message: "the observer dropped a body response".to_owned(),
             })?
             .map_err(|message| BrowserError::NetworkObserver { message })
+    }
+
+    pub(super) async fn navigate(
+        &self,
+        target_id: String,
+        url: String,
+    ) -> Result<NavigateOutcome, ObserverPageCommandError> {
+        match self
+            .page_command(target_id, ObserverPageCommand::Navigate(url))
+            .await?
+        {
+            ObserverPageCommandOutcome::Navigate(outcome) => Ok(outcome),
+            _ => Err(ObserverPageCommandError::Observer(
+                "the observer returned the wrong navigate response".to_owned(),
+            )),
+        }
+    }
+
+    pub(super) async fn reload(
+        &self,
+        target_id: String,
+        loader_id: String,
+    ) -> Result<(), ObserverPageCommandError> {
+        match self
+            .page_command(target_id, ObserverPageCommand::Reload(loader_id))
+            .await?
+        {
+            ObserverPageCommandOutcome::Reload => Ok(()),
+            _ => Err(ObserverPageCommandError::Observer(
+                "the observer returned the wrong reload response".to_owned(),
+            )),
+        }
+    }
+
+    pub(super) async fn main_document(
+        &self,
+        target_id: String,
+    ) -> Result<MainDocument, ObserverPageCommandError> {
+        match self
+            .page_command(target_id, ObserverPageCommand::MainDocument)
+            .await?
+        {
+            ObserverPageCommandOutcome::MainDocument(document) => Ok(document),
+            _ => Err(ObserverPageCommandError::Observer(
+                "the observer returned the wrong main-document response".to_owned(),
+            )),
+        }
+    }
+
+    pub(super) async fn stop_loading(
+        &self,
+        target_id: String,
+    ) -> Result<(), ObserverPageCommandError> {
+        match self
+            .page_command(target_id, ObserverPageCommand::StopLoading)
+            .await?
+        {
+            ObserverPageCommandOutcome::StopLoading => Ok(()),
+            _ => Err(ObserverPageCommandError::Observer(
+                "the observer returned the wrong stop-loading response".to_owned(),
+            )),
+        }
+    }
+
+    async fn page_command(
+        &self,
+        target_id: String,
+        command: ObserverPageCommand,
+    ) -> Result<ObserverPageCommandOutcome, ObserverPageCommandError> {
+        let (response, completed) = oneshot::channel();
+        self.commands
+            .send(ObserverCommand::Page {
+                target_id,
+                command,
+                response,
+            })
+            .await
+            .map_err(|_| {
+                ObserverPageCommandError::Observer("the observer task stopped".to_owned())
+            })?;
+        completed.await.map_err(|_| {
+            ObserverPageCommandError::Observer(
+                "the observer dropped a page command response".to_owned(),
+            )
+        })?
     }
 
     pub(super) fn is_finished(&self) -> bool {
@@ -205,12 +357,14 @@ async fn run(
     let mut stop_reason = "the observer task stopped".to_owned();
     let mut ready = Some(ready);
     let mut pending_bodies = HashMap::<CallId, PendingBody>::new();
+    let mut pending_page_commands = HashMap::<CallId, PendingPageCommand>::new();
     let mut targets = AttachedTargets::default();
     let mut active_target_id = root_target_id.as_ref().to_owned();
     let mut auto_attach_ready = false;
 
     loop {
         pending_bodies.retain(|_, pending| !pending.response.is_closed());
+        pending_page_commands.retain(|_, pending| !pending.response.is_closed());
         tokio::select! {
             message = connection.next() => {
                 let Some(message) = message else {
@@ -247,6 +401,9 @@ async fn run(
                             complete_ready(&mut ready, auto_attach_ready, &targets);
                         } else if let Some(pending) = pending_bodies.remove(&response.id) {
                             let result = decode_body_response(response, pending.kind);
+                            let _ = pending.response.send(result);
+                        } else if let Some(pending) = pending_page_commands.remove(&response.id) {
+                            let result = decode_page_command_response(response, pending.kind);
                             let _ = pending.response.send(result);
                         } else if let Some(error) = response.error {
                             warn!(
@@ -309,6 +466,38 @@ async fn run(
                             }
                         }
                     }
+                    ObserverCommand::Page {
+                        target_id,
+                        command,
+                        response,
+                    } => {
+                        let Some(session_id) = targets.session_targets.iter().find_map(
+                            |(session_id, attached_target_id)| {
+                                (attached_target_id == &target_id).then(|| session_id.clone())
+                            },
+                        ) else {
+                            let _ = response.send(Err(ObserverPageCommandError::Observer(
+                                format!("the page session for target {target_id} is unavailable"),
+                            )));
+                            continue;
+                        };
+                        let kind = command.kind();
+                        match submit_page_command(
+                            &mut connection,
+                            SessionId::new(session_id),
+                            command,
+                        ) {
+                            Ok(call_id) => {
+                                pending_page_commands.insert(
+                                    call_id,
+                                    PendingPageCommand { kind, response },
+                                );
+                            }
+                            Err(message) => {
+                                let _ = response.send(Err(ObserverPageCommandError::Observer(message)));
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -323,6 +512,11 @@ async fn run(
     for (_, pending) in pending_bodies {
         let _ = pending.response.send(Err(stop_reason.clone()));
     }
+    for (_, pending) in pending_page_commands {
+        let _ = pending
+            .response
+            .send(Err(ObserverPageCommandError::Observer(stop_reason.clone())));
+    }
     while let Ok(command) = commands.try_recv() {
         match command {
             ObserverCommand::Activate { response, .. } => {
@@ -330,6 +524,9 @@ async fn run(
             }
             ObserverCommand::Body { response, .. } => {
                 let _ = response.send(Err(stop_reason.clone()));
+            }
+            ObserverCommand::Page { response, .. } => {
+                let _ = response.send(Err(ObserverPageCommandError::Observer(stop_reason.clone())));
             }
         }
     }
@@ -437,6 +634,29 @@ fn submit_body(
     .map_err(|error| error.to_string())
 }
 
+fn submit_page_command(
+    connection: &mut Connection<CdpEventMessage>,
+    session_id: SessionId,
+    command: ObserverPageCommand,
+) -> Result<CallId, String> {
+    match command {
+        ObserverPageCommand::Navigate(url) => {
+            submit(connection, Some(session_id), NavigateParams::new(url))
+        }
+        ObserverPageCommand::Reload(loader_id) => {
+            let params = ReloadParams::builder().loader_id(loader_id).build();
+            submit(connection, Some(session_id), params)
+        }
+        ObserverPageCommand::MainDocument => {
+            submit(connection, Some(session_id), GetFrameTreeParams::default())
+        }
+        ObserverPageCommand::StopLoading => {
+            submit(connection, Some(session_id), StopLoadingParams::default())
+        }
+    }
+    .map_err(|error| error.to_string())
+}
+
 fn response_result<T: serde::de::DeserializeOwned>(
     response: chromiumoxide::types::Response,
 ) -> Result<T, String> {
@@ -469,6 +689,53 @@ fn decode_body_response(
                 body: response.body,
                 base64_encoded: response.base64_encoded,
             })
+        }
+    }
+}
+
+fn decode_page_command_response(
+    response: chromiumoxide::types::Response,
+    kind: ObserverPageCommandKind,
+) -> Result<ObserverPageCommandOutcome, ObserverPageCommandError> {
+    if let Some(error) = response.error {
+        return Err(ObserverPageCommandError::Rejected(error.to_string()));
+    }
+    let result = response.result.ok_or_else(|| {
+        ObserverPageCommandError::Observer("DevTools returned no command result".to_owned())
+    })?;
+    match kind {
+        ObserverPageCommandKind::Navigate => {
+            let response = serde_json::from_value::<NavigateReturns>(result)
+                .map_err(|error| ObserverPageCommandError::Observer(error.to_string()))?;
+            Ok(ObserverPageCommandOutcome::Navigate(NavigateOutcome {
+                frame_id: response.frame_id.as_ref().to_owned(),
+                loader_id: response
+                    .loader_id
+                    .map(|loader_id| loader_id.as_ref().to_owned()),
+                error_text: response.error_text,
+                is_download: response.is_download.unwrap_or(false),
+            }))
+        }
+        ObserverPageCommandKind::Reload => {
+            serde_json::from_value::<ReloadReturns>(result)
+                .map_err(|error| ObserverPageCommandError::Observer(error.to_string()))?;
+            Ok(ObserverPageCommandOutcome::Reload)
+        }
+        ObserverPageCommandKind::MainDocument => {
+            let response = serde_json::from_value::<GetFrameTreeReturns>(result)
+                .map_err(|error| ObserverPageCommandError::Observer(error.to_string()))?;
+            let frame = response.frame_tree.frame;
+            Ok(ObserverPageCommandOutcome::MainDocument(MainDocument {
+                frame_id: frame.id.as_ref().to_owned(),
+                loader_id: frame.loader_id.as_ref().to_owned(),
+                url: frame.url,
+                unreachable_url: frame.unreachable_url,
+            }))
+        }
+        ObserverPageCommandKind::StopLoading => {
+            serde_json::from_value::<StopLoadingReturns>(result)
+                .map_err(|error| ObserverPageCommandError::Observer(error.to_string()))?;
+            Ok(ObserverPageCommandOutcome::StopLoading)
         }
     }
 }

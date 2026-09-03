@@ -63,7 +63,7 @@ use chromiumoxide::{
             page::{
                 AddScriptToEvaluateOnNewDocumentParams, EventJavascriptDialogOpening,
                 GetNavigationHistoryParams, HandleJavaScriptDialogParams,
-                NavigateToHistoryEntryParams, Viewport,
+                NavigateToHistoryEntryParams, StopLoadingParams, Viewport,
             },
             target::{FilterEntry, GetTargetsParams, SetAutoAttachParams, TargetFilter, TargetId},
             web_authn::{
@@ -115,6 +115,7 @@ use credential_store::VirtualCredentialStore;
 
 const DEFAULT_WAIT_TIMEOUT: Duration = Duration::from_secs(25);
 const DEFAULT_NAVIGATION_TIMEOUT: Duration = Duration::from_secs(5);
+const NAVIGATION_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
 const BROWSER_LAUNCH_TIMEOUT: Duration = Duration::from_secs(10);
 const COOKIE_AUTHORIZATION_TIMEOUT: Duration = Duration::from_secs(120);
 const COOKIE_AUTHORIZATION_POLL_INTERVAL: Duration = Duration::from_millis(250);
@@ -152,7 +153,6 @@ const MAX_DIAGNOSTIC_RESULTS: usize = 1_000;
 const REACT_DIAGNOSTICS_PROTOCOL_VERSION: u32 = 1;
 const REACT_DIAGNOSTICS_MAX_EVENTS: usize = 512;
 const REACT_DIAGNOSTICS_BUNDLE: &str = include_str!("../assets/react_diagnostics.js");
-
 pub(crate) struct NativeBrowser {
     runtime_dir: TempDir,
     executable: Option<PathBuf>,
@@ -3530,6 +3530,11 @@ impl NativeBrowser {
                 session.sync_virtual_authenticators().await?;
             }
             let observation = interaction::ActionObservation::capture(&session.diagnostics)?;
+            let requests_after = session
+                .diagnostics
+                .lock()
+                .map_err(|_| BrowserError::DiagnosticsUnavailable)?
+                .next_request_sequence;
             let wait_for_completion = requires_action_completion(action_name);
             let trace_action = action.clone();
             let started = Instant::now();
@@ -3545,6 +3550,8 @@ impl NativeBrowser {
                             &observation,
                         )
                         .await?
+                    } else if is_managed_navigation_action(action_name) {
+                        navigation_network_snapshot(&session.diagnostics, requests_after)?
                     } else {
                         interaction::empty_network()
                     };
@@ -3762,7 +3769,6 @@ const fn session_stopped(error: &BrowserError, driver_finished: bool) -> Option<
         BrowserError::Cdp(CdpError::ChannelSendError(ChannelError::Canceled(_)))
         | BrowserError::Cdp(CdpError::Timeout)
         | BrowserError::NetworkObserver { .. }
-        | BrowserError::NavigationTimeout { .. }
         | BrowserError::EvaluationTimeout { .. } => Some(true),
         _ if driver_finished => Some(true),
         _ => None,
@@ -3782,7 +3788,7 @@ async fn execute_action(
         BrowserAction::Open { url } => {
             validate_url(&url)?;
             session.validate_navigation(&Url::parse(&url)?)?;
-            navigate(&session.page, &url).await?;
+            navigate_managed(session, &url).await?;
             if let Some(platform) = &session.context.platform {
                 override_navigator_platform(&session.page, platform).await?;
             }
@@ -3791,7 +3797,7 @@ async fn execute_action(
             Ok(action_result(sequence, BrowserActionName::Open))
         }
         BrowserAction::Reload => {
-            reload(&session.page).await?;
+            reload_managed(session).await?;
             if let Some(platform) = &session.context.platform {
                 override_navigator_platform(&session.page, platform).await?;
             }
@@ -4306,7 +4312,7 @@ return element.checked;"#
                     session.context.viewport = Some(descriptor.viewport());
                     session.context.user_agent = Some(descriptor.user_agent.clone());
                     session.context.platform = Some(descriptor.platform.clone());
-                    reload(&session.page).await?;
+                    reload_managed(session).await?;
                     override_navigator_platform(&session.page, &descriptor.platform).await?;
                     session.refs.clear();
                     if let Some(ready) = ready.as_ref() {
@@ -5362,7 +5368,7 @@ return {
             let page = session.browser.new_page("about:blank").await?;
             session.activate_page(page).await?;
             if let Some(url) = url {
-                navigate(&session.page, &url).await?;
+                navigate_managed(session, &url).await?;
                 session.sync_virtual_authenticators().await?;
             }
             Ok(action_result(sequence, BrowserActionName::NewTab))
@@ -6034,9 +6040,7 @@ async fn navigate(page: &Page, url: &str) -> Result<(), BrowserError> {
     match timeout(DEFAULT_NAVIGATION_TIMEOUT, page.goto(url)).await {
         Ok(Ok(_)) => Ok(()),
         Ok(Err(error)) => {
-            if let Some(current_url) =
-                wait_for_usable_document(page, url, DEFAULT_NAVIGATION_TIMEOUT).await
-            {
+            if let Some(current_url) = recover_navigation(page, url).await? {
                 warn!(
                     target: "nanocodex_browser",
                     requested_url = url,
@@ -6050,9 +6054,7 @@ async fn navigate(page: &Page, url: &str) -> Result<(), BrowserError> {
             }
         }
         Err(_) => {
-            if let Some(current_url) =
-                wait_for_usable_document(page, url, DEFAULT_NAVIGATION_TIMEOUT).await
-            {
+            if let Some(current_url) = recover_navigation(page, url).await? {
                 warn!(
                     target: "nanocodex_browser",
                     requested_url = url,
@@ -6070,49 +6072,226 @@ async fn navigate(page: &Page, url: &str) -> Result<(), BrowserError> {
     }
 }
 
-async fn reload(page: &Page) -> Result<(), BrowserError> {
-    let url = page
+async fn navigate_managed(session: &Session, url: &str) -> Result<(), BrowserError> {
+    let target_id = session.page.target_id().as_ref().to_owned();
+    let navigation = async {
+        let outcome = session
+            .network_observer
+            .navigate(target_id.clone(), url.to_owned())
+            .await
+            .map_err(|error| navigation_command_error(url, error))?;
+        match classify_navigation_outcome(url, outcome)? {
+            ManagedNavigation::SameDocument => Ok(()),
+            ManagedNavigation::CrossDocument {
+                frame_id,
+                loader_id,
+            } => {
+                let document = wait_for_managed_document(session, &target_id, |document| {
+                    document.frame_id == frame_id && document.loader_id == loader_id
+                })
+                .await?;
+                validate_committed_document(url, &document)
+            }
+        }
+    };
+    finish_managed_navigation(session, target_id.clone(), url, navigation).await
+}
+
+async fn reload_managed(session: &Session) -> Result<(), BrowserError> {
+    let url = session
+        .page
         .url()
         .await?
         .unwrap_or_else(|| "about:blank".to_owned());
-    match timeout(DEFAULT_NAVIGATION_TIMEOUT, page.reload()).await {
-        Ok(Ok(_)) => Ok(()),
-        Ok(Err(error)) => {
-            if wait_for_usable_document(page, &url, DEFAULT_NAVIGATION_TIMEOUT)
-                .await
-                .is_some()
-            {
-                warn!(
-                    target: "nanocodex_browser",
-                    current_url = url,
-                    %error,
-                    "continuing after a reload race left a usable document"
-                );
-                Ok(())
-            } else {
-                Err(error.into())
-            }
-        }
+    let target_id = session.page.target_id().as_ref().to_owned();
+    let navigation = async {
+        let before = main_document(session, &target_id).await?;
+        session
+            .network_observer
+            .reload(target_id.clone(), before.loader_id.clone())
+            .await
+            .map_err(|error| navigation_command_error(&url, error))?;
+        let document = wait_for_managed_document(session, &target_id, |document| {
+            document.frame_id == before.frame_id && document.loader_id != before.loader_id
+        })
+        .await?;
+        validate_committed_document(&url, &document)
+    };
+    finish_managed_navigation(session, target_id.clone(), &url, navigation).await
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ManagedNavigation {
+    SameDocument,
+    CrossDocument { frame_id: String, loader_id: String },
+}
+
+fn classify_navigation_outcome(
+    url: &str,
+    outcome: network_observer::NavigateOutcome,
+) -> Result<ManagedNavigation, BrowserError> {
+    if let Some(message) = outcome.error_text {
+        return Err(BrowserError::NavigationFailed {
+            url: url.to_owned(),
+            message,
+        });
+    }
+    if outcome.is_download {
+        return Err(BrowserError::NavigationDownload {
+            url: url.to_owned(),
+        });
+    }
+    Ok(match outcome.loader_id {
+        Some(loader_id) => ManagedNavigation::CrossDocument {
+            frame_id: outcome.frame_id,
+            loader_id,
+        },
+        None => ManagedNavigation::SameDocument,
+    })
+}
+
+async fn finish_managed_navigation<F>(
+    session: &Session,
+    target_id: String,
+    requested_url: &str,
+    navigation: F,
+) -> Result<(), BrowserError>
+where
+    F: std::future::Future<Output = Result<(), BrowserError>>,
+{
+    match timeout(DEFAULT_NAVIGATION_TIMEOUT, navigation).await {
+        Ok(result) => result,
         Err(_) => {
-            if wait_for_usable_document(page, &url, DEFAULT_NAVIGATION_TIMEOUT)
-                .await
-                .is_some()
-            {
-                warn!(
-                    target: "nanocodex_browser",
-                    current_url = url,
-                    timeout_ms = DEFAULT_NAVIGATION_TIMEOUT.as_millis(),
-                    "continuing after reload produced a usable document while resources kept loading"
-                );
-                Ok(())
-            } else {
-                Err(BrowserError::NavigationTimeout {
-                    url,
-                    milliseconds: DEFAULT_NAVIGATION_TIMEOUT.as_millis(),
-                })
-            }
+            stop_and_settle_managed_navigation(session, &target_id).await?;
+            Err(BrowserError::NavigationTimeout {
+                url: requested_url.to_owned(),
+                milliseconds: DEFAULT_NAVIGATION_TIMEOUT.as_millis(),
+            })
         }
     }
+}
+
+fn navigation_command_error(
+    url: &str,
+    error: network_observer::ObserverPageCommandError,
+) -> BrowserError {
+    match error {
+        network_observer::ObserverPageCommandError::Rejected(message) => {
+            BrowserError::NavigationFailed {
+                url: url.to_owned(),
+                message,
+            }
+        }
+        network_observer::ObserverPageCommandError::Observer(message) => {
+            BrowserError::NetworkObserver { message }
+        }
+    }
+}
+
+fn observer_page_error(error: network_observer::ObserverPageCommandError) -> BrowserError {
+    let message = match error {
+        network_observer::ObserverPageCommandError::Rejected(message) => {
+            format!("DevTools rejected an observer lifecycle command: {message}")
+        }
+        network_observer::ObserverPageCommandError::Observer(message) => message,
+    };
+    BrowserError::NetworkObserver { message }
+}
+
+async fn main_document(
+    session: &Session,
+    target_id: &str,
+) -> Result<network_observer::MainDocument, BrowserError> {
+    session
+        .network_observer
+        .main_document(target_id.to_owned())
+        .await
+        .map_err(observer_page_error)
+}
+
+async fn wait_for_managed_document(
+    session: &Session,
+    target_id: &str,
+    matches: impl Fn(&network_observer::MainDocument) -> bool,
+) -> Result<network_observer::MainDocument, BrowserError> {
+    loop {
+        let document = main_document(session, target_id).await?;
+        if matches(&document) {
+            return Ok(document);
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+fn validate_committed_document(
+    requested_url: &str,
+    document: &network_observer::MainDocument,
+) -> Result<(), BrowserError> {
+    if let Some(unreachable_url) = document
+        .unreachable_url
+        .as_deref()
+        .filter(|url| !url.is_empty())
+    {
+        return Err(BrowserError::NavigationFailed {
+            url: requested_url.to_owned(),
+            message: format!("Chromium committed an error document for {unreachable_url}"),
+        });
+    }
+    if document.url.starts_with("chrome-error:") {
+        return Err(BrowserError::NavigationFailed {
+            url: requested_url.to_owned(),
+            message: "Chromium committed an error document".to_owned(),
+        });
+    }
+    Ok(())
+}
+
+async fn stop_and_settle_managed_navigation(
+    session: &Session,
+    target_id: &str,
+) -> Result<(), BrowserError> {
+    let cleanup = async {
+        session
+            .network_observer
+            .stop_loading(target_id.to_owned())
+            .await
+            .map_err(observer_page_error)?;
+        let mut previous = main_document(session, target_id).await?;
+        loop {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            let current = main_document(session, target_id).await?;
+            if current.frame_id == previous.frame_id && current.loader_id == previous.loader_id {
+                return Ok(());
+            }
+            previous = current;
+        }
+    };
+    timeout(NAVIGATION_CLEANUP_TIMEOUT, cleanup)
+        .await
+        .map_err(|_| BrowserError::NetworkObserver {
+            message: format!(
+                "navigation cleanup for target {target_id} did not settle within {}ms",
+                NAVIGATION_CLEANUP_TIMEOUT.as_millis()
+            ),
+        })?
+}
+
+async fn recover_navigation(
+    page: &Page,
+    requested_url: &str,
+) -> Result<Option<String>, BrowserError> {
+    // `chromiumoxide` resolves Page.navigate only after the load event. Modern
+    // applications can keep that event pending indefinitely despite already
+    // exposing a usable document. Stop the outstanding load before returning
+    // from our timeout so its internal navigation watcher cannot poison the
+    // next action, then allow a short bounded document-state recovery window.
+    let stop_result = page.execute(StopLoadingParams::default()).await;
+    let recovered = wait_for_usable_document(page, requested_url, MAIN_CONTEXT_RETRY_TIMEOUT).await;
+    if recovered.is_some() {
+        return Ok(recovered);
+    }
+    stop_result?;
+    Ok(None)
 }
 
 async fn navigate_history(page: &Page, delta: i64) -> Result<(), BrowserError> {
@@ -7248,9 +7427,7 @@ const fn action_result(sequence: u64, action: BrowserActionName) -> BrowserActio
 const fn requires_action_completion(action: BrowserActionName) -> bool {
     matches!(
         action,
-        BrowserActionName::Open
-            | BrowserActionName::Reload
-            | BrowserActionName::Click
+        BrowserActionName::Click
             | BrowserActionName::Fill
             | BrowserActionName::Press
             | BrowserActionName::Hover
@@ -7281,11 +7458,47 @@ const fn captures_action_outcome(action: BrowserActionName) -> bool {
     requires_action_completion(action)
         || matches!(
             action,
-            BrowserActionName::ForcePseudoState
+            BrowserActionName::Open
+                | BrowserActionName::Reload
+                | BrowserActionName::ForcePseudoState
                 | BrowserActionName::NewTab
                 | BrowserActionName::SelectTab
                 | BrowserActionName::CloseTab
         )
+}
+
+const fn is_managed_navigation_action(action: BrowserActionName) -> bool {
+    matches!(action, BrowserActionName::Open | BrowserActionName::Reload)
+}
+
+fn navigation_network_snapshot(
+    diagnostics: &Arc<StdMutex<Diagnostics>>,
+    after: u64,
+) -> Result<crate::BrowserActionNetwork, BrowserError> {
+    let diagnostics = diagnostics
+        .lock()
+        .map_err(|_| BrowserError::DiagnosticsUnavailable)?;
+    let requests = diagnostics
+        .requests
+        .iter()
+        .filter(|entry| entry.sequence > after)
+        .collect::<Vec<_>>();
+    Ok(crate::BrowserActionNetwork {
+        request_count: requests.len(),
+        completed_count: requests
+            .iter()
+            .filter(|entry| entry.request.completed && entry.request.failure.is_none())
+            .count(),
+        failed_count: requests
+            .iter()
+            .filter(|entry| entry.request.failure.is_some())
+            .count(),
+        navigation: requests
+            .iter()
+            .any(|entry| entry.request.resource_type.eq_ignore_ascii_case("document")),
+        timed_out: false,
+        waited_ms: 0,
+    })
 }
 
 async fn capture_action_outcome(
@@ -7903,6 +8116,10 @@ pub enum BrowserError {
         "browser navigation to {url} did not produce a usable document within {milliseconds}ms"
     )]
     NavigationTimeout { url: String, milliseconds: u128 },
+    #[error("browser navigation to {url} failed: {message}")]
+    NavigationFailed { url: String, message: String },
+    #[error("browser navigation to {url} started a download instead of committing a document")]
+    NavigationDownload { url: String },
     #[error("browser wait of {milliseconds}ms exceeds the maximum of {maximum}ms")]
     WaitTooLong { milliseconds: u64, maximum: u128 },
     #[error("mobile audit requires an open page")]
@@ -8282,10 +8499,11 @@ mod tests {
     use super::isolated_launch_config;
     use super::{
         BrowserConfig, Chromium, Diagnostics, GateSignals, MAX_ACTION_INPUT_BYTES,
-        MAX_CONSOLE_ENTRIES, MAX_DIAGNOSTIC_TEXT_BYTES, MAX_NETWORK_REQUESTS, NetworkSource,
-        allowed_cookie_params, build_config, captured_profile_cookies, classify_gate,
-        close_chromium, cookie_param, diagnostic_limit, profile_cookie, profile_launch_config,
-        resolve_extension_directory, session_stopped, trace_browser_configuration, validate_url,
+        MAX_CONSOLE_ENTRIES, MAX_DIAGNOSTIC_TEXT_BYTES, MAX_NETWORK_REQUESTS, ManagedNavigation,
+        NetworkSource, allowed_cookie_params, build_config, captured_profile_cookies,
+        classify_gate, classify_navigation_outcome, close_chromium, cookie_param, diagnostic_limit,
+        profile_cookie, profile_launch_config, resolve_extension_directory, session_stopped,
+        trace_browser_configuration, validate_url,
     };
     use crate::session::ProfileCookieSnapshot;
     use crate::{
@@ -9448,7 +9666,66 @@ mod tests {
     }
 
     #[test]
-    fn in_flight_timeouts_discard_the_session() {
+    fn managed_navigation_outcomes_distinguish_documents_fragments_errors_and_downloads() {
+        let cross_document = classify_navigation_outcome(
+            "https://example.com/next",
+            super::network_observer::NavigateOutcome {
+                frame_id: "frame".to_owned(),
+                loader_id: Some("loader".to_owned()),
+                error_text: None,
+                is_download: false,
+            },
+        )
+        .expect("cross-document navigation");
+        assert_eq!(
+            cross_document,
+            ManagedNavigation::CrossDocument {
+                frame_id: "frame".to_owned(),
+                loader_id: "loader".to_owned(),
+            }
+        );
+
+        let same_document = classify_navigation_outcome(
+            "https://example.com/page#fragment",
+            super::network_observer::NavigateOutcome {
+                frame_id: "frame".to_owned(),
+                loader_id: None,
+                error_text: None,
+                is_download: false,
+            },
+        )
+        .expect("same-document navigation");
+        assert_eq!(same_document, ManagedNavigation::SameDocument);
+
+        assert!(matches!(
+            classify_navigation_outcome(
+                "https://unreachable.invalid",
+                super::network_observer::NavigateOutcome {
+                    frame_id: "frame".to_owned(),
+                    loader_id: Some("loader".to_owned()),
+                    error_text: Some("net::ERR_NAME_NOT_RESOLVED".to_owned()),
+                    is_download: false,
+                },
+            ),
+            Err(BrowserError::NavigationFailed { ref message, .. })
+                if message == "net::ERR_NAME_NOT_RESOLVED"
+        ));
+        assert!(matches!(
+            classify_navigation_outcome(
+                "https://example.com/archive.zip",
+                super::network_observer::NavigateOutcome {
+                    frame_id: "frame".to_owned(),
+                    loader_id: None,
+                    error_text: None,
+                    is_download: true,
+                },
+            ),
+            Err(BrowserError::NavigationDownload { .. })
+        ));
+    }
+
+    #[test]
+    fn session_discard_classification_separates_navigation_from_observer_lifecycle() {
         assert_eq!(
             session_stopped(
                 &BrowserError::EvaluationTimeout {
@@ -9466,12 +9743,50 @@ mod tests {
                 },
                 false,
             ),
+            None
+        );
+        assert_eq!(
+            session_stopped(
+                &BrowserError::NavigationFailed {
+                    url: "https://example.com".to_owned(),
+                    message: "net::ERR_FAILED".to_owned(),
+                },
+                false,
+            ),
+            None
+        );
+        assert_eq!(
+            session_stopped(
+                &BrowserError::NavigationDownload {
+                    url: "https://example.com/archive.zip".to_owned(),
+                },
+                false,
+            ),
+            None
+        );
+        assert_eq!(
+            session_stopped(
+                &BrowserError::NetworkObserver {
+                    message: "connection closed".to_owned(),
+                },
+                false,
+            ),
             Some(true)
         );
         assert_eq!(
             session_stopped(
                 &BrowserError::Cdp(chromiumoxide::error::CdpError::Timeout),
                 false,
+            ),
+            Some(true)
+        );
+        assert_eq!(
+            session_stopped(
+                &BrowserError::NavigationFailed {
+                    url: "https://example.com".to_owned(),
+                    message: "net::ERR_FAILED".to_owned(),
+                },
+                true,
             ),
             Some(true)
         );

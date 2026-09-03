@@ -1,4 +1,7 @@
-use std::{collections::BTreeMap, time::Instant};
+use std::{
+    collections::BTreeMap,
+    time::{Duration, Instant},
+};
 
 use eyre::{Result, eyre};
 use nanocodex_tools::{
@@ -193,6 +196,321 @@ async fn virtual_credentials_require_the_first_navigation() -> Result<()> {
         Err(BrowserError::VirtualAuthenticatorNotReady)
     ));
     Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires a local Chrome or Chromium installation"]
+async fn streaming_open_returns_before_eof_and_reuses_the_same_target() -> Result<()> {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+    let address = listener.local_addr()?;
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await?;
+        let mut request = [0_u8; 4096];
+        stream.read(&mut request).await?;
+        let body = b"<html><body><main>streaming document is usable</main>";
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nTransfer-Encoding: chunked\r\nConnection: keep-alive\r\n\r\n{:X}\r\n",
+            body.len()
+        );
+        stream.write_all(response.as_bytes()).await?;
+        stream.write_all(body).await?;
+        stream.write_all(b"\r\n").await?;
+        stream.flush().await?;
+        std::future::pending::<()>().await;
+        Ok::<(), std::io::Error>(())
+    });
+    let browser = Browser::new()?;
+    browser.start().await?;
+    let target_id = active_tab_id(&browser).await?;
+    let url = format!("http://127.0.0.1:{}/", address.port());
+
+    let started = Instant::now();
+    browser.execute(BrowserAction::Open { url }).await?;
+    assert!(
+        started.elapsed() < Duration::from_secs(4),
+        "streaming navigation waited for the load deadline: {:?}",
+        started.elapsed()
+    );
+    let content = browser
+        .execute(BrowserAction::Evaluate {
+            expression: "document.body.textContent".to_owned(),
+        })
+        .await?;
+    assert!(matches!(
+        content,
+        BrowserActionResult::Evaluation { ref value, .. }
+            if value.as_str().is_some_and(|text| text.contains("streaming document is usable"))
+    ));
+
+    browser
+        .execute(BrowserAction::Open {
+            url: "data:text/html,next%20navigation%20works".to_owned(),
+        })
+        .await?;
+    assert_eq!(active_tab_id(&browser).await?, target_id);
+    browser.close().await?;
+    server.abort();
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires a local Chrome or Chromium installation"]
+async fn same_document_fragment_navigation_preserves_the_document_and_target() -> Result<()> {
+    let browser = Browser::new()?;
+    browser.start().await?;
+    let base = "data:text/html,<title>fragment</title><script>window.__fragmentToken='same-document'</script>";
+    browser
+        .execute(BrowserAction::Open {
+            url: base.to_owned(),
+        })
+        .await?;
+    let target_id = active_tab_id(&browser).await?;
+
+    browser
+        .execute(BrowserAction::Open {
+            url: format!("{base}#section"),
+        })
+        .await?;
+
+    assert_eq!(active_tab_id(&browser).await?, target_id);
+    assert_eq!(
+        evaluate_string(&browser, "`${location.hash}:${window.__fragmentToken}`").await?,
+        "#section:same-document"
+    );
+    browser.close().await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires a local Chrome or Chromium installation"]
+async fn streaming_reload_returns_before_eof() -> Result<()> {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+    let address = listener.local_addr()?;
+    let server = tokio::spawn(async move {
+        let mut retained_streams = Vec::new();
+        for body in [
+            b"<html><body><main>first streaming document</main>".as_slice(),
+            b"<html><body><main>reloaded streaming document</main>".as_slice(),
+        ] {
+            let (mut stream, _) = listener.accept().await?;
+            let mut request = [0_u8; 4096];
+            stream.read(&mut request).await?;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nTransfer-Encoding: chunked\r\nConnection: keep-alive\r\n\r\n{:X}\r\n",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).await?;
+            stream.write_all(body).await?;
+            stream.write_all(b"\r\n").await?;
+            stream.flush().await?;
+            retained_streams.push(stream);
+        }
+        std::future::pending::<()>().await;
+        Ok::<(), std::io::Error>(())
+    });
+    let browser = Browser::new()?;
+    browser.start().await?;
+    let url = format!("http://127.0.0.1:{}/", address.port());
+    browser.execute(BrowserAction::Open { url }).await?;
+
+    let started = Instant::now();
+    browser.execute(BrowserAction::Reload).await?;
+    assert!(
+        started.elapsed() < Duration::from_secs(4),
+        "streaming reload waited for the load deadline: {:?}",
+        started.elapsed()
+    );
+    assert!(
+        evaluate_string(&browser, "document.body.textContent")
+            .await?
+            .contains("reloaded streaming document")
+    );
+    browser.close().await?;
+    server.abort();
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires a local Chrome or Chromium installation"]
+async fn ordinary_navigation_failure_keeps_the_target_reusable() -> Result<()> {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+    let address = listener.local_addr()?;
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await?;
+        let mut request = [0_u8; 4096];
+        stream.read(&mut request).await?;
+        drop(stream);
+        Ok::<(), std::io::Error>(())
+    });
+    let browser = Browser::new()?;
+    browser.start().await?;
+    let target_id = active_tab_id(&browser).await?;
+
+    let error = browser
+        .execute(BrowserAction::Open {
+            url: format!("http://127.0.0.1:{}/", address.port()),
+        })
+        .await
+        .expect_err("an empty HTTP response must fail navigation");
+    assert!(
+        matches!(
+            error,
+            BrowserError::NavigationFailed { ref message, .. }
+                if message.contains("net::ERR_")
+        ),
+        "unexpected navigation error: {error:?}"
+    );
+    browser
+        .execute(BrowserAction::Open {
+            url: "data:text/html,<title>reused</title>navigation%20reused".to_owned(),
+        })
+        .await?;
+    assert_eq!(active_tab_id(&browser).await?, target_id);
+    assert_eq!(evaluate_string(&browser, "document.title").await?, "reused");
+
+    browser.close().await?;
+    server.await??;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires a local Chrome or Chromium installation"]
+async fn navigation_timeout_stops_a_late_commit_and_keeps_the_target_reusable() -> Result<()> {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+    let address = listener.local_addr()?;
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await?;
+        let mut request = [0_u8; 4096];
+        stream.read(&mut request).await?;
+        tokio::time::sleep(Duration::from_secs(6)).await;
+        let response = b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 44\r\nConnection: close\r\n\r\n<title>late</title>late navigation committed";
+        let _ = stream.write_all(response).await;
+        let _ = stream.flush().await;
+        Ok::<(), std::io::Error>(())
+    });
+    let browser = Browser::new()?;
+    browser.start().await?;
+    let target_id = active_tab_id(&browser).await?;
+
+    let started = Instant::now();
+    let error = browser
+        .execute(BrowserAction::Open {
+            url: format!("http://127.0.0.1:{}/", address.port()),
+        })
+        .await
+        .expect_err("a response withheld past the navigation deadline must time out");
+    assert!(
+        matches!(
+            error,
+            BrowserError::NavigationTimeout {
+                milliseconds: 5_000,
+                ..
+            }
+        ),
+        "unexpected navigation error: {error:?}"
+    );
+    assert!(started.elapsed() < Duration::from_secs(7));
+
+    browser
+        .execute(BrowserAction::Open {
+            url: "data:text/html,<title>replacement</title>replacement%20owns%20the%20target"
+                .to_owned(),
+        })
+        .await?;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(active_tab_id(&browser).await?, target_id);
+    assert_eq!(
+        evaluate_string(&browser, "document.title").await?,
+        "replacement"
+    );
+
+    browser.close().await?;
+    server.await??;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires a local Chrome or Chromium installation"]
+async fn managed_navigation_routes_open_and_reload_to_the_selected_target() -> Result<()> {
+    let browser = Browser::new()?;
+    browser.start().await?;
+    browser
+        .execute(BrowserAction::Open {
+            url: "data:text/html,<title>first-base</title>".to_owned(),
+        })
+        .await?;
+    let first_target = active_tab_id(&browser).await?;
+    browser
+        .execute(BrowserAction::NewTab {
+            url: Some("data:text/html,<title>second-base</title>".to_owned()),
+        })
+        .await?;
+    let second_target = active_tab_id(&browser).await?;
+    assert_ne!(first_target, second_target);
+
+    browser
+        .execute(BrowserAction::SelectTab {
+            tab_id: first_target.clone(),
+        })
+        .await?;
+    browser
+        .execute(BrowserAction::Open {
+            url: "data:text/html,<title>first-routed</title>".to_owned(),
+        })
+        .await?;
+    browser
+        .execute(BrowserAction::SelectTab {
+            tab_id: second_target.clone(),
+        })
+        .await?;
+    browser
+        .execute(BrowserAction::Open {
+            url: "data:text/html,<title>second-routed</title>".to_owned(),
+        })
+        .await?;
+    browser.execute(BrowserAction::Reload).await?;
+    assert_eq!(
+        evaluate_string(&browser, "document.title").await?,
+        "second-routed"
+    );
+    browser
+        .execute(BrowserAction::SelectTab {
+            tab_id: first_target,
+        })
+        .await?;
+    assert_eq!(
+        evaluate_string(&browser, "document.title").await?,
+        "first-routed"
+    );
+
+    browser.close().await?;
+    Ok(())
+}
+
+async fn active_tab_id(browser: &Browser) -> Result<String> {
+    let BrowserActionResult::Tabs { tabs, .. } = browser.execute(BrowserAction::ListTabs).await?
+    else {
+        return Err(eyre!("expected browser tabs"));
+    };
+    tabs.into_iter()
+        .find(|tab| tab.active)
+        .map(|tab| tab.tab_id)
+        .ok_or_else(|| eyre!("missing active browser tab"))
+}
+
+async fn evaluate_string(browser: &Browser, expression: &str) -> Result<String> {
+    let BrowserActionResult::Evaluation { value, .. } = browser
+        .execute(BrowserAction::Evaluate {
+            expression: expression.to_owned(),
+        })
+        .await?
+    else {
+        return Err(eyre!("expected browser evaluation"));
+    };
+    value
+        .as_str()
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| eyre!("evaluation did not return a string: {value}"))
 }
 
 #[tokio::test]
