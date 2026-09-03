@@ -574,29 +574,26 @@ where
                 aborted_outputs.extend(self.finish_completed_tool_call(completed, &call.progress)?);
                 continue;
             }
-            let duration_ns = elapsed_ns(call.started_at);
-            let elapsed_seconds = call.started_at.elapsed().as_secs_f64();
-            let output = ToolOutputBody::Text(if call.shell_abort_format {
-                format!("Wall time: {elapsed_seconds:.1} seconds\naborted by user")
-            } else {
-                format!("aborted by user after {:.1}s", elapsed_seconds.max(0.1))
-            });
-            let structured_result = output.structured_result();
-            self.finish_active_tool_progress(&call.progress);
+            let active_nested_tool_calls = self.finish_active_tool_progress(&call.progress);
+            for nested_call in active_nested_tool_calls {
+                let started_after_ns = nested_call.started_after_ns(call.started_at);
+                self.emit_cancelled_tool_result(
+                    &nested_call.call_id,
+                    &nested_call.tool,
+                    nested_call.started_at,
+                    Some(started_after_ns),
+                    false,
+                    None,
+                )?;
+            }
             self.finish_cancelled_tool_work(&call);
-            record_tool_span_terminal(&call.span, "cancelled", "ERROR", duration_ns, &output);
-            self.events.emit(
-                AgentEventKind::ToolResult,
-                ToolResultEvent {
-                    call_id: &call.call_id,
-                    tool: &call.name,
-                    status: "cancelled",
-                    duration_ns,
-                    started_after_ns: None,
-                    result: &output,
-                    structured_result: &structured_result,
-                    metadata: None,
-                },
+            let output = self.emit_cancelled_tool_result(
+                &call.call_id,
+                &call.name,
+                call.started_at,
+                None,
+                call.shell_abort_format,
+                Some(&call.span),
             )?;
             aborted_outputs.push(match call.kind {
                 CodeCallKind::Custom => custom_tool_output(call.call_id, output),

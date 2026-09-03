@@ -21,6 +21,8 @@ import { managedCodeEvaluator } from "./code-evaluator";
 import {
   cloudflareSandboxTools,
   deleteCloudflareSandbox,
+  openSandboxPreviewCapability,
+  proxyCloudflareSandboxPreview,
 } from "./sandbox-tools";
 import {
   ContainerProxy,
@@ -791,6 +793,10 @@ async function managedFetch(
   trustedAgentPrincipal?: Principal,
 ): Promise<Response> {
     const url = new URL(request.url);
+    if (url.pathname.startsWith("/sandbox-preview/")) {
+      const sandboxPreview = await routeSandboxPreviewRequest(request, env, url);
+      if (sandboxPreview) return sandboxPreview;
+    }
     const browserModel = await routeBrowserModel(request, env, url);
     if (browserModel) return browserModel;
     const realtimeTransport = await routeManagedRealtimeTransport(
@@ -1506,6 +1512,62 @@ async function managedFetch(
       }
     }
     return json({ error: "method_not_allowed" }, { status: 405 });
+}
+
+export async function routeSandboxPreviewRequest(
+  request: Request,
+  env: Pick<Env, "NANOCODEX_ADMIN_TOKEN" | "NANOCODEX_SANDBOXES">,
+  url = new URL(request.url),
+  openCapability = openSandboxPreviewCapability,
+  proxyPreview = proxyCloudflareSandboxPreview,
+): Promise<Response | undefined> {
+  const match = url.pathname.match(/^\/sandbox-preview\/([^/]+)(\/.*)?$/);
+  if (!match) return undefined;
+  if (!env.NANOCODEX_ADMIN_TOKEN) return new Response("Not Found", { status: 404 });
+  let preview: { sessionId: string; port: number };
+  try {
+    preview = await openCapability(env.NANOCODEX_ADMIN_TOKEN, match[1]!);
+  } catch {
+    return new Response("Not Found", { status: 404 });
+  }
+  return proxyPreview(
+    env.NANOCODEX_SANDBOXES,
+    preview.sessionId,
+    preview.port,
+    request,
+    match[2] ?? "/",
+  );
+}
+
+export function createManagedSandboxTools(
+  env: Pick<
+    Env,
+    "NANOCODEX_ADMIN_TOKEN" | "NANOCODEX_SANDBOXES" | "NANOCODEX_SANDBOX_LOCAL"
+  >,
+  session: { session_id: string; public_origin: string },
+  isAccountOwnedTurn: () => boolean,
+  createTools: typeof cloudflareSandboxTools = cloudflareSandboxTools,
+): NamedTool[] {
+  return Object.entries(createTools(
+    env.NANOCODEX_SANDBOXES,
+    session.session_id,
+    env.NANOCODEX_SANDBOX_LOCAL === "true",
+    session.public_origin,
+    env.NANOCODEX_ADMIN_TOKEN,
+  )).map(([name, tool]) => ({
+    name,
+    ...tool,
+    handler: async (input, context) => {
+      if (!isAccountOwnedTurn()) {
+        throw new ManagedRequestError(
+          403,
+          "sandbox_forbidden",
+          "sandbox tools are available only to account-owned turns",
+        );
+      }
+      return tool.handler(input, context);
+    },
+  } satisfies NamedTool));
 }
 
 export class ChiefOfStaffBackend extends WorkerEntrypoint<Env> {
@@ -5165,24 +5227,11 @@ export class DurableAgentSession extends DurableComputerSession {
             (connectionId) => this.#activeTurnMcpAllowed(connectionId),
           ),
     };
-    const sandboxTools = multiplayer ? [] : Object.entries(cloudflareSandboxTools(
-      this.env.NANOCODEX_SANDBOXES,
-      session.session_id,
-      this.env.NANOCODEX_SANDBOX_LOCAL === "true",
-    )).map(([name, tool]) => ({
-      name,
-      ...tool,
-      handler: async (input, context) => {
-        if (!this.#isAccountOwnedTurn()) {
-          throw new ManagedRequestError(
-            403,
-            "sandbox_forbidden",
-            "sandbox tools are available only to account-owned turns",
-          );
-        }
-        return tool.handler(input, context);
-      },
-    } satisfies NamedTool));
+    const sandboxTools = multiplayer ? [] : createManagedSandboxTools(
+      this.env,
+      session,
+      () => this.#isAccountOwnedTurn(),
+    );
     const cloudTools: NamedTool[] = [
       ...(browserRuntime?.tools ?? []),
       ...(multiplayer ? [computer.tool] : []),

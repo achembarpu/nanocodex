@@ -16,6 +16,24 @@ pub(super) struct ActiveToolCall {
 #[derive(Default)]
 pub(super) struct ActiveToolProgress {
     pub(super) nested_tool_calls: u32,
+    pub(super) active_nested_tool_calls: Vec<ActiveNestedToolCall>,
+}
+
+pub(super) struct ActiveNestedToolCall {
+    pub(super) call_id: String,
+    pub(super) tool: String,
+    pub(super) started_at: Instant,
+}
+
+impl ActiveNestedToolCall {
+    pub(super) fn started_after_ns(&self, parent_started_at: Instant) -> u64 {
+        u64::try_from(
+            self.started_at
+                .saturating_duration_since(parent_started_at)
+                .as_nanos(),
+        )
+        .unwrap_or(u64::MAX)
+    }
 }
 
 #[derive(Deserialize, Serialize)]
@@ -51,6 +69,7 @@ impl CodeModeObserver for NestedToolEventObserver<'_> {
                 name,
                 input,
             } => {
+                let started_at = Instant::now();
                 let (call_id, call_index) = self.event_context(call_id);
                 let result = self.events.emit(
                     AgentEventKind::ToolCall,
@@ -62,20 +81,42 @@ impl CodeModeObserver for NestedToolEventObserver<'_> {
                     },
                 );
                 if result.is_ok() {
-                    self.progress
+                    let mut progress = self
+                        .progress
                         .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .nested_tool_calls += 1;
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    progress.nested_tool_calls += 1;
+                    progress
+                        .active_nested_tool_calls
+                        .push(ActiveNestedToolCall {
+                            call_id,
+                            tool: name.to_owned(),
+                            started_at,
+                        });
                 }
                 result
             }
             CodeModeUpdate::NestedCallCompleted(call) => {
                 let (call_id, _) = self.event_context(&call.call_id);
+                let active = {
+                    let mut progress = self
+                        .progress
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    progress
+                        .active_nested_tool_calls
+                        .iter()
+                        .position(|active| active.call_id == call_id)
+                        .map(|index| progress.active_nested_tool_calls.remove(index))
+                };
+                let Some(active) = active else {
+                    return;
+                };
                 self.events.emit(
                     AgentEventKind::ToolResult,
                     ToolResultEvent {
-                        call_id: &call_id,
-                        tool: &call.name,
+                        call_id: &active.call_id,
+                        tool: &active.tool,
                         status: status(call.success),
                         duration_ns: call.duration_ns,
                         started_after_ns: Some(call.started_after_ns),
@@ -344,17 +385,21 @@ where
         progress: &Mutex<ActiveToolProgress>,
     ) -> Result<Vec<ResponseItem>> {
         self.stats.tool_work_duration_ns += completed.work_duration_ns;
-        self.finish_active_tool_progress(progress);
+        let _ = self.finish_active_tool_progress(progress);
         Ok(completed.response_items)
     }
 
-    pub(super) fn finish_active_tool_progress(&mut self, progress: &Mutex<ActiveToolProgress>) {
+    pub(super) fn finish_active_tool_progress(
+        &mut self,
+        progress: &Mutex<ActiveToolProgress>,
+    ) -> Vec<ActiveNestedToolCall> {
         let progress = std::mem::take(
             &mut *progress
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
         );
         self.stats.tool_calls += progress.nested_tool_calls;
+        progress.active_nested_tool_calls
     }
 
     pub(super) fn completed_tool_work_duration(active: &ActiveToolCall) -> u64 {
@@ -401,6 +446,42 @@ where
             },
         )?;
         Ok(())
+    }
+
+    pub(super) fn emit_cancelled_tool_result(
+        &self,
+        call_id: &str,
+        tool: &str,
+        started_at: Instant,
+        started_after_ns: Option<u64>,
+        shell_abort_format: bool,
+        span: Option<&tracing::Span>,
+    ) -> Result<ToolOutputBody> {
+        let duration_ns = elapsed_ns(started_at);
+        let elapsed_seconds = started_at.elapsed().as_secs_f64();
+        let output = ToolOutputBody::Text(if shell_abort_format {
+            format!("Wall time: {elapsed_seconds:.1} seconds\naborted by user")
+        } else {
+            format!("aborted by user after {:.1}s", elapsed_seconds.max(0.1))
+        });
+        let structured_result = output.structured_result();
+        if let Some(span) = span {
+            record_tool_span_terminal(span, "cancelled", "ERROR", duration_ns, &output);
+        }
+        self.events.emit(
+            AgentEventKind::ToolResult,
+            ToolResultEvent {
+                call_id,
+                tool,
+                status: "cancelled",
+                duration_ns,
+                started_after_ns,
+                result: &output,
+                structured_result: &structured_result,
+                metadata: None,
+            },
+        )?;
+        Ok(output)
     }
 
     pub(super) fn panicked_tool_call(

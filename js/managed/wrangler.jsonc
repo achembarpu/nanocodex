@@ -189,7 +189,9 @@
     {
       "class_name": "Sandbox",
       "image": "./Dockerfile",
-      "instance_type": "standard-1"
+      "instance_type": "standard-1",
+      // Preserve active containers across the current >120s build journey during rollouts.
+      "rollout_active_grace_period": 300
     }
   ]
 }

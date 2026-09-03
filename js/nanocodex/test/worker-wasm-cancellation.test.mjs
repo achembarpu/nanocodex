@@ -108,6 +108,21 @@ test("compiled Worker Agent aborts active nested work and reuses the tool runtim
       websocketWarmup: true,
     }),
   }, { worker });
+  const events = [];
+  const runCancelled = deferred();
+  const recoveredNestedCompleted = deferred();
+  const watch = agent.events.watch();
+  watch.onEvent((event) => {
+    events.push(event);
+    if (event.type === "run.failed" && event.payload.status === "cancelled") {
+      runCancelled.resolve();
+    } else if (
+      event.type === "tool.result"
+      && event.payload.call_id.startsWith("call-nested-recovered/code-")
+    ) {
+      recoveredNestedCompleted.resolve();
+    }
+  });
 
   try {
     const turn = agent.turn.prompt({ input: "Run the blocking nested tool." });
@@ -129,6 +144,33 @@ test("compiled Worker Agent aborts active nested work and reuses the tool runtim
     await within(turn.cancel(), 1_000, "nested turn cancellation");
     await within(blocker.aborted.promise, 1_000, "nested request abort");
     await assert.rejects(within(result, 1_000, "cancelled nested result"), /cancel/i);
+    await within(runCancelled.promise, 1_000, "cancelled run terminal");
+
+    const cancelledNested = events.filter((event) => (
+      event.type === "tool.result"
+      && event.payload.call_id === "call-nested/code-1"
+    ));
+    assert.equal(cancelledNested.length, 1);
+    assert.equal(cancelledNested[0].payload.tool, "blocked");
+    assert.equal(cancelledNested[0].payload.status, "cancelled");
+    assert.match(cancelledNested[0].payload.result, /^aborted by user after /);
+    assert.equal(
+      cancelledNested[0].payload.structured_result,
+      cancelledNested[0].payload.result,
+    );
+    assert.equal(Number.isSafeInteger(cancelledNested[0].payload.duration_ns), true);
+    assert.equal(Number.isSafeInteger(cancelledNested[0].payload.started_after_ns), true);
+    const nestedTerminalIndex = events.indexOf(cancelledNested[0]);
+    const outerTerminalIndex = events.findIndex((event) => (
+      event.type === "tool.result"
+      && event.payload.call_id === "call-nested"
+      && event.payload.status === "cancelled"
+    ));
+    const runTerminalIndex = events.findIndex((event) => (
+      event.type === "run.failed" && event.payload.status === "cancelled"
+    ));
+    assert(nestedTerminalIndex < outerTerminalIndex);
+    assert(outerTerminalIndex < runTerminalIndex);
 
     const followOn = agent.turn.prompt({ input: "Run the fast nested tool." });
     const replacement = await within(server.nextConnection(), 2_000, "replacement connection");
@@ -145,8 +187,18 @@ test("compiled Worker Agent aborts active nested work and reuses the tool runtim
     sendFinal(replacement, "nested-recovered", "RECOVERED");
     const recovered = await within(followOn.result(), 2_000, "follow-on result");
     assert.equal(recovered.finalMessage, "RECOVERED");
+    await within(recoveredNestedCompleted.promise, 1_000, "recovered nested terminal");
+    const recoveredNested = events.filter((event) => (
+      event.type === "tool.result"
+      && event.payload.call_id.startsWith("call-nested-recovered/code-")
+    ));
+    assert.equal(recoveredNested.length, 1);
+    assert.equal(recoveredNested[0].payload.tool, "blocked");
+    assert.equal(recoveredNested[0].payload.status, "completed");
+    assert(events.indexOf(recoveredNested[0]) > runTerminalIndex);
     recovered.dispose();
   } finally {
+    watch.off();
     agent.dispose();
     for (const socket of server.websocketServer.clients) socket.terminate();
     await Promise.all([server.close(), blocker.close()]);

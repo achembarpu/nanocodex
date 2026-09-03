@@ -1,6 +1,7 @@
 import { getSandbox } from "@cloudflare/sandbox";
 import type { ToolMap } from "nanocodex";
 
+import { isPrivateEgressHeader } from "./managed-egress";
 import type { Sandbox } from "./sandbox-runtime";
 
 const WORKSPACE = "/workspace";
@@ -9,7 +10,35 @@ const MAX_FILE_BYTES = 1024 * 1024;
 const MAX_OUTPUT_BYTES = 128 * 1024;
 const MAX_LIST_ENTRIES = 512;
 const WORKSPACE_MOUNT_PROBE_TIMEOUT_MS = 10_000;
+const PREVIEW_CAPABILITY_TTL_MS = 60 * 60 * 1_000;
 const PREVIEW_AAD = new TextEncoder().encode("nanocodex-cloudflare-sandbox-preview-v1");
+const PREVIEW_WEBSOCKET_RESPONSE_HEADERS = new Set([
+  "connection",
+  "sec-websocket-accept",
+  "sec-websocket-extensions",
+  "sec-websocket-protocol",
+  "upgrade",
+]);
+const PREVIEW_HTTP_RESPONSE_HEADERS_BLOCKED = new Set([
+  "clear-site-data",
+  "connection",
+  "content-security-policy-report-only",
+  "host",
+  "keep-alive",
+  "nel",
+  "proxy-authenticate",
+  "proxy-authorization",
+  "refresh",
+  "report-to",
+  "set-cookie",
+  "set-cookie2",
+  "trailer",
+  "transfer-encoding",
+]);
+
+let cachedPreviewKey:
+  | { secret: string; promise: Promise<CryptoKey> }
+  | undefined;
 
 type SandboxPreparation = {
   sessionId: string;
@@ -131,17 +160,6 @@ export function createCloudflareSandboxTools(
   createSandbox: () => Promise<SandboxToolClient>,
   createPreview?: (port: number) => Promise<{ port: number; url: string; persistent: boolean }>,
 ): ToolMap {
-  let sandboxPromise: Promise<SandboxToolClient> | undefined;
-  const sandbox = () => {
-    if (sandboxPromise) return sandboxPromise;
-    const created = createSandbox();
-    sandboxPromise = created;
-    void created.catch(() => {
-      if (sandboxPromise === created) sandboxPromise = undefined;
-    });
-    return created;
-  };
-
   return {
     sandbox_exec: {
       description: "Run a foreground shell command in this session's isolated Cloudflare Sandbox workspace.",
@@ -165,7 +183,7 @@ export function createCloudflareSandboxTools(
         const cwd = workspacePath(optionalString(value.cwd, "cwd") ?? ".");
         const timeout = optionalPositiveInteger(value.timeout_ms, "timeout_ms");
         return withSandboxRpcResult(
-          (await sandbox()).exec(command, {
+          (await createSandbox()).exec(command, {
             cwd,
             ...(timeout === undefined ? {} : { timeout }),
           }),
@@ -191,7 +209,7 @@ export function createCloudflareSandboxTools(
       handler: async (input) => {
         const path = workspacePath(requiredString(objectInput(input).path, "path", 1024));
         return withSandboxRpcResult(
-          (await sandbox()).readFile(path, { encoding: "none" }),
+          (await createSandbox()).readFile(path, { encoding: "none" }),
           async (result) => {
             if (result.size > MAX_FILE_BYTES) {
               await cancelReadableStream(result.content, "file exceeds 1 MiB");
@@ -229,7 +247,7 @@ export function createCloudflareSandboxTools(
           "ready_timeout_ms",
         );
         return withSandboxRpcResult(
-          (await sandbox()).startProcess(command, { cwd, autoCleanup: true }),
+          (await createSandbox()).startProcess(command, { cwd, autoCleanup: true }),
           async (process) => {
             if (readyPort !== undefined) {
               await process.waitForPort(
@@ -265,7 +283,7 @@ export function createCloudflareSandboxTools(
         const content = requiredContent(value.content);
         const bytes = new TextEncoder().encode(content).byteLength;
         if (bytes > MAX_FILE_BYTES) throw new Error("content exceeds 1 MiB");
-        await (await sandbox()).writeFile(path, content, { encoding: "utf-8" });
+        await (await createSandbox()).writeFile(path, content, { encoding: "utf-8" });
         return { path, bytes_written: bytes };
       },
     },
@@ -282,7 +300,7 @@ export function createCloudflareSandboxTools(
         const value = objectInput(input);
         const path = workspacePath(optionalString(value.path, "path") ?? ".");
         return withSandboxRpcResult(
-          (await sandbox()).listFiles(path, { includeHidden: true }),
+          (await createSandbox()).listFiles(path, { includeHidden: true }),
           (result) => ({
             path,
             entries: result.files.slice(0, MAX_LIST_ENTRIES).map((entry) => ({
@@ -302,10 +320,10 @@ export function createCloudflareSandboxTools(
       parameters: portParameters(),
       handler: async (input) => {
         const port = requiredPort(objectInput(input).port);
-        await sandbox();
+        const prepared = await createSandbox();
         if (createPreview) return createPreview(port);
         return withSandboxRpcResult(
-          (await sandbox()).tunnels.get(port),
+          prepared.tunnels.get(port),
           (tunnel) => ({ port, url: tunnel.url, persistent: false }),
         );
       },
@@ -349,9 +367,18 @@ export async function openSandboxPreviewCapability(
   } catch {
     throw new Error("invalid preview capability");
   }
-  const [sessionId, rawPort, ...extra] = new TextDecoder().decode(plaintext).split("\n");
+  const [sessionId, rawPort, rawExpiresAt, ...extra] = new TextDecoder()
+    .decode(plaintext)
+    .split("\n");
   const port = Number(rawPort);
-  if (!sessionId || extra.length > 0 || !Number.isInteger(port) || port < 1024 || port > 65_535) {
+  const expiresAt = Number(rawExpiresAt);
+  if (!sessionId
+    || extra.length > 0
+    || !Number.isInteger(port)
+    || port < 1024
+    || port > 65_535
+    || !Number.isSafeInteger(expiresAt)
+    || expiresAt <= Date.now()) {
     throw new Error("invalid preview capability");
   }
   return { sessionId, port };
@@ -368,11 +395,49 @@ export async function proxyCloudflareSandboxPreview(
   const targetPath = path.startsWith("/") ? path : `/${path}`;
   const target = new URL(`http://sandbox.internal${targetPath}${incoming.search}`);
   const forwarded = new Request(target, request);
-  const sandbox = sandboxHandle(namespace, sessionId);
-  if (request.headers.get("Upgrade")?.toLowerCase() === "websocket") {
-    return sandbox.wsConnect(forwarded, port);
+  const websocket = request.headers.get("Upgrade")?.toLowerCase() === "websocket";
+  for (const name of [...forwarded.headers.keys()]) {
+    if (isPrivatePreviewRequestHeader(name, websocket)) forwarded.headers.delete(name);
   }
-  return sandbox.containerFetch(forwarded, port);
+  const sandbox = sandboxHandle(namespace, sessionId);
+  if (websocket) {
+    const response = await sandbox.wsConnect(forwarded, port);
+    if (response.status !== 101 || !response.webSocket) {
+      if (response.status === 101) return new Response("Sandbox WebSocket upgrade failed", { status: 502 });
+      return hardenPreviewHttpResponse(response);
+    }
+    const responseHeaders = new Headers();
+    for (const [name, value] of response.headers) {
+      if (PREVIEW_WEBSOCKET_RESPONSE_HEADERS.has(name.toLowerCase())) {
+        responseHeaders.append(name, value);
+      }
+    }
+    return new Response(null, {
+      status: 101,
+      headers: responseHeaders,
+      webSocket: response.webSocket,
+    });
+  }
+  return hardenPreviewHttpResponse(await sandbox.containerFetch(forwarded, port));
+}
+
+function hardenPreviewHttpResponse(response: Response): Response {
+  const responseHeaders = new Headers(response.headers);
+  for (const name of [...responseHeaders.keys()]) {
+    if (PREVIEW_HTTP_RESPONSE_HEADERS_BLOCKED.has(name.toLowerCase())
+      || isPrivateEgressHeader(name)) responseHeaders.delete(name);
+  }
+  responseHeaders.set(
+    "content-security-policy",
+    "sandbox allow-downloads allow-forms allow-modals allow-pointer-lock allow-popups allow-popups-to-escape-sandbox allow-presentation allow-scripts",
+  );
+  responseHeaders.set("permissions-policy", "camera=(), geolocation=(), microphone=(), payment=(), usb=()");
+  responseHeaders.set("referrer-policy", "no-referrer");
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: responseHeaders,
+  });
 }
 
 async function sealSandboxPreview(
@@ -384,7 +449,7 @@ async function sealSandboxPreview(
   const ciphertext = new Uint8Array(await crypto.subtle.encrypt(
     { name: "AES-GCM", iv, additionalData: PREVIEW_AAD },
     await previewKey(previewSecret),
-    new TextEncoder().encode(`${sessionId}\n${port}`),
+    new TextEncoder().encode(`${sessionId}\n${port}\n${Date.now() + PREVIEW_CAPABILITY_TTL_MS}`),
   ));
   const sealed = new Uint8Array(iv.byteLength + ciphertext.byteLength);
   sealed.set(iv);
@@ -392,10 +457,37 @@ async function sealSandboxPreview(
   return encodeBase64Url(sealed);
 }
 
-async function previewKey(secret: string): Promise<CryptoKey> {
+function previewKey(secret: string): Promise<CryptoKey> {
   if (!secret) throw new Error("preview secret is required");
+  if (cachedPreviewKey?.secret === secret) return cachedPreviewKey.promise;
+  const promise = derivePreviewKey(secret);
+  cachedPreviewKey = { secret, promise };
+  void promise.catch(() => {
+    if (cachedPreviewKey?.promise === promise) cachedPreviewKey = undefined;
+  });
+  return promise;
+}
+
+async function derivePreviewKey(secret: string): Promise<CryptoKey> {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(secret));
   return crypto.subtle.importKey("raw", digest, { name: "AES-GCM" }, false, ["encrypt", "decrypt"]);
+}
+
+function isPrivatePreviewRequestHeader(name: string, websocket: boolean): boolean {
+  const lower = name.toLowerCase();
+  return isPrivateEgressHeader(name)
+    || lower === "host"
+    || lower === "origin"
+    || lower === "proxy-connection"
+    || lower === "referer"
+    || lower === "te"
+    || lower === "trailer"
+    || lower === "transfer-encoding"
+    || (!websocket && (lower === "connection" || lower === "upgrade"))
+    || lower.startsWith("cf-")
+    || lower.startsWith("forwarded")
+    || lower.startsWith("x-forwarded-")
+    || lower.startsWith("x-nanocodex-");
 }
 
 function encodeBase64Url(value: Uint8Array): string {

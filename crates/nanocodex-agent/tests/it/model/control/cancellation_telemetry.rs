@@ -8,7 +8,7 @@ use std::{
 };
 
 use nanocodex_oai_api::{
-    responses::WarmupResponse,
+    responses::{ContentItem, MessageRole, ResponseItem, WarmupResponse},
     tower::{
         CodeCall, CodeCallKind, GenerationOutput, ResponsePipelineStats, ResponsesAttempt,
         ResponsesAttemptKind, ResponsesOutput, ResponsesServiceResponse,
@@ -100,11 +100,67 @@ impl Service<ResponsesAttempt> for NestedCancellationService {
                     usage: None,
                 }),
                 (1, ResponsesAttemptKind::Generation) => nested_tool_generation(),
+                (2, ResponsesAttemptKind::Generation) => recovered_nested_tool_generation(),
+                (3, ResponsesAttemptKind::Generation) => {
+                    assert!(request.input_items().any(|item| {
+                        serde_json::to_string(item).is_ok_and(|item| {
+                            item.contains("call-recovered") && item.contains("completed")
+                        })
+                    }));
+                    final_generation()
+                }
                 _ => panic!("unexpected attempt {call}: {:?}", request.kind()),
             };
             Ok(ResponsesServiceResponse::new(output))
         })
     }
+}
+
+fn recovered_nested_tool_generation() -> ResponsesOutput {
+    let input = r#"text(await tools.stats__completed({}));"#;
+    let output_item = serde_json::from_value(json!({
+        "type": "custom_tool_call",
+        "call_id": "call-recovered",
+        "name": "exec",
+        "input": input
+    }))
+    .expect("custom tool call item decodes");
+    ResponsesOutput::Generation(GenerationOutput {
+        id: "resp-recovered-tools".to_owned(),
+        status: "completed".to_owned(),
+        end_turn: Some(false),
+        final_message: None,
+        output_items: vec![output_item],
+        code_calls: vec![CodeCall {
+            call_id: "call-recovered".to_owned(),
+            name: "exec".to_owned(),
+            namespace: None,
+            input: input.to_owned(),
+            kind: CodeCallKind::Custom,
+        }],
+        usage: None,
+        time_to_first_event_ns: 0,
+        time_to_first_output_ns: None,
+        pipeline_stats: ResponsePipelineStats::default(),
+    })
+}
+
+fn final_generation() -> ResponsesOutput {
+    ResponsesOutput::Generation(GenerationOutput {
+        id: "resp-recovered-final".to_owned(),
+        status: "completed".to_owned(),
+        end_turn: Some(true),
+        final_message: Some("recovered".to_owned()),
+        output_items: vec![ResponseItem::message(
+            MessageRole::Assistant,
+            [ContentItem::output_text("recovered")],
+        )],
+        code_calls: Vec::new(),
+        usage: None,
+        time_to_first_event_ns: 0,
+        time_to_first_output_ns: None,
+        pipeline_stats: ResponsePipelineStats::default(),
+    })
 }
 
 fn nested_tool_generation() -> ResponsesOutput {
@@ -177,23 +233,67 @@ async fn cancellation_retains_completed_nested_progress_in_terminal_metrics() ->
         turn.result().await,
         Err(NanocodexError::TurnCancelled)
     ));
+    assert_eq!(
+        agent
+            .prompt("Run a healthy nested tool.")
+            .await?
+            .result()
+            .await?
+            .final_message(),
+        "recovered"
+    );
     agent.shutdown().await?;
     drop(agent);
 
     let mut completed_nested_duration_ns = None;
+    let mut cancelled_nested = None;
     let mut terminal = None;
+    let mut ordered_terminals = Vec::new();
     while let Some(event) = events.recv().await {
         if event.kind == AgentEventKind::ToolResult {
             let result = event.decode_payload::<Value>()?;
+            ordered_terminals.push(format!(
+                "{}:{}",
+                result["call_id"].as_str().unwrap_or("missing"),
+                result["status"].as_str().unwrap_or("missing")
+            ));
             if result["call_id"] == "call-exec/code-1" && result["status"] == "completed" {
                 completed_nested_duration_ns = result["duration_ns"].as_u64();
+            } else if result["call_id"] == "call-exec/code-2" {
+                cancelled_nested = Some(result);
             }
         } else if event.kind == AgentEventKind::RunFailed {
-            terminal = Some(event.decode_payload::<Value>()?);
+            let result = event.decode_payload::<Value>()?;
+            ordered_terminals.push(format!(
+                "run:{}",
+                result["status"].as_str().unwrap_or("missing")
+            ));
+            terminal = Some(result);
+        } else if event.kind == AgentEventKind::RunCompleted {
+            let result = event.decode_payload::<Value>()?;
+            ordered_terminals.push(format!(
+                "run:{}",
+                result["status"].as_str().unwrap_or("missing")
+            ));
         }
     }
     let completed_nested_duration_ns = completed_nested_duration_ns
         .ok_or_else(|| eyre!("completed nested tool result was not emitted"))?;
+    let cancelled_nested =
+        cancelled_nested.ok_or_else(|| eyre!("cancelled nested tool result was not emitted"))?;
+    assert_eq!(cancelled_nested["tool"], "stats__pending");
+    assert_eq!(cancelled_nested["status"], "cancelled");
+    assert!(cancelled_nested["duration_ns"].as_u64().is_some());
+    assert!(cancelled_nested["started_after_ns"].as_u64().is_some());
+    assert!(
+        cancelled_nested["result"]
+            .as_str()
+            .is_some_and(|result| result.starts_with("aborted by user after "))
+    );
+    assert_eq!(
+        cancelled_nested["structured_result"],
+        cancelled_nested["result"]
+    );
     let terminal = terminal.ok_or_else(|| eyre!("cancelled terminal event was not emitted"))?;
     assert_eq!(terminal["status"], "cancelled");
     assert_eq!(terminal["tool_calls"], 3);
@@ -205,7 +305,19 @@ async fn cancellation_retains_completed_nested_progress_in_terminal_metrics() ->
         .ok_or_else(|| eyre!("tool wall duration was missing"))?;
     assert!(work >= completed_nested_duration_ns);
     assert!(wall >= work);
-    assert_eq!(calls.load(Ordering::Relaxed), 2);
+    assert_eq!(calls.load(Ordering::Relaxed), 4);
+    assert_eq!(
+        ordered_terminals,
+        [
+            "call-exec/code-1:completed",
+            "call-exec/code-2:cancelled",
+            "call-exec:cancelled",
+            "run:cancelled",
+            "call-recovered/code-1:completed",
+            "call-recovered:completed",
+            "run:completed",
+        ]
+    );
 
     std::fs::remove_dir_all(workspace)?;
     Ok(())
