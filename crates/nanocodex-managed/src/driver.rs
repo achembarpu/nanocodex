@@ -295,6 +295,7 @@ pub(crate) struct ManagedDriver<S> {
     commands: mpsc::Receiver<Command>,
     events: AgentEventPublisher,
     shutdown: Shutdown,
+    event_observer: Option<mpsc::UnboundedSender<ManagedEvent>>,
     pending: HashMap<String, PendingTurn>,
     turns_by_key: HashMap<BackendTurnKey, String>,
     next_event_seq: u64,
@@ -321,6 +322,7 @@ where
         commands: mpsc::Receiver<Command>,
         events: AgentEventPublisher,
         shutdown: Shutdown,
+        event_observer: Option<mpsc::UnboundedSender<ManagedEvent>>,
         #[cfg(feature = "tools")] attachment: Option<AttachmentSupervisor>,
     ) -> Self {
         Self {
@@ -330,6 +332,7 @@ where
             commands,
             events,
             shutdown,
+            event_observer,
             pending: HashMap::new(),
             turns_by_key: HashMap::new(),
             next_event_seq: 1,
@@ -587,6 +590,9 @@ where
             return Err(NanocodexError::BackendContract {
                 detail: "managed event envelope and body identified different turns",
             });
+        }
+        if let Some(observer) = &self.event_observer {
+            drop(observer.send(event.clone()));
         }
         if let Some(mut nested) = event.data.agent_event().map_err(backend_error)? {
             nested.seq = self.next_event_seq;

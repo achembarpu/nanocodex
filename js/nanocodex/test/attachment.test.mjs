@@ -90,6 +90,81 @@ test("catalog preserves provider, remote name, summary, and timeout metadata", a
   await tools.close();
 });
 
+test("Tools publishes its non-secret user-machine snapshot with each attachment", async () => {
+  const tools = await createTools({
+    attachmentId: "laptop",
+    machines: [{
+      id: "laptop",
+      name: "George's laptop",
+      workspace: "/Users/george/project",
+      capabilities: ["filesystem", "native-shell"],
+    }],
+  });
+  const socket = new FakeSocket();
+  const connector = tools.attach(reverseTarget(async () => socket));
+  const connecting = connector.connect();
+  await waitFor(() => socket.frames().length === 1);
+  assert.deepEqual(socket.frames()[0], {
+    type: "catalog",
+    tools: [],
+    attachment_id: "laptop",
+    machines: [{
+      id: "laptop",
+      name: "George's laptop",
+      workspace: "/Users/george/project",
+      capabilities: ["filesystem", "native-shell"],
+    }],
+  });
+  socket.receive({ type: "ready" });
+  await drain(await connecting, socket);
+  await tools.close();
+});
+
+test("independent Tools runtimes publish distinct attachment identifiers", async () => {
+  const firstTools = await createTools({ attachmentId: "machine:first" });
+  const secondTools = await createTools({ attachmentId: "machine:second" });
+  const firstSocket = new FakeSocket();
+  const secondSocket = new FakeSocket();
+  const firstConnecting = firstTools.attach(reverseTarget(async () => firstSocket)).connect();
+  const secondConnecting = secondTools.attach(reverseTarget(async () => secondSocket)).connect();
+  await waitFor(() => firstSocket.frames().length === 1 && secondSocket.frames().length === 1);
+  assert.equal(firstSocket.frames()[0].attachment_id, "machine:first");
+  assert.equal(secondSocket.frames()[0].attachment_id, "machine:second");
+  firstSocket.receive({ type: "ready" });
+  secondSocket.receive({ type: "ready" });
+  const [firstClient, secondClient] = await Promise.all([firstConnecting, secondConnecting]);
+  await Promise.all([drain(firstClient, firstSocket), drain(secondClient, secondSocket)]);
+  await Promise.all([firstTools.close(), secondTools.close()]);
+});
+
+test("machine metadata is bounded and cannot carry arbitrary fields", async () => {
+  const machine = {
+    id: "laptop",
+    name: "Laptop",
+    workspace: "/workspace",
+    capabilities: [],
+  };
+  for (const [machines, message] of [
+    [[{ ...machine, token: "secret" }], /unsupported field token/],
+    [[{ ...machine, capabilities: ["filesystem", "filesystem"] }], /must be unique/],
+    [[machine, { ...machine, id: "desktop" }], /at most 1/],
+    [[{ ...machine, capabilities: Array.from({ length: 65 }, (_, index) => `capability:${index}`) }], /safe identifiers/],
+  ]) {
+    await assert.rejects(createTools({ attachmentId: "laptop", machines }), message);
+  }
+  for (const attachmentId of ["", "unsafe id", "é", "x".repeat(124), 1]) {
+    await assert.rejects(
+      createTools({ attachmentId }),
+      /attachmentId must be a safe identifier of at most 123 bytes/,
+    );
+  }
+  await assert.rejects(createTools({ machines: [machine] }), /id equals attachmentId/);
+  await assert.rejects(
+    createTools({ attachmentId: "desktop", machines: [machine] }),
+    /id equals attachmentId/,
+  );
+});
+
 test("in-flight cancellation uses an ordinary ambiguous result and receipt ack path", async () => {
   let admitted;
   const fixture = await readyAttachment({
@@ -379,13 +454,17 @@ test("a replaced socket owns a fresh immutable catalog and ignores stale callbac
   const second = new FakeSocket();
   const sockets = [first, second];
   const tools = await createTools({ tools: { echo: { handler: () => "ok" } } });
-  const connector = createAttachment(tools, reverseTarget(async () => sockets.shift()), { reconnectDelayMs: 1 });
+  const connector = createAttachment(tools, reverseTarget(async () => sockets.shift()), {
+    attachmentId: "stable-host",
+    reconnectDelayMs: 1,
+  });
   const connecting = connector.connect();
   await waitFor(() => first.frames().some(({ type }) => type === "catalog"));
   first.receive({ type: "ready" });
   const client = await connecting;
   first.close(1012, "replace");
   await waitFor(() => second.frames().some(({ type }) => type === "catalog"));
+  assert.equal(first.frames()[0].attachment_id, "stable-host");
   assert.deepEqual(second.frames()[0], first.frames()[0]);
   second.receive({ type: "ready" });
   await waitFor(() => client.connected);

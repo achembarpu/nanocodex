@@ -149,6 +149,10 @@ pub(crate) enum AppEvent {
         fast_mode: bool,
         model: Model,
     },
+    HistoryReplayed {
+        pane: PaneId,
+        projection: Box<RestoredSessionProjection>,
+    },
     NotifyError {
         pane: PaneId,
         error: String,
@@ -389,6 +393,9 @@ impl AppNode {
                     model,
                 },
             ),
+            AppEvent::HistoryReplayed { pane, projection } => {
+                self.update_root(pane, RootEvent::HistoryReplayed { projection })
+            }
             AppEvent::NotifyError { pane, error } => {
                 self.update_root(pane, RootEvent::NotifyError(error))
             }

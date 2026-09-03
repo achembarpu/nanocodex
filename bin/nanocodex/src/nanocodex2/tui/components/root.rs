@@ -180,6 +180,9 @@ pub(crate) enum RootEvent {
         fast_mode: bool,
         model: Model,
     },
+    HistoryReplayed {
+        projection: Box<RestoredSessionProjection>,
+    },
     NotifyError(String),
     NotifySuccess(String),
     ConfirmReviewDownload,
@@ -224,6 +227,7 @@ pub(crate) enum RootEffect {
     NewSession(Model),
     LoadSessions(SessionListKind),
     LoadRecentPrompts(Vec<RecentPromptDraft>),
+    LoadOlderHistory,
     ResumeSession(String),
     Steer {
         id: QueueId,
@@ -518,6 +522,21 @@ impl RootNode {
         thinking: ReasoningEffort,
         records: Vec<Arc<TranscriptRecord>>,
     ) -> RestoredSessionProjection {
+        Self::project_session_with_stream_state(thinking, records, true)
+    }
+
+    pub(crate) fn project_open_session(
+        thinking: ReasoningEffort,
+        records: Vec<Arc<TranscriptRecord>>,
+    ) -> RestoredSessionProjection {
+        Self::project_session_with_stream_state(thinking, records, false)
+    }
+
+    fn project_session_with_stream_state(
+        thinking: ReasoningEffort,
+        records: Vec<Arc<TranscriptRecord>>,
+        stream_closed: bool,
+    ) -> RestoredSessionProjection {
         let mut transcript = Transcript::with_effort(thinking);
         let mut context_diagnostics = ContextDiagnostics::default();
         let mut context_tokens = None;
@@ -532,12 +551,30 @@ impl RootNode {
             }
             let _ = transcript.update(TranscriptEvent::Record(record));
         }
-        let _ = transcript.update(TranscriptEvent::AgentStreamClosed);
+        if stream_closed {
+            let _ = transcript.update(TranscriptEvent::AgentStreamClosed);
+        }
         RestoredSessionProjection {
             transcript,
             context_diagnostics,
             context_tokens,
             recent_prompts,
+        }
+    }
+
+    fn replay_history(&mut self, mut projection: RestoredSessionProjection) {
+        projection
+            .transcript
+            .preserve_viewport_from(self.transcript.component());
+        projection.transcript.set_workspace(&self.workspace);
+        self.transcript = Node::new(projection.transcript);
+        self.context_diagnostics = projection.context_diagnostics;
+        self.recent_prompts = projection.recent_prompts;
+        if let Some(tokens) = projection.context_tokens {
+            let _ = self
+                .composer
+                .component_mut()
+                .update(ComposerEvent::ContextTokens(tokens));
         }
     }
 
@@ -970,9 +1007,15 @@ impl RootNode {
             return ComponentUpdate::render(RenderRequest::Immediate);
         }
         if let Some(command) = self.transcript.component().scroll_command(&event) {
+            let load_older = matches!(command, ScrollCommand::Home)
+                || matches!(command, ScrollCommand::Rows(rows) if rows < 0)
+                    && self.transcript.component().at_top();
             let transcript = self.transcript.update(TranscriptEvent::Scroll(command));
             return ComponentUpdate {
-                effects: Vec::new(),
+                effects: load_older
+                    .then_some(RootEffect::LoadOlderHistory)
+                    .into_iter()
+                    .collect(),
                 render: transcript.render,
             };
         }
@@ -2699,6 +2742,10 @@ impl Component for RootNode {
                 self.set_model(model);
                 ComponentUpdate::render(RenderRequest::Immediate)
             }
+            RootEvent::HistoryReplayed { projection } => {
+                self.replay_history(*projection);
+                ComponentUpdate::render(RenderRequest::Immediate)
+            }
             RootEvent::NotifyError(message) => {
                 self.notification = Some(Notification::plain(message, Color::Red));
                 ComponentUpdate::render(RenderRequest::Immediate)
@@ -3027,4 +3074,79 @@ fn is_plain_key(event: &Event, character: char) -> bool {
     matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
         && key.code == KeyCode::Char(character)
         && key.modifiers.is_empty()
+}
+
+#[cfg(test)]
+mod history_tests {
+    use super::{Component, RootEffect, RootEvent, RootNode};
+    use crate::config::ReasoningEffort;
+    use crate::tui::{
+        theme::Theme,
+        transcript::{LocalEvent, TranscriptRecord, TurnId},
+    };
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::{Terminal, backend::TestBackend};
+    use std::sync::Arc;
+
+    #[test]
+    fn upward_at_top_and_home_request_older_history() {
+        let mut root = RootNode::new(std::path::Path::new("/workspace"), ReasoningEffort::Medium);
+
+        let page_up = root.update(RootEvent::Terminal(Event::Key(KeyEvent::new(
+            KeyCode::PageUp,
+            KeyModifiers::NONE,
+        ))));
+        assert!(matches!(
+            page_up.effects.as_slice(),
+            [RootEffect::LoadOlderHistory]
+        ));
+
+        let home = root.update(RootEvent::Terminal(Event::Key(KeyEvent::new(
+            KeyCode::Home,
+            KeyModifiers::CONTROL,
+        ))));
+        assert!(matches!(
+            home.effects.as_slice(),
+            [RootEffect::LoadOlderHistory]
+        ));
+    }
+
+    #[test]
+    fn downward_scroll_does_not_request_older_history() {
+        let mut root = RootNode::new(std::path::Path::new("/workspace"), ReasoningEffort::Medium);
+        let update = root.update(RootEvent::Terminal(Event::Key(KeyEvent::new(
+            KeyCode::PageDown,
+            KeyModifiers::NONE,
+        ))));
+
+        assert!(update.effects.is_empty());
+    }
+
+    #[test]
+    fn upward_scroll_away_from_the_loaded_top_does_not_request_history() {
+        let mut root = RootNode::new(std::path::Path::new("/workspace"), ReasoningEffort::Medium);
+        for sequence in 1..=30 {
+            let record = TranscriptRecord::from_local(
+                sequence,
+                sequence,
+                LocalEvent::UserSubmitted {
+                    id: TurnId::new(sequence),
+                    text: format!("prompt {sequence}"),
+                },
+            )
+            .unwrap();
+            let _ = root.update(RootEvent::Transcript(Arc::new(record)));
+        }
+        let mut terminal = Terminal::new(TestBackend::new(60, 12)).unwrap();
+        terminal
+            .draw(|frame| root.render_focused(frame, frame.area(), &Theme::default(), true))
+            .unwrap();
+
+        let update = root.update(RootEvent::Terminal(Event::Key(KeyEvent::new(
+            KeyCode::PageUp,
+            KeyModifiers::NONE,
+        ))));
+
+        assert!(update.effects.is_empty());
+    }
 }

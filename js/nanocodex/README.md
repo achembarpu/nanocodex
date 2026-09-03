@@ -87,6 +87,12 @@ workspace, and MCP are composed once; placement is selected afterward. Pass the
 recipe to an in-process Node or Web API host, or reverse-attach it to a managed
 agent target:
 
+For a reverse machine attachment, `attachmentId` is its stable safe-ASCII source
+identity (at most 123 bytes), and must equal the `id` of its sole non-secret
+`machines` entry. Multiple machines may stay attached through independent
+`Tools` runtimes; reconnect one runtime to replace that machine route while the
+durable managed agent stays alive. Generic attachments may omit machine metadata.
+
 ```js
 import { createTools } from "nanocodex";
 import { Agent, Transport, Workspace } from "nanocodex/node";
@@ -94,6 +100,13 @@ import WebSocket from "ws";
 
 const workspace = await Workspace.open({ path: process.cwd() });
 const tools = await createTools({
+  attachmentId: "laptop",
+  machines: [{
+    id: "laptop",
+    name: "My laptop",
+    workspace: process.cwd(),
+    capabilities: ["filesystem", "native-shell"],
+  }],
   workspace,
   tools: {
     lookup_issue: {

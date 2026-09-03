@@ -134,6 +134,30 @@ async fn run_uses_managed_lifecycle_with_the_configured_local_workspace() {
     assert!(!decoy.path().join("hosted-proof.txt").exists());
     assert!(!config_home.path().join("host-id").exists());
     assert!(!config_home.path().join("attachment-id").exists());
+    let catalogs = state.catalogs.lock().unwrap();
+    assert_eq!(catalogs.len(), 1);
+    let catalog = &catalogs[0];
+    let attachment_id = catalog["attachment_id"].as_str().unwrap();
+    assert!(attachment_id.len() <= 123);
+    assert!(uuid::Uuid::parse_str(attachment_id).is_ok());
+    assert_eq!(catalog["machines"].as_array().unwrap().len(), 1);
+    assert_eq!(catalog["machines"][0]["id"], attachment_id);
+    assert_eq!(
+        catalog["machines"][0]["workspace"],
+        workspace.path().to_string_lossy().as_ref()
+    );
+    assert!(
+        !catalog["machines"][0]["name"]
+            .as_str()
+            .unwrap()
+            .trim()
+            .is_empty()
+    );
+    assert_eq!(
+        catalog["machines"][0]["capabilities"],
+        serde_json::json!(["native", "filesystem", "process", "package", "server"])
+    );
+    drop(catalogs);
     server.abort();
 }
 
@@ -320,6 +344,10 @@ async fn run_reconnects_the_same_local_host_after_a_ready_socket_disconnect() {
     let catalogs = state.catalogs.lock().unwrap();
     assert_eq!(catalogs.len(), 2);
     assert_eq!(catalogs[0], catalogs[1]);
+    assert_eq!(
+        catalogs[0]["attachment_id"],
+        catalogs[0]["machines"][0]["id"]
+    );
     assert!(!workspace.path().join("hosted-proof.txt").exists());
     assert!(!String::from_utf8_lossy(&output.stderr).contains(&api_key));
     server.abort();
@@ -1109,7 +1137,7 @@ async fn serve_tool_host(mut socket: WebSocket, state: TestState, disconnect_aft
     };
     let catalog: serde_json::Value = serde_json::from_str(&catalog).unwrap();
     assert_eq!(catalog["type"], "catalog");
-    assert_eq!(catalog.as_object().unwrap().len(), 2);
+    assert_eq!(catalog.as_object().unwrap().len(), 4);
     let names = catalog["tools"]
         .as_array()
         .unwrap()

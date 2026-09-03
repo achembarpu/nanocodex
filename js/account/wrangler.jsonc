@@ -26,6 +26,7 @@
     "run_worker_first": [
       "/",
       "/agent",
+      "/agent/*",
       "/demos/chief-of-staff",
       "/multiplayer",
       "/world",

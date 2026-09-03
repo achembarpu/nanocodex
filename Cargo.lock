@@ -6228,6 +6228,7 @@ dependencies = [
  "nanocodex-managed",
  "nanocodex-subagents",
  "nanocodex-tools",
+ "percent-encoding",
  "png 0.18.1",
  "pulldown-cmark 0.13.4",
  "ratatui 0.30.2",
@@ -6246,6 +6247,8 @@ dependencies = [
  "unicode-segmentation",
  "unicode-width 0.2.0",
  "url",
+ "uuid",
+ "whoami 1.6.1",
 ]
 
 [[package]]

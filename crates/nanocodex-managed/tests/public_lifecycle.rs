@@ -5,6 +5,8 @@ use std::{
     time::Duration,
 };
 
+#[cfg(feature = "tools")]
+use axum::extract::ws::{Message, WebSocketUpgrade};
 use axum::{
     Json, Router,
     body::{Body, Bytes},
@@ -17,10 +19,19 @@ use futures_util::{FutureExt, stream};
 use nanocodex_agent::{
     AgentEvents, Model, Nanocodex, PromptRequest, ReasoningMode, Thinking, TurnControl, TurnResult,
 };
-use nanocodex_managed::{AgentSettings, Managed, ManagedApiKey, ManagedClient, ManagedError};
+use nanocodex_managed::{
+    AgentSettings, Managed, ManagedApiKey, ManagedClient, ManagedError, ManagedEventData,
+    PromptInput,
+};
 use nanocodex_oai_api::events::AgentEventKind;
 use serde_json::{Value, json};
 use tokio::sync::{Notify, mpsc};
+
+#[cfg(feature = "tools")]
+use nanocodex_tools::{
+    Tools,
+    attachment::{AttachmentMachine, AttachmentMetadata},
+};
 
 const AGENT_ID: &str = "agent-public-lifecycle";
 const SESSION_ID: &str = "019fc927-b280-79a7-8445-1b9996ad2fb0";
@@ -46,6 +57,7 @@ struct FixtureInner {
     create_bodies: Mutex<Vec<Value>>,
     settings: Mutex<Value>,
     operations: Mutex<Vec<&'static str>>,
+    catalogs: Mutex<Vec<Value>>,
     changed: Notify,
 }
 
@@ -77,6 +89,7 @@ impl Fixture {
                 create_bodies: Mutex::new(Vec::new()),
                 settings: Mutex::new(default_settings()),
                 operations: Mutex::new(Vec::new()),
+                catalogs: Mutex::new(Vec::new()),
                 changed: Notify::new(),
             }),
         }
@@ -113,6 +126,73 @@ impl Fixture {
             changed.await;
         }
     }
+
+    #[cfg(feature = "tools")]
+    async fn wait_for_catalog(&self) {
+        loop {
+            let changed = self.inner.changed.notified();
+            if !lock(&self.inner.catalogs).is_empty() {
+                return;
+            }
+            changed.await;
+        }
+    }
+}
+
+#[cfg(feature = "tools")]
+#[tokio::test]
+async fn public_managed_lifecycle_threads_attachment_metadata() {
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        let api_key = format!("ncx_live_{}_{}", "c".repeat(12), "d".repeat(43));
+        let fixture = Fixture::new(&api_key);
+        let app = Router::new()
+            .route("/v1/agents/{agent_id}", get(agent_state))
+            .route("/v1/agents/{agent_id}/events", get(events))
+            .route("/v1/agents/{agent_id}/tool-host", get(tool_host))
+            .with_state(fixture.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = ManagedClient::new(
+            format!("http://{address}"),
+            ManagedApiKey::parse(api_key).unwrap(),
+        )
+        .unwrap();
+        let machine = AttachmentMachine::new(
+            "machine-public-1",
+            "Public lifecycle host",
+            "/workspace/public",
+            ["native", "filesystem"],
+        )
+        .unwrap();
+        let tools = Tools::builder().without_defaults().build().unwrap();
+        let (agent, _): (Nanocodex, AgentEvents) =
+            Nanocodex::builder(Managed::open(client, AGENT_ID))
+                .tools(tools)
+                .attachment_metadata(AttachmentMetadata::machine(machine))
+                .build()
+                .await
+                .unwrap();
+        fixture.wait_for_catalog().await;
+        assert_eq!(
+            lock(&fixture.inner.catalogs)[0],
+            json!({
+                "type": "catalog",
+                "tools": [],
+                "attachment_id": "machine-public-1",
+                "machines": [{
+                    "id": "machine-public-1",
+                    "name": "Public lifecycle host",
+                    "workspace": "/workspace/public",
+                    "capabilities": ["native", "filesystem"]
+                }]
+            })
+        );
+        agent.disconnect().await.unwrap();
+        server.abort();
+    })
+    .await
+    .expect("metadata lifecycle should remain bounded");
 }
 
 #[tokio::test]
@@ -152,6 +232,7 @@ async fn public_managed_lifecycle_preserves_durable_identity_control_and_replay(
         )
         .expect("loopback managed client should build");
 
+        let (observed_sender, mut observed_events) = mpsc::unbounded_channel();
         let (agent, mut events): (Nanocodex, AgentEvents) = Nanocodex::builder(
             Managed::create(client.clone()).with_settings(AgentSettings {
                 model: Model::Terra,
@@ -160,12 +241,14 @@ async fn public_managed_lifecycle_preserves_durable_identity_control_and_replay(
                 fast_mode: true,
             }),
         )
+        .event_observer(observed_sender)
         .build()
         .await
         .expect("public managed create should build");
         assert_eq!(agent.session_id().to_string(), SESSION_ID);
         assert_eq!(events.request_id(), SESSION_ID);
         fixture.wait_for_event_cursor("40").await;
+        assert_eq!(lock(&fixture.inner.event_cursors).len(), 1);
 
         let settings = client
             .set_model(AGENT_ID, Model::Luna)
@@ -204,15 +287,18 @@ async fn public_managed_lifecycle_preserves_durable_identity_control_and_replay(
         );
 
         fixture
+            .send_event(accepted_event(41, ACTIVE_TURN_ID, "live prompt"))
+            .await;
+        fixture
             .send_event(nested_event(
-                41,
+                42,
                 "assistant.message",
                 json!({"text": "live"}),
             ))
             .await;
         fixture
             .send_event(nested_event(
-                42,
+                43,
                 "run.completed",
                 json!({"status": "completed"}),
             ))
@@ -242,12 +328,47 @@ async fn public_managed_lifecycle_preserves_durable_identity_control_and_replay(
         );
 
         fixture
-            .send_event(completed_event(43, ACTIVE_TURN_ID, "live answer"))
+            .send_event(completed_event(44, ACTIVE_TURN_ID, "live answer"))
             .await;
         let result: TurnResult = turn
             .await
             .expect("live terminal should complete the result");
         assert_result(&result, ACTIVE_REQUEST_ID, "live answer");
+
+        let mut observed = Vec::new();
+        for _ in 0..4 {
+            observed.push(
+                observed_events
+                    .recv()
+                    .await
+                    .expect("ordered managed observer should remain open"),
+            );
+        }
+        assert_eq!(
+            observed
+                .iter()
+                .map(|event| event.cursor.as_str())
+                .collect::<Vec<_>>(),
+            ["41", "42", "43", "44"]
+        );
+        assert!(matches!(
+            &observed[0].data,
+            ManagedEventData::TurnAccepted {
+                input: PromptInput::Text(input),
+                ..
+            } if input == "live prompt"
+        ));
+        assert!(matches!(observed[1].data, ManagedEventData::Event { .. }));
+        assert!(matches!(observed[2].data, ManagedEventData::Event { .. }));
+        assert!(matches!(
+            observed[3].data,
+            ManagedEventData::TurnCompleted { .. }
+        ));
+        assert_eq!(
+            lock(&fixture.inner.event_cursors).len(),
+            1,
+            "the observer must tap the lifecycle stream instead of opening another subscription"
+        );
 
         shutdown
             .await
@@ -260,7 +381,7 @@ async fn public_managed_lifecycle_preserves_durable_identity_control_and_replay(
                 .expect("public managed open should build");
         assert_eq!(reopened.session_id().to_string(), SESSION_ID);
         assert_eq!(reopened_events.request_id(), SESSION_ID);
-        fixture.wait_for_event_cursor("43").await;
+        fixture.wait_for_event_cursor("44").await;
 
         let retained = reopened
             .prompt(PromptRequest::new("retained prompt").request_id(RETAINED_REQUEST_ID))
@@ -301,7 +422,7 @@ async fn public_managed_lifecycle_preserves_durable_identity_control_and_replay(
                 .build()
                 .await
                 .expect("public managed state-fenced open should build");
-        fixture.wait_for_event_cursor("43").await;
+        fixture.wait_for_event_cursor("44").await;
         assert_eq!(
             lock(&fixture.inner.state_reads).len(),
             state_reads_before_open,
@@ -318,11 +439,11 @@ async fn public_managed_lifecycle_preserves_durable_identity_control_and_replay(
         );
         let event_cursors = lock(&fixture.inner.event_cursors);
         assert_eq!(event_cursors.first().map(String::as_str), Some("40"));
-        assert!(event_cursors.iter().any(|cursor| cursor == "43"));
+        assert!(event_cursors.iter().any(|cursor| cursor == "44"));
         assert!(
             event_cursors
                 .iter()
-                .all(|cursor| cursor == "40" || cursor == "43")
+                .all(|cursor| cursor == "40" || cursor == "44")
         );
         drop(event_cursors);
 
@@ -437,7 +558,7 @@ async fn agent_state(
     let latest_event_cursor = {
         let mut reads = lock(&fixture.inner.state_reads);
         reads.push(agent_id);
-        if reads.len() == 1 { "40" } else { "43" }
+        if reads.len() == 1 { "40" } else { "44" }
     };
     let mut state = agent_state_json(AGENT_ID, latest_event_cursor);
     state["settings"] = lock(&fixture.inner.settings).clone();
@@ -468,6 +589,29 @@ async fn update_settings(
     }
     lock(&fixture.inner.operations).push("settings");
     json_response(StatusCode::OK, json!({"settings": settings.clone()}))
+}
+
+#[cfg(feature = "tools")]
+async fn tool_host(
+    State(fixture): State<Fixture>,
+    Path(agent_id): Path<String>,
+    headers: HeaderMap,
+    upgrade: WebSocketUpgrade,
+) -> impl IntoResponse {
+    authorize(&fixture, &headers);
+    assert_eq!(agent_id, AGENT_ID);
+    upgrade.on_upgrade(move |mut socket| async move {
+        let Some(Ok(Message::Text(catalog))) = socket.recv().await else {
+            return;
+        };
+        lock(&fixture.inner.catalogs).push(serde_json::from_str(&catalog).unwrap());
+        fixture.inner.changed.notify_waiters();
+        socket
+            .send(Message::Text(json!({"type": "ready"}).to_string().into()))
+            .await
+            .unwrap();
+        while socket.recv().await.is_some() {}
+    })
 }
 
 fn agent_state_json(agent_id: &str, latest_event_cursor: &str) -> Value {
@@ -659,6 +803,21 @@ fn nested_event(cursor: u64, kind: &str, payload: Value) -> Bytes {
         }
     });
     Bytes::from(format!("id: {cursor}\nevent: event\ndata: {envelope}\n\n"))
+}
+
+fn accepted_event(cursor: u64, turn_id: &str, input: &str) -> Bytes {
+    let envelope = json!({
+        "cursor": cursor.to_string(),
+        "created_at": cursor,
+        "turn_id": turn_id,
+        "type": "turn_accepted",
+        "id": turn_id,
+        "input": input,
+        "replayed": false
+    });
+    Bytes::from(format!(
+        "id: {cursor}\nevent: turn_accepted\ndata: {envelope}\n\n"
+    ))
 }
 
 fn completed_event(cursor: u64, turn_id: &str, final_message: &str) -> Bytes {

@@ -29,6 +29,7 @@ import {
   type BrowserAccountMcpConnection,
 } from "./browserMcp";
 import { clientFailureMessage } from "./clientFailure";
+import { attachManagedBrowserHand } from "./managedBrowserHand";
 import { managedTerminalAgent, openManagedAgent } from "./managedAgentRuntime";
 
 export type { AgentTerminalMode, AgentTerminalState } from "nanocodex-terminal";
@@ -159,11 +160,41 @@ export const ManagedAgentTerminal = memo(function ManagedAgentTerminal({
 }) {
   const managed = useMemo(() => openManagedAgent(agentId), [agentId]);
   const agent = useMemo(() => managedTerminalAgent(managed), [managed]);
-  const retryAgent = useCallback(() => {}, []);
+  const [browserHand, setBrowserHand] = useState<Awaited<ReturnType<typeof attachManagedBrowserHand>>>();
+  const [browserHandError, setBrowserHandError] = useState<string>();
+  const [browserHandAttempt, setBrowserHandAttempt] = useState(0);
+  useEffect(() => {
+    const controller = new AbortController();
+    let hand: Awaited<ReturnType<typeof attachManagedBrowserHand>> | undefined;
+    setBrowserHand(undefined);
+    setBrowserHandError(undefined);
+    void attachManagedBrowserHand(managed, controller.signal).then((attached) => {
+      if (controller.signal.aborted) {
+        void attached.close();
+        return;
+      }
+      hand = attached;
+      setBrowserHand(attached);
+      void hand.closed().then(() => {
+        if (controller.signal.aborted) return;
+        setBrowserHand(undefined);
+        setBrowserHandError("The browser workspace hand disconnected. Retry to attach it again.");
+      });
+    }).catch((error) => {
+      if (!controller.signal.aborted) setBrowserHandError(errorMessage(error));
+    });
+    return () => {
+      controller.abort();
+      if (hand) void hand.close();
+    };
+  }, [browserHandAttempt, managed]);
+  const retryAgent = useCallback(() => {
+    setBrowserHandAttempt((current) => current + 1);
+  }, []);
   return (
     <AgentTerminalView
-      agent={agent}
-      agentError={undefined}
+      agent={browserHand ? agent : undefined}
+      agentError={browserHandError}
       inactiveMessage={({ agentError, agentStatus }) => inactiveTerminalMessage({
         agentError,
         agentStatus,
@@ -177,12 +208,14 @@ export const ManagedAgentTerminal = memo(function ManagedAgentTerminal({
       onStateChange={onStateChange}
       retryAgent={retryAgent}
       voice={voiceEnabled}
-      accessory={({ agentReady, submit }) => (
+      accessory={({ agentReady, submit }) => browserHand ? (
         <ArtifactDock
           agentReady={agentReady}
           onPrompt={(artifact, prompt, path) => submit(artifactFollowOnPrompt(artifact, path, prompt))}
+          workspace={browserHand.workspace}
+          workspaceId={browserHand.workspaceId}
         />
-      )}
+      ) : null}
     />
   );
 });

@@ -99,6 +99,7 @@ pub(crate) struct Transcript {
     effort: ReasoningEffort,
     pinned_prompt: Option<PinnedPrompt>,
     updates_banner_area: Option<Rect>,
+    at_top: bool,
 }
 
 struct CachedEntry {
@@ -280,6 +281,7 @@ impl Transcript {
             effort,
             pinned_prompt: None,
             updates_banner_area: None,
+            at_top: true,
         }
     }
 
@@ -288,6 +290,38 @@ impl Transcript {
         snapshot.model = self.model.fork_snapshot();
         snapshot.cache.workspace.clone_from(&self.cache.workspace);
         snapshot
+    }
+
+    pub(crate) const fn at_top(&self) -> bool {
+        self.at_top
+    }
+
+    pub(crate) fn preserve_viewport_from(&mut self, previous: &Self) {
+        let ScrollState::Detached(previous_anchor) = previous.scroll else {
+            return;
+        };
+        let Some(previous_index) = previous.model.index_of(previous_anchor.entry) else {
+            return;
+        };
+        let distance_from_end = previous
+            .model
+            .entries()
+            .len()
+            .saturating_sub(previous_index);
+        let Some(index) = self.model.entries().len().checked_sub(distance_from_end) else {
+            return;
+        };
+        let Some(entry) = self.model.entries().get(index) else {
+            return;
+        };
+        let anchor = Anchor {
+            entry: entry.id,
+            line: previous_anchor.line,
+        };
+        self.scroll = ScrollState::Detached(anchor);
+        self.last_top = Some(anchor);
+        self.new_updates = previous.new_updates;
+        self.at_top = false;
     }
 
     pub(crate) fn set_workspace(&mut self, workspace: &Path) {
@@ -888,6 +922,10 @@ impl Transcript {
             }
         };
         self.last_top = top;
+        self.at_top = match top {
+            Some(top) => self.first_anchor(width, theme) == Some(top),
+            None => true,
+        };
 
         let anchors = top.map_or_else(Vec::new, |anchor| {
             self.collect_forward_anchors(anchor, usize::from(height), width, theme)
@@ -2009,4 +2047,53 @@ fn render_user(text: &str, width: u16, theme: &Theme) -> markdown::Layout {
 
 fn line_width(text: &str) -> usize {
     unicode_width::UnicodeWidthStr::width(text)
+}
+
+#[cfg(test)]
+mod history_tests {
+    use super::{Anchor, Component, ScrollState, Transcript, TranscriptEvent};
+    use crate::tui::transcript::{LocalEvent, TranscriptRecord, TurnId};
+    use std::sync::Arc;
+
+    #[test]
+    fn replayed_prefix_preserves_the_detached_viewport_anchor() {
+        let mut previous = Transcript::new();
+        for (sequence, text) in [(1, "recent one"), (2, "recent two")] {
+            let _ = previous.update(TranscriptEvent::Record(user(sequence, text)));
+        }
+        let previous_anchor = Anchor {
+            entry: previous.model.entries()[0].id,
+            line: 0,
+        };
+        previous.scroll = ScrollState::Detached(previous_anchor);
+        previous.last_top = Some(previous_anchor);
+        previous.new_updates = 3;
+
+        let mut replayed = Transcript::new();
+        for (sequence, text) in [(1, "older"), (2, "recent one"), (3, "recent two")] {
+            let _ = replayed.update(TranscriptEvent::Record(user(sequence, text)));
+        }
+        replayed.preserve_viewport_from(&previous);
+
+        let ScrollState::Detached(anchor) = replayed.scroll else {
+            panic!("history replay must remain detached");
+        };
+        assert_eq!(replayed.model.index_of(anchor.entry), Some(1));
+        assert_eq!(anchor.line, 0);
+        assert_eq!(replayed.new_updates, 3);
+    }
+
+    fn user(sequence: u64, text: &str) -> Arc<TranscriptRecord> {
+        Arc::new(
+            TranscriptRecord::from_local(
+                sequence,
+                sequence,
+                LocalEvent::UserSubmitted {
+                    id: TurnId::new(sequence),
+                    text: text.to_owned(),
+                },
+            )
+            .unwrap(),
+        )
+    }
 }

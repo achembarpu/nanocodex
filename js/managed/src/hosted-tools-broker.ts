@@ -54,7 +54,7 @@ export class HostedToolsBroker extends HostedToolsBrokerCore {
 class SqlHostedToolsPersistence implements HostedToolsBrokerPersistence {
   constructor(readonly storage: DurableObjectStorage) {}
 
-  initialize(now: number): HostedToolsStateRow | undefined {
+  initialize(now: number): readonly HostedToolsStateRow[] {
     this.storage.sql.exec(`
       CREATE TABLE IF NOT EXISTS hosted_tools_state (
         singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
@@ -65,6 +65,22 @@ class SqlHostedToolsPersistence implements HostedToolsBrokerPersistence {
         catalog_json TEXT
       );
       INSERT OR IGNORE INTO hosted_tools_state (singleton) VALUES (1);
+      CREATE TABLE IF NOT EXISTS hosted_tools_routes (
+        route_id TEXT PRIMARY KEY,
+        generation INTEGER NOT NULL DEFAULT 0,
+        host_id TEXT,
+        lease_id TEXT,
+        lease_expires_at INTEGER NOT NULL DEFAULT 0,
+        catalog_json TEXT
+      );
+      INSERT OR IGNORE INTO hosted_tools_routes
+        (route_id, generation, host_id, lease_id, lease_expires_at, catalog_json)
+        SELECT '$legacy', generation, host_id, lease_id, lease_expires_at, catalog_json
+        FROM hosted_tools_state
+        WHERE singleton = 1;
+      UPDATE hosted_tools_state
+        SET host_id = NULL, lease_id = NULL, lease_expires_at = 0, catalog_json = NULL
+        WHERE singleton = 1;
       CREATE TABLE IF NOT EXISTS hosted_tool_calls (
         call_id TEXT PRIMARY KEY,
         session_id TEXT NOT NULL,
@@ -93,7 +109,7 @@ class SqlHostedToolsPersistence implements HostedToolsBrokerPersistence {
         ON hosted_tool_calls(lease_id, generation, state);
     `);
     return this.transaction(() => {
-      const retired = this.state();
+      const retired = this.states().filter((state) => state.lease_id !== null);
       this.storage.sql.exec(
         `UPDATE hosted_tool_calls SET state = 'unavailable', result_json = ?, updated_at = ?
          WHERE state = 'admitted'`,
@@ -106,28 +122,41 @@ class SqlHostedToolsPersistence implements HostedToolsBrokerPersistence {
         JSON.stringify(hostedToolsAmbiguous("Hosted Tools lifecycle restarted after dispatch")),
         now,
       );
-      if (retired.lease_id) this.clearHost(retired.lease_id, retired.generation);
-      return retired.lease_id ? retired : undefined;
+      for (const state of retired) this.clearHost(state.lease_id!, state.generation);
+      return retired;
     });
   }
 
   transaction<T>(callback: () => T): T { return this.storage.transactionSync(callback); }
 
-  state(): HostedToolsStateRow {
+  states(): readonly HostedToolsStateRow[] {
+    return this.storage.sql.exec<HostedToolsStateRow>(
+      `SELECT route_id, generation, host_id, lease_id, lease_expires_at, catalog_json
+       FROM hosted_tools_routes ORDER BY route_id`,
+    ).toArray();
+  }
+
+  state(routeId: string): HostedToolsStateRow | undefined {
     const row = this.storage.sql.exec<HostedToolsStateRow>(
-      `SELECT generation, host_id, lease_id, lease_expires_at, catalog_json
-       FROM hosted_tools_state WHERE singleton = 1`,
+      `SELECT route_id, generation, host_id, lease_id, lease_expires_at, catalog_json
+       FROM hosted_tools_routes WHERE route_id = ?`,
+      routeId,
     ).toArray()[0];
-    if (!row) throw new Error("Hosted Tools state is missing");
     return row;
   }
 
   replaceHost(row: HostedToolsStateRow): void {
     this.storage.sql.exec(
-      `UPDATE hosted_tools_state
-       SET generation = ?, host_id = ?, lease_id = ?, lease_expires_at = ?,
-           catalog_json = ?
-       WHERE singleton = 1`,
+      `INSERT INTO hosted_tools_routes
+         (route_id, generation, host_id, lease_id, lease_expires_at, catalog_json)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(route_id) DO UPDATE SET
+         generation = excluded.generation,
+         host_id = excluded.host_id,
+         lease_id = excluded.lease_id,
+         lease_expires_at = excluded.lease_expires_at,
+         catalog_json = excluded.catalog_json`,
+      row.route_id,
       row.generation,
       row.host_id,
       row.lease_id,
@@ -138,10 +167,10 @@ class SqlHostedToolsPersistence implements HostedToolsBrokerPersistence {
 
   clearHost(leaseId: string, generation: number): void {
     this.storage.sql.exec(
-      `UPDATE hosted_tools_state
+      `UPDATE hosted_tools_routes
        SET host_id = NULL, lease_id = NULL, lease_expires_at = 0,
            catalog_json = NULL
-       WHERE singleton = 1 AND lease_id = ? AND generation = ?`,
+       WHERE lease_id = ? AND generation = ?`,
       leaseId,
       generation,
     );
@@ -149,9 +178,9 @@ class SqlHostedToolsPersistence implements HostedToolsBrokerPersistence {
 
   clearCatalog(leaseId: string, generation: number): void {
     this.storage.sql.exec(
-      `UPDATE hosted_tools_state
+      `UPDATE hosted_tools_routes
        SET catalog_json = NULL
-       WHERE singleton = 1 AND lease_id = ? AND generation = ?`,
+       WHERE lease_id = ? AND generation = ?`,
       leaseId,
       generation,
     );
@@ -277,27 +306,18 @@ class SqlHostedToolsPersistence implements HostedToolsBrokerPersistence {
     ).toArray()[0]?.count ?? 0);
   }
 
-  pruneReceipts(activeLeaseId: string | null, activeGeneration: number, limit: number): void {
-    if (activeLeaseId === null) {
-      this.storage.sql.exec(
-        `DELETE FROM hosted_tool_calls WHERE call_id IN (
-           SELECT call_id FROM hosted_tool_calls
-           WHERE state NOT IN ('admitted', 'dispatched')
-           ORDER BY updated_at DESC, call_id DESC LIMIT -1 OFFSET ?
-         )`,
-        limit,
-      );
-      return;
-    }
+  pruneReceipts(limit: number): void {
     this.storage.sql.exec(
       `DELETE FROM hosted_tool_calls WHERE call_id IN (
          SELECT call_id FROM hosted_tool_calls
          WHERE state NOT IN ('admitted', 'dispatched')
-           AND NOT (lease_id = ? AND generation = ?)
+           AND NOT EXISTS (
+             SELECT 1 FROM hosted_tools_routes
+             WHERE hosted_tools_routes.lease_id = hosted_tool_calls.lease_id
+               AND hosted_tools_routes.generation = hosted_tool_calls.generation
+           )
          ORDER BY updated_at DESC, call_id DESC LIMIT -1 OFFSET ?
        )`,
-      activeLeaseId,
-      activeGeneration,
       limit,
     );
   }

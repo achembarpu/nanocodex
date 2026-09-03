@@ -20,10 +20,14 @@ const IDS = [
   "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
   "22222222-2222-4222-8222-222222222222",
   "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+  "33333333-3333-4333-8333-333333333333",
+  "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+  "44444444-4444-4444-8444-444444444444",
+  "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
 ];
 const CLEANUP_DIGEST = await hostedToolCatalogDigest([cleanupEntry()]);
 
-type State = ReturnType<HostedToolsBrokerPersistence["state"]>;
+type State = NonNullable<ReturnType<HostedToolsBrokerPersistence["state"]>>;
 type CallRow = NonNullable<ReturnType<HostedToolsBrokerPersistence["call"]>>;
 type CallState = CallRow["state"];
 
@@ -48,6 +52,270 @@ describe("HostedToolsBroker socket-owned protocol", () => {
     await catalog(fixture.broker, host);
     expect(host.closed).toMatchObject({ code: 1008 });
     expect(host.sent).not.toContainEqual(expect.objectContaining({ type: "fenced" }));
+  });
+
+  it("projects account machines only while their host is routing-ready", async () => {
+    const fixture = createFixture();
+    const host = fixture.socket();
+    const machines = [{
+      id: "desktop",
+      name: "Build desktop",
+      workspace: "/home/george/repo",
+      capabilities: ["filesystem", "native-shell"],
+    }];
+    await fixture.broker.message(host.webSocket, JSON.stringify({
+      type: "catalog",
+      attachment_id: "desktop",
+      tools: [entry()],
+      machines,
+    }));
+
+    expect(fixture.broker.machines()).toEqual(machines);
+    await fixture.broker.message(host.webSocket, JSON.stringify({ type: "drain" }));
+    expect(fixture.broker.machines()).toEqual([]);
+  });
+
+  it("replaces the live machine snapshot without rebuilding its broker", async () => {
+    const fixture = createFixture();
+    const first = fixture.socket();
+    await fixture.broker.message(first.webSocket, JSON.stringify({
+      type: "catalog",
+      attachment_id: "laptop",
+      tools: [entry()],
+      machines: [{
+        id: "laptop",
+        name: "Laptop",
+        workspace: "/Users/george/repo",
+        capabilities: ["filesystem"],
+      }],
+    }));
+    const replacement = fixture.socket();
+    await fixture.broker.message(replacement.webSocket, JSON.stringify({
+      type: "catalog",
+      attachment_id: "laptop",
+      tools: [entry()],
+      machines: [{
+        id: "laptop",
+        name: "Renamed laptop",
+        workspace: "/home/george/repo",
+        capabilities: ["filesystem", "native-shell"],
+      }],
+    }));
+
+    expect(first.closed).toMatchObject({ code: 1008 });
+    expect(fixture.broker.machines()).toEqual([{
+      id: "laptop",
+      name: "Renamed laptop",
+      workspace: "/home/george/repo",
+      capabilities: ["filesystem", "native-shell"],
+    }]);
+  });
+
+  it("qualifies same-name machine tools, dispatches wire names, and disconnects independently", async () => {
+    const fixture = createFixture();
+    const routeB = fixture.socket();
+    await fixture.broker.message(routeB.webSocket, JSON.stringify({
+      type: "catalog",
+      attachment_id: "machine-b",
+      tools: [entry("exec_command")],
+      machines: [{ id: "machine-b", name: "Machine B", workspace: "/b", capabilities: ["shell"] }],
+    }));
+    const routeA = fixture.socket();
+    await fixture.broker.message(routeA.webSocket, JSON.stringify({
+      type: "catalog",
+      attachment_id: "machine-a",
+      tools: [entry("exec_command")],
+      machines: [{ id: "machine-a", name: "Machine A", workspace: "/a", capabilities: ["filesystem"] }],
+    }));
+
+    expect(fixture.broker.provider().definitions().map((definition) => definition.name))
+      .toEqual(["user_machine-a_exec_command", "user_machine-b_exec_command"]);
+    expect(fixture.broker.machines().map((machine) => machine.id)).toEqual(["machine-a", "machine-b"]);
+
+    const pendingA = fixture.broker.provider().resolve("user_machine-a_exec_command")!.handler({}, {
+      sessionId: "session:1", callId: "source:a",
+    });
+    const pendingB = fixture.broker.provider().resolve("user_machine-b_exec_command")!.handler({}, {
+      sessionId: "session:1", callId: "source:b",
+    });
+    const callA = routeA.sent.find((frame) => frame.type === "call")!;
+    const callB = routeB.sent.find((frame) => frame.type === "call")!;
+    expect(callA.name).toBe("exec_command");
+    expect(callB.name).toBe("exec_command");
+    await fixture.broker.message(routeA.webSocket, result(callA.call_id as string, "from A"));
+    await fixture.broker.message(routeB.webSocket, result(callB.call_id as string, "from B"));
+    await expect(pendingA).resolves.toMatchObject({ output: "from A" });
+    await expect(pendingB).resolves.toMatchObject({ output: "from B" });
+
+    const replacementA = fixture.socket();
+    await fixture.broker.message(replacementA.webSocket, JSON.stringify({
+      type: "catalog",
+      attachment_id: "machine-a",
+      tools: [entry("exec_command")],
+      machines: [{ id: "machine-a", name: "Machine A2", workspace: "/a2", capabilities: ["filesystem"] }],
+    }));
+    expect(routeA.closed).toMatchObject({ code: 1008 });
+    expect(routeB.closed).toBeUndefined();
+    expect(fixture.broker.provider().definitions().map((definition) => definition.name))
+      .toEqual(["user_machine-a_exec_command", "user_machine-b_exec_command"]);
+
+    fixture.persistence.routes.get("user:machine-a")!.lease_expires_at = NOW + 1;
+    const routeBExpiry = fixture.persistence.routes.get("user:machine-b")!.lease_expires_at;
+    await fixture.broker.message(replacementA.webSocket, JSON.stringify({ type: "ping", nonce: "alive" }));
+    expect(replacementA.sent.at(-1)).toEqual({ type: "pong", nonce: "alive" });
+    expect(fixture.persistence.routes.get("user:machine-a")!.lease_expires_at).toBeGreaterThan(NOW + 1);
+    expect(fixture.persistence.routes.get("user:machine-b")!.lease_expires_at).toBe(routeBExpiry);
+
+    await fixture.broker.message(replacementA.webSocket, JSON.stringify({ type: "drain" }));
+    expect(fixture.broker.provider().definitions().map((definition) => definition.name)).toEqual(["user_machine-b_exec_command"]);
+    expect(fixture.broker.machines().map((machine) => machine.id)).toEqual(["machine-b"]);
+    fixture.broker.webSocketClose(replacementA.webSocket, 1000, "done");
+    expect(fixture.broker.provider().definitions().map((definition) => definition.name)).toEqual(["user_machine-b_exec_command"]);
+
+    fixture.broker.webSocketClose(routeB.webSocket, 1000, "done");
+    expect(fixture.broker.provider().definitions()).toEqual([]);
+    expect(fixture.broker.machines()).toEqual([]);
+  });
+
+  it("expires only the named route whose lease elapsed", async () => {
+    const fixture = createFixture();
+    const routeA = fixture.socket();
+    await fixture.broker.message(routeA.webSocket, JSON.stringify({
+      type: "catalog",
+      attachment_id: "machine-a",
+      tools: [entry("alpha")],
+      machines: [{ id: "machine-a", name: "Machine A", workspace: "/a", capabilities: ["shell"] }],
+    }));
+    const routeB = fixture.socket();
+    await fixture.broker.message(routeB.webSocket, JSON.stringify({
+      type: "catalog",
+      attachment_id: "machine-b",
+      tools: [entry("beta")],
+      machines: [{ id: "machine-b", name: "Machine B", workspace: "/b", capabilities: ["shell"] }],
+    }));
+    fixture.persistence.routes.get("user:machine-a")!.lease_expires_at = NOW;
+
+    expect(fixture.broker.machines().map((machine) => machine.id)).toEqual(["machine-b"]);
+    expect(routeA.closed).toMatchObject({ code: 1008 });
+    expect(routeB.closed).toBeUndefined();
+    expect(fixture.broker.provider().definitions().map((definition) => definition.name))
+      .toEqual(["user_machine-b_beta"]);
+  });
+
+  it("keeps a dispatched call pinned when another named route is replaced", async () => {
+    const fixture = createFixture();
+    const routeA = fixture.socket();
+    await fixture.broker.message(routeA.webSocket, JSON.stringify({
+      type: "catalog",
+      attachment_id: "route-a",
+      tools: [entry("alpha")],
+    }));
+    const routeB = fixture.socket();
+    await fixture.broker.message(routeB.webSocket, JSON.stringify({
+      type: "catalog",
+      attachment_id: "route-b",
+      tools: [entry("beta")],
+    }));
+    const pending = fixture.broker.provider().resolve("alpha")!.handler({}, {
+      sessionId: "session:1",
+      callId: "source:1",
+    });
+    const call = routeA.sent.find((frame) => frame.type === "call")!;
+
+    const replacementB = fixture.socket();
+    await fixture.broker.message(replacementB.webSocket, JSON.stringify({
+      type: "catalog",
+      attachment_id: "route-b",
+      tools: [entry("gamma")],
+    }));
+    expect(routeB.closed).toMatchObject({ code: 1008 });
+    expect(routeA.closed).toBeUndefined();
+    await fixture.broker.message(routeA.webSocket, result(call.call_id as string, "from A"));
+    await expect(pending).resolves.toMatchObject({ success: true, output: "from A" });
+    expect(replacementB.sent.some((frame) => frame.type === "call")).toBe(false);
+  });
+
+  it("still rejects duplicate unqualified generic tool names", async () => {
+    const fixture = createFixture();
+    const first = fixture.socket();
+    await fixture.broker.message(first.webSocket, JSON.stringify({
+      type: "catalog", attachment_id: "generic-a", tools: [entry("alpha")],
+    }));
+    const candidate = fixture.socket();
+    await fixture.broker.message(candidate.webSocket, JSON.stringify({
+      type: "catalog", attachment_id: "generic-b", tools: [entry("alpha")],
+    }));
+    expect(candidate.closed).toMatchObject({
+      code: 1008,
+      reason: expect.stringContaining("catalog_contract_mismatch"),
+    });
+    expect(first.closed).toBeUndefined();
+    expect(fixture.broker.provider().definitions().map((definition) => definition.name)).toEqual(["alpha"]);
+  });
+
+  it("uses a stable bounded alias for a long qualified machine tool", async () => {
+    const fixture = createFixture();
+    const machineId = `m.${"a".repeat(120)}`;
+    const originalName = `run_${"x".repeat(124)}`;
+    const host = fixture.socket();
+    const frame = {
+      type: "catalog", attachment_id: machineId, tools: [entry(originalName)],
+      machines: [{ id: machineId, name: "Long machine", workspace: "/long", capabilities: ["shell"] }],
+    };
+    await fixture.broker.message(host.webSocket, JSON.stringify(frame));
+    const definition = fixture.broker.provider().definitions()[0]!;
+    expect(definition.name).toHaveLength(128);
+    expect(definition.name).toMatch(/^[A-Za-z0-9_-]{128}$/);
+    expect(definition.description).toContain(`user:${machineId}:${originalName}`);
+    const pending = fixture.broker.provider().resolve(definition.name)!.handler({}, {
+      sessionId: "session:1", callId: "source:long",
+    });
+    const call = host.sent.find((candidate) => candidate.type === "call")!;
+    expect(call.name).toBe(originalName);
+    await fixture.broker.message(host.webSocket, result(call.call_id as string, "long route"));
+    await expect(pending).resolves.toMatchObject({ output: "long route" });
+  });
+
+  it("removes machines when an open host lease expires", async () => {
+    const fixture = createFixture();
+    const host = fixture.socket();
+    await fixture.broker.message(host.webSocket, JSON.stringify({
+      type: "catalog",
+      attachment_id: "laptop",
+      tools: [entry()],
+      machines: [{
+        id: "laptop",
+        name: "Laptop",
+        workspace: "/workspace",
+        capabilities: ["filesystem"],
+      }],
+    }));
+    fixture.persistence.routes.get("user:laptop")!.lease_expires_at = NOW;
+
+    expect(fixture.broker.machines()).toEqual([]);
+    expect(host.closed).toMatchObject({ code: 1008 });
+  });
+
+  it("rejects machine metadata from Connect-grant hosts", async () => {
+    const fixture = createFixture();
+    const host = fixture.socket([], CLEANUP_DIGEST, GRANT_A);
+    await fixture.broker.message(host.webSocket, JSON.stringify({
+      type: "catalog",
+      attachment_id: "desktop",
+      tools: [cleanupEntry()],
+      machines: [{
+        id: "desktop",
+        name: "Build desktop",
+        workspace: "/home/george/repo",
+        capabilities: ["filesystem"],
+      }],
+    }));
+
+    expect(host.closed).toMatchObject({
+      code: 1008,
+      reason: expect.stringContaining("catalog_contract_mismatch"),
+    });
+    expect(fixture.broker.machines()).toEqual([]);
   });
 
   it("durably dispatches an exact call and ACKs both the result and duplicate receipt", async () => {
@@ -201,7 +469,7 @@ describe("HostedToolsBroker socket-owned protocol", () => {
     expect(competing.sent.some((frame) => frame.type === "call")).toBe(false);
   });
 
-  it("rejects replacement across Connect and account host boundaries in both directions", async () => {
+  it("keeps Connect and account persistence routes in separate authorization planes", async () => {
     for (const connectFirst of [true, false]) {
       const fixture = createFixture();
       const first = connectFirst
@@ -220,11 +488,13 @@ describe("HostedToolsBroker socket-owned protocol", () => {
         type: "catalog",
         tools: [connectFirst ? entry() : cleanupEntry()],
       }));
-      expect(competing.closed).toMatchObject({
-        code: 1008,
-        reason: expect.stringContaining("grant_conflict"),
-      });
+      expect(competing.sent).toEqual([{ type: "ready" }]);
       expect(first.closed).toBeUndefined();
+      expect(competing.closed).toBeUndefined();
+      expect([...fixture.persistence.routes.keys()]).toEqual(expect.arrayContaining([
+        "connect:$legacy",
+        "user:$legacy",
+      ]));
     }
   });
 
@@ -417,36 +687,53 @@ class FakeSocket {
 }
 
 class MemoryPersistence implements HostedToolsBrokerPersistence {
-  current: State = {
-    generation: 0,
-    host_id: null,
-    lease_id: null,
-    lease_expires_at: 0,
-    catalog_json: null,
-  };
-  readonly calls = new Map<string, CallRow>();
+  readonly routes = new Map<string, State>();
 
-  initialize(_now: number): State | undefined { return undefined; }
-  transaction<T>(callback: () => T): T { return callback(); }
-  state(): State { return structuredClone(this.current); }
-  replaceHost(row: State): void { this.current = structuredClone(row); }
-  clearHost(leaseId: string, generation: number): void {
-    if (this.current.lease_id !== leaseId || this.current.generation !== generation) return;
-    this.current = {
-      ...this.current,
+  constructor() {
+    this.routes.set("user:$legacy", {
+      route_id: "user:$legacy",
+      generation: 0,
       host_id: null,
       lease_id: null,
       lease_expires_at: 0,
       catalog_json: null,
-    };
+    });
+  }
+
+  get current(): State {
+    return this.routes.get("user:$legacy")!;
+  }
+
+  initialize(_now: number): readonly State[] { return []; }
+  transaction<T>(callback: () => T): T { return callback(); }
+  states(): readonly State[] { return [...this.routes.values()].map((row) => structuredClone(row)); }
+  state(routeId: string): State | undefined {
+    const row = this.routes.get(routeId);
+    return row && structuredClone(row);
+  }
+  replaceHost(row: State): void { this.routes.set(row.route_id, structuredClone(row)); }
+  clearHost(leaseId: string, generation: number): void {
+    const current = [...this.routes.values()].find((row) => row.lease_id === leaseId
+      && row.generation === generation);
+    if (!current) return;
+    this.routes.set(current.route_id, {
+      ...current,
+      host_id: null,
+      lease_id: null,
+      lease_expires_at: 0,
+      catalog_json: null,
+    });
   }
   clearCatalog(leaseId: string, generation: number): void {
-    if (this.current.lease_id !== leaseId || this.current.generation !== generation) return;
-    this.current = {
-      ...this.current,
+    const current = [...this.routes.values()].find((row) => row.lease_id === leaseId
+      && row.generation === generation);
+    if (!current) return;
+    this.routes.set(current.route_id, {
+      ...current,
       catalog_json: null,
-    };
+    });
   }
+  readonly calls = new Map<string, CallRow>();
   call(callId: string): CallRow | undefined {
     const row = this.calls.get(callId);
     return row && structuredClone(row);
@@ -502,20 +789,20 @@ class MemoryPersistence implements HostedToolsBrokerPersistence {
     return [...this.calls.values()].filter((row) => row.lease_id === leaseId
       && row.generation === generation).length;
   }
-  pruneReceipts(_activeLeaseId: string | null, _activeGeneration: number, _limit: number): void {}
+  pruneReceipts(_limit: number): void {}
 }
 
 async function catalog(broker: HostedToolsBroker, host: FakeSocket): Promise<void> {
   await broker.message(host.webSocket, JSON.stringify({ type: "catalog", tools: [entry()] }));
 }
 
-function entry() {
+function entry(name = "fixture__lookup") {
   return {
     provider: "fixture",
-    remote_name: "lookup",
+    remote_name: name === "fixture__lookup" ? "lookup" : name,
     definition: {
       type: "function" as const,
-      name: "fixture__lookup",
+      name,
       description: "Look up one fixture",
       strict: true,
       parameters: { type: "object", properties: {} },

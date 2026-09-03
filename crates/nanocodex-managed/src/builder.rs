@@ -9,16 +9,20 @@ use nanocodex_agent::{
     AgentEvents, BuilderBackend, Model, Nanocodex, NanocodexError, ReasoningMode, Thinking,
     backend::BackendRuntime,
 };
+use tokio::sync::mpsc;
 use tower::{Layer, Service, ServiceExt};
 
 #[cfg(feature = "tools")]
-use nanocodex_tools::{Tools, attachment::AttachmentTarget};
+use nanocodex_tools::{
+    Tools,
+    attachment::{AttachmentMetadata, AttachmentTarget},
+};
 
 #[cfg(feature = "tools")]
 use crate::attachment::AttachmentSupervisor;
 use crate::{
     AgentReceipt, AgentSettings, AgentState, EventCursor, ManagedClient, ManagedError,
-    ManagedEvents, PromptInput, TurnAction, TurnView,
+    ManagedEvent, ManagedEvents, PromptInput, TurnAction, TurnView,
     driver::{ManagedAgent, ManagedDriver},
     websocket::ManagedSocket,
 };
@@ -402,8 +406,11 @@ impl<S> BuilderBackend for Managed<S> {
     fn into_builder(self) -> Self::Builder {
         ManagedBuilder {
             managed: self,
+            event_observer: None,
             #[cfg(feature = "tools")]
             tools: None,
+            #[cfg(feature = "tools")]
+            attachment_metadata: None,
         }
     }
 }
@@ -412,8 +419,11 @@ impl<S> BuilderBackend for Managed<S> {
 #[derive(Debug)]
 pub struct ManagedBuilder<S = ManagedService> {
     managed: Managed<S>,
+    event_observer: Option<mpsc::UnboundedSender<ManagedEvent>>,
     #[cfg(feature = "tools")]
     tools: Option<Tools>,
+    #[cfg(feature = "tools")]
+    attachment_metadata: Option<AttachmentMetadata>,
 }
 
 impl<S> ManagedBuilder<S> {
@@ -425,8 +435,11 @@ impl<S> ManagedBuilder<S> {
                 service,
                 operation: self.managed.operation,
             },
+            event_observer: self.event_observer,
             #[cfg(feature = "tools")]
             tools: self.tools,
+            #[cfg(feature = "tools")]
+            attachment_metadata: self.attachment_metadata,
         }
     }
 
@@ -438,17 +451,32 @@ impl<S> ManagedBuilder<S> {
     {
         let Self {
             managed,
+            event_observer,
             #[cfg(feature = "tools")]
             tools,
+            #[cfg(feature = "tools")]
+            attachment_metadata,
         } = self;
         ManagedBuilder {
             managed: Managed {
                 service: layer.layer(managed.service),
                 operation: managed.operation,
             },
+            event_observer,
             #[cfg(feature = "tools")]
             tools,
+            #[cfg(feature = "tools")]
+            attachment_metadata,
         }
+    }
+
+    /// Copies the driver's ordered durable envelopes to a presentation observer.
+    ///
+    /// A closed observer is ignored and never affects the managed lifecycle.
+    #[must_use]
+    pub fn event_observer(mut self, observer: mpsc::UnboundedSender<ManagedEvent>) -> Self {
+        self.event_observer = Some(observer);
+        self
     }
 
     /// Attaches one caller-owned immutable tool recipe to the managed agent.
@@ -457,6 +485,15 @@ impl<S> ManagedBuilder<S> {
     #[must_use]
     pub fn tools(mut self, tools: Tools) -> Self {
         self.tools = Some(tools);
+        self
+    }
+
+    /// Publishes stable, non-secret routing metadata for the attached tools.
+    #[cfg(feature = "tools")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "tools")))]
+    #[must_use]
+    pub fn attachment_metadata(mut self, metadata: AttachmentMetadata) -> Self {
+        self.attachment_metadata = Some(metadata);
         self
     }
 
@@ -555,7 +592,10 @@ impl<S> ManagedBuilder<S> {
                     Ok(_) => return Err(unexpected_response()),
                     Err(error) => return Err(error),
                 };
-                Some(AttachmentSupervisor::start(tools, target).map_err(backend_error)?)
+                Some(
+                    AttachmentSupervisor::start(tools, target, self.attachment_metadata)
+                        .map_err(backend_error)?,
+                )
             }
             None => None,
         };
@@ -600,6 +640,7 @@ impl<S> ManagedBuilder<S> {
             commands,
             runtime.events(),
             shutdown,
+            self.event_observer,
             #[cfg(feature = "tools")]
             attachment,
         );

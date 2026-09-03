@@ -107,8 +107,10 @@ async fn fast_ready_disconnects_keep_exponential_reconnect_backoff() {
     let server = tokio::spawn(async move {
         let mut accepted = Vec::new();
         for _ in 0..4 {
-            let mut socket = ready(&listener).await;
-            accepted.push(Instant::now());
+            let mut socket = accept(&listener).await;
+            let catalog = recv_json(&mut socket).await;
+            send_json(&mut socket, json!({"type":"ready"})).await;
+            accepted.push((Instant::now(), catalog));
             socket.close(None).await.unwrap();
         }
         accepted
@@ -120,14 +122,19 @@ async fn fast_ready_disconnects_keep_exponential_reconnect_backoff() {
         .unwrap();
     let (attachment, _) = tools
         .attach(AttachmentTarget::new(endpoint, "bearer").unwrap())
+        .metadata(machine_metadata(
+            "machine-reconnect",
+            "/workspace/reconnect",
+        ))
         .start()
         .unwrap();
     let accepted = tokio::time::timeout(Duration::from_secs(2), server)
         .await
         .unwrap()
         .unwrap();
-    assert!(accepted[2].duration_since(accepted[1]) >= Duration::from_millis(170));
-    assert!(accepted[3].duration_since(accepted[2]) >= Duration::from_millis(350));
+    assert!(accepted[2].0.duration_since(accepted[1].0) >= Duration::from_millis(170));
+    assert!(accepted[3].0.duration_since(accepted[2].0) >= Duration::from_millis(350));
+    assert!(accepted.windows(2).all(|pair| pair[0].1 == pair[1].1));
     attachment.detach().await.unwrap();
 }
 
@@ -140,8 +147,18 @@ async fn catalog_call_result_and_drain_use_exact_frames() {
         let mut socket = accept(&listener).await;
         let catalog = recv_json(&mut socket).await;
         assert_eq!(catalog["type"], "catalog");
-        assert_eq!(catalog.as_object().unwrap().len(), 2);
+        assert_eq!(catalog.as_object().unwrap().len(), 4);
         assert_eq!(catalog["tools"][0]["definition"]["name"], "echo");
+        assert_eq!(catalog["attachment_id"], "machine-1");
+        assert_eq!(
+            catalog["machines"],
+            json!([{
+                "id": "machine-1",
+                "name": "Developer laptop",
+                "workspace": "/workspace/project",
+                "capabilities": ["native", "filesystem", "process", "package", "server"]
+            }])
+        );
         send_json(&mut socket, json!({"type":"ready"})).await;
 
         send_json(&mut socket, call("call-1", "echo")).await;
@@ -163,6 +180,7 @@ async fn catalog_call_result_and_drain_use_exact_frames() {
         .unwrap();
     let (attachment, _) = tools
         .attach(AttachmentTarget::new(endpoint, "bearer").unwrap())
+        .metadata(machine_metadata("machine-1", "/workspace/project"))
         .connect()
         .await
         .unwrap();
@@ -170,6 +188,27 @@ async fn catalog_call_result_and_drain_use_exact_frames() {
     completed_rx.await.unwrap();
     attachment.detach().await.unwrap();
     server.await.unwrap();
+}
+
+#[test]
+fn attachment_metadata_enforces_the_machine_wire_contract() {
+    let metadata = machine_metadata("machine.valid:1", "/workspace/project");
+    assert_eq!(metadata.attachment_id(), "machine.valid:1");
+    assert_eq!(
+        metadata.attached_machine().unwrap().id(),
+        metadata.attachment_id()
+    );
+    assert!(AttachmentMetadata::named("a".repeat(123)).is_ok());
+    assert!(AttachmentMetadata::named("a".repeat(124)).is_err());
+    assert!(AttachmentMetadata::named("unsafe/id").is_err());
+    assert!(AttachmentMachine::new("machine-1", "name", "/workspace", ["BadCapability"]).is_err());
+    assert!(
+        AttachmentMachine::new("machine-1", "name", "/workspace", ["process", "process"]).is_err()
+    );
+    assert!(
+        AttachmentMachine::new("machine-1", "é".repeat(65), "/workspace", [] as [&str; 0],)
+            .is_err()
+    );
 }
 
 #[tokio::test]
@@ -383,4 +422,16 @@ fn now_ms() -> u64 {
         .as_millis()
         .try_into()
         .unwrap()
+}
+
+fn machine_metadata(id: &str, workspace: &str) -> AttachmentMetadata {
+    AttachmentMetadata::machine(
+        AttachmentMachine::new(
+            id,
+            "Developer laptop",
+            workspace,
+            ["native", "filesystem", "process", "package", "server"],
+        )
+        .unwrap(),
+    )
 }

@@ -1,3 +1,8 @@
+import {
+  normalizeHostedMachines,
+  type HostedMachine,
+} from "../../tools/hostedMachine.mjs";
+
 export const HOSTED_TOOLS_LEASE_MS = 60_000;
 export const HOSTED_TOOL_CALL_TIMEOUT_MS = 120_000;
 export const MAX_HOSTED_TOOLS_FRAME_BYTES = 256 * 1024;
@@ -46,6 +51,8 @@ export type HostedToolCatalogEntry = {
   timeout_ms: number;
 };
 
+export type { HostedMachine } from "../../tools/hostedMachine.mjs";
+
 export type HostedToolOutputContent =
   | { type: "input_text"; text: string }
   | { type: "input_image"; image_url: string; detail: "auto" | "low" | "high" | "original" }
@@ -77,6 +84,8 @@ export type HostedToolsHostFrame =
   | {
       type: "catalog";
       tools: HostedToolCatalogEntry[];
+      machines?: HostedMachine[];
+      attachment_id?: string;
     }
   | {
       type: "result";
@@ -189,7 +198,7 @@ export function parseHostedToolsFrame(encoded: string): HostedToolsFrame {
 function parseCatalog(
   frame: Record<string, unknown>,
 ): Extract<HostedToolsHostFrame, { type: "catalog" }> {
-  exactKeys(frame, ["type", "tools"]);
+  exactKeys(frame, ["type", "tools", "machines", "attachment_id"]);
   if (!Array.isArray(frame.tools) || frame.tools.length > MAX_HOSTED_TOOL_CATALOG_ENTRIES) {
     throw new HostedToolsProtocolError(
       "invalid_catalog",
@@ -197,6 +206,17 @@ function parseCatalog(
     );
   }
   const tools = frame.tools.map((entry, index) => catalogEntry(entry, index));
+  const machines = machineCatalog(frame.machines);
+  const attachmentId = frame.attachment_id === undefined
+    ? undefined
+    : sourceIdentifier(frame.attachment_id, "attachment_id");
+  if (machines !== undefined && machines.length > 0
+    && (machines.length !== 1 || attachmentId !== machines[0]?.id)) {
+    throw new HostedToolsProtocolError(
+      "invalid_catalog",
+      "a machine catalog requires one machine whose id equals attachment_id",
+    );
+  }
   const names = new Set<string>();
   const identities = new Set<string>();
   for (const tool of tools) {
@@ -216,7 +236,21 @@ function parseCatalog(
   return {
     type: "catalog",
     tools,
+    ...(machines === undefined ? {} : { machines }),
+    ...(attachmentId === undefined ? {} : { attachment_id: attachmentId }),
   };
+}
+
+function machineCatalog(value: unknown): HostedMachine[] | undefined {
+  if (value === undefined) return undefined;
+  try {
+    return [...normalizeHostedMachines(value as readonly HostedMachine[])];
+  } catch (error) {
+    throw new HostedToolsProtocolError(
+      "invalid_catalog",
+      error instanceof Error ? error.message : String(error),
+    );
+  }
 }
 
 function parseResult(frame: Record<string, unknown>): Extract<HostedToolsHostFrame, { type: "result" }> {
@@ -540,6 +574,16 @@ function identifier(value: unknown, name: string): string {
     throw new HostedToolsProtocolError(
       "invalid_identifier",
       `${name} must be 1-${MAX_HOSTED_TOOL_NAME_BYTES} safe ASCII bytes`,
+    );
+  }
+  return value;
+}
+
+function sourceIdentifier(value: unknown, name: string): string {
+  if (typeof value !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,122}$/.test(value)) {
+    throw new HostedToolsProtocolError(
+      "invalid_identifier",
+      `${name} must be 1-123 safe ASCII bytes`,
     );
   }
   return value;

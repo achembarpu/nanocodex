@@ -6,7 +6,7 @@
 mod driver;
 mod protocol;
 
-use std::{fmt, sync::Arc};
+use std::{collections::HashSet, fmt, sync::Arc};
 use tokio::sync::{mpsc, watch};
 use url::{Host, Url};
 
@@ -14,6 +14,183 @@ use crate::{
     Tools,
     prepared::{PreparedToolError, PreparedToolRuntime, PreparedTools},
 };
+
+const MAX_ATTACHMENT_ID_BYTES: usize = 123;
+const MAX_MACHINE_NAME_BYTES: usize = 128;
+const MAX_MACHINE_WORKSPACE_BYTES: usize = 1024;
+const MAX_MACHINE_CAPABILITIES: usize = 64;
+const MAX_MACHINE_CAPABILITY_BYTES: usize = 64;
+
+/// Non-secret description of the one machine represented by an attachment.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
+pub struct AttachmentMachine {
+    id: Box<str>,
+    name: Box<str>,
+    workspace: Box<str>,
+    capabilities: Box<[Box<str>]>,
+}
+
+impl AttachmentMachine {
+    /// Creates a bounded machine descriptor accepted by the managed wire contract.
+    ///
+    /// # Errors
+    ///
+    /// Rejects unsafe identifiers, empty or oversized display fields, and
+    /// duplicate or unsafe capability identifiers.
+    pub fn new<I, S>(
+        id: impl Into<String>,
+        name: impl Into<String>,
+        workspace: impl Into<String>,
+        capabilities: I,
+    ) -> Result<Self, AttachmentError>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let id = id.into();
+        if !valid_safe_identifier(&id, MAX_ATTACHMENT_ID_BYTES) {
+            return Err(AttachmentError::Catalog(
+                "attachment machine id must be a safe ASCII identifier of at most 123 bytes".into(),
+            ));
+        }
+        let name = name.into();
+        let name = name.trim();
+        if name.is_empty() || name.len() > MAX_MACHINE_NAME_BYTES {
+            return Err(AttachmentError::Catalog(
+                "attachment machine name must be 1-128 UTF-8 bytes".into(),
+            ));
+        }
+        let workspace = workspace.into();
+        if workspace.trim().is_empty()
+            || workspace.len() > MAX_MACHINE_WORKSPACE_BYTES
+            || workspace.contains('\0')
+        {
+            return Err(AttachmentError::Catalog(
+                "attachment machine workspace must be 1-1024 UTF-8 bytes without NUL".into(),
+            ));
+        }
+        let capabilities = capabilities
+            .into_iter()
+            .map(Into::into)
+            .collect::<Vec<String>>();
+        if capabilities.len() > MAX_MACHINE_CAPABILITIES {
+            return Err(AttachmentError::Catalog(
+                "attachment machines support at most 64 capabilities".into(),
+            ));
+        }
+        let mut unique = HashSet::with_capacity(capabilities.len());
+        if capabilities
+            .iter()
+            .any(|capability| !valid_capability(capability) || !unique.insert(capability.as_str()))
+        {
+            return Err(AttachmentError::Catalog(
+                "attachment machine capabilities must be unique safe ASCII identifiers".into(),
+            ));
+        }
+        Ok(Self {
+            id: id.into(),
+            name: name.into(),
+            workspace: workspace.into(),
+            capabilities: capabilities
+                .into_iter()
+                .map(String::into_boxed_str)
+                .collect(),
+        })
+    }
+
+    /// Stable process-owned machine identifier.
+    #[must_use]
+    pub const fn id(&self) -> &str {
+        &self.id
+    }
+
+    /// Human-readable host display name.
+    #[must_use]
+    pub const fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Workspace represented by this attachment.
+    #[must_use]
+    pub const fn workspace(&self) -> &str {
+        &self.workspace
+    }
+
+    /// Non-secret capabilities available on this machine.
+    #[must_use]
+    pub const fn capabilities(&self) -> &[Box<str>] {
+        &self.capabilities
+    }
+}
+
+/// Optional stable routing metadata published with every attachment catalog.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AttachmentMetadata {
+    attachment_id: Box<str>,
+    machine: Option<AttachmentMachine>,
+}
+
+impl AttachmentMetadata {
+    /// Creates a stable named attachment without machine topology.
+    ///
+    /// # Errors
+    ///
+    /// Rejects IDs outside the safe ASCII, 123-byte source-ID contract.
+    pub fn named(attachment_id: impl Into<String>) -> Result<Self, AttachmentError> {
+        let attachment_id = attachment_id.into();
+        if !valid_safe_identifier(&attachment_id, MAX_ATTACHMENT_ID_BYTES) {
+            return Err(AttachmentError::Catalog(
+                "attachment id must be a safe ASCII identifier of at most 123 bytes".into(),
+            ));
+        }
+        Ok(Self {
+            attachment_id: attachment_id.into(),
+            machine: None,
+        })
+    }
+
+    /// Creates a machine attachment whose routing ID is the machine ID.
+    #[must_use]
+    pub fn machine(machine: AttachmentMachine) -> Self {
+        Self {
+            attachment_id: machine.id.clone(),
+            machine: Some(machine),
+        }
+    }
+
+    /// Stable source routing identifier.
+    #[must_use]
+    pub const fn attachment_id(&self) -> &str {
+        &self.attachment_id
+    }
+
+    /// Machine topology, when this attachment represents a user machine.
+    #[must_use]
+    pub const fn attached_machine(&self) -> Option<&AttachmentMachine> {
+        self.machine.as_ref()
+    }
+}
+
+fn valid_safe_identifier(value: &str, max_bytes: usize) -> bool {
+    value.len() <= max_bytes
+        && value
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_alphanumeric)
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-'))
+}
+
+fn valid_capability(value: &str) -> bool {
+    value.len() <= MAX_MACHINE_CAPABILITY_BYTES
+        && value.as_bytes().first().is_some_and(u8::is_ascii_lowercase)
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase()
+                || byte.is_ascii_digit()
+                || matches!(byte, b'.' | b'_' | b':' | b'-')
+        })
+}
 
 /// Transport-only destination for an attached tool executor.
 #[derive(Clone)]
@@ -83,6 +260,7 @@ impl fmt::Debug for AttachmentTarget {
 pub struct AttachmentConnector {
     tools: Tools,
     target: AttachmentTarget,
+    metadata: Option<AttachmentMetadata>,
 }
 
 impl Tools {
@@ -92,11 +270,19 @@ impl Tools {
         AttachmentConnector {
             tools: self,
             target,
+            metadata: None,
         }
     }
 }
 
 impl AttachmentConnector {
+    /// Publishes stable non-secret routing metadata with every catalog reconnect.
+    #[must_use]
+    pub fn metadata(mut self, metadata: AttachmentMetadata) -> Self {
+        self.metadata = Some(metadata);
+        self
+    }
+
     /// Validates the recipe and starts its complete lifecycle in the background.
     ///
     /// # Errors
@@ -115,6 +301,7 @@ impl AttachmentConnector {
         tokio::spawn(initialize_and_run(
             prepared,
             self.target,
+            self.metadata,
             command_rx,
             event_tx,
             status_tx,
@@ -147,6 +334,7 @@ impl AttachmentConnector {
 async fn initialize_and_run(
     prepared: PreparedTools,
     target: AttachmentTarget,
+    metadata: Option<AttachmentMetadata>,
     mut command_rx: mpsc::Receiver<driver::Command>,
     event_tx: mpsc::Sender<AttachmentEvent>,
     status_tx: watch::Sender<AttachmentStatus>,
@@ -191,6 +379,7 @@ async fn initialize_and_run(
             endpoint: target.endpoint,
             authorization: format!("Bearer {}", target.bearer).into(),
             tools,
+            metadata,
         })
     })();
     let config = match config {

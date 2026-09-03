@@ -167,7 +167,7 @@ export async function manageAccountConnectors(
     `/v1/connectors/${operation.provider}/callback`,
     options.publicOrigin,
   );
-  const returnTo = `/agent?${new URLSearchParams({ thread: options.sessionId })}`;
+  const returnTo = `/agent/${encodeURIComponent(options.sessionId)}`;
   const response = await brokerFetch(
     options.broker,
     connectorBrokerUrl(options.userId, operation.provider),

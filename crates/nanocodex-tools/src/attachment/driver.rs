@@ -18,7 +18,9 @@ use tokio_tungstenite::{
 use url::Url;
 
 use super::protocol::{self, ExecutorFrame, RemoteFrame};
-use super::{AttachmentCallOutcome, AttachmentError, AttachmentEvent, AttachmentStatus};
+use super::{
+    AttachmentCallOutcome, AttachmentError, AttachmentEvent, AttachmentMetadata, AttachmentStatus,
+};
 use crate::prepared::{PreparedToolCall, PreparedToolError, PreparedToolRuntime};
 
 #[cfg(not(test))]
@@ -38,6 +40,7 @@ pub(crate) struct Config {
     pub(crate) endpoint: Url,
     pub(crate) authorization: Box<str>,
     pub(crate) tools: Value,
+    pub(crate) metadata: Option<AttachmentMetadata>,
 }
 
 pub(crate) enum Command {
@@ -377,6 +380,15 @@ where
         &mut socket,
         &ExecutorFrame::Catalog {
             tools: &config.tools,
+            machines: config
+                .metadata
+                .as_ref()
+                .and_then(AttachmentMetadata::attached_machine)
+                .map(std::slice::from_ref),
+            attachment_id: config
+                .metadata
+                .as_ref()
+                .map(AttachmentMetadata::attachment_id),
         },
     )
     .await

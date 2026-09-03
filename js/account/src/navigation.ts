@@ -83,6 +83,20 @@ export function pathForSurface(surface: Surface) {
   return surfacePaths[surface];
 }
 
+export function pathForAgent(agentId: string) {
+  return `/agent/${encodeURIComponent(agentId)}`;
+}
+
+export function agentIdFromPath(pathname: string): string | undefined {
+  const match = pathname.match(/^\/agent\/([^/]+)\/?$/);
+  if (!match) return undefined;
+  try {
+    return decodeURIComponent(match[1]);
+  } catch {
+    return undefined;
+  }
+}
+
 export function pathForCommit(hash: string) {
   return `${surfacePaths.commits}?${new URLSearchParams({ commit: hash })}`;
 }
@@ -94,6 +108,7 @@ export function surfaceFromUrl(url: Pick<URL, "pathname" | "searchParams">): Sur
 
   if (pathname === "/evals" || pathname.startsWith("/evals/")) return "evals";
   if (pathname === "/docs" || pathname.startsWith("/docs/")) return "docs";
+  if (agentIdFromPath(pathname)) return "agent";
   if (pathname === "/agent" && url.searchParams.get("demo") === "attached-tools") return "tools";
   if (pathname === "/connect/device") return "connect";
   if (pathname === "/connect/vault") return "connect";

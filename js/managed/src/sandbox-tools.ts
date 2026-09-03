@@ -1,18 +1,19 @@
-import { getSandbox, type Sandbox } from "@cloudflare/sandbox";
+import { getSandbox } from "@cloudflare/sandbox";
 import type { ToolMap } from "nanocodex";
+
+import type { Sandbox } from "./sandbox-runtime";
 
 const WORKSPACE = "/workspace";
 const MAX_COMMAND_CHARS = 32 * 1024;
 const MAX_FILE_BYTES = 1024 * 1024;
 const MAX_OUTPUT_BYTES = 128 * 1024;
 const MAX_LIST_ENTRIES = 512;
-const MAX_TIMEOUT_MS = 120_000;
 const PREVIEW_AAD = new TextEncoder().encode("nanocodex-cloudflare-sandbox-preview-v1");
 
 type SandboxToolClient = {
   exec(
     command: string,
-    options: { cwd: string; timeout: number },
+    options: { cwd: string; timeout?: number },
   ): Promise<{
     success: boolean;
     exitCode: number;
@@ -29,7 +30,7 @@ type SandboxToolClient = {
     command: string;
     status: string;
     getStatus(): Promise<string>;
-    waitForPort(port: number, options: { timeout: number }): Promise<void>;
+    waitForPort(port: number, options?: { timeout?: number }): Promise<void>;
   }>;
   readFile(
     path: string,
@@ -82,6 +83,31 @@ export async function destroyCloudflareSandbox(
   await sandboxHandle(namespace, sessionId).destroy();
 }
 
+export async function deleteCloudflareSandbox(
+  namespace: DurableObjectNamespace<Sandbox>,
+  bucket: R2Bucket,
+  sessionId: string,
+): Promise<void> {
+  // Destruction unmounts the R2-backed workspace. Purge its objects only after
+  // that completes so a final filesystem flush cannot recreate deleted keys.
+  await destroyCloudflareSandbox(namespace, sessionId);
+  await deleteCloudflareSandboxWorkspace(bucket, sessionId);
+}
+
+/** Deletes the persisted filesystem owned by one deleted agent sandbox. */
+export async function deleteCloudflareSandboxWorkspace(
+  bucket: R2Bucket,
+  sessionId: string,
+): Promise<void> {
+  const prefix = `/sessions/${sessionId}/`;
+  while (true) {
+    const page = await bucket.list({ prefix, limit: 1_000 });
+    const keys = page.objects.map(({ key }) => key);
+    if (keys.length === 0) return;
+    await bucket.delete(keys);
+  }
+}
+
 export function createCloudflareSandboxTools(
   createSandbox: () => Promise<SandboxToolClient>,
   createPreview?: (port: number) => Promise<{ port: number; url: string; persistent: boolean }>,
@@ -91,13 +117,17 @@ export function createCloudflareSandboxTools(
 
   return {
     sandbox_exec: {
-      description: "Run a shell command in this session's isolated Cloudflare Sandbox workspace.",
+      description: "Run a foreground shell command in this session's isolated Cloudflare Sandbox workspace.",
       parameters: {
         type: "object",
         properties: {
           command: { type: "string", description: "Shell command to run." },
           cwd: { type: "string", description: "Workspace-relative working directory." },
-          timeout_ms: { type: "integer", minimum: 1, maximum: MAX_TIMEOUT_MS },
+          timeout_ms: {
+            type: "integer",
+            minimum: 1,
+            description: "Optional Sandbox SDK execution timeout in milliseconds.",
+          },
         },
         required: ["command"],
         additionalProperties: false,
@@ -106,9 +136,12 @@ export function createCloudflareSandboxTools(
         const value = objectInput(input);
         const command = requiredString(value.command, "command", MAX_COMMAND_CHARS);
         const cwd = workspacePath(optionalString(value.cwd, "cwd") ?? ".");
-        const timeout = optionalInteger(value.timeout_ms, "timeout_ms", 1, MAX_TIMEOUT_MS) ?? 60_000;
+        const timeout = optionalPositiveInteger(value.timeout_ms, "timeout_ms");
         return withSandboxRpcResult(
-          (await sandbox()).exec(command, { cwd, timeout }),
+          (await sandbox()).exec(command, {
+            cwd,
+            ...(timeout === undefined ? {} : { timeout }),
+          }),
           (result) => {
             const stdout = truncate(result.stdout);
             const stderr = truncate(result.stderr);
@@ -150,7 +183,11 @@ export function createCloudflareSandboxTools(
           command: { type: "string", description: "Command to start." },
           cwd: { type: "string", description: "Workspace-relative working directory." },
           ready_port: { type: "integer", minimum: 1024, maximum: 65_535 },
-          ready_timeout_ms: { type: "integer", minimum: 1, maximum: MAX_TIMEOUT_MS },
+          ready_timeout_ms: {
+            type: "integer",
+            minimum: 1,
+            description: "Optional Sandbox SDK port-readiness timeout in milliseconds.",
+          },
         },
         required: ["command"],
         additionalProperties: false,
@@ -160,17 +197,18 @@ export function createCloudflareSandboxTools(
         const command = requiredString(value.command, "command", MAX_COMMAND_CHARS);
         const cwd = workspacePath(optionalString(value.cwd, "cwd") ?? ".");
         const readyPort = optionalPort(value.ready_port, "ready_port");
-        const readyTimeout = optionalInteger(
+        const readyTimeout = optionalPositiveInteger(
           value.ready_timeout_ms,
           "ready_timeout_ms",
-          1,
-          MAX_TIMEOUT_MS,
-        ) ?? 30_000;
+        );
         return withSandboxRpcResult(
           (await sandbox()).startProcess(command, { cwd, autoCleanup: true }),
           async (process) => {
             if (readyPort !== undefined) {
-              await process.waitForPort(readyPort, { timeout: readyTimeout });
+              await process.waitForPort(
+                readyPort,
+                readyTimeout === undefined ? undefined : { timeout: readyTimeout },
+              );
             }
             return {
               process_id: process.id,
@@ -376,6 +414,9 @@ function sandboxHandle(
   return getSandbox(namespace, `nanocodex-${sessionId}`, {
     normalizeId: true,
     sleepAfter: "10m",
+    // Commands are independent tool calls. A command containing `exit` must
+    // not terminate a shared SDK shell and poison later calls.
+    enableDefaultSession: false,
     transport: "rpc",
     labels: { application: "nanocodex", session: sessionId },
   });
@@ -419,6 +460,14 @@ function optionalInteger(
     throw new Error(`${name} must be an integer between ${minimum} and ${maximum}`);
   }
   return value as number;
+}
+
+function optionalPositiveInteger(value: unknown, name: string): number | undefined {
+  if (value === undefined) return undefined;
+  if (!Number.isSafeInteger(value) || Number(value) < 1) {
+    throw new Error(`${name} must be a positive integer`);
+  }
+  return Number(value);
 }
 
 function requiredPort(value: unknown): number {

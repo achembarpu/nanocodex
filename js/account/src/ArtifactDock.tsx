@@ -14,6 +14,7 @@ import {
   ArtifactDocument,
   ArtifactInput,
 } from "nanocodex/tools/artifact";
+import type { Workspace } from "nanocodex/browser/workspace";
 import { LiveReactArtifact } from "./LiveReactArtifact";
 import {
   getBrowserThread,
@@ -32,9 +33,13 @@ function compactWorkspace(): boolean {
 export const ArtifactDock = memo(function ArtifactDock({
   agentReady,
   onPrompt,
+  workspace,
+  workspaceId,
 }: {
   agentReady: boolean;
   onPrompt(artifact: ArtifactDocument, prompt: string, path: string): void;
+  workspace?: Workspace;
+  workspaceId?: string;
 }) {
   const [store, setStore] = useState<ArtifactStore>();
   const [artifacts, setArtifacts] = useState<readonly ArtifactDocument[]>([]);
@@ -70,7 +75,7 @@ export const ArtifactDock = memo(function ArtifactDock({
 
   useEffect(() => {
     let active = true;
-    void openKernelWorkspace().then(async (nextWorkspace) => {
+    void (workspace ? Promise.resolve(workspace) : openKernelWorkspace()).then(async (nextWorkspace) => {
       if (!active) return;
       const nextStore = new ArtifactStore(nextWorkspace);
       setStore(nextStore);
@@ -80,14 +85,14 @@ export const ArtifactDock = memo(function ArtifactDock({
       active = false;
       refreshEpoch.current++;
     };
-  }, [refresh]);
+  }, [refresh, workspace]);
 
   useEffect(() => {
     return subscribeThreadWorkspaceChanges(
-      getBrowserThread().id,
+      workspaceId ?? getBrowserThread().id,
       () => void refresh(store),
     );
-  }, [refresh, store]);
+  }, [refresh, store, workspaceId]);
 
   useEffect(() => {
     if (!store) return;

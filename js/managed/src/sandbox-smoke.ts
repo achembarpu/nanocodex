@@ -1,6 +1,6 @@
-import type { Sandbox } from "@cloudflare/sandbox";
 import type { ToolMap } from "nanocodex";
 
+import type { Sandbox } from "./sandbox-runtime";
 import { cloudflareSandboxTools, destroyCloudflareSandbox } from "./sandbox-tools";
 
 export async function cloudflareSandboxSmokeSetup(

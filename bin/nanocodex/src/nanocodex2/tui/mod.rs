@@ -40,11 +40,12 @@ use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
 use futures_util::{StreamExt, future::join_all};
 use nanocodex::Model;
 use nanocodex_agent::{
-    AgentEvents, Nanocodex, NanocodexError, Turn, TurnControl, TurnResult, events::AgentEvent,
+    Nanocodex, NanocodexError, Turn, TurnControl, TurnResult, events::AgentEvent,
 };
 use nanocodex_managed::{
-    AgentList, AgentSettings, EventCursor, ManagedClient, ManagedError, ManagedEvent,
-    ManagedEventData, PromptContent, PromptInput, ReasoningMode as ManagedReasoningMode, Thinking,
+    AgentList, AgentSettings, EventCursor, EventHistoryPage, ManagedClient, ManagedError,
+    ManagedEvent, ManagedEventData, PromptContent, PromptInput,
+    ReasoningMode as ManagedReasoningMode, Thinking,
 };
 use std::{
     collections::{HashMap, HashSet, VecDeque},
@@ -54,7 +55,7 @@ use std::{
     sync::Arc,
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
-use tokio::task::JoinSet;
+use tokio::{sync::mpsc, task::JoinSet};
 
 type Admission = (PaneId, TurnId, Result<Turn, NanocodexError>);
 type Completion = (PaneId, TurnId, Result<TurnResult, NanocodexError>);
@@ -66,17 +67,63 @@ type SettingsCompletion = (
     &'static str,
     Result<AgentSettings, ManagedError>,
 );
+type HistoryCompletion = (
+    PaneId,
+    String,
+    u64,
+    String,
+    Result<EventHistoryPage, ManagedError>,
+);
 type HistoryProjection = (Vec<Arc<TranscriptRecord>>, u64, Vec<RecentPrompt>);
 type ConnectedAgent = (
     Nanocodex,
-    AgentEvents,
+    mpsc::UnboundedReceiver<ManagedEvent>,
     String,
     PathBuf,
-    Vec<ManagedEvent>,
+    HistoryWindow,
     Option<String>,
     AgentSettings,
     bool,
 );
+
+const HISTORY_PAGE_SIZE: u16 = 256;
+
+#[derive(Clone, Default)]
+struct HistoryWindow {
+    events: Vec<ManagedEvent>,
+    before: Option<String>,
+    has_more: bool,
+}
+
+impl HistoryWindow {
+    fn retry_from(before: String) -> Self {
+        Self {
+            events: Vec::new(),
+            before: Some(before),
+            has_more: true,
+        }
+    }
+
+    fn from_page(requested_before: String, page: EventHistoryPage) -> Result<Self, ManagedError> {
+        let mut window = Self::retry_from(requested_before);
+        window.prepend(page)?;
+        Ok(window)
+    }
+
+    fn prepend(&mut self, page: EventHistoryPage) -> Result<(), ManagedError> {
+        if page.data.is_empty() && page.has_more {
+            return Err(ManagedError::InvalidResponse(
+                "managed history reports an empty nonterminal page",
+            ));
+        }
+        self.before = page.data.first().map(|event| event.cursor.clone());
+        self.has_more = page.has_more;
+        let mut events = page.data;
+        events.append(&mut self.events);
+        self.events = events;
+        Ok(())
+    }
+}
 
 #[derive(Clone)]
 enum RetryTarget {
@@ -128,8 +175,8 @@ impl SettingsMutation {
 struct DriverRuntime {
     client: ManagedClient,
     agent: Option<Nanocodex>,
-    events: Option<AgentEvents>,
-    events_open: bool,
+    managed_events: Option<mpsc::UnboundedReceiver<ManagedEvent>>,
+    managed_events_open: bool,
     agent_id: String,
     settings: AgentSettings,
     pending_settings: Option<AgentSettings>,
@@ -149,6 +196,12 @@ struct DriverRuntime {
     settings_updates: JoinSet<SettingsCompletion>,
     settings_queue: VecDeque<(PaneId, String, SettingsMutation)>,
     shells: JoinSet<(PaneId, ShellExecution)>,
+    history_loads: JoinSet<HistoryCompletion>,
+    history_generation: u64,
+    history: HistoryWindow,
+    history_sequences: HashMap<String, u64>,
+    live_records: Vec<Arc<TranscriptRecord>>,
+    live_prompts: Vec<RecentPrompt>,
     active_shells: usize,
     shell_context: Vec<String>,
     pending_submission: Option<(PaneId, TurnId, Submission)>,
@@ -164,13 +217,9 @@ impl DriverRuntime {
                 ManagedError::Configuration(format!("TUI transcript error: {error}"))
             })?;
         self.sequence = self.sequence.saturating_add(1);
-        Ok(Arc::new(record))
-    }
-
-    fn agent_record(&mut self, event: AgentEvent) -> Arc<TranscriptRecord> {
-        let record = TranscriptRecord::from_agent(self.sequence, unix_ms(), event);
-        self.sequence = self.sequence.saturating_add(1);
-        Arc::new(record)
+        let record = Arc::new(record);
+        self.live_records.push(Arc::clone(&record));
+        Ok(record)
     }
 
     fn start_submission(&mut self, pane: PaneId, id: TurnId, prompt: Submission) {
@@ -286,13 +335,25 @@ async fn connect_agent(
     create_settings: AgentSettings,
 ) -> Result<ConnectedAgent, ConnectionFailure> {
     let created = agent_id.is_none();
-    let (opened, history, retry, settings) = match agent_id {
-        None => (
-            super::open_workspace_agent_with_settings(&client, None, None, create_settings).await,
-            None,
-            RetryTarget::Create(create_settings),
-            create_settings,
-        ),
+    let (managed_event_sender, managed_events) = mpsc::unbounded_channel();
+    let (opened, history, history_before, retry, settings) = match agent_id {
+        None => {
+            let opened = super::open_workspace_agent_with_settings(
+                &client,
+                None,
+                None,
+                create_settings,
+                Some(managed_event_sender),
+            )
+            .await;
+            (
+                opened,
+                None,
+                None,
+                RetryTarget::Create(create_settings),
+                create_settings,
+            )
+        }
         Some(agent_id) => {
             let state = client
                 .state(&agent_id)
@@ -309,30 +370,51 @@ async fn connect_agent(
                     }
                 })?;
             let settings = state.settings;
-            let opening =
-                super::open_workspace_agent_from(&client, Some(agent_id.clone()), Some(state));
-            let history = load_event_history(&client, &agent_id, &cursor);
+            let opening = super::open_workspace_agent_from(
+                &client,
+                Some(agent_id.clone()),
+                Some(state),
+                Some(managed_event_sender),
+            );
+            let before = decimal_successor(cursor.as_str());
+            let history = async {
+                let page = client
+                    .history(&agent_id, Some(&before), HISTORY_PAGE_SIZE)
+                    .await?;
+                HistoryWindow::from_page(before.clone(), page)
+            };
             let (opened, history) = tokio::join!(opening, history);
             (
                 opened,
                 Some(history),
+                Some(before),
                 RetryTarget::Agent(agent_id),
                 settings,
             )
         }
     };
-    let (agent, events, agent_id, workspace) =
+    let (agent, _events, agent_id, workspace) =
         opened.map_err(|error| ConnectionFailure { error, retry })?;
     let (history, warning) = match history {
-        None => (Vec::new(), None),
+        None => (HistoryWindow::default(), None),
         Some(Ok(history)) => (history, None),
-        Some(Err(error)) => (
-            Vec::new(),
-            Some(format!("Durable event history is unavailable: {error}")),
-        ),
+        Some(Err(error)) => {
+            let before = history_before.expect("existing agents have a history cursor");
+            (
+                HistoryWindow::retry_from(before),
+                Some(format!("Durable event history is unavailable: {error}")),
+            )
+        }
     };
     Ok((
-        agent, events, agent_id, workspace, history, warning, settings, created,
+        agent,
+        managed_events,
+        agent_id,
+        workspace,
+        history,
+        warning,
+        settings,
+        created,
     ))
 }
 
@@ -376,8 +458,8 @@ async fn run_inner(
     let mut runtime = DriverRuntime {
         client: client.clone(),
         agent: None,
-        events: None,
-        events_open: false,
+        managed_events: None,
+        managed_events_open: false,
         agent_id: String::new(),
         settings: initial_settings,
         pending_settings: None,
@@ -397,6 +479,12 @@ async fn run_inner(
         settings_updates: JoinSet::new(),
         settings_queue: VecDeque::new(),
         shells: JoinSet::new(),
+        history_loads: JoinSet::new(),
+        history_generation: 0,
+        history: HistoryWindow::default(),
+        history_sequences: HashMap::new(),
+        live_records: Vec::new(),
+        live_prompts: Vec::new(),
         active_shells: 0,
         shell_context: Vec::new(),
         pending_submission: None,
@@ -463,19 +551,42 @@ async fn run_inner(
                 stopping = apply_update(update, &mut app, &mut runtime, &mut terminal, &mut scheduler).await?;
             }
             event = async {
-                match runtime.events.as_mut() {
+                match runtime.managed_events.as_mut() {
                     Some(events) => events.recv().await,
                     None => pending().await,
                 }
-            }, if runtime.events_open => {
+            }, if runtime.managed_events_open => {
                 match event {
                     Some(event) => {
-                        let record = runtime.agent_record(event);
-                        let update = app.update(AppEvent::Transcript { pane: PaneId::Main, record });
-                        stopping = apply_update(update, &mut app, &mut runtime, &mut terminal, &mut scheduler).await?;
+                        if let Some((record, prompt)) = live_managed_projection(
+                            event,
+                            &runtime.agent_id,
+                            &runtime.workspace,
+                            &mut runtime.sequence,
+                        )? {
+                            runtime.live_records.push(Arc::clone(&record));
+                            if let Some(prompt) = prompt {
+                                runtime.live_prompts.insert(0, prompt.clone());
+                                runtime.live_prompts.truncate(100);
+                                runtime.recent_prompts.insert(0, prompt);
+                                runtime.recent_prompts.truncate(100);
+                            }
+                            let update = app.update(AppEvent::Transcript {
+                                pane: PaneId::Main,
+                                record,
+                            });
+                            stopping = apply_update(
+                                update,
+                                &mut app,
+                                &mut runtime,
+                                &mut terminal,
+                                &mut scheduler,
+                            )
+                            .await?;
+                        }
                     }
                     None => {
-                        runtime.events_open = false;
+                        runtime.managed_events_open = false;
                         request_render(app.update(AppEvent::AgentStreamClosed(PaneId::Main)), &mut scheduler);
                     }
                 }
@@ -506,7 +617,7 @@ async fn run_inner(
                             };
                             stopping = apply_update(update, &mut app, &mut runtime, &mut terminal, &mut scheduler).await?;
                         }
-                        ConnectionResult::Agent { purpose, result: Ok((agent, events, agent_id, workspace, history, warning, settings, created)) } => {
+                        ConnectionResult::Agent { purpose, result: Ok((agent, managed_events, agent_id, workspace, history, warning, settings, created)) } => {
                             runtime.retry_target = None;
                             let requested_startup_settings = if created {
                                 runtime.pending_settings.take()
@@ -514,47 +625,50 @@ async fn run_inner(
                                 None
                             };
                             let display_settings = requested_startup_settings.unwrap_or(settings);
-                            let (mut records, mut sequence, mut prompts) =
-                                match history_projection(history, &agent_id, &workspace) {
+                            runtime.history_generation = runtime.history_generation.wrapping_add(1);
+                            runtime.history_loads.abort_all();
+                            if !matches!(purpose, ConnectionPurpose::Startup) {
+                                runtime.history_sequences.clear();
+                                runtime.live_records.clear();
+                                runtime.live_prompts.clear();
+                                runtime.sequence = 1;
+                            }
+                            let (mut records, mut prompts) =
+                                match history_projection_with_sequences(
+                                    history.events.clone(),
+                                    &agent_id,
+                                    &workspace,
+                                    &mut runtime.history_sequences,
+                                    &mut runtime.sequence,
+                                ) {
                                     Ok(projection) => projection,
                                     Err(error) => {
                                         request_render(app.update(AppEvent::NotifyError {
                                             pane: PaneId::Main,
                                             error: format!("Durable event history is unavailable: {error}"),
                                         }), &mut scheduler);
-                                        (Vec::new(), 1, Vec::new())
+                                        (Vec::new(), Vec::new())
                                     }
                                 };
-                            if matches!(purpose, ConnectionPurpose::Startup)
-                                && let Some((_, id, submission)) = runtime.pending_submission.as_ref()
-                            {
-                                let text = submission.display_text().to_owned();
-                                records.push(Arc::new(TranscriptRecord::from_local(
-                                    sequence,
-                                    unix_ms(),
-                                    LocalEvent::UserSubmitted { id: *id, text: text.clone() },
-                                ).map_err(|error| ManagedError::Configuration(format!("TUI transcript error: {error}")))?));
-                                sequence = sequence.saturating_add(1);
-                                prompts.insert(0, RecentPrompt {
-                                    text,
-                                    recorded_at_unix_ms: unix_ms(),
-                                    session_id: agent_id.clone(),
-                                    workspace: workspace.clone(),
-                                });
+                            if matches!(purpose, ConnectionPurpose::Startup) {
+                                records.extend(runtime.live_records.iter().cloned());
+                                let mut live_prompts = runtime.live_prompts.clone();
+                                live_prompts.append(&mut prompts);
+                                prompts = live_prompts;
                             }
                             if let Some(previous) = runtime.agent.replace(agent) {
                                 runtime.connection.spawn(async move {
                                     ConnectionResult::Disconnected(previous.disconnect().await)
                                 });
                             }
-                            runtime.events = Some(events);
-                            runtime.events_open = true;
+                            runtime.managed_events = Some(managed_events);
+                            runtime.managed_events_open = true;
                             runtime.agent_id = agent_id;
                             runtime.settings = settings;
                             runtime.workspace = workspace;
-                            runtime.sequence = sequence;
-                            runtime.next_turn = runtime.next_turn.max(sequence);
+                            runtime.next_turn = runtime.next_turn.max(runtime.sequence);
                             runtime.recent_prompts = prompts;
+                            runtime.history = history;
                             let pane = match purpose {
                                 ConnectionPurpose::Startup => PaneId::Main,
                                 ConnectionPurpose::Resume(pane) | ConnectionPurpose::New(pane) => pane,
@@ -842,6 +956,75 @@ async fn run_inner(
                     }
                 }
             }
+            result = runtime.history_loads.join_next(), if !runtime.history_loads.is_empty() => {
+                if let Some(result) = result {
+                    match result {
+                        Err(error) => {
+                            request_render(app.update(AppEvent::NotifyError {
+                                pane: PaneId::Main,
+                                error: format!("Older durable history task stopped unexpectedly: {error}"),
+                            }), &mut scheduler);
+                        }
+                        Ok((pane, agent_id, generation, requested_before, result))
+                            if agent_id == runtime.agent_id
+                                && generation == runtime.history_generation
+                                && runtime.history.before.as_deref() == Some(&requested_before) => match result {
+                            Err(error) => {
+                                request_render(app.update(AppEvent::NotifyError {
+                                    pane,
+                                    error: format!("Could not load older durable history: {error}"),
+                                }), &mut scheduler);
+                            }
+                            Ok(page) => {
+                                let mut candidate_history = runtime.history.clone();
+                                match candidate_history.prepend(page) {
+                                Err(error) => {
+                                    request_render(app.update(AppEvent::NotifyError {
+                                        pane,
+                                        error: format!("Could not load older durable history: {error}"),
+                                    }), &mut scheduler);
+                                }
+                                Ok(()) => {
+                                    let mut candidate_sequences = runtime.history_sequences.clone();
+                                    let mut candidate_sequence = runtime.sequence;
+                                    match history_projection_with_sequences(
+                                        candidate_history.events.clone(),
+                                        &runtime.agent_id,
+                                        &runtime.workspace,
+                                        &mut candidate_sequences,
+                                        &mut candidate_sequence,
+                                    ) {
+                                        Err(error) => request_render(app.update(AppEvent::NotifyError {
+                                            pane,
+                                            error: format!("Could not replay older durable history: {error}"),
+                                        }), &mut scheduler),
+                                        Ok((mut records, mut prompts)) => {
+                                            runtime.history = candidate_history;
+                                            runtime.history_sequences = candidate_sequences;
+                                            runtime.sequence = candidate_sequence;
+                                            runtime.next_turn = runtime.next_turn.max(runtime.sequence);
+                                            records.extend(runtime.live_records.iter().cloned());
+                                            let mut live_prompts = runtime.live_prompts.clone();
+                                            live_prompts.append(&mut prompts);
+                                            runtime.recent_prompts = live_prompts;
+                                            let projection = RootNode::project_open_session(
+                                                effort_from_thinking(runtime.settings.thinking),
+                                                records,
+                                            );
+                                            request_render(app.update(AppEvent::HistoryReplayed {
+                                                pane,
+                                                projection: Box::new(projection),
+                                            }), &mut scheduler);
+                                        }
+                                    }
+                                }
+                            }
+                            },
+                        },
+                        Ok(_) => {}
+                    }
+                }
+            }
             () = wait_until(render_deadline), if render_deadline.is_some() => {}
             () = wait_until(animation_deadline), if animation_deadline.is_some() => {
                 let update = app.update(AppEvent::AnimationFrame(Instant::now()));
@@ -892,25 +1075,6 @@ async fn apply_update(
                     RootEffect::Submit(prompt) | RootEffect::ContinueSubagent(prompt) => {
                         let id = TurnId::new(runtime.next_turn);
                         runtime.next_turn = runtime.next_turn.saturating_add(1);
-                        let text = prompt.display_text().to_owned();
-                        let recorded_at_unix_ms = unix_ms();
-                        runtime.recent_prompts.insert(
-                            0,
-                            RecentPrompt {
-                                text: text.clone(),
-                                recorded_at_unix_ms,
-                                session_id: runtime.agent_id.clone(),
-                                workspace: runtime.workspace.clone(),
-                            },
-                        );
-                        runtime.recent_prompts.truncate(100);
-                        let record =
-                            runtime.local_record(LocalEvent::UserSubmitted { id, text })?;
-                        absorb(
-                            app.update(AppEvent::Transcript { pane, record }),
-                            &mut effects,
-                            scheduler,
-                        );
                         if runtime.active_shells == 0 {
                             runtime.start_submission(pane, id, prompt);
                         } else {
@@ -945,15 +1109,6 @@ async fn apply_update(
                         } else {
                             let turn_id = TurnId::new(runtime.next_turn);
                             runtime.next_turn = runtime.next_turn.saturating_add(1);
-                            let record = runtime.local_record(LocalEvent::UserSubmitted {
-                                id: turn_id,
-                                text: prompt.display_text().to_owned(),
-                            })?;
-                            absorb(
-                                app.update(AppEvent::Transcript { pane, record }),
-                                &mut effects,
-                                scheduler,
-                            );
                             absorb(
                                 app.update(AppEvent::SteerPromoted { pane, id }),
                                 &mut effects,
@@ -1044,6 +1199,22 @@ async fn apply_update(
                             &mut effects,
                             scheduler,
                         );
+                    }
+                    RootEffect::LoadOlderHistory => {
+                        if runtime.history.has_more
+                            && runtime.history_loads.is_empty()
+                            && let Some(before) = runtime.history.before.clone()
+                        {
+                            let client = runtime.client.clone();
+                            let agent_id = runtime.agent_id.clone();
+                            let generation = runtime.history_generation;
+                            runtime.history_loads.spawn(async move {
+                                let result = client
+                                    .history(&agent_id, Some(&before), HISTORY_PAGE_SIZE)
+                                    .await;
+                                (pane, agent_id, generation, before, result)
+                            });
+                        }
                     }
                     RootEffect::ResumeSession(agent_id) => {
                         if !runtime.idle() {
@@ -1302,35 +1473,84 @@ async fn wait_until(deadline: Option<Instant>) {
     }
 }
 
-async fn load_event_history(
-    client: &ManagedClient,
-    agent_id: &str,
-    through: &EventCursor,
-) -> Result<Vec<ManagedEvent>, ManagedError> {
-    let mut pages = Vec::new();
-    let mut before = None;
-    loop {
-        let page = client.history(agent_id, before.as_deref(), 256).await?;
-        if page.data.is_empty() {
-            if page.has_more {
-                return Err(ManagedError::InvalidResponse(
-                    "managed history reports an empty nonterminal page",
-                ));
-            }
-            break;
+fn decimal_successor(cursor: &str) -> String {
+    let mut digits = cursor.as_bytes().to_vec();
+    for digit in digits.iter_mut().rev() {
+        if *digit < b'9' {
+            *digit += 1;
+            return String::from_utf8(digits).expect("decimal cursor remains UTF-8");
         }
-        before = page.data.first().map(|event| event.cursor.clone());
-        pages.push(page.data);
-        if !page.has_more {
-            break;
-        }
+        *digit = b'0';
     }
-    pages.reverse();
-    Ok(pages
-        .into_iter()
-        .flatten()
-        .filter(|event| cursor_at_or_before(&event.cursor, through.as_str()))
-        .collect())
+    let mut successor = String::with_capacity(digits.len().saturating_add(1));
+    successor.push('1');
+    successor.extend(digits.into_iter().map(char::from));
+    successor
+}
+
+fn live_managed_projection(
+    event: ManagedEvent,
+    agent_id: &str,
+    workspace: &Path,
+    next_sequence: &mut u64,
+) -> Result<Option<(Arc<TranscriptRecord>, Option<RecentPrompt>)>, ManagedError> {
+    let timestamp = managed_timestamp(event.created_at, 0);
+    let (record, prompt) = match event.data {
+        ManagedEventData::TurnAccepted { input, .. } => {
+            let text = prompt_input_text(&input);
+            let record = TranscriptRecord::from_local(
+                *next_sequence,
+                timestamp,
+                LocalEvent::UserSubmitted {
+                    id: TurnId::new(*next_sequence),
+                    text: text.clone(),
+                },
+            )
+            .map_err(|error| {
+                ManagedError::Configuration(format!("TUI managed event error: {error}"))
+            })?;
+            let prompt = RecentPrompt {
+                text,
+                recorded_at_unix_ms: timestamp,
+                session_id: agent_id.to_owned(),
+                workspace: workspace.to_path_buf(),
+            };
+            (record, Some(prompt))
+        }
+        ManagedEventData::Event { event } => {
+            let event: AgentEvent = serde_json::from_str(event.get()).map_err(|error| {
+                ManagedError::Configuration(format!(
+                    "invalid live agent event in TUI stream: {error}"
+                ))
+            })?;
+            (
+                TranscriptRecord::from_agent(*next_sequence, timestamp, event),
+                None,
+            )
+        }
+        ManagedEventData::TurnFailed { error, .. }
+        | ManagedEventData::TurnRetryable { error, .. } => {
+            let record = TranscriptRecord::from_local(
+                *next_sequence,
+                timestamp,
+                LocalEvent::WorkerTurnFinished {
+                    id: TurnId::new(*next_sequence),
+                    error: Some(error),
+                },
+            )
+            .map_err(|error| {
+                ManagedError::Configuration(format!("TUI managed event error: {error}"))
+            })?;
+            (record, None)
+        }
+        ManagedEventData::AgentCreated { .. }
+        | ManagedEventData::TurnCancelling { .. }
+        | ManagedEventData::TurnCompleted { .. }
+        | ManagedEventData::TurnCancelled { .. }
+        | ManagedEventData::StreamFailed { .. } => return Ok(None),
+    };
+    *next_sequence = next_sequence.saturating_add(1);
+    Ok(Some((Arc::new(record), prompt)))
 }
 
 fn history_projection(
@@ -1338,10 +1558,37 @@ fn history_projection(
     agent_id: &str,
     workspace: &Path,
 ) -> Result<HistoryProjection, ManagedError> {
+    let mut sequences = HashMap::new();
+    let mut next_sequence = 1;
+    let (records, recent) = history_projection_with_sequences(
+        history,
+        agent_id,
+        workspace,
+        &mut sequences,
+        &mut next_sequence,
+    )?;
+    Ok((records, next_sequence, recent))
+}
+
+fn history_projection_with_sequences(
+    history: Vec<ManagedEvent>,
+    agent_id: &str,
+    workspace: &Path,
+    sequences: &mut HashMap<String, u64>,
+    next_sequence: &mut u64,
+) -> Result<(Vec<Arc<TranscriptRecord>>, Vec<RecentPrompt>), ManagedError> {
     let mut records = Vec::new();
-    let mut sequence = 1_u64;
     let mut recent = Vec::new();
-    for (index, event) in history.into_iter().enumerate() {
+    let coherent_start = history
+        .iter()
+        .position(|event| matches!(event.data, ManagedEventData::TurnAccepted { .. }))
+        .unwrap_or(0);
+    for (index, event) in history.into_iter().enumerate().skip(coherent_start) {
+        let sequence = *sequences.entry(event.cursor.clone()).or_insert_with(|| {
+            let sequence = *next_sequence;
+            *next_sequence = next_sequence.saturating_add(1);
+            sequence
+        });
         let timestamp = managed_timestamp(event.created_at, index);
         match event.data {
             ManagedEventData::TurnAccepted { input, .. } => {
@@ -1364,7 +1611,6 @@ fn history_projection(
                     workspace: workspace.to_path_buf(),
                 });
                 records.push(Arc::new(record));
-                sequence = sequence.saturating_add(1);
             }
             ManagedEventData::Event { event } => {
                 let event: AgentEvent = serde_json::from_str(event.get()).map_err(|error| {
@@ -1375,7 +1621,6 @@ fn history_projection(
                 records.push(Arc::new(TranscriptRecord::from_agent(
                     sequence, timestamp, event,
                 )));
-                sequence = sequence.saturating_add(1);
             }
             ManagedEventData::TurnFailed { error, .. }
             | ManagedEventData::TurnRetryable { error, .. } => {
@@ -1391,7 +1636,6 @@ fn history_projection(
                     ManagedError::Configuration(format!("TUI history error: {error}"))
                 })?;
                 records.push(Arc::new(record));
-                sequence = sequence.saturating_add(1);
             }
             ManagedEventData::AgentCreated { .. }
             | ManagedEventData::TurnCancelling { .. }
@@ -1401,7 +1645,7 @@ fn history_projection(
         }
     }
     recent.reverse();
-    Ok((records, sequence, recent))
+    Ok((records, recent))
 }
 
 fn cursor_at_or_before(cursor: &str, through: &str) -> bool {
@@ -1543,10 +1787,18 @@ fn terminal_error(error: io::Error) -> ManagedError {
 
 #[cfg(test)]
 mod tests {
-    use super::{cursor_at_or_before, history_projection, session_summaries};
-    use nanocodex_managed::{AgentList, AgentSummary, ManagedEvent, ManagedEventData, PromptInput};
+    use super::{
+        HistoryWindow, cursor_at_or_before, decimal_successor, history_projection,
+        history_projection_with_sequences, live_managed_projection, session_summaries,
+    };
+    use nanocodex_managed::{
+        AgentList, AgentSummary, EventHistoryPage, ManagedEvent, ManagedEventData, PromptInput,
+    };
     use serde_json::{json, value::to_raw_value};
-    use std::{collections::BTreeMap, path::Path};
+    use std::{
+        collections::{BTreeMap, HashMap},
+        path::Path,
+    };
 
     #[test]
     fn managed_history_projects_into_tact_user_and_assistant_records() {
@@ -1599,11 +1851,206 @@ mod tests {
     }
 
     #[test]
+    fn live_managed_acceptance_projects_the_remote_user_prompt() {
+        let mut next_sequence = 7;
+        let (record, prompt) = live_managed_projection(
+            managed_turn("42", "sent from another client"),
+            "agent-1",
+            Path::new("/workspace"),
+            &mut next_sequence,
+        )
+        .unwrap()
+        .expect("turn acceptance should project");
+
+        let prompt = prompt.expect("turn acceptance should update prompt history");
+        assert_eq!((record.source(), record.kind()), ("tact", "user.submitted"));
+        assert_eq!(record.sequence(), 7);
+        assert_eq!(prompt.text, "sent from another client");
+        assert_eq!(prompt.session_id, "agent-1");
+        assert_eq!(prompt.workspace, Path::new("/workspace"));
+        assert_eq!(next_sequence, 8);
+    }
+
+    #[test]
+    fn live_managed_projection_preserves_agent_output_after_the_prompt() {
+        let mut next_sequence = 7;
+        let event = ManagedEvent {
+            cursor: "43".to_owned(),
+            created_at: Some(1_750_000_000.0),
+            turn_id: Some("turn-42".to_owned()),
+            data: ManagedEventData::Event {
+                event: to_raw_value(&json!({
+                    "protocol_version": 1,
+                    "request_id": "request-1",
+                    "seq": 1,
+                    "type": "assistant.message",
+                    "payload": {
+                        "model_call_index": 0,
+                        "item_id": null,
+                        "phase": null,
+                        "text": "done"
+                    }
+                }))
+                .unwrap(),
+            },
+        };
+
+        let (record, prompt) = live_managed_projection(
+            event,
+            "agent-1",
+            Path::new("/workspace"),
+            &mut next_sequence,
+        )
+        .unwrap()
+        .expect("agent output should project");
+
+        assert_eq!(
+            (record.source(), record.kind()),
+            ("agent", "assistant.message")
+        );
+        assert!(prompt.is_none());
+        assert_eq!(next_sequence, 8);
+    }
+
+    #[test]
     fn durable_history_is_fenced_through_the_live_stream_cursor() {
         assert!(cursor_at_or_before("9", "10"));
         assert!(cursor_at_or_before("10", "10"));
         assert!(!cursor_at_or_before("11", "10"));
         assert!(cursor_at_or_before("999", "latest"));
+    }
+
+    #[test]
+    fn snapshot_cursor_successor_is_unbounded_and_canonical() {
+        assert_eq!(decimal_successor("0"), "1");
+        assert_eq!(decimal_successor("1299"), "1300");
+        assert_eq!(
+            decimal_successor("99999999999999999999"),
+            "100000000000000000000"
+        );
+    }
+
+    #[test]
+    fn replay_keeps_loaded_event_sequences_stable_when_older_events_arrive() {
+        let mut sequences = HashMap::new();
+        let mut next_sequence = 1;
+        let (recent, _) = history_projection_with_sequences(
+            vec![managed_turn("5", "recent")],
+            "agent-1",
+            Path::new("/workspace"),
+            &mut sequences,
+            &mut next_sequence,
+        )
+        .unwrap();
+        let recent_sequence = recent[0].sequence();
+
+        let (replayed, _) = history_projection_with_sequences(
+            vec![managed_turn("3", "older"), managed_turn("5", "recent")],
+            "agent-1",
+            Path::new("/workspace"),
+            &mut sequences,
+            &mut next_sequence,
+        )
+        .unwrap();
+
+        assert_eq!(replayed[1].sequence(), recent_sequence);
+        assert_ne!(replayed[0].sequence(), recent_sequence);
+        assert_eq!(next_sequence, 3);
+    }
+
+    #[test]
+    fn replay_ignores_a_partial_turn_before_the_first_loaded_prompt() {
+        let partial = ManagedEvent {
+            cursor: "4".to_owned(),
+            created_at: Some(1_750_000_000.0),
+            turn_id: Some("older-turn".to_owned()),
+            data: ManagedEventData::Event {
+                event: to_raw_value(&json!({ "not": "an agent event" })).unwrap(),
+            },
+        };
+
+        let (records, _, recent) = history_projection(
+            vec![partial, managed_turn("5", "complete turn")],
+            "agent-1",
+            Path::new("/workspace"),
+        )
+        .unwrap();
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(recent[0].text, "complete turn");
+    }
+
+    #[test]
+    fn history_window_prepends_one_page_and_stops_at_exhaustion() {
+        let mut window = HistoryWindow::from_page(
+            "7".to_owned(),
+            EventHistoryPage {
+                data: vec![managed_created("5"), managed_created("6")],
+                has_more: true,
+                latest_cursor: "6".to_owned(),
+            },
+        )
+        .unwrap();
+        assert_eq!(window.before.as_deref(), Some("5"));
+        assert!(window.has_more);
+
+        window
+            .prepend(EventHistoryPage {
+                data: vec![managed_created("3"), managed_created("4")],
+                has_more: false,
+                latest_cursor: "6".to_owned(),
+            })
+            .unwrap();
+
+        assert_eq!(
+            window
+                .events
+                .iter()
+                .map(|event| event.cursor.as_str())
+                .collect::<Vec<_>>(),
+            ["3", "4", "5", "6"]
+        );
+        assert_eq!(window.before.as_deref(), Some("3"));
+        assert!(!window.has_more);
+    }
+
+    #[test]
+    fn empty_nonterminal_history_page_does_not_advance_the_retry_cursor() {
+        let mut window = HistoryWindow::retry_from("9".to_owned());
+        let result = window.prepend(EventHistoryPage {
+            data: Vec::new(),
+            has_more: true,
+            latest_cursor: "8".to_owned(),
+        });
+
+        assert!(result.is_err());
+        assert_eq!(window.before.as_deref(), Some("9"));
+        assert!(window.has_more);
+    }
+
+    fn managed_created(cursor: &str) -> ManagedEvent {
+        ManagedEvent {
+            cursor: cursor.to_owned(),
+            created_at: Some(1_750_000_000.0),
+            turn_id: None,
+            data: ManagedEventData::AgentCreated {
+                agent_id: "agent-1".to_owned(),
+                capabilities: json!({}),
+            },
+        }
+    }
+
+    fn managed_turn(cursor: &str, prompt: &str) -> ManagedEvent {
+        ManagedEvent {
+            cursor: cursor.to_owned(),
+            created_at: Some(1_750_000_000.0),
+            turn_id: Some(format!("turn-{cursor}")),
+            data: ManagedEventData::TurnAccepted {
+                id: format!("turn-{cursor}"),
+                input: PromptInput::Text(prompt.to_owned()),
+                replayed: false,
+            },
+        }
     }
 
     #[test]

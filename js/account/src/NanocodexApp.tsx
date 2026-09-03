@@ -53,9 +53,11 @@ import {
 import { fuzzyScore } from "./fuzzy";
 import {
   accountNavigation,
+  agentIdFromPath,
   connectDemoUrl,
   demoNavigation,
   gitNavigation,
+  pathForAgent,
   pathForCommit,
   pathForSurface,
   primaryNavigation,
@@ -74,7 +76,6 @@ import type {
 } from "./publishedRepository";
 import type { HarnessCommit } from "./threadRepositorySnapshot";
 import { loadWorldAssets } from "./monsterWorldRenderer";
-import { getBrowserThread } from "nanocodex/tools/browser";
 import {
   prepareRepositorySurface,
   type PreparedDirectRoute,
@@ -258,9 +259,8 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
   const requestedCommit = surface === "commits"
     ? commitHashFromSearch(location.search)
     : undefined;
-  const [threadId, setThreadId] = useState<string | undefined>(() =>
-    surface === "home" || surface === "docs" ? undefined : getBrowserThread().id
-  );
+  const routeAgentId = surface === "agent" ? agentIdFromPath(location.pathname) : undefined;
+  const [activeAgentId, setActiveAgentId] = useState(routeAgentId);
   const [snapshot, setSnapshot] = useState<PublishedRepositorySnapshot | undefined>(
     preparedRoute.repositorySnapshot,
   );
@@ -313,6 +313,10 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
   const commitWorkspaceRef = useRef<HTMLElement>(null);
   const commitRailRef = useRef<HTMLElement>(null);
   const commitRailCloseRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    if (routeAgentId) setActiveAgentId(routeAgentId);
+  }, [routeAgentId]);
   const commitRailOpenerRef = useRef<HTMLElement | null>(null);
   const commitStreamRef = useRef<CommitCodeStreamHandle>(null);
   const repositoryRequestId = useRef(0);
@@ -706,26 +710,20 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
             : `${surface[0].toUpperCase()}${surface.slice(1)}`} · Nanocodex`;
   }, [surface]);
 
-  useLayoutEffect(() => {
-    if (surface !== "home" || location.pathname !== "/") return;
-    const search = new URLSearchParams(location.search);
-    if (!search.has("thread")) return;
-    search.delete("thread");
-    const query = search.toString();
-    navigate(query ? `/?${query}` : "/", { replace: true });
-  }, [location.pathname, location.search, navigate, surface]);
-
-  const threadSurfacePath = useCallback(
-    (nextSurface: Surface) =>
-      nextSurface === "home"
-        ? pathForSurface("home")
-        : nextSurface === "tools"
-          ? pathForSurface("tools")
-          : threadId
-            ? `${pathForSurface(nextSurface)}?thread=${threadId}`
-            : pathForSurface(nextSurface),
-    [threadId],
+  const surfacePath = useCallback(
+    (nextSurface: Surface) => nextSurface === "agent" && activeAgentId
+      ? pathForAgent(activeAgentId)
+      : pathForSurface(nextSurface),
+    [activeAgentId],
   );
+
+  const handleAgentChange = useCallback((agentId: string, options?: { replace?: boolean }) => {
+    setActiveAgentId(agentId);
+    if (surface !== "agent") return;
+    const destination = pathForAgent(agentId);
+    if (location.pathname === destination && !location.search) return;
+    navigate(destination, { replace: options?.replace });
+  }, [location.pathname, location.search, navigate, surface]);
 
   const preloadSurface = useCallback((nextSurface: Surface) => {
     if (nextSurface === "home" || nextSurface === "agent") {
@@ -759,7 +757,6 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
     nextSurface: RepositorySurface,
     destination: string,
     navigationId: number,
-    nextThreadId: string,
   ) => {
     const requestedCommit = nextSurface === "commits"
       ? commitHashFromDestination(destination)
@@ -777,7 +774,6 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
       ),
       onPrepared: (preparedRepository) => {
         flushSync(() => {
-          if (!threadId) setThreadId(nextThreadId);
           commitPreparedRepository(preparedRepository);
           repositoryFailureTargetRef.current = undefined;
           setRepositoryLoadError((current) => current === nextSurface ? null : current);
@@ -785,14 +781,13 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
       },
       onFailure: () => {
         flushSync(() => {
-          if (!threadId) setThreadId(nextThreadId);
           repositoryFailureTargetRef.current = { requestedCommit, surface: nextSurface };
           setRepositoryLoadError(nextSurface);
         });
       },
       navigate: () => startTransition(() => navigate(destination)),
     });
-  }, [commitPreparedRepository, navigate, threadId]);
+  }, [commitPreparedRepository, navigate]);
 
   const navigateToSurface = useCallback((nextSurface: Surface) => {
     retainAgentExperience(nextSurface);
@@ -837,8 +832,7 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
       startTransition(() => navigate(destination));
       return;
     }
-    const nextThreadId = threadId ?? crypto.randomUUID();
-    const destination = `${pathForSurface(nextSurface)}?thread=${nextThreadId}`;
+    const destination = surfacePath(nextSurface);
     if (`${location.pathname}${location.search}` === destination) return;
     repositoryRequestId.current++;
     if (nextSurface === "code" || nextSurface === "commits") {
@@ -853,14 +847,12 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
           );
       if (ready) {
         if (nextSurface === "commits") commitIntentTargetRef.current = undefined;
-        if (!threadId) setThreadId(nextThreadId);
         startTransition(() => navigate(destination));
         return;
       }
-      navigateToPreparedRepository(nextSurface, destination, navigationId, nextThreadId);
+      navigateToPreparedRepository(nextSurface, destination, navigationId);
       return;
     }
-    if (!threadId) setThreadId(nextThreadId);
     startTransition(() => navigate(destination));
   }, [
     commitHistory,
@@ -871,7 +863,7 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
     preloadSurface,
     retainAgentExperience,
     snapshot,
-    threadId,
+    surfacePath,
   ]);
 
   const handleSurfaceClick = useCallback((
@@ -893,15 +885,13 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
     if (`${location.pathname}${location.search}` === destination) return;
     retainAgentExperience("commits");
     const navigationId = ++surfaceNavigationId.current;
-    const nextThreadId = threadId ?? crypto.randomUUID();
     repositoryRequestId.current++;
-    navigateToPreparedRepository("commits", destination, navigationId, nextThreadId);
+    navigateToPreparedRepository("commits", destination, navigationId);
   }, [
     location.pathname,
     location.search,
     navigateToPreparedRepository,
     retainAgentExperience,
-    threadId,
   ]);
 
   useLayoutEffect(() => {
@@ -1118,7 +1108,7 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
       }`.trim()}
       href={item.surface === "docs"
         ? pathForSurface(item.surface)
-        : threadSurfacePath(item.surface)}
+        : surfacePath(item.surface)}
       aria-current={surface === item.surface ? "page" : undefined}
       key={item.surface}
       onFocus={() => preloadSurface(item.surface)}
@@ -1155,7 +1145,7 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
             </a>
             <a
               className={surface === "home" ? "wordmark is-active" : "wordmark"}
-              href={threadSurfacePath("home")}
+              href={surfacePath("home")}
               aria-label="Nanocodex home"
               aria-current={surface === "home" ? "page" : undefined}
               onFocus={() => preloadSurface("home")}
@@ -1170,7 +1160,7 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
             <nav className="surface-switch" aria-label="Product navigation">
               <a
                 className={surface === "home" ? "is-active" : ""}
-                href={threadSurfacePath("home")}
+                href={surfacePath("home")}
                 aria-current={surface === "home" ? "page" : undefined}
                 onFocus={() => preloadSurface("home")}
                 onPointerEnter={() => preloadSurface("home")}
@@ -1300,7 +1290,7 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
             <nav className="mobile-navigation-sections" aria-label="Mobile product navigation">
               <a
                 className={`mobile-navigation-home${surface === "home" ? " is-active" : ""}`}
-                href={threadSurfacePath("home")}
+                href={surfacePath("home")}
                 aria-current={surface === "home" ? "page" : undefined}
                 onClick={(event) => {
                   closeMobileNavigation();
@@ -1370,6 +1360,7 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
                 </h1>
                 <section className="home-demo" id="agent-demo">
                   <AgentExperience
+                    agentId={routeAgentId}
                     landing={agentExperienceSurface === "home"}
                     mode={
                       surface === "agent"
@@ -1378,6 +1369,7 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
                           ? "preview"
                           : "hidden"
                     }
+                    onAgentChange={handleAgentChange}
                   />
                 </section>
               </article>

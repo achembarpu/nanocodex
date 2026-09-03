@@ -117,7 +117,7 @@ describe("managed account connector tool", () => {
     expect(url).toBe("https://broker.internal/users/user%2Fwith%20spaces/connectors/google");
     expect(JSON.parse(String(init?.body))).toEqual({
       redirect_uri: "https://nanocodex.example/v1/connectors/google/callback",
-      return_to: "/agent?thread=77777777-7777-4777-8777-777777777777",
+      return_to: "/agent/77777777-7777-4777-8777-777777777777",
       account_hint: "reader@example.com",
     });
   });

@@ -1,4 +1,5 @@
 import type { PromptInput } from "nanocodex";
+import type { HostedMachine } from "./hosted-tools-protocol";
 
 import {
   CONNECTOR_CAPABILITY_IDS,
@@ -51,6 +52,10 @@ export type VaultEntry =
       phone_number: string;
     }>;
 
+export type AccountMachine = Readonly<HostedMachine & {
+  kind: "sandbox" | "user";
+}>;
+
 export type AccountInfo = Readonly<{
   status: "disabled" | "ready" | "unavailable";
   /** Legacy capability-level summary retained for existing agents. */
@@ -61,6 +66,8 @@ export type AccountInfo = Readonly<{
   connectorAccounts: Readonly<
     Partial<Record<ConnectorCapabilityId, readonly ConnectorConnection[]>>
   >;
+  /** Hands currently available to the account-owned agent. */
+  machines: readonly AccountMachine[];
   identity: Readonly<Record<string, never>>;
   stablecoins: readonly [];
   authorizations: readonly [];
@@ -73,8 +80,9 @@ export async function accountInfo(
   enabled: boolean,
   allowedConnectors?: readonly ConnectorCapabilityId[],
   allowedConnections?: ConnectorConnectionSelection,
+  machines: readonly AccountMachine[] = [],
 ): Promise<AccountInfo> {
-  if (!enabled) return emptyInfo("disabled");
+  if (!enabled) return emptyInfo("disabled", machines);
   try {
     const encodedUserId = encodeURIComponent(userId);
     const [response, vault] = await Promise.all([
@@ -83,7 +91,7 @@ export async function accountInfo(
     ]);
     if (!response.ok) {
       await response.body?.cancel();
-      return emptyInfo("unavailable");
+      return emptyInfo("unavailable", machines);
     }
     const statuses = connectorStatuses(await response.json());
     const allowed = allowedConnectors === undefined ? undefined : new Set(allowedConnectors);
@@ -111,13 +119,14 @@ export async function accountInfo(
       authenticated,
       accounts,
       connectorAccounts,
+      machines,
       identity: {},
       stablecoins: [],
       authorizations: [],
       vault,
     };
   } catch {
-    return emptyInfo("unavailable");
+    return emptyInfo("unavailable", machines);
   }
 }
 
@@ -128,7 +137,12 @@ export function projectAccountInfo(
 ): AccountInfo {
   const vault = vaultEntries(info.vault);
   if (allowedConnectors === undefined) {
-    return { ...info, connectorAccounts: info.connectorAccounts ?? {}, vault };
+    return {
+      ...info,
+      connectorAccounts: info.connectorAccounts ?? {},
+      machines: info.machines ?? [],
+      vault,
+    };
   }
   const allowed = new Set(allowedConnectors);
   const connectorAccounts = Object.fromEntries(
@@ -163,6 +177,7 @@ export function projectAccountInfo(
     accounts,
     connectorAccounts,
     vault,
+    machines: info.machines ?? [],
   };
 }
 
@@ -170,7 +185,9 @@ export function withInitialAccountInfo(input: PromptInput, info: AccountInfo): P
   const explanation = [
     "The managed runtime already resolved the following non-secret accountInfo snapshot for",
     "this agent. Use it as the current connected-account context. Do not call accountInfo",
-    "again unless the task requires state refreshed after this first prompt. When connectorAccounts",
+    "again unless the task requires state refreshed after this first prompt. Machine topology is",
+    "intentionally omitted from this retained snapshot: call accountInfo immediately before choosing",
+    "a hand because user machines can connect or disconnect without restarting the agent. When connectorAccounts",
     "lists multiple connections for a service, choose the appropriate one by label and pass its id",
     "as X-Nanocodex-Connector-Connection on that provider request. Never invent a connection id.",
     "Vault entries are safe references only and never contain passwords, full card numbers, CVVs,",
@@ -179,19 +196,23 @@ export function withInitialAccountInfo(input: PromptInput, info: AccountInfo): P
   ].join(" ");
   const context = {
     type: "text" as const,
-    text: `${explanation}\n\n<account_info>\n${JSON.stringify(info)}\n</account_info>`,
+    text: `${explanation}\n\n<account_info>\n${JSON.stringify({ ...info, machines: [] })}\n</account_info>`,
   };
   return typeof input === "string"
     ? [context, { type: "text", text: input }]
     : [context, ...input];
 }
 
-function emptyInfo(status: "disabled" | "unavailable"): AccountInfo {
+function emptyInfo(
+  status: "disabled" | "unavailable",
+  machines: readonly AccountMachine[],
+): AccountInfo {
   return {
     status,
     authenticated: [],
     accounts: {},
     connectorAccounts: {},
+    machines,
     identity: {},
     stablecoins: [],
     authorizations: [],

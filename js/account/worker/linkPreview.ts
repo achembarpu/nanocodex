@@ -134,7 +134,8 @@ function isIframeNavigation(request: Request): boolean {
 
 export function documentStatusForPath(pathname: string): 200 | 404 | null {
   pathname = normalizePath(pathname);
-  if (pathname === "/" || pathname === "/agent" || pathname === "/multiplayer"
+  if (pathname === "/" || pathname === "/agent" || isAgentDocumentPath(pathname)
+    || pathname === "/multiplayer"
     || pathname === "/world" || pathname === "/artifact-runtime"
     || pathname === "/demos/chief-of-staff"
     || pathname === "/changelog" || pathname === "/code" || pathname === "/commits"
@@ -219,7 +220,9 @@ async function previewForUrl(url: URL, env: LinkPreviewEnv): Promise<Preview> {
       title: "Nanocodex",
     };
   }
-  if (pathname === "/agent") return fixed(pathname, "Browser agent", "Run the Rust-owned Codex lifecycle locally in a browser Worker.");
+  if (pathname === "/agent" || isAgentDocumentPath(pathname)) {
+    return fixed(pathname, "Durable agent", "Open an account-owned durable Nanocodex agent.");
+  }
   if (pathname === "/demos/chief-of-staff") return fixed(pathname, "Chief of Staff", "Connect a signed Slack ingress to account-owned durable Nanocodex agents.", "CHAT SDK INTEGRATION");
   if (pathname === "/multiplayer") return fixed(pathname, "Multiplayer", "Join a durable room with many humans and one secretless managed Nanocodex agent.", "DURABLE MULTIPLAYER");
   if (pathname === "/world") return fixed(pathname, "Springleaf Town", "Watch Nanocodex inhabitants act inside a living pixel world.", "MONSTER WORLD");
@@ -262,6 +265,10 @@ async function previewForUrl(url: URL, env: LinkPreviewEnv): Promise<Preview> {
     eyebrow: "HIGH-PERFORMANCE CODEX SDK",
     title: SITE_NAME,
   };
+}
+
+function isAgentDocumentPath(pathname: string): boolean {
+  return /^\/agent\/[^/]+$/.test(pathname);
 }
 
 async function evalPreview(pathname: string, env: LinkPreviewEnv): Promise<Preview> {

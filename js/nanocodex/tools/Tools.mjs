@@ -10,6 +10,7 @@ import {
   toolRuntimeLifecycle,
 } from "../runtime/tool-router.mjs";
 import { createAttachment } from "./attachment.mjs";
+import { normalizeHostedMachines } from "nanocodex-tools/internal/hosted-machine";
 
 /**
  * Builds one language-neutral JavaScript-owned tool runtime.
@@ -17,6 +18,11 @@ import { createAttachment } from "./attachment.mjs";
  */
 export async function createTools(options = {}) {
   validateOptions(options);
+  const machines = normalizeHostedMachines(options.machines);
+  const attachmentId = options.attachmentId;
+  if (machines.length > 0 && attachmentId !== machines[0].id) {
+    throw new TypeError("createTools machine attachment requires one machine whose id equals attachmentId");
+  }
   const router = new ToolRouter();
   const resolved = resolveTools(
     options.tools === undefined ? {} : options.tools,
@@ -75,7 +81,7 @@ export async function createTools(options = {}) {
     attach(target) {
       if (closed) throw new Error("Tools runtime is closed");
       if (arguments.length !== 1) throw new TypeError("Tools.attach accepts only a target");
-      const attachment = createAttachment(owner, target);
+      const attachment = createAttachment(owner, target, { machines, attachmentId });
       attachments.add(attachment);
       void attachment.closed().then(() => attachments.delete(attachment));
       return attachment;
@@ -114,9 +120,12 @@ function validateOptions(options) {
   if (!options || typeof options !== "object" || Array.isArray(options)) {
     throw new TypeError("createTools options must be an object");
   }
-  const allowed = new Set(["tools", "workspace", "workspaceOptions", "mcp", "mcpOptions"]);
+  const allowed = new Set(["tools", "workspace", "workspaceOptions", "mcp", "mcpOptions", "machines", "attachmentId"]);
   for (const name of Object.keys(options)) {
     if (!allowed.has(name)) throw new TypeError(`unsupported createTools option: ${name}`);
+  }
+  if (options.attachmentId !== undefined && (typeof options.attachmentId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,122}$/.test(options.attachmentId))) {
+    throw new TypeError("createTools attachmentId must be a safe identifier of at most 123 bytes");
   }
   if (options.workspace === undefined && options.workspaceOptions !== undefined) {
     throw new TypeError("workspaceOptions requires workspace");

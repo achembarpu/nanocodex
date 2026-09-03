@@ -4,9 +4,14 @@ use std::{
     env, fs,
     io::ErrorKind,
     path::{Path, PathBuf},
+    sync::OnceLock,
 };
 
+use nanocodex_tools::attachment::{AttachmentMachine, AttachmentMetadata};
 use serde::Deserialize;
+
+const MACHINE_CAPABILITIES: [&str; 5] = ["native", "filesystem", "process", "package", "server"];
+static MACHINE_ID: OnceLock<String> = OnceLock::new();
 
 #[derive(Debug)]
 pub(crate) struct HostConfig {
@@ -31,6 +36,8 @@ pub(crate) enum HostConfigError {
         #[source]
         source: toml::de::Error,
     },
+    #[error("invalid local attachment metadata: {0}")]
+    Attachment(String),
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -62,6 +69,27 @@ impl HostConfig {
     pub(crate) fn workspace(&self) -> &Path {
         &self.workspace
     }
+
+    pub(crate) fn attachment_metadata(&self) -> Result<AttachmentMetadata, HostConfigError> {
+        let id = MACHINE_ID
+            .get_or_init(|| uuid::Uuid::new_v4().to_string())
+            .clone();
+        let name = bounded_display_name(whoami::devicename());
+        let workspace = self.workspace.to_string_lossy().into_owned();
+        AttachmentMachine::new(id, name, workspace, MACHINE_CAPABILITIES)
+            .map(AttachmentMetadata::machine)
+            .map_err(|error| HostConfigError::Attachment(error.to_string()))
+    }
+}
+
+fn bounded_display_name(mut name: String) -> String {
+    if name.trim().is_empty() {
+        return "Local machine".to_owned();
+    }
+    while name.len() > 128 {
+        name.pop();
+    }
+    name
 }
 
 impl ConfigFile {

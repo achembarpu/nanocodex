@@ -23,10 +23,15 @@ import "./Home.css";
 
 /** Ephemeral homepage consumer and managed-durable Agent demo. */
 export const AgentExperience = memo(function AgentExperience({
-  landing, mode,
+  agentId,
+  landing,
+  mode,
+  onAgentChange,
 }: {
+  agentId?: string;
   landing?: boolean;
   mode: AgentTerminalMode;
+  onAgentChange?(agentId: string, options?: { replace?: boolean }): void;
 }) {
   const [ephemeralThreadId] = useState(() => crypto.randomUUID());
   const account = useAccountSession();
@@ -53,18 +58,13 @@ export const AgentExperience = memo(function AgentExperience({
     if (landing || account.status !== "ready" || !account.account) return;
     let cancelled = false;
     const accountId = account.account.id;
-    const retainedId = safeGet(managedSelectionKey(accountId)) ?? undefined;
-    setManagedConversationId(retainedId);
     setConversationPending(true);
     setManagedError(undefined);
     void listManagedConversations(accountId).then(async (listed) => {
       if (cancelled) return;
       const next = listed.length || !hasCredential ? listed : [await createManagedConversation(accountId)];
       if (cancelled) return;
-      const selected = next.find(({ id }) => id === retainedId)?.id ?? next[0]?.id;
       setManagedConversations(next);
-      setManagedConversationId(selected);
-      if (selected) safeSet(managedSelectionKey(accountId), selected);
     }).catch((error) => {
       if (!cancelled) setManagedError(errorMessage(error));
     }).finally(() => {
@@ -72,6 +72,18 @@ export const AgentExperience = memo(function AgentExperience({
     });
     return () => { cancelled = true; };
   }, [account.account?.id, account.status, hasCredential, landing, managedAttempt]);
+
+  useEffect(() => {
+    if (landing || !account.account || managedConversations.length === 0) return;
+    const retainedId = safeGet(managedSelectionKey(account.account.id)) ?? undefined;
+    const selected = managedConversations.find(({ id }) => id === agentId)?.id
+      ?? managedConversations.find(({ id }) => id === retainedId)?.id
+      ?? managedConversations[0]?.id;
+    if (!selected) return;
+    setManagedConversationId(selected);
+    safeSet(managedSelectionKey(account.account.id), selected);
+    if (agentId !== selected) onAgentChange?.(selected, { replace: true });
+  }, [account.account, agentId, landing, managedConversations, onAgentChange]);
 
   const changeCredentialSource = useCallback((source: CredentialSource) => {
     if (credentialSourceRef.current !== undefined && credentialSourceRef.current !== source) {
@@ -98,7 +110,8 @@ export const AgentExperience = memo(function AgentExperience({
     if (account.account) safeSet(managedSelectionKey(account.account.id), id);
     setRuntimeState(undefined);
     setRailOpen(false);
-  }, [account.account]);
+    onAgentChange?.(id);
+  }, [account.account, onAgentChange]);
   const createConversation = useCallback(() => {
     if (conversationPending || !account.account) return;
     setConversationPending(true);
@@ -109,9 +122,10 @@ export const AgentExperience = memo(function AgentExperience({
       safeSet(managedSelectionKey(account.account!.id), conversation.id);
       setRuntimeState(undefined);
       setRailOpen(false);
+      onAgentChange?.(conversation.id);
     }).catch((error) => setManagedError(errorMessage(error)))
       .finally(() => setConversationPending(false));
-  }, [account.account, conversationPending]);
+  }, [account.account, conversationPending, onAgentChange]);
   const retryManagedConversations = useCallback(() => {
     setManagedError(undefined);
     setManagedAttempt((value) => value + 1);

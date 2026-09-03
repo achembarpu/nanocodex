@@ -36,8 +36,26 @@ const outcome = {
 
 describe("hosted tools socket protocol", () => {
   it("parses the exact executor-to-DO frame set", () => {
+    const machines = [{
+      id: "laptop",
+      name: "George's laptop",
+      workspace: "/Users/george/project",
+      capabilities: ["filesystem", "native-shell"],
+    }];
+    expect(parseHostedToolsHostFrame(JSON.stringify({
+      type: "catalog",
+      tools: [tool],
+      machines,
+      attachment_id: "laptop",
+    }))).toEqual({ type: "catalog", tools: [tool], machines, attachment_id: "laptop" });
     expect(parseHostedToolsHostFrame(JSON.stringify({ type: "catalog", tools: [tool] })))
       .toEqual({ type: "catalog", tools: [tool] });
+    const maximumAttachmentId = "a".repeat(123);
+    expect(parseHostedToolsHostFrame(JSON.stringify({
+      type: "catalog",
+      tools: [tool],
+      attachment_id: maximumAttachmentId,
+    }))).toEqual({ type: "catalog", tools: [tool], attachment_id: maximumAttachmentId });
     expect(parseHostedToolsHostFrame(JSON.stringify({ type: "result", call_id: "call:1", outcome })))
       .toEqual({ type: "result", call_id: "call:1", outcome });
     expect(parseHostedToolsHostFrame(JSON.stringify({ type: "ping", nonce: "n-1" })))
@@ -123,5 +141,48 @@ describe("hosted tools socket protocol", () => {
       .toThrow("nonce");
     expect(() => parseHostedToolsHostFrame("x".repeat(MAX_HOSTED_TOOLS_FRAME_BYTES + 1)))
       .toThrow("limited");
+    expect(() => parseHostedToolsHostFrame(JSON.stringify({
+      type: "catalog",
+      tools: [tool],
+      machines: [{
+        id: "laptop",
+        name: "Laptop",
+        workspace: "/workspace",
+        capabilities: [],
+        token: "secret",
+      }],
+    }))).toThrow("unsupported field token");
+    const machine = {
+      id: "laptop",
+      name: "Laptop",
+      workspace: "/workspace",
+      capabilities: ["filesystem"],
+    };
+    expect(() => parseHostedToolsHostFrame(JSON.stringify({
+      type: "catalog",
+      tools: [tool],
+      machines: Array.from({ length: 2 }, (_, index) => ({
+        ...machine,
+        id: `machine:${index}`,
+      })),
+    }))).toThrow("at most 1");
+    for (const attachmentId of ["", "unsafe id", "é", "x".repeat(124), 1, null]) {
+      expect(() => parseHostedToolsHostFrame(JSON.stringify({
+        type: "catalog",
+        tools: [tool],
+        attachment_id: attachmentId,
+      }))).toThrow("attachment_id must be 1-123 safe ASCII bytes");
+    }
+    expect(() => parseHostedToolsHostFrame(JSON.stringify({
+      type: "catalog",
+      tools: [tool],
+      machines: [machine],
+      attachment_id: "desktop",
+    }))).toThrow("id equals attachment_id");
+    expect(() => parseHostedToolsHostFrame(JSON.stringify({
+      type: "catalog",
+      tools: [tool],
+      machines: [machine],
+    }))).toThrow("id equals attachment_id");
   });
 });

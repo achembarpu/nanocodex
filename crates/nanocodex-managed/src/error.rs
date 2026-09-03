@@ -1,7 +1,5 @@
 use reqwest::StatusCode;
 
-pub(crate) const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
-
 /// Failure returned by the native managed lifecycle transport.
 #[derive(Debug, thiserror::Error)]
 pub enum ManagedError {
@@ -22,9 +20,6 @@ pub enum ManagedError {
         /// Human-readable service error message.
         message: String,
     },
-    /// An ordinary managed response exceeded the fixed one-mebibyte limit.
-    #[error("managed response exceeded {MAX_RESPONSE_BYTES} bytes")]
-    ResponseTooLarge,
     /// A successful ordinary response violated its typed JSON contract.
     #[error("managed response is malformed: {0}")]
     InvalidResponse(&'static str),

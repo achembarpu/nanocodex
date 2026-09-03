@@ -1,6 +1,5 @@
 use std::{fmt, sync::Arc};
 
-use futures_util::StreamExt;
 use reqwest::{
     Method, Response,
     header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue},
@@ -16,7 +15,7 @@ use crate::{
     EventCursor, EventHistoryPage, FindSessionsRequest, FindSessionsResponse, ManagedApiKey,
     ManagedError, ManagedEventStream, MemoryKey, MemoryListResponse, MemoryRecord, PromptInput,
     ReadSessionBody, ReadSessionRequest, ReadSessionResponse, TurnAction, TurnSteer,
-    TurnSubmission, TurnView, error::MAX_RESPONSE_BYTES,
+    TurnSubmission, TurnView,
 };
 
 const MAX_HISTORY_PAGE: u16 = 256;
@@ -707,13 +706,13 @@ pub(crate) async fn decode_response<T: DeserializeOwned>(
     if !response.status().is_success() {
         return Err(response_error(response).await);
     }
-    let bytes = bounded_body(response).await?;
+    let bytes = response_body(response).await?;
     serde_json::from_slice(&bytes).map_err(|_| ManagedError::InvalidResponse("invalid JSON"))
 }
 
 pub(crate) async fn response_error(response: Response) -> ManagedError {
     let status = response.status();
-    let body = bounded_body(response).await.ok();
+    let body = response_body(response).await.ok();
     let parsed = body
         .as_deref()
         .and_then(|body| serde_json::from_slice::<ErrorBody>(body).ok());
@@ -729,28 +728,12 @@ pub(crate) async fn response_error(response: Response) -> ManagedError {
     }
 }
 
-async fn bounded_body(response: Response) -> Result<Vec<u8>, ManagedError> {
-    if response
-        .content_length()
-        .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
-    {
-        return Err(ManagedError::ResponseTooLarge);
-    }
-    let initial_capacity = response
-        .content_length()
-        .and_then(|length| usize::try_from(length).ok())
-        .unwrap_or(0)
-        .min(MAX_RESPONSE_BYTES);
-    let mut body = Vec::with_capacity(initial_capacity);
-    let mut stream = response.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(ManagedError::Transport)?;
-        if body.len().saturating_add(chunk.len()) > MAX_RESPONSE_BYTES {
-            return Err(ManagedError::ResponseTooLarge);
-        }
-        body.extend_from_slice(&chunk);
-    }
-    Ok(body)
+async fn response_body(response: Response) -> Result<Vec<u8>, ManagedError> {
+    response
+        .bytes()
+        .await
+        .map(|bytes| bytes.to_vec())
+        .map_err(ManagedError::Transport)
 }
 
 #[derive(Deserialize)]
@@ -793,13 +776,13 @@ pub(crate) fn agent_path(agent_id: &str) -> String {
 mod tests {
     use axum::{
         Router,
-        body::{Body, Bytes},
+        body::Body,
         http::{Response, StatusCode},
         routing::get,
     };
     use tokio::io::AsyncReadExt;
 
-    use super::ManagedClient;
+    use super::{ManagedClient, decode_response};
     use crate::{ManagedApiKey, ManagedError, PromptInput};
 
     fn key() -> String {
@@ -863,32 +846,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ordinary_responses_are_bounded_without_content_length() {
+    async fn ordinary_responses_have_no_client_byte_limit() {
+        let payload = "x".repeat(1024 * 1024 + 1);
+        let encoded = serde_json::to_string(&serde_json::json!({ "payload": payload })).unwrap();
         let app = Router::new().route(
-            "/v1/agents",
-            get(|| async {
-                let chunks = futures_util::stream::iter([Ok::<_, std::convert::Infallible>(
-                    Bytes::from(vec![b'x'; 1024 * 1024 + 1]),
-                )]);
-                Response::builder()
-                    .status(StatusCode::OK)
-                    .body(Body::from_stream(chunks))
-                    .unwrap()
+            "/large",
+            get(move || {
+                let encoded = encoded.clone();
+                async move {
+                    Response::builder()
+                        .status(StatusCode::OK)
+                        .body(Body::from(encoded))
+                        .unwrap()
+                }
             }),
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let client = ManagedClient::new(
-            format!("http://{address}"),
-            ManagedApiKey::parse(key()).unwrap(),
-        )
-        .unwrap();
-
-        assert!(matches!(
-            client.list().await,
-            Err(ManagedError::ResponseTooLarge)
-        ));
+        let response = reqwest::get(format!("http://{address}/large"))
+            .await
+            .unwrap();
+        let decoded: serde_json::Value = decode_response(response).await.unwrap();
+        assert_eq!(decoded["payload"].as_str().unwrap().len(), 1024 * 1024 + 1);
         server.abort();
     }
 
