@@ -50,9 +50,15 @@ whoami.workspace = true
 
 [dev-dependencies]
 axum = { workspace = true, features = ["ws"] }
+criterion.workspace = true
 futures-util.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["fs", "io-std", "io-util", "net", "process"] }
+
+[[bench]]
+name = "nanocodex2_tui"
+path = "../src/nanocodex2/tui/bench.rs"
+harness = false
 
 [[bin]]
 name = "nanocodex2"

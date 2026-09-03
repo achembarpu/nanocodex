@@ -6091,6 +6091,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "clap",
+ "criterion",
  "crossterm 0.29.0",
  "dark-light",
  "dotenvy",
