@@ -4267,11 +4267,6 @@ export class DurableAgentSession extends DurableComputerSession {
     row = this.#managedTurn(id);
     if (!row || isTerminalState(row.state)) return;
     let turn = this.#turns.get(id);
-    if (!turn && row.may_have_inner_operation === 0) {
-      this.#commitManagedMessage(id, { type: "turn_cancelled", id });
-      this.#scheduleRecovery();
-      return;
-    }
     if (!turn) {
       const cancellingAdmission = row.state === "cancelling";
       row = await this.#admitManagedTurn(row, true);
@@ -4333,11 +4328,6 @@ export class DurableAgentSession extends DurableComputerSession {
         this.#pendingTurnIds.delete(row.id);
         this.#turnInputs.delete(row.id);
         return dispatchable ?? row;
-      }
-      if (dispatchable.state === "cancelling" && dispatchable.may_have_inner_operation === 0) {
-        this.#pendingTurnIds.delete(row.id);
-        this.#turnInputs.delete(row.id);
-        return dispatchable;
       }
       dispatchInputJson = this.#managedDispatchInput(dispatchable) ?? dispatchInputJson;
       this.#eventTurnQueue.push(row.id);
