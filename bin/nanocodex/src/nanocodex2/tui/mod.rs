@@ -75,6 +75,7 @@ type HistoryCompletion = (
     Result<EventHistoryPage, ManagedError>,
 );
 type HistoryProjection = (Vec<Arc<TranscriptRecord>>, u64, Vec<RecentPrompt>);
+type LiveManagedProjection = (Arc<TranscriptRecord>, Option<RecentPrompt>);
 type ConnectedAgent = (
     Nanocodex,
     mpsc::UnboundedReceiver<ManagedEvent>,
@@ -1493,7 +1494,7 @@ fn live_managed_projection(
     agent_id: &str,
     workspace: &Path,
     next_sequence: &mut u64,
-) -> Result<Option<(Arc<TranscriptRecord>, Option<RecentPrompt>)>, ManagedError> {
+) -> Result<Option<LiveManagedProjection>, ManagedError> {
     let timestamp = managed_timestamp(event.created_at, 0);
     let (record, prompt) = match event.data {
         ManagedEventData::TurnAccepted { input, .. } => {

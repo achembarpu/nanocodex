@@ -230,7 +230,7 @@ mod tests {
                 ratatui::style::Color::Rgb(0xD7, 0xD7, 0xD7),
             ]
             .into_iter()
-            .collect()
+            .collect::<std::collections::HashSet<_>>()
         );
         assert!(glyphs.len() >= 5);
     }

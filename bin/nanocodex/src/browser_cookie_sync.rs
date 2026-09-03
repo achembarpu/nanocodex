@@ -315,7 +315,7 @@ async fn sync_vault_cookie_jar(
         profile_id,
         store_id,
         revision,
-        cookies: &cookies,
+        cookies,
     };
     let encoded = serde_json::to_vec(&request).wrap_err("failed to encode cookie jar")?;
     ensure!(

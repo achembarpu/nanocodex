@@ -627,14 +627,16 @@ fn session_cookie_identities(
     {
         return Ok(HashSet::new());
     }
-    let partition = columns
-        .contains("top_frame_site_key")
-        .then_some("top_frame_site_key")
-        .unwrap_or("''");
-    let ancestor = columns
-        .contains("has_cross_site_ancestor")
-        .then_some("has_cross_site_ancestor")
-        .unwrap_or("NULL");
+    let partition = if columns.contains("top_frame_site_key") {
+        "top_frame_site_key"
+    } else {
+        "''"
+    };
+    let ancestor = if columns.contains("has_cross_site_ancestor") {
+        "has_cross_site_ancestor"
+    } else {
+        "NULL"
+    };
     let mut statement = database.prepare(&format!(
         "SELECT name, host_key, path, {partition}, {ancestor} \
          FROM cookies WHERE is_persistent = 0"
