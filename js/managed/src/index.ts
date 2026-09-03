@@ -3943,7 +3943,7 @@ export class DurableAgentSession extends DurableComputerSession {
     if (isTerminalState(row.state)) return json(managedTurnView(row));
     try {
       const cancelling = this.#markCancelling(id);
-      this.#scheduleCancellation(cancelling.id);
+      await this.#scheduleCancellation(cancelling.id);
       return json({ turn_id: id, state: "cancelling" }, { status: 202 });
     } catch (error) {
       return managedErrorResponse(error, "cancel_failed");
@@ -4304,13 +4304,15 @@ export class DurableAgentSession extends DurableComputerSession {
     return this.#managedTurn(id) ?? current;
   }
 
-  #scheduleCancellation(id: string): void {
-    if (this.#deleting || this.#cancellationTasks.has(id)) return;
+  #scheduleCancellation(id: string): Promise<void> {
+    if (this.#deleting) return Promise.resolve();
+    if (this.#cancellationTasks.has(id)) return this.#scheduleNextAlarm();
     const task = Promise.resolve().then(() => this.#cancelManagedTurn(id));
     this.#cancellationTasks.set(id, task);
     // Retain a durable recovery lease even if this isolate is lost while the
     // live cancellation call is in flight.
-    this.ctx.waitUntil(this.#scheduleNextAlarm());
+    const alarm = this.#scheduleNextAlarm();
+    this.ctx.waitUntil(alarm);
     const observed = task.catch((error) => {
       console.warn({ type: "managed.turn_cancellation_failed", error_kind: errorKind(error) });
     }).finally(async () => {
@@ -4318,6 +4320,7 @@ export class DurableAgentSession extends DurableComputerSession {
       if (!this.#deleting) await this.#scheduleNextAlarm();
     });
     this.ctx.waitUntil(observed);
+    return alarm;
   }
 
   async #cancelManagedTurn(id: string): Promise<void> {
