@@ -259,7 +259,7 @@ struct BlockingDurableTool {
     started: Arc<tokio::sync::Notify>,
 }
 
-struct EphemeralSpawnTool {
+struct RecordedHiddenTool {
     calls: Arc<std::sync::atomic::AtomicUsize>,
 }
 
@@ -312,11 +312,11 @@ impl nanocodex_agent::Tool for BlockingDurableTool {
 }
 
 #[nanocodex_tools::contract::async_trait]
-impl nanocodex_agent::Tool for EphemeralSpawnTool {
+impl nanocodex_agent::Tool for RecordedHiddenTool {
     fn definition(&self) -> nanocodex_tools::ToolDefinition {
         nanocodex_tools::ToolDefinition::function(
-            "spawn_agent",
-            "Create one process-owned child for the recovery regression.",
+            "recorded_hidden_tool",
+            "Return one result whose replay must not depend on the current tool catalog.",
             json!({
                 "type": "object",
                 "properties": {},
@@ -333,9 +333,7 @@ impl nanocodex_agent::Tool for EphemeralSpawnTool {
         self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(nanocodex_tools::ToolOutput::from_json(
             json!({
-                "agent_id": 41,
-                "role": "recovery probe",
-                "status": { "state": "running" }
+                "receipt": "durably recorded"
             }),
             true,
         ))
@@ -348,7 +346,7 @@ struct DurableToolService {
 }
 
 #[derive(Clone)]
-struct RemovedSpawnRecoveryService {
+struct RemovedToolRecoveryService {
     generations: Arc<std::sync::atomic::AtomicUsize>,
 }
 
@@ -958,7 +956,7 @@ impl tower::Service<nanocodex_oai_api::tower::ResponsesAttempt> for SteeredDurab
     }
 }
 
-impl tower::Service<nanocodex_oai_api::tower::ResponsesAttempt> for RemovedSpawnRecoveryService {
+impl tower::Service<nanocodex_oai_api::tower::ResponsesAttempt> for RemovedToolRecoveryService {
     type Response = nanocodex_oai_api::tower::ResponsesServiceResponse;
     type Error = ResponseError;
     type Future = std::future::Ready<std::result::Result<Self::Response, Self::Error>>;
@@ -993,20 +991,20 @@ impl tower::Service<nanocodex_oai_api::tower::ResponsesAttempt> for RemovedSpawn
                 if generation == 0 {
                     let item = serde_json::from_value(json!({
                         "type": "function_call",
-                        "call_id": "call-spawn-agent",
-                        "name": "spawn_agent",
+                        "call_id": "call-recorded-hidden-tool",
+                        "name": "recorded_hidden_tool",
                         "arguments": "{}"
                     }))
-                    .expect("spawn tool call item decodes");
+                    .expect("recorded tool call item decodes");
                     ResponsesOutput::Generation(GenerationOutput {
-                        id: "spawn-response".to_owned(),
+                        id: "recorded-tool-response".to_owned(),
                         status: "completed".to_owned(),
                         end_turn: Some(false),
                         final_message: None,
                         output_items: vec![item],
                         code_calls: vec![CodeCall {
-                            call_id: "call-spawn-agent".to_owned(),
-                            name: "spawn_agent".to_owned(),
+                            call_id: "call-recorded-hidden-tool".to_owned(),
+                            name: "recorded_hidden_tool".to_owned(),
                             namespace: None,
                             input: "{}".to_owned(),
                             kind: CodeCallKind::Function,
@@ -1022,26 +1020,22 @@ impl tower::Service<nanocodex_oai_api::tower::ResponsesAttempt> for RemovedSpawn
                             call_id,
                             output: FunctionOutputBody::Text(output),
                             ..
-                        } if &**call_id == "call-spawn-agent" => Some(output.as_ref()),
+                        } if &**call_id == "call-recorded-hidden-tool" => Some(output.as_ref()),
                         _ => None,
                     });
                     let recovered_output =
-                        recovered_output.expect("recovery must return a failed spawn tool result");
-                    assert!(recovered_output.contains(
-                        "cannot replay completed tool call `spawn_agent` because the tool is unavailable"
-                    ));
-                    assert!(
-                        !recovered_output.contains("agent_id"),
-                        "the recovered model must not receive the dead child identity"
-                    );
+                        recovered_output.expect("recovery must replay the completed tool result");
+                    assert!(recovered_output.contains("durably recorded"));
                     ResponsesOutput::Generation(GenerationOutput {
                         id: "recovered-response".to_owned(),
                         status: "completed".to_owned(),
                         end_turn: Some(true),
-                        final_message: Some("recovered without a ghost child".to_owned()),
+                        final_message: Some("recovered with the recorded tool output".to_owned()),
                         output_items: vec![ResponseItem::message(
                             MessageRole::Assistant,
-                            [ContentItem::output_text("recovered without a ghost child")],
+                            [ContentItem::output_text(
+                                "recovered with the recorded tool output",
+                            )],
                         )],
                         code_calls: Vec::new(),
                         usage: None,
@@ -3234,7 +3228,7 @@ async fn portable_state_retries_an_unfinished_tool() -> Result<()> {
 }
 
 #[tokio::test]
-async fn changed_tool_profile_blocks_replay_after_spawn_without_creating_a_ghost() -> Result<()> {
+async fn completed_tool_output_replays_after_tool_is_removed() -> Result<()> {
     let store = crate::MemoryStore::new()?;
     let failing_store = FailReplaceOnce {
         inner: store.clone(),
@@ -3242,23 +3236,26 @@ async fn changed_tool_profile_blocks_replay_after_spawn_without_creating_a_ghost
         failed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
     let generations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let spawn_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let tool_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let openai = || {
         let generations = Arc::clone(&generations);
         OpenAi::builder("test-key")
-            .service(move || RemovedSpawnRecoveryService {
+            .service(move || RemovedToolRecoveryService {
                 generations: Arc::clone(&generations),
             })
             .build()
     };
-    let workspace = temporary_workspace("durability-spawn-recovery")?;
+    let workspace = temporary_workspace("durability-removed-tool-recovery")?;
     let first_tools = Tools::builder()
         .without_defaults()
-        .tool(EphemeralSpawnTool {
-            calls: Arc::clone(&spawn_calls),
-        })
+        .tool_with_exposure(
+            RecordedHiddenTool {
+                calls: Arc::clone(&tool_calls),
+            },
+            nanocodex_agent::tools::ToolExposure::Hidden,
+        )
         .build()?;
-    let state = crate::DurableSession::open(failing_store, "spawn-recovery").await?;
+    let state = crate::DurableSession::open(failing_store, "removed-tool-recovery").await?;
     let builder = Nanocodex::builder(openai()?)
         .workspace(&workspace)
         .session_id(test_session_id())
@@ -3268,26 +3265,105 @@ async fn changed_tool_profile_blocks_replay_after_spawn_without_creating_a_ghost
     let (agent, events) = builder.build()?;
 
     let first = agent
-        .prompt(PromptRequest::new("delegate once").request_id("turn-1"))
+        .prompt(PromptRequest::new("call the recorded tool once").request_id("turn-1"))
         .await?
         .result()
         .await
         .expect_err("the injected crash boundary must stop before the wait model call");
     assert!(first.to_string().contains("injected replacement failure"));
     assert_eq!(
-        spawn_calls.load(std::sync::atomic::Ordering::SeqCst),
+        tool_calls.load(std::sync::atomic::Ordering::SeqCst),
         1,
-        "the first runtime must create exactly one ephemeral child"
+        "the first runtime must execute the tool exactly once"
     );
     assert_eq!(
         generations.load(std::sync::atomic::Ordering::SeqCst),
         1,
-        "the crash must happen after spawn completion and before the next model call"
+        "the crash must happen after tool completion and before the next model call"
     );
     agent.shutdown().await?;
     drop((agent, events));
 
-    let state = crate::DurableSession::open(store, "spawn-recovery").await?;
+    let state = crate::DurableSession::open(store, "removed-tool-recovery").await?;
+    let recovered_tools = Tools::builder().without_defaults().build()?;
+    let builder = Nanocodex::builder(openai()?)
+        .workspace(&workspace)
+        .session_id(test_session_id())
+        .tools(recovered_tools)
+        .durability(state)
+        .await?;
+    let (recovered, recovered_events) = builder.build()?;
+    let replayed = recovered
+        .prompt(PromptRequest::new("call the recorded tool once").request_id("turn-1"))
+        .await?
+        .result()
+        .await?;
+    assert_eq!(
+        replayed.final_message(),
+        "recovered with the recorded tool output"
+    );
+    assert_eq!(
+        tool_calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "recovery must not rerun the missing tool handler"
+    );
+    assert_eq!(
+        generations.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "recovery must continue from the exact recorded tool output"
+    );
+
+    recovered.shutdown().await?;
+    drop((recovered, recovered_events));
+    std::fs::remove_dir_all(workspace)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn changed_model_tool_profile_still_blocks_recovery() -> Result<()> {
+    let store = crate::MemoryStore::new()?;
+    let failing_store = FailReplaceOnce {
+        inner: store.clone(),
+        expected_revision: 7,
+        failed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    };
+    let generations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let tool_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let openai = || {
+        let generations = Arc::clone(&generations);
+        OpenAi::builder("test-key")
+            .service(move || RemovedToolRecoveryService {
+                generations: Arc::clone(&generations),
+            })
+            .build()
+    };
+    let workspace = temporary_workspace("durability-changed-tool-profile")?;
+    let first_tools = Tools::builder()
+        .without_defaults()
+        .tool(RecordedHiddenTool {
+            calls: Arc::clone(&tool_calls),
+        })
+        .build()?;
+    let state = crate::DurableSession::open(failing_store, "changed-tool-profile").await?;
+    let builder = Nanocodex::builder(openai()?)
+        .workspace(&workspace)
+        .session_id(test_session_id())
+        .tools(first_tools)
+        .durability(state)
+        .await?;
+    let (agent, events) = builder.build()?;
+
+    let first = agent
+        .prompt(PromptRequest::new("call the recorded tool once").request_id("turn-1"))
+        .await?
+        .result()
+        .await
+        .expect_err("the injected crash boundary must stop before the next model call");
+    assert!(first.to_string().contains("injected replacement failure"));
+    agent.shutdown().await?;
+    drop((agent, events));
+
+    let state = crate::DurableSession::open(store, "changed-tool-profile").await?;
     let recovered_tools = Tools::builder().without_defaults().build()?;
     let builder = Nanocodex::builder(openai()?)
         .workspace(&workspace)
@@ -3297,22 +3373,14 @@ async fn changed_tool_profile_blocks_replay_after_spawn_without_creating_a_ghost
         .await?;
     let (recovered, recovered_events) = builder.build()?;
     let error = recovered
-        .prompt(PromptRequest::new("delegate once").request_id("turn-1"))
+        .prompt(PromptRequest::new("call the recorded tool once").request_id("turn-1"))
         .await?
         .result()
         .await
-        .expect_err("a changed model-visible tool profile must block recorded model replay");
+        .expect_err("a changed model-visible tool profile must block recovery");
     assert!(error.to_string().contains("changed definition"));
-    assert_eq!(
-        spawn_calls.load(std::sync::atomic::Ordering::SeqCst),
-        1,
-        "recovery must not rerun the missing spawn handler"
-    );
-    assert_eq!(
-        generations.load(std::sync::atomic::Ordering::SeqCst),
-        1,
-        "a changed request profile must fail before another model call"
-    );
+    assert_eq!(tool_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(generations.load(std::sync::atomic::Ordering::SeqCst), 1);
 
     recovered.shutdown().await?;
     drop((recovered, recovered_events));

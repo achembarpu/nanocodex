@@ -70,13 +70,14 @@ This deliberately permits duplicate provider billing and duplicate external
 tool effects. Standalone compaction follows the same rule: a committed
 checkpoint replays, while an unfinished transform runs again.
 
-Completed tool outputs are replayed only while the recovered agent still owns
-the named tool. If a deployment removes a runtime-owned tool, recovery emits an
-explicit failed tool result rather than returning an opaque handle whose owner
-no longer exists. A durability-attached agent passes the same lifecycle to
-every clean descendant. Each child uses its own stable session ID as its state
-ID and owns an independent fence, operation journal, and checkpoint. Forking a
-durable checkpoint remains unsupported because a fork is not a clean state.
+Completed tool outputs replay exactly without consulting the recovered runtime's
+current tool catalog. Tool availability matters only when an unfinished step
+must execute. Capabilities represented by a tool result, such as spawned-agent
+identity, own their persistence and reconnection semantics outside generic step
+replay. A durability-attached agent passes the same lifecycle to every clean
+descendant. Each child uses its own stable session ID as its state ID and owns
+an independent fence, operation journal, and checkpoint. Forking a durable
+checkpoint remains unsupported because a fork is not a clean state.
 
 This persists agent execution, not a higher-level task-tree registry. An
 orchestrator that assigns separate tree-local IDs, mailboxes, roles, or status
